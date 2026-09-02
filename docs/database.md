@@ -72,7 +72,7 @@ SSH 连接配置。密码与密钥口令只存 keyring 引用（`password_ref` /
 | `auth_type` | `key` 或 `password` |
 | `private_key_path` | 私钥路径（key 认证） |
 | `password_ref` / `passphrase_ref` | keyring 引用 |
-| `known_hosts_mode` | 默认 `accept-new` |
+| `known_hosts_mode` | `accept-new`（默认）/ `strict` / `ask` / `off` |
 | `last_checked_*` | 最近连通探测 |
 | `password_probe_*` | 密码认证探测；`passed` / `available` 时 DTO 的 `password_execution_allowed` 为 true |
 | `created_at` / `updated_at` | 更新触发器会刷新 `updated_at` |
@@ -162,16 +162,18 @@ Git plumbing 快照的数据库索引。真实对象在仓库 `refs/noxcode/chec
 | `backup_database` | 导出 SQL 脚本（含 schema、数据、`_sqlx_migrations`） |
 | `restore_database` | 校验脚本 → 写 `noxcode.pre-import-backup-*.sql` → 清库导入 → 补迁移 → 完整性检查 |
 | `open_database_folder` | 用系统文件管理器打开 `$APPCONFIG` |
+| `list_ssh_configs` / `get_ssh_config` / `create_ssh_config` / `update_ssh_config` / `delete_ssh_config` | SSH 配置 CRUD，见 [`ssh.md`](ssh.md) |
+| `probe_ssh_password_auth` / `test_ssh_connection` | 写 `password_probe_*` / `last_check_*` |
 
 备份范围只覆盖 SQLite 本体。不包括：
 
-- keyring 里的 SSH 密码 / 私钥口令
-- 应用配置目录里的 JSON（native-settings、MCP 等，后续阶段）
+- keyring 里的 SSH 密码 / 私钥口令（服务名 `noxcode-ssh`）
+- 应用配置目录里的 `ssh-secret-index.json` 以及后续 native-settings / MCP JSON
 - Git 仓库里的 checkpoint 对象
 
 恢复时若备份版本高于应用支持的最新迁移，会拒绝导入。导入失败会尝试滚回导入前自动备份。
 
-渠道 / 档案 / 工作区 / SSH 的 CRUD 命令尚未注册，表结构已就绪。
+SSH 配置 CRUD 与探测命令已注册。渠道 / 档案 / 工作区的 CRUD 尚未注册，表结构已就绪。
 
 ## 本地查看
 

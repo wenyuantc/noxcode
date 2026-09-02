@@ -40,3 +40,7 @@ tauri-plugin-updater = "2.11.0"
 tauri-plugin-process = "2.3.1"
 russh = { version = "0.63", default-features = false, features = ["ring", "flate2", "rsa"] }
 ssh2-config = "0.8"
+
+[dev-dependencies]
+rand = "0.10"
+tempfile = "3"

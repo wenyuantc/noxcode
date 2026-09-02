@@ -2,7 +2,7 @@
 
 noxcode 是 Tauri 2 桌面应用：进程内 Native Agent、AI 渠道、SSH 工作区、Git checkpoint。业务外壳只保留工作区 + Agent 档案 + 会话，不做项目 / 员工 / 看板 / 任务自动化。
 
-完整分阶段计划见 [`plan.md`](../plan.md)。表结构、迁移与备份见 [`database.md`](database.md)。
+完整分阶段计划见 [`plan.md`](../plan.md)。表结构、迁移与备份见 [`database.md`](database.md)。SSH 实现见 [`ssh.md`](ssh.md)。
 
 ## 数据流
 
@@ -49,13 +49,14 @@ flowchart LR
 
 | 层 | 现状 | 目标 |
 | --- | --- | --- |
-| 前端 `src/` | 空白页 + `database.ts` stub | 单主界面 + 全屏设置页，见下方路由 |
+| 前端 `src/` | 空白页 + `database.ts` stub + `backend.ts` / `types.ts`（SSH 封装） | 单主界面 + 全屏设置页，见下方路由 |
 | `db/` | version 1 baseline，9 张表 | 只追加连续迁移 `2..N` |
 | `app/database` + `app/shared` | 健康检查 / 备份 / 恢复 | 保持 |
-| `app/ssh/` | 依赖已引入，无实现 | russh 连接、连接池、known_hosts、`~/.ssh/config` 导入 |
-| `app/{workspaces,profiles,sessions}` | 未建 | CRUD |
+| `app/ssh/` + `app/secret_store` | P2 已落地，见 [`ssh.md`](ssh.md) | P5 补设置页 / 信任横幅 |
+| `app/workspaces` | 仅 `fetch_workspace_by_id` | CRUD |
+| `app/{profiles,sessions}` | 未建 | CRUD |
 | `git/` | `runner.rs` + 启动预检 | status / diff / 临时索引 / checkpoint |
-| `engine/` | 未建 | `ExecutionContext`（local \| ssh） |
+| `engine/` | `ExecutionContext`（local \| ssh） | 会话接线后继续用 |
 | `native/` | 未建 | 渠道 + 模型客户端 + agent 循环 + session 外壳 |
 
 策略是「保留内核 + 替换外壳」：`native/model`、`native/tools`、`native/agent` 从参考实现近乎原样搬运；`native/session.rs` / `manager.rs` 重写（`employee` → `agent_profile`，去掉 task / run_queue / 任务自动化）；SSH 与 Git 按本仓库决策新写，不搬系统 `ssh` 子进程和 Node git bridge。
@@ -69,23 +70,27 @@ flowchart LR
 
 全仓库只允许 [`src-tauri/src/git/runner.rs`](../src-tauri/src/git/runner.rs) spawn `git`。Windows 子进程走 [`process_spawn.rs`](../src-tauri/src/process_spawn.rs)（隐藏 CMD 窗口）。
 
-前端 invoke 的唯一出口将是 `src/lib/backend.ts`（尚未落地）。已注册命令：
+前端 invoke 的唯一出口是 [`src/lib/backend.ts`](../src/lib/backend.ts)。已注册命令：
 
 | 命令 | 模块 |
 | --- | --- |
 | `health_check` / `backup_database` / `restore_database` / `open_database_folder` | `app::database` |
+| `list_ssh_configs` / `get_ssh_config` / `create_ssh_config` / `update_ssh_config` / `delete_ssh_config` | `app::ssh` |
+| `probe_ssh_password_auth` / `test_ssh_connection` | `app::ssh` |
+| `list_ssh_config_file_hosts` / `import_ssh_config_file_host` | `app::ssh` |
+| `resolve_ssh_host_trust` | `app::ssh`（`ask` 模式确认回传） |
 
-后续约 60 个命令的完整清单见 `plan.md` §4。
+事件：`ssh-host-trust-request`、`ssh-host-key-changed`。后续约 60 个命令的完整清单见 `plan.md` §4。
 
 ## SSH
 
-纯 Rust 协议实现（`russh`），不调系统 `ssh`，不用 `ssh2` C 绑定。
+纯 Rust 协议实现（`russh`），不调系统 `ssh`，不用 `ssh2` C 绑定。细节见 [`ssh.md`](ssh.md)。
 
-- 认证：`key` → `authenticate_publickey`；`password` → `authenticate_password`。密码 / 口令在 keyring。
-- 连接复用：自维护 `HashMap<ssh_config_id, Handle>` + keepalive，替代 OpenSSH ControlMaster。
-- known_hosts 三态：已知匹配放行；新主机按 `known_hosts_mode`；`KeyChanged` 一律拒绝并告 MITM。
+- 认证：`key` → `authenticate_publickey`；`password` → `authenticate_password`。密码 / 口令在 keyring（服务名 `noxcode-ssh`）。
+- 连接复用：`SshPool` 按 `ssh_config_id` 串行持有一条连接 + keepalive，替代 OpenSSH ControlMaster。
+- known_hosts 四态：`accept-new` / `strict` / `ask` / `off`。已知匹配放行；新主机按策略；`KeyChanged` 在前三态一律拒绝并告 MITM。
 - `~/.ssh/config` 用 `ssh2-config` 导入 Host 别名。第一版不支持 `ProxyJump`，导入时必须明示，不能静默忽略。
-- `exec` 仍经远端 shell，必须保留 `shell_escape_single_quoted`。
+- `exec` 仍经远端 shell，必须保留 `shell_escape_single_quoted`。返回 `SshCommandOutput`，不是 `std::process::Output`。
 
 ## Git
 
@@ -128,6 +133,6 @@ P0 脚手架 → P1 数据层 → P2 SSH → P2.5 Git → P3 渠道
 P6 打包  ←  P5 前端  ←  P4.5 ← P4.4 ← P4.3 ← P4.2 ← P4.1
 ```
 
-P2 必须在 tools/ssh 之前；P3 必须在 model 客户端测通之前；P2.5 必须在 session 接线之前。当前仓库已完成 P0 与 P1。
+P2 必须在 tools/ssh 之前；P3 必须在 model 客户端测通之前；P2.5 必须在 session 接线之前。当前仓库已完成 P0、P1、P2。
 
 第一版不做：斜杠命令完整版、插件打包、PTY、内置 ripgrep、浏览器 / CUA、OpenTelemetry。见 `plan.md` §6。

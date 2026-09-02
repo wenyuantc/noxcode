@@ -12,13 +12,9 @@ pub const DB_URL: &str = "sqlite:noxcode.db";
 pub(crate) const DB_FILE_NAME: &str = "noxcode.db";
 pub(crate) const DB_AUTO_IMPORT_BACKUP_PREFIX: &str = "noxcode.pre-import-backup";
 pub(crate) const SQLITE_DATETIME_FORMAT: &str = "%Y-%m-%d %H:%M:%S";
-#[allow(dead_code)]
 pub(crate) const EXECUTION_TARGET_LOCAL: &str = "local";
-#[allow(dead_code)]
 pub(crate) const EXECUTION_TARGET_SSH: &str = "ssh";
-#[allow(dead_code)]
 pub(crate) const WORKSPACE_TYPE_LOCAL: &str = "local";
-#[allow(dead_code)]
 pub(crate) const WORKSPACE_TYPE_SSH: &str = "ssh";
 
 pub(crate) struct DatabaseMigrationStatus {
@@ -78,7 +74,6 @@ pub(crate) fn resolve_existing_file_path(path: &str) -> Result<PathBuf, String> 
     Ok(canonical)
 }
 
-#[allow(dead_code)]
 pub(crate) fn normalize_optional_text(value: Option<&str>) -> Option<String> {
     value
         .map(str::trim)
@@ -86,7 +81,6 @@ pub(crate) fn normalize_optional_text(value: Option<&str>) -> Option<String> {
         .map(ToOwned::to_owned)
 }
 
-#[allow(dead_code)]
 pub(crate) fn new_id() -> String {
     Uuid::new_v4().to_string()
 }
