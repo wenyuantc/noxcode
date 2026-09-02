@@ -1,0 +1,15 @@
+dist
+src-tauri/target
+src-tauri/gen
+node_modules
+package-lock.json
+Cargo.lock
+.github
+*.md
+*.json
+!package.json
+!tsconfig*.json
+!vite.config.ts
+coverage
+*.min.js
+*.min.css

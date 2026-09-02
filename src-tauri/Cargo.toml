@@ -1,0 +1,42 @@
+[package]
+name = "noxcode"
+version = "0.1.0"
+description = "noxcode"
+authors = ["you"]
+edition = "2021"
+
+[lib]
+name = "noxcode_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2.6.3", features = [] }
+
+[dependencies]
+tauri = { version = "2.11.5", features = ["protocol-asset", "tray-icon"] }
+tauri-plugin-opener = "2.5.5"
+tauri-plugin-sql = { version = "2.4.1", features = ["sqlite"] }
+tauri-plugin-shell = "2.3.6"
+tauri-plugin-dialog = "2.7.3"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+base64 = "0.22"
+chrono = { version = "0.4", features = ["serde"] }
+uuid = { version = "1", features = ["v4"] }
+thiserror = "2"
+tokio = { version = "1", features = ["process", "io-util", "net", "sync", "time", "macros", "rt"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
+sqlx = { version = "0.8.6", features = ["sqlite", "runtime-tokio", "macros"] }
+libc = "0.2"
+tauri-plugin-notification = "2.4.0"
+keyring = { version = "3", features = [
+  "apple-native",
+  "windows-native",
+  "sync-secret-service",
+  "crypto-rust",
+] }
+tauri-plugin-updater = "2.11.0"
+tauri-plugin-process = "2.3.1"
+russh = { version = "0.63", default-features = false, features = ["ring", "flate2", "rsa"] }
+ssh2-config = "0.8"
