@@ -316,3 +316,293 @@ pub struct DatabaseRestoreResult {
     pub restored_at: String,
     pub message: String,
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NativeSettings {
+    pub max_turns: i32,
+    pub max_subagent_turns: i32,
+    pub confirm_high_risk: bool,
+    pub max_concurrent_subagents: i32,
+    pub subagent_policy: String,
+    pub context_window_tokens: i32,
+    pub rollout_token_budget: i64,
+    pub max_tool_output_tokens: i32,
+    pub permission_timeout_secs: i32,
+    pub subagent_budget_share_percent: i32,
+    #[serde(default)]
+    pub hooks: Vec<NativeHook>,
+    #[serde(default)]
+    pub global_prompt_template: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct NativeHook {
+    pub id: String,
+    pub event: String,
+    pub matcher: String,
+    pub command: String,
+    pub timeout_secs: i32,
+    pub enabled: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UpdateNativeSettings {
+    pub max_turns: Option<i32>,
+    pub max_subagent_turns: Option<i32>,
+    pub confirm_high_risk: Option<bool>,
+    pub max_concurrent_subagents: Option<i32>,
+    pub subagent_policy: Option<String>,
+    pub context_window_tokens: Option<i32>,
+    pub rollout_token_budget: Option<i64>,
+    pub max_tool_output_tokens: Option<i32>,
+    pub permission_timeout_secs: Option<i32>,
+    pub subagent_budget_share_percent: Option<i32>,
+    pub hooks: Option<Vec<NativeHook>>,
+    pub global_prompt_template: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct McpServerConfig {
+    pub id: String,
+    pub name: String,
+    pub command: String,
+    pub args: Vec<String>,
+    #[serde(default)]
+    pub env: Vec<McpEnvVar>,
+    pub enabled: bool,
+    #[serde(default)]
+    pub notes: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct McpEnvVar {
+    pub key: String,
+    pub value: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct McpServersDocument {
+    pub servers: Vec<McpServerConfig>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UpdateMcpServersPayload {
+    pub servers: Vec<McpServerConfig>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CreateAgentProfile {
+    pub name: String,
+    pub ai_channel_id: String,
+    pub model: String,
+    pub reasoning_effort: Option<String>,
+    pub system_prompt: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UpdateAgentProfile {
+    pub name: Option<String>,
+    pub ai_channel_id: Option<String>,
+    pub model: Option<String>,
+    pub reasoning_effort: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_explicit_nullable")]
+    pub system_prompt: Option<Option<String>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CreateWorkspace {
+    pub name: String,
+    pub workspace_type: String,
+    pub repo_path: Option<String>,
+    pub ssh_config_id: Option<String>,
+    pub remote_repo_path: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UpdateWorkspace {
+    pub name: Option<String>,
+    pub workspace_type: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_explicit_nullable")]
+    pub repo_path: Option<Option<String>>,
+    #[serde(default, deserialize_with = "deserialize_explicit_nullable")]
+    pub ssh_config_id: Option<Option<String>>,
+    #[serde(default, deserialize_with = "deserialize_explicit_nullable")]
+    pub remote_repo_path: Option<Option<String>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorkspaceHealth {
+    pub workspace_id: String,
+    pub ok: bool,
+    pub message: String,
+    pub git_version: Option<String>,
+    pub toplevel: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentSessionResumeInfo {
+    pub session_id: String,
+    pub resumable: bool,
+    pub model: Option<String>,
+    pub turns: Option<i64>,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StartNativeSessionInput {
+    pub profile_id: String,
+    pub workspace_id: String,
+    pub prompt: String,
+    pub model: Option<String>,
+    pub reasoning_effort: Option<String>,
+    pub system_prompt: Option<String>,
+    pub resume_session_id: Option<String>,
+    pub image_paths: Option<Vec<String>>,
+    pub plan_mode: Option<bool>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentSessionStarted {
+    pub profile_id: String,
+    pub workspace_id: String,
+    pub session_kind: String,
+    pub session_record_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentSessionOutput {
+    pub profile_id: String,
+    pub workspace_id: Option<String>,
+    pub session_kind: String,
+    pub session_record_id: String,
+    pub session_event_id: String,
+    pub line: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentSessionExit {
+    pub profile_id: String,
+    pub workspace_id: Option<String>,
+    pub session_kind: String,
+    pub session_record_id: String,
+    pub code: i32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NativeTextDelta {
+    pub session_record_id: String,
+    pub kind: String,
+    pub text: String,
+    #[serde(default)]
+    pub clear: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NativeContextUsage {
+    pub session_record_id: String,
+    pub used_tokens: usize,
+    pub limit_tokens: usize,
+    pub generation: u32,
+    pub compactions: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
+pub struct NativeApiCallLogListItem {
+    pub id: String,
+    pub call_id: String,
+    pub attempt: i64,
+    pub channel_id: Option<String>,
+    pub channel_name: Option<String>,
+    pub protocol: String,
+    pub response_encoding: Option<String>,
+    pub model: Option<String>,
+    pub thinking_enabled: i64,
+    pub thinking_level: Option<String>,
+    pub request_format: String,
+    pub input_tokens: Option<i64>,
+    pub output_tokens: Option<i64>,
+    pub cached_tokens: Option<i64>,
+    pub total_tokens: Option<i64>,
+    pub first_token_ms: Option<i64>,
+    pub duration_ms: Option<i64>,
+    pub status: String,
+    pub http_status: Option<i64>,
+    pub session_id: Option<String>,
+    pub profile_id: Option<String>,
+    pub workspace_id: Option<String>,
+    pub profile_name: Option<String>,
+    pub workspace_name: Option<String>,
+    pub execution_target: Option<String>,
+    pub call_kind: Option<String>,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
+pub struct NativeApiCallLogDetail {
+    pub id: String,
+    pub call_id: String,
+    pub attempt: i64,
+    pub channel_id: Option<String>,
+    pub channel_name: Option<String>,
+    pub protocol: String,
+    pub response_encoding: Option<String>,
+    pub model: Option<String>,
+    pub thinking_enabled: i64,
+    pub thinking_level: Option<String>,
+    pub request_format: String,
+    pub request_body: Option<String>,
+    pub request_truncated: i64,
+    pub response_body: Option<String>,
+    pub response_truncated: i64,
+    pub input_tokens: Option<i64>,
+    pub output_tokens: Option<i64>,
+    pub cached_tokens: Option<i64>,
+    pub total_tokens: Option<i64>,
+    pub first_token_ms: Option<i64>,
+    pub duration_ms: Option<i64>,
+    pub status: String,
+    pub http_status: Option<i64>,
+    pub error_message: Option<String>,
+    pub session_id: Option<String>,
+    pub profile_id: Option<String>,
+    pub workspace_id: Option<String>,
+    pub profile_name: Option<String>,
+    pub workspace_name: Option<String>,
+    pub subagent_id: Option<String>,
+    pub call_kind: Option<String>,
+    pub execution_target: Option<String>,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ListNativeApiCallLogsPayload {
+    pub workspace_id: Option<String>,
+    pub profile_id: Option<String>,
+    pub execution_target: Option<String>,
+    pub session_id: Option<String>,
+    pub channel_name: Option<String>,
+    pub model: Option<String>,
+    pub status: Option<String>,
+    pub start_date: Option<String>,
+    pub end_date: Option<String>,
+    pub limit: Option<i64>,
+    pub offset: Option<i64>,
+    pub include_total: Option<bool>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, FromRow)]
+pub struct NativeApiCallLogStats {
+    pub total: i64,
+    pub success: i64,
+    pub failed: i64,
+    pub cancelled: i64,
+    pub input_tokens: i64,
+    pub output_tokens: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NativeApiCallLogPage {
+    pub items: Vec<NativeApiCallLogListItem>,
+    pub total: i64,
+    pub stats: NativeApiCallLogStats,
+}

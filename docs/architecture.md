@@ -2,7 +2,7 @@
 
 noxcode 是 Tauri 2 桌面应用：进程内 Native Agent、AI 渠道、SSH 工作区、Git checkpoint。业务外壳只保留工作区 + Agent 档案 + 会话，不做项目 / 员工 / 看板 / 任务自动化。
 
-完整分阶段计划见 [`plan.md`](../plan.md)。表结构、迁移与备份见 [`database.md`](database.md)。SSH 实现见 [`ssh.md`](ssh.md)。Git 实现见 [`git.md`](git.md)。AI 渠道见 [`channels.md`](channels.md)。
+完整分阶段计划见 [`plan.md`](../plan.md)。表结构、迁移与备份见 [`database.md`](database.md)。SSH 实现见 [`ssh.md`](ssh.md)。Git 实现见 [`git.md`](git.md)。AI 渠道见 [`channels.md`](channels.md)。Native Agent 运行时见 [`native.md`](native.md)。
 
 ## 数据流
 
@@ -53,11 +53,11 @@ flowchart LR
 | `db/` | version 1 baseline，9 张表 | 只追加连续迁移 `2..N` |
 | `app/database` + `app/shared` | 健康检查 / 备份 / 恢复 | 保持 |
 | `app/ssh/` + `app/secret_store` | P2 已落地，见 [`ssh.md`](ssh.md) | P5 补设置页 / 信任横幅 |
-| `app/workspaces` | 仅 `fetch_workspace_by_id` | CRUD |
-| `app/{profiles,sessions}` | 未建 | CRUD |
-| `git/` | P2.5 已落地，见 [`git.md`](git.md) | P4.4 接 native session / 写文件后自动打点 |
+| `app/workspaces` | P4.4 CRUD + 健康检查 | P5 工作区选择器 |
+| `app/{profiles,sessions}` | P4.4 CRUD；删会话清 checkpoint | P5 档案 / 历史 UI |
+| `git/` | P2.5 + P4.4 自动打点 | P5 GitPanel / CheckpointTimeline |
 | `engine/` | `ExecutionContext`（local \| ssh） | 会话接线后继续用 |
-| `native/` | P3 已落地渠道 + 精简 model 客户端（probe / list_models） | P4.1 覆盖完整 client；再接 agent 循环 + session 外壳 |
+| `native/` | P4 已落地完整 model / tools / agent / session | P5 会话流与设置页 |
 
 策略是「保留内核 + 替换外壳」：`native/model`、`native/tools`、`native/agent` 从参考实现近乎原样搬运；`native/session.rs` / `manager.rs` 重写（`employee` → `agent_profile`，去掉 task / run_queue / 任务自动化）；SSH 与 Git 按本仓库决策新写，不搬系统 `ssh` 子进程和 Node git bridge。
 
@@ -87,8 +87,18 @@ flowchart LR
 | `test_ai_channel` / `list_ai_channel_models` | `native::channels` |
 | `list_model_catalog` | `native::model_catalog` |
 | `get_network_settings` / `update_network_settings` | `app::network_settings` |
+| `list/create/update/delete_agent_profile` | `app::profiles` |
+| `list/create/update/delete_workspace` / `check_workspace_health` | `app::workspaces` |
+| `list_agent_sessions` / `get_agent_session_log_lines` / `prepare_agent_session_resume` / `delete_agent_session` | `app::sessions` |
+| `start/stop/restart/resume_native_session` / `stop_native` / `send/finish_native_input` | `native::session` |
+| `resolve_native_tool_permission` / `answer_native_plan_question` | `native::session` |
+| `get/update_native_settings` | `native::settings` |
+| `list_native_global_skills` / `open_native_skills_dir` | `native::skills` |
+| `list/create/update/delete_native_subagent` | `native::subagents` |
+| `list/get_native_api_call_log` | `native::api_logs` |
+| `get/update/reset_mcp_servers` | `native::mcp_servers` |
 
-事件：`ssh-host-trust-request`、`ssh-host-key-changed`。后续约 60 个命令的完整清单见 `plan.md` §4。Git 细节见 [`git.md`](git.md)。
+事件：`ssh-host-trust-request`、`ssh-host-key-changed`、`native-session`、`native-stdout`、`native-text-delta`、`native-context-usage`、`native-permission-request`、`native-plan-question`、`native-exit`。Git 细节见 [`git.md`](git.md)。会话细节见 [`native.md`](native.md)。
 
 ## SSH
 
@@ -118,7 +128,7 @@ flowchart LR
 
 渠道配置在表 `ai_channels`（`api_key` 列直接落库）。协议三套：openai chat/completions、anthropic messages、codex Responses。P3 已落地 CRUD、测通、拉模型；细节见 [`channels.md`](channels.md)。
 
-模型目录本阶段是扁平 `model_catalog.json`（`lookup_catalog` 精确 ID / 别名 / 归一化 / 前缀模糊）。§1 决策 4 的 provider 分层 schema（`noxcode.model-providers.v1` + JSON path 注入思考等级）挪到 P4.1，与完整 `ModelClient` 一起做。
+模型目录保持扁平 `model_catalog.json`（`lookup_catalog` 精确 ID / 别名 / 归一化 / 前缀模糊）。完整 `ModelClient`（chat / SSE / 重试 / call log）已在 P4.1 落地，并保留 `ModelClientConfig.network` 与 `build_http_client`。§1 决策 4 的 provider 分层 schema（`noxcode.model-providers.v1` + JSON path 注入思考等级）留到 v2。
 
 HTTP 代理 / 不代理地址 / 自定义 CA 存在 `$APPCONFIG/network-settings.json`，测通与拉模型走 `build_http_client`。
 
@@ -143,6 +153,6 @@ P0 脚手架 → P1 数据层 → P2 SSH → P2.5 Git → P3 渠道
 P6 打包  ←  P5 前端  ←  P4.5 ← P4.4 ← P4.3 ← P4.2 ← P4.1
 ```
 
-P2 必须在 tools/ssh 之前；P3 必须在 model 客户端测通之前；P2.5 必须在 session 接线之前。当前仓库已完成 P0、P1、P2、P2.5、P3。
+P2 必须在 tools/ssh 之前；P3 必须在 model 客户端测通之前；P2.5 必须在 session 接线之前。当前仓库已完成 P0、P1、P2、P2.5、P3、P4。
 
 第一版不做：斜杠命令完整版、插件打包、PTY、内置 ripgrep、浏览器 / CUA、OpenTelemetry。见 `plan.md` §6。

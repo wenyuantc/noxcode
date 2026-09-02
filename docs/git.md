@@ -96,8 +96,11 @@ ref：`refs/noxcode/checkpoints/<session_id>/<seq>`。author / committer 固定 
 
 覆盖：status / stage / commit / push、index 字节级不变、空格 / 中文 / 换行文件名、rename numstat、回滚三类影响面、gitignore 不删、merge 中间态拒绝、ref 失效、只读部分失败、删会话后 gc 无残留。
 
+## Native 自动打点（P4.4）
+
+`native/session.rs` 在会话开始时尝试 `create_checkpoint(kind=session_start)`。`Write` / `Edit` / `ApplyPatch` 成功后由 `ToolCtx.on_mutation` 异步打 `after_tool_call`，同一会话同时只允许一个在途打点；失败只警告。`delete_agent_session` 先 `delete_checkpoints_for_session`，`delete_workspace` 先 `clear_workspace_checkpoints`，避免 CASCADE 删行后 `refs/noxcode/*` 泄漏。
+
 ## 暂不做
 
-- native 写文件后自动打点（P4.4）
 - `ScratchIndex::from_head`（本阶段无 AI 触发的选中路径提交）
 - GitPanel / CheckpointTimeline UI（P5）

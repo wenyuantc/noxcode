@@ -9,8 +9,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use tauri::{Emitter, Manager};
+use tokio::sync::Mutex;
 
 use crate::app::ssh::{HostTrustBroker, HostTrustEvent, SshPool};
+use crate::native::manager::NativeAgentManager;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -40,6 +42,7 @@ pub fn run() {
             });
             let pool = SshPool::new(trust, Duration::from_secs(600));
             app.manage(pool.clone());
+            app.manage(Arc::new(Mutex::new(NativeAgentManager::new())));
             pool.start_idle_reaper(Duration::from_secs(60));
 
             if cfg!(debug_assertions) {
@@ -90,6 +93,41 @@ pub fn run() {
             native::channels::test_ai_channel,
             native::channels::list_ai_channel_models,
             native::model_catalog::list_model_catalog,
+            native::session::start_native_session,
+            native::session::stop_native_session,
+            native::session::stop_native,
+            native::session::restart_native_session,
+            native::session::resume_native_session,
+            native::session::send_native_input,
+            native::session::finish_native_input,
+            native::session::resolve_native_tool_permission,
+            native::session::answer_native_plan_question,
+            native::settings::get_native_settings,
+            native::settings::update_native_settings,
+            native::skills::list_native_global_skills,
+            native::skills::open_native_skills_dir,
+            native::subagents::list_native_subagents,
+            native::subagents::create_native_subagent,
+            native::subagents::update_native_subagent,
+            native::subagents::delete_native_subagent,
+            native::api_logs::list_native_api_call_logs,
+            native::api_logs::get_native_api_call_log,
+            native::mcp_servers::get_mcp_servers,
+            native::mcp_servers::update_mcp_servers,
+            native::mcp_servers::reset_mcp_servers,
+            app::profiles::list_agent_profiles,
+            app::profiles::create_agent_profile,
+            app::profiles::update_agent_profile,
+            app::profiles::delete_agent_profile,
+            app::workspaces::list_workspaces,
+            app::workspaces::create_workspace,
+            app::workspaces::update_workspace,
+            app::workspaces::delete_workspace,
+            app::workspaces::check_workspace_health,
+            app::sessions::list_agent_sessions,
+            app::sessions::get_agent_session_log_lines,
+            app::sessions::prepare_agent_session_resume,
+            app::sessions::delete_agent_session,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
@@ -98,6 +136,11 @@ pub fn run() {
                 git::preflight::show_fatal_dialog_if_needed(app);
             }
             tauri::RunEvent::Exit => {
+                if let Some(manager) = app.try_state::<Arc<Mutex<NativeAgentManager>>>() {
+                    tauri::async_runtime::block_on(async {
+                        manager.lock().await.cancel_all();
+                    });
+                }
                 if let Some(pool) = app.try_state::<SshPool>() {
                     tauri::async_runtime::block_on(pool.shutdown());
                 }

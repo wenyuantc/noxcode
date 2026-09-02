@@ -1,11 +1,16 @@
 //! Native model clients used by the in-process agent loop.
-//!
-//! P3 只落地 probe / list_models。P4.1 用完整实现覆盖本目录。
-#![allow(dead_code)]
+#![allow(dead_code, unused_imports)]
 
+pub mod anthropic;
+pub mod call_log;
 pub mod client;
+pub mod openai;
+pub mod responses;
 pub mod retry;
+pub mod sse;
+pub mod types;
+pub mod usage;
 
-#[allow(unused_imports)]
 pub use client::{ListedModels, ModelClient, ModelClientConfig};
 pub use retry::RetryConfig;
+pub use usage::usage_to_delta;

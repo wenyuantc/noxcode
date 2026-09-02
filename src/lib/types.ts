@@ -313,3 +313,376 @@ export const NATIVE_THINKING_LEVELS = [
   "xhigh",
   "max",
 ] as const;
+
+export type ReasoningEffort = "low" | "medium" | "high" | "xhigh" | "max";
+
+export interface AgentProfile {
+  id: string;
+  name: string;
+  ai_channel_id: string | null;
+  model: string;
+  reasoning_effort: string;
+  system_prompt: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface CreateAgentProfileInput {
+  name: string;
+  ai_channel_id: string;
+  model: string;
+  reasoning_effort?: string | null;
+  system_prompt?: string | null;
+}
+
+export interface UpdateAgentProfileInput {
+  name?: string;
+  ai_channel_id?: string;
+  model?: string;
+  reasoning_effort?: string;
+  system_prompt?: string | null;
+}
+
+export type WorkspaceType = "local" | "ssh";
+
+export interface Workspace {
+  id: string;
+  name: string;
+  workspace_type: WorkspaceType;
+  repo_path: string | null;
+  ssh_config_id: string | null;
+  remote_repo_path: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface CreateWorkspaceInput {
+  name: string;
+  workspace_type: WorkspaceType;
+  repo_path?: string | null;
+  ssh_config_id?: string | null;
+  remote_repo_path?: string | null;
+}
+
+export interface UpdateWorkspaceInput {
+  name?: string;
+  workspace_type?: WorkspaceType;
+  repo_path?: string | null;
+  ssh_config_id?: string | null;
+  remote_repo_path?: string | null;
+}
+
+export interface WorkspaceHealth {
+  workspace_id: string;
+  ok: boolean;
+  message: string;
+  git_version: string | null;
+  toplevel: string | null;
+}
+
+export interface AgentSession {
+  id: string;
+  profile_id: string | null;
+  workspace_id: string | null;
+  working_dir: string | null;
+  execution_target: string;
+  ssh_config_id: string | null;
+  target_host_label: string | null;
+  session_kind: string;
+  status: string;
+  started_at: string;
+  ended_at: string | null;
+  exit_code: number | null;
+  resume_session_id: string | null;
+  input_tokens: number | null;
+  output_tokens: number | null;
+  total_tokens: number | null;
+  reasoning_tokens: number | null;
+  cached_tokens: number | null;
+  created_at: string;
+}
+
+export interface AgentSessionEvent {
+  id: string;
+  session_id: string;
+  event_type: string;
+  message: string | null;
+  created_at: string;
+}
+
+export interface AgentSessionResumeInfo {
+  session_id: string;
+  resumable: boolean;
+  model: string | null;
+  turns: number | null;
+  message: string;
+}
+
+export interface StartNativeSessionInput {
+  profile_id: string;
+  workspace_id: string;
+  prompt: string;
+  model?: string | null;
+  reasoning_effort?: string | null;
+  system_prompt?: string | null;
+  resume_session_id?: string | null;
+  image_paths?: string[] | null;
+  plan_mode?: boolean | null;
+}
+
+export interface AgentSessionStarted {
+  profile_id: string;
+  workspace_id: string;
+  session_kind: string;
+  session_record_id: string;
+}
+
+export interface AgentSessionOutput {
+  profile_id: string;
+  workspace_id: string | null;
+  session_kind: string;
+  session_record_id: string;
+  session_event_id: string;
+  line: string;
+}
+
+export interface AgentSessionExit {
+  profile_id: string;
+  workspace_id: string | null;
+  session_kind: string;
+  session_record_id: string;
+  code: number;
+}
+
+export interface NativeTextDelta {
+  session_record_id: string;
+  kind: string;
+  text: string;
+  clear: boolean;
+}
+
+export type NativeToolRiskKind = "overwrite" | "delete" | "push" | "force_git" | "mcp" | "opaque";
+
+export type NativePermissionDecision = "allow_session" | "allow_once" | "allow_server" | "deny";
+
+export interface NativePermissionRequest {
+  session_record_id: string;
+  request_id: string;
+  profile_id: string;
+  workspace_id: string | null;
+  session_kind: string;
+  tool_name: string;
+  kind: NativeToolRiskKind;
+  summary: string;
+  remote: boolean;
+  mcp_server_id: string | null;
+}
+
+export interface NativePlanQuestion {
+  prompt: string;
+  options: string[];
+}
+
+export interface NativePlanQuestionRequest {
+  session_record_id: string;
+  request_id: string;
+  profile_id: string;
+  workspace_id: string | null;
+  session_kind: string;
+  questions: NativePlanQuestion[];
+}
+
+export interface NativeContextUsage {
+  session_record_id: string;
+  used_tokens: number;
+  limit_tokens: number;
+  generation: number;
+  compactions: number;
+}
+
+export interface NativeHook {
+  id: string;
+  event: string;
+  matcher: string;
+  command: string;
+  timeout_secs: number;
+  enabled: boolean;
+}
+
+export interface NativeSettings {
+  max_turns: number;
+  max_subagent_turns: number;
+  confirm_high_risk: boolean;
+  max_concurrent_subagents: number;
+  subagent_policy: string;
+  context_window_tokens: number;
+  rollout_token_budget: number;
+  max_tool_output_tokens: number;
+  permission_timeout_secs: number;
+  subagent_budget_share_percent: number;
+  hooks: NativeHook[];
+  global_prompt_template: string;
+}
+
+export interface UpdateNativeSettingsInput {
+  max_turns?: number;
+  max_subagent_turns?: number;
+  confirm_high_risk?: boolean;
+  max_concurrent_subagents?: number;
+  subagent_policy?: string;
+  context_window_tokens?: number;
+  rollout_token_budget?: number;
+  max_tool_output_tokens?: number;
+  permission_timeout_secs?: number;
+  subagent_budget_share_percent?: number;
+  hooks?: NativeHook[];
+  global_prompt_template?: string;
+}
+
+export type NativeSkillSource = "workspace_agents" | "workspace_claude" | "global";
+
+export interface NativeSkill {
+  name: string;
+  description: string;
+  source: NativeSkillSource;
+  dir: string;
+  skill_md_path: string;
+  body: string;
+  extra_files: string[];
+}
+
+export interface NativeGlobalSkills {
+  dir: string;
+  skills: NativeSkill[];
+}
+
+export interface NativeSubagent {
+  id: string;
+  name: string;
+  description: string;
+  model_mode: string;
+  channel_id: string | null;
+  model: string | null;
+  tool_mode: string;
+  tools: string[];
+  system_prompt: string;
+  inject_agents_md: boolean;
+  scope: string;
+  workspace_ids: string[];
+}
+
+export interface CreateNativeSubagentInput {
+  name: string;
+  description: string;
+  model_mode?: string | null;
+  channel_id?: string | null;
+  model?: string | null;
+  tool_mode?: string | null;
+  tools?: string[] | null;
+  system_prompt?: string | null;
+  inject_agents_md?: boolean | null;
+  scope?: string | null;
+  workspace_ids?: string[] | null;
+}
+
+export interface UpdateNativeSubagentInput {
+  name?: string;
+  description?: string;
+  model_mode?: string;
+  channel_id?: string | null;
+  model?: string | null;
+  tool_mode?: string;
+  tools?: string[];
+  system_prompt?: string;
+  inject_agents_md?: boolean;
+  scope?: string;
+  workspace_ids?: string[];
+}
+
+export interface McpEnvVar {
+  key: string;
+  value: string;
+}
+
+export interface McpServerConfig {
+  id: string;
+  name: string;
+  command: string;
+  args: string[];
+  env: McpEnvVar[];
+  enabled: boolean;
+  notes: string | null;
+}
+
+export interface McpServersDocument {
+  servers: McpServerConfig[];
+}
+
+export interface NativeApiCallLogListItem {
+  id: string;
+  call_id: string;
+  attempt: number;
+  channel_id: string | null;
+  channel_name: string | null;
+  protocol: string;
+  response_encoding: string | null;
+  model: string | null;
+  thinking_enabled: number;
+  thinking_level: string | null;
+  request_format: string;
+  input_tokens: number | null;
+  output_tokens: number | null;
+  cached_tokens: number | null;
+  total_tokens: number | null;
+  first_token_ms: number | null;
+  duration_ms: number | null;
+  status: string;
+  http_status: number | null;
+  session_id: string | null;
+  profile_id: string | null;
+  workspace_id: string | null;
+  profile_name: string | null;
+  workspace_name: string | null;
+  execution_target: string | null;
+  call_kind: string | null;
+  created_at: string;
+}
+
+export interface NativeApiCallLogDetail extends NativeApiCallLogListItem {
+  request_body: string | null;
+  request_truncated: number;
+  response_body: string | null;
+  response_truncated: number;
+  error_message: string | null;
+  subagent_id: string | null;
+}
+
+export interface ListNativeApiCallLogsInput {
+  workspace_id?: string | null;
+  profile_id?: string | null;
+  execution_target?: string | null;
+  session_id?: string | null;
+  channel_name?: string | null;
+  model?: string | null;
+  status?: string | null;
+  start_date?: string | null;
+  end_date?: string | null;
+  limit?: number | null;
+  offset?: number | null;
+  include_total?: boolean | null;
+}
+
+export interface NativeApiCallLogStats {
+  total: number;
+  success: number;
+  failed: number;
+  cancelled: number;
+  input_tokens: number;
+  output_tokens: number;
+}
+
+export interface NativeApiCallLogPage {
+  items: NativeApiCallLogListItem[];
+  total: number;
+  stats: NativeApiCallLogStats;
+}

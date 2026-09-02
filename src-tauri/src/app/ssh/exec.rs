@@ -47,7 +47,6 @@ impl Default for ExecOptions {
     }
 }
 
-#[allow(dead_code)]
 #[derive(Debug)]
 pub(crate) enum SshStreamEvent {
     Stdout(Vec<u8>),
@@ -56,12 +55,10 @@ pub(crate) enum SshStreamEvent {
     Closed,
 }
 
-#[allow(dead_code)]
 pub(crate) struct SshCommandStream {
     channel: Channel<Msg>,
 }
 
-#[allow(dead_code)]
 impl SshCommandStream {
     pub(crate) async fn next(&mut self) -> Option<SshStreamEvent> {
         loop {
@@ -125,7 +122,6 @@ impl SshPool {
         run_exec_channel(channel, cmd, options).await
     }
 
-    #[allow(dead_code)]
     pub(crate) async fn spawn(
         &self,
         params: &ConnectParams,
@@ -140,7 +136,6 @@ impl SshPool {
         }
     }
 
-    #[allow(dead_code)]
     async fn spawn_once(
         &self,
         params: &ConnectParams,
@@ -214,7 +209,6 @@ async fn collect_command_output(
     })
 }
 
-#[allow(dead_code)]
 pub(crate) async fn execute_ssh_command<R: Runtime>(
     app: &AppHandle<R>,
     ssh_config: &SshConfigRecord,
@@ -228,7 +222,6 @@ pub(crate) async fn execute_ssh_command<R: Runtime>(
         .map_err(Into::into)
 }
 
-#[allow(dead_code)]
 pub(crate) async fn execute_ssh_command_with_input<R: Runtime>(
     app: &AppHandle<R>,
     ssh_config: &SshConfigRecord,
@@ -250,7 +243,6 @@ pub(crate) async fn execute_ssh_command_with_input<R: Runtime>(
     .map_err(Into::into)
 }
 
-#[allow(dead_code)]
 pub(crate) async fn spawn_ssh_command<R: Runtime>(
     app: &AppHandle<R>,
     ssh_config: &SshConfigRecord,

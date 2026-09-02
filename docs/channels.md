@@ -33,7 +33,7 @@ flowchart LR
 | [`src-tauri/src/native/protocol.rs`](../src-tauri/src/native/protocol.rs) | 协议别名、URL、模型 JSON、额外请求头 |
 | [`src-tauri/src/native/model_catalog.rs`](../src-tauri/src/native/model_catalog.rs) | 扁平 catalog 查找与 thinking 归一化 |
 | [`src-tauri/src/native/model_catalog.json`](../src-tauri/src/native/model_catalog.json) | `include_str!` 内嵌目录 |
-| [`src-tauri/src/native/model/client.rs`](../src-tauri/src/native/model/client.rs) | P3 精简版：`probe` / `list_models` |
+| [`src-tauri/src/native/model/client.rs`](../src-tauri/src/native/model/client.rs) | 完整 chat / SSE / 重试 / call log；`probe` / `list_models` 仍给渠道测通 |
 | [`src-tauri/src/native/model/retry.rs`](../src-tauri/src/native/model/retry.rs) | 重试判定与错误脱敏 |
 | [`src-tauri/src/app/network_settings.rs`](../src-tauri/src/app/network_settings.rs) | `$APPCONFIG/network-settings.json` |
 | [`src/lib/backend.ts`](../src/lib/backend.ts) | 前端唯一 invoke 出口 |
@@ -83,7 +83,6 @@ Base URL 必须是 `http://` 或 `https://`，末尾 `/` 会去掉后再拼路�
 
 `listAiChannels` / `createAiChannel` / `updateAiChannel` / `deleteAiChannel` / `testAiChannel` / `listAiChannelModels` / `listModelCatalog` / `getNetworkSettings` / `updateNetworkSettings`。invoke 参数名与 Rust 一致：`payload` 或 `id, updates`。
 
-## P4.1 交接点
+## P4.1 交接点（已完成）
 
-- 用完整 `native/model/client.rs`（chat / SSE / 重试 / call_log）覆盖精简版；保留 `ModelClientConfig.network` 与 `new()` 里的 `build_http_client`。
-- §1 决策 4（`noxcode.model-providers.v1` provider 分层 + JSON path 注入思考等级）整体挪到 P4.1。本阶段 catalog 保持扁平列表。
+完整 `native/model/client.rs`（chat / SSE / 重试 / call_log）已覆盖精简版，并保留 `ModelClientConfig.network` 与 `new()` 里的 `build_http_client`。catalog 仍是扁平列表；`noxcode.model-providers.v1` provider 分层与 JSON path 注入思考等级留到 v2。会话接线见 [`native.md`](native.md)。

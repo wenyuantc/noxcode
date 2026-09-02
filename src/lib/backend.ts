@@ -2,9 +2,19 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 
 import type {
+  AgentProfile,
+  AgentSession,
+  AgentSessionEvent,
+  AgentSessionExit,
+  AgentSessionOutput,
+  AgentSessionResumeInfo,
+  AgentSessionStarted,
   AiChannel,
+  CreateAgentProfileInput,
   CreateAiChannelInput,
+  CreateNativeSubagentInput,
   CreateSshConfigInput,
+  CreateWorkspaceInput,
   GitBranch,
   GitCheckpoint,
   GitCheckpointKind,
@@ -19,7 +29,19 @@ import type {
   GitRestoreResult,
   GitStatus,
   ListAiChannelModelsResult,
+  ListNativeApiCallLogsInput,
+  McpServersDocument,
   ModelCatalogEntry,
+  NativeApiCallLogDetail,
+  NativeApiCallLogPage,
+  NativeContextUsage,
+  NativeGlobalSkills,
+  NativePermissionDecision,
+  NativePermissionRequest,
+  NativePlanQuestionRequest,
+  NativeSettings,
+  NativeSubagent,
+  NativeTextDelta,
   NetworkSettings,
   SshConfig,
   SshConfigFileHost,
@@ -28,10 +50,17 @@ import type {
   SshHostKeyChanged,
   SshHostTrustPrompt,
   SshPasswordProbeResult,
+  StartNativeSessionInput,
   TestAiChannelInput,
   TestAiChannelResult,
+  UpdateAgentProfileInput,
   UpdateAiChannelInput,
+  UpdateNativeSettingsInput,
+  UpdateNativeSubagentInput,
   UpdateSshConfigInput,
+  UpdateWorkspaceInput,
+  Workspace,
+  WorkspaceHealth,
 } from "./types";
 
 export function listSshConfigs(): Promise<SshConfig[]> {
@@ -226,4 +255,226 @@ export function getNetworkSettings(): Promise<NetworkSettings> {
 
 export function updateNetworkSettings(payload: NetworkSettings): Promise<NetworkSettings> {
   return invoke("update_network_settings", { payload });
+}
+
+export function listAgentProfiles(): Promise<AgentProfile[]> {
+  return invoke("list_agent_profiles");
+}
+
+export function createAgentProfile(payload: CreateAgentProfileInput): Promise<AgentProfile> {
+  return invoke("create_agent_profile", { payload });
+}
+
+export function updateAgentProfile(
+  id: string,
+  updates: UpdateAgentProfileInput,
+): Promise<AgentProfile> {
+  return invoke("update_agent_profile", { id, updates });
+}
+
+export function deleteAgentProfile(id: string): Promise<void> {
+  return invoke("delete_agent_profile", { id });
+}
+
+export function listWorkspaces(): Promise<Workspace[]> {
+  return invoke("list_workspaces");
+}
+
+export function createWorkspace(payload: CreateWorkspaceInput): Promise<Workspace> {
+  return invoke("create_workspace", { payload });
+}
+
+export function updateWorkspace(id: string, updates: UpdateWorkspaceInput): Promise<Workspace> {
+  return invoke("update_workspace", { id, updates });
+}
+
+export function deleteWorkspace(id: string): Promise<void> {
+  return invoke("delete_workspace", { id });
+}
+
+export function checkWorkspaceHealth(workspaceId: string): Promise<WorkspaceHealth> {
+  return invoke("check_workspace_health", { workspaceId });
+}
+
+export function listAgentSessions(
+  workspaceId?: string,
+  profileId?: string,
+  limit?: number,
+): Promise<AgentSession[]> {
+  return invoke("list_agent_sessions", { workspaceId, profileId, limit });
+}
+
+export function getAgentSessionLogLines(
+  sessionId: string,
+  afterEventId?: string,
+  limit?: number,
+): Promise<AgentSessionEvent[]> {
+  return invoke("get_agent_session_log_lines", { sessionId, afterEventId, limit });
+}
+
+export function prepareAgentSessionResume(sessionId: string): Promise<AgentSessionResumeInfo> {
+  return invoke("prepare_agent_session_resume", { sessionId });
+}
+
+export function deleteAgentSession(sessionId: string): Promise<void> {
+  return invoke("delete_agent_session", { sessionId });
+}
+
+export function startNativeSession(payload: StartNativeSessionInput): Promise<AgentSessionStarted> {
+  return invoke("start_native_session", { payload });
+}
+
+export function stopNativeSession(sessionRecordId: string): Promise<void> {
+  return invoke("stop_native_session", { sessionRecordId });
+}
+
+export function stopNative(profileId: string): Promise<void> {
+  return invoke("stop_native", { profileId });
+}
+
+export function restartNativeSession(
+  payload: StartNativeSessionInput,
+): Promise<AgentSessionStarted> {
+  return invoke("restart_native_session", { payload });
+}
+
+export function resumeNativeSession(
+  payload: StartNativeSessionInput,
+  resumeSessionId?: string,
+): Promise<AgentSessionStarted> {
+  return invoke("resume_native_session", { payload, resumeSessionId });
+}
+
+export function sendNativeInput(sessionRecordId: string, input: string): Promise<void> {
+  return invoke("send_native_input", { sessionRecordId, input });
+}
+
+export function finishNativeInput(sessionRecordId: string): Promise<void> {
+  return invoke("finish_native_input", { sessionRecordId });
+}
+
+export function resolveNativeToolPermission(
+  sessionRecordId: string,
+  requestId: string,
+  decision: NativePermissionDecision,
+): Promise<void> {
+  return invoke("resolve_native_tool_permission", { sessionRecordId, requestId, decision });
+}
+
+export function answerNativePlanQuestion(
+  sessionRecordId: string,
+  requestId: string,
+  skipped: boolean,
+  answers: string[],
+): Promise<void> {
+  return invoke("answer_native_plan_question", { sessionRecordId, requestId, skipped, answers });
+}
+
+export function getNativeSettings(): Promise<NativeSettings> {
+  return invoke("get_native_settings");
+}
+
+export function updateNativeSettings(updates: UpdateNativeSettingsInput): Promise<NativeSettings> {
+  return invoke("update_native_settings", { updates });
+}
+
+export function listNativeGlobalSkills(): Promise<NativeGlobalSkills> {
+  return invoke("list_native_global_skills");
+}
+
+export function openNativeSkillsDir(): Promise<void> {
+  return invoke("open_native_skills_dir");
+}
+
+export function listNativeSubagents(): Promise<NativeSubagent[]> {
+  return invoke("list_native_subagents");
+}
+
+export function createNativeSubagent(payload: CreateNativeSubagentInput): Promise<NativeSubagent> {
+  return invoke("create_native_subagent", { payload });
+}
+
+export function updateNativeSubagent(
+  id: string,
+  payload: UpdateNativeSubagentInput,
+): Promise<NativeSubagent> {
+  return invoke("update_native_subagent", { id, payload });
+}
+
+export function deleteNativeSubagent(id: string): Promise<void> {
+  return invoke("delete_native_subagent", { id });
+}
+
+export function listNativeApiCallLogs(
+  payload?: ListNativeApiCallLogsInput,
+): Promise<NativeApiCallLogPage> {
+  return invoke("list_native_api_call_logs", { payload });
+}
+
+export function getNativeApiCallLog(id: string): Promise<NativeApiCallLogDetail> {
+  return invoke("get_native_api_call_log", { id });
+}
+
+export function getMcpServers(): Promise<McpServersDocument> {
+  return invoke("get_mcp_servers");
+}
+
+export function updateMcpServers(payload: McpServersDocument): Promise<McpServersDocument> {
+  return invoke("update_mcp_servers", { payload });
+}
+
+export function resetMcpServers(): Promise<McpServersDocument> {
+  return invoke("reset_mcp_servers");
+}
+
+export function onNativeStdout(
+  callback: (output: AgentSessionOutput) => void,
+): Promise<UnlistenFn> {
+  return listen<AgentSessionOutput>("native-stdout", (event) => {
+    callback(event.payload);
+  });
+}
+
+export function onNativeExit(callback: (exit: AgentSessionExit) => void): Promise<UnlistenFn> {
+  return listen<AgentSessionExit>("native-exit", (event) => {
+    callback(event.payload);
+  });
+}
+
+export function onNativeSession(
+  callback: (session: AgentSessionStarted) => void,
+): Promise<UnlistenFn> {
+  return listen<AgentSessionStarted>("native-session", (event) => {
+    callback(event.payload);
+  });
+}
+
+export function onNativeTextDelta(callback: (delta: NativeTextDelta) => void): Promise<UnlistenFn> {
+  return listen<NativeTextDelta>("native-text-delta", (event) => {
+    callback(event.payload);
+  });
+}
+
+export function onNativePermissionRequest(
+  callback: (request: NativePermissionRequest) => void,
+): Promise<UnlistenFn> {
+  return listen<NativePermissionRequest>("native-permission-request", (event) => {
+    callback(event.payload);
+  });
+}
+
+export function onNativePlanQuestion(
+  callback: (request: NativePlanQuestionRequest) => void,
+): Promise<UnlistenFn> {
+  return listen<NativePlanQuestionRequest>("native-plan-question", (event) => {
+    callback(event.payload);
+  });
+}
+
+export function onNativeContextUsage(
+  callback: (usage: NativeContextUsage) => void,
+): Promise<UnlistenFn> {
+  return listen<NativeContextUsage>("native-context-usage", (event) => {
+    callback(event.payload);
+  });
 }

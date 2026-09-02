@@ -7,4 +7,5 @@
 | [ssh.md](ssh.md) | P2：russh 连接池、known_hosts、命令与前端封装 |
 | [git.md](git.md) | P2.5：系统 git、临时索引、checkpoint 与回滚 |
 | [channels.md](channels.md) | P3：AI 渠道、扁平 catalog、网络设置 |
+| [native.md](native.md) | P4：native agent 运行时、会话生命周期、六条链路 |
 | [plan.md](../plan.md) | 分阶段实施计划（仓库根目录） |

@@ -20,10 +20,7 @@ use crate::app::ssh::configs::fetch_ssh_config_record_by_id;
 use crate::app::ssh::{resolve_connect_params, SshPool};
 use crate::engine::context::resolve_workspace_execution_context_with_pool;
 
-use self::checkpoint::{
-    clear_workspace_checkpoints, create_checkpoint, list_checkpoints, preview_restore,
-    restore_checkpoint, sweep_orphan_refs,
-};
+use self::checkpoint::{list_checkpoints, preview_restore, restore_checkpoint, sweep_orphan_refs};
 use self::commit::{
     commit_changes, create_branch, list_branches, push_branch, GitBranch, GitCommitResult,
     GitPushResult,
@@ -31,14 +28,18 @@ use self::commit::{
 use self::diff::{
     get_file_diff, get_numstat, GitFileDiff, GitFileDiffScope, GitNumstatEntry, GitNumstatScope,
 };
-use self::repo::{load_repo_info, GitRepoInfo};
-use self::runner::GitTarget;
+use self::repo::GitRepoInfo;
 use self::stage::{restore_paths, stage_paths, unstage_paths};
 use self::status::{get_status, GitStatus};
 
-pub(crate) use self::checkpoint::{GitCheckpointInfo, GitRestorePreview, GitRestoreResult};
+pub(crate) use self::checkpoint::{
+    clear_workspace_checkpoints, create_checkpoint, delete_checkpoints_for_session,
+    GitCheckpointInfo, GitRestorePreview, GitRestoreResult,
+};
+pub(crate) use self::repo::load_repo_info;
+pub(crate) use self::runner::{GitTarget, IndexMode};
 
-async fn resolve_git_target<R: Runtime>(
+pub(crate) async fn resolve_git_target<R: Runtime>(
     app: &AppHandle<R>,
     workspace_id: &str,
 ) -> Result<GitTarget, String> {
