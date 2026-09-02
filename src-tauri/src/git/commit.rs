@@ -43,11 +43,7 @@ pub(crate) async fn commit_changes(
 
     with_repo_lock(target, || async {
         let mut args = vec!["commit", "-m", message];
-        let path_refs: Vec<&str> = paths
-            .unwrap_or(&[])
-            .iter()
-            .map(String::as_str)
-            .collect();
+        let path_refs: Vec<&str> = paths.unwrap_or(&[]).iter().map(String::as_str).collect();
         if !path_refs.is_empty() {
             args.push("--");
             args.extend(path_refs.iter().copied());
@@ -77,8 +73,10 @@ pub(crate) async fn push_branch(
 ) -> Result<GitPushResult, GitError> {
     let mut args = vec!["push".to_string()];
     if set_upstream {
-        let remote = remote.ok_or_else(|| GitError::Parse("set_upstream 需要 remote".to_string()))?;
-        let branch = branch.ok_or_else(|| GitError::Parse("set_upstream 需要 branch".to_string()))?;
+        let remote =
+            remote.ok_or_else(|| GitError::Parse("set_upstream 需要 remote".to_string()))?;
+        let branch =
+            branch.ok_or_else(|| GitError::Parse("set_upstream 需要 branch".to_string()))?;
         args.push("--set-upstream".to_string());
         args.push(remote.to_string());
         args.push(branch.to_string());

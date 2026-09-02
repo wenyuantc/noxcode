@@ -45,7 +45,9 @@ async fn init_files(dir: &Path) {
         .await
         .expect("email");
     std::fs::write(dir.join("README.md"), "hello\n").unwrap();
-    fixture_git(&target, &["add", "README.md"]).await.expect("add");
+    fixture_git(&target, &["add", "README.md"])
+        .await
+        .expect("add");
     fixture_git(&target, &["commit", "-m", "init"])
         .await
         .expect("commit");
@@ -146,7 +148,11 @@ async fn repo_status_stage_commit_push_and_branch() {
     run_on_targets(|target, dir| async move {
         let dir = dir.as_path();
         let info = load_repo_info(&target, "ws-git").await.expect("info");
-        assert!(info.toplevel.ends_with(dir.file_name().unwrap().to_str().unwrap()) || info.toplevel.contains(dir.to_string_lossy().as_ref()));
+        assert!(
+            info.toplevel
+                .ends_with(dir.file_name().unwrap().to_str().unwrap())
+                || info.toplevel.contains(dir.to_string_lossy().as_ref())
+        );
         assert_eq!(info.branch.as_deref(), Some("main"));
 
         std::fs::write(dir.join("a.txt"), "A\n").unwrap();
@@ -196,7 +202,9 @@ async fn repo_status_stage_commit_push_and_branch() {
 
         let remote_dir = tempfile::tempdir().expect("remote");
         let remote = GitTarget::Local(remote_dir.path().to_path_buf());
-        fixture_git(&remote, &["init", "--bare"]).await.expect("bare");
+        fixture_git(&remote, &["init", "--bare"])
+            .await
+            .expect("bare");
         fixture_git(
             &target,
             &[
@@ -221,7 +229,9 @@ async fn checkpoint_does_not_touch_user_index() {
         let dir = dir.as_path();
         let (pool, workspace_id, session_id) = seed_session().await;
         std::fs::write(dir.join("b.txt"), "B_user\n").unwrap();
-        fixture_git(&target, &["add", "b.txt"]).await.expect("user add");
+        fixture_git(&target, &["add", "b.txt"])
+            .await
+            .expect("user add");
         std::fs::write(dir.join("a.txt"), "A_ai\n").unwrap();
         std::fs::write(dir.join("c.txt"), "C_ai\n").unwrap();
         let before = index_bytes(dir);
@@ -253,12 +263,13 @@ async fn checkpoint_does_not_touch_user_index() {
                     .unwrap()
                     .flatten()
                     .filter(|entry| {
-                        entry
-                            .metadata()
-                            .ok()
-                            .is_some_and(|meta| meta.modified().ok().is_some_and(|time| {
-                                time.elapsed().map(|spent| spent.as_secs() < 5).unwrap_or(false)
-                            }))
+                        entry.metadata().ok().is_some_and(|meta| {
+                            meta.modified().ok().is_some_and(|time| {
+                                time.elapsed()
+                                    .map(|spent| spent.as_secs() < 5)
+                                    .unwrap_or(false)
+                            })
+                        })
                     })
                     .collect();
                 assert!(
@@ -362,8 +373,14 @@ async fn checkpoint_restore_three_classes_and_visibility() {
         let restored = restore_checkpoint(&pool, &target, &workspace_id, &checkpoint.id, &[])
             .await
             .expect("restore");
-        assert_eq!(std::fs::read_to_string(dir.join("keep.txt")).unwrap(), "old\n");
-        assert_eq!(std::fs::read_to_string(dir.join("gone.txt")).unwrap(), "gone\n");
+        assert_eq!(
+            std::fs::read_to_string(dir.join("keep.txt")).unwrap(),
+            "old\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.join("gone.txt")).unwrap(),
+            "gone\n"
+        );
         assert!(dir.join("fresh.txt").exists());
         assert!(restored.pre_restore_checkpoint.kind == "auto_pre_restore");
 
@@ -423,8 +440,12 @@ async fn restore_rejects_merge_and_missing_ref() {
         let dir = dir.as_path();
         let (pool, workspace_id, session_id) = seed_session().await;
         std::fs::write(dir.join("file.txt"), "base\n").unwrap();
-        fixture_git(&target, &["add", "file.txt"]).await.expect("add");
-        fixture_git(&target, &["commit", "-m", "base"]).await.expect("c1");
+        fixture_git(&target, &["add", "file.txt"])
+            .await
+            .expect("add");
+        fixture_git(&target, &["commit", "-m", "base"])
+            .await
+            .expect("c1");
         let checkpoint = create_checkpoint(
             &pool,
             &target,
@@ -440,12 +461,22 @@ async fn restore_rejects_merge_and_missing_ref() {
             .await
             .expect("other");
         std::fs::write(dir.join("file.txt"), "other\n").unwrap();
-        fixture_git(&target, &["add", "file.txt"]).await.expect("add o");
-        fixture_git(&target, &["commit", "-m", "other"]).await.expect("c2");
-        fixture_git(&target, &["switch", "main"]).await.expect("main");
+        fixture_git(&target, &["add", "file.txt"])
+            .await
+            .expect("add o");
+        fixture_git(&target, &["commit", "-m", "other"])
+            .await
+            .expect("c2");
+        fixture_git(&target, &["switch", "main"])
+            .await
+            .expect("main");
         std::fs::write(dir.join("file.txt"), "main\n").unwrap();
-        fixture_git(&target, &["add", "file.txt"]).await.expect("add m");
-        fixture_git(&target, &["commit", "-m", "main"]).await.expect("c3");
+        fixture_git(&target, &["add", "file.txt"])
+            .await
+            .expect("add m");
+        fixture_git(&target, &["commit", "-m", "main"])
+            .await
+            .expect("c3");
         let merge = git(
             &target,
             &["merge", "--no-commit", "other"],
@@ -524,11 +555,7 @@ async fn delete_session_cleans_refs_and_objects() {
             .expect("delete");
         let leftover = git(
             &target,
-            &[
-                "for-each-ref",
-                "--format=%(refname)",
-                "refs/noxcode",
-            ],
+            &["for-each-ref", "--format=%(refname)", "refs/noxcode"],
             &IndexMode::ReadOnly,
         )
         .await
@@ -564,8 +591,12 @@ async fn readonly_file_reports_failed_and_keeps_prerestore() {
         let dir = dir.as_path();
         let (pool, workspace_id, session_id) = seed_session().await;
         std::fs::write(dir.join("locked.txt"), "old\n").unwrap();
-        fixture_git(&target, &["add", "locked.txt"]).await.expect("add");
-        fixture_git(&target, &["commit", "-m", "lock"]).await.expect("commit");
+        fixture_git(&target, &["add", "locked.txt"])
+            .await
+            .expect("add");
+        fixture_git(&target, &["commit", "-m", "lock"])
+            .await
+            .expect("commit");
         let checkpoint = create_checkpoint(
             &pool,
             &target,
@@ -587,7 +618,8 @@ async fn readonly_file_reports_failed_and_keeps_prerestore() {
         std::fs::set_permissions(dir, writable).unwrap();
         let result = result.expect("restore should return even if some files fail");
         assert!(
-            !result.failed.is_empty() || std::fs::read_to_string(dir.join("locked.txt")).unwrap() == "old\n",
+            !result.failed.is_empty()
+                || std::fs::read_to_string(dir.join("locked.txt")).unwrap() == "old\n",
             "要么部分失败，要么成功还原: {result:?}"
         );
         assert_eq!(result.pre_restore_checkpoint.kind, "auto_pre_restore");

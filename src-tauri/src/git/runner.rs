@@ -196,11 +196,7 @@ impl ScratchIndex {
                 }
                 Ok(())
             }
-            ScratchLocation::Remote {
-                path,
-                pool,
-                params,
-            } => {
+            ScratchLocation::Remote { path, pool, params } => {
                 let script = format!("rm -f -- {}", shell_escape_single_quoted(path));
                 let output = ssh_exec(pool, params, &script, GitRunOptions::default()).await?;
                 if output.success() {
@@ -222,11 +218,7 @@ impl Drop for ScratchState {
             ScratchLocation::Local(path) => {
                 let _ = std::fs::remove_file(path);
             }
-            ScratchLocation::Remote {
-                path,
-                pool,
-                params,
-            } => {
+            ScratchLocation::Remote { path, pool, params } => {
                 let path = path.clone();
                 let pool = pool.clone();
                 let params = params.clone();
@@ -451,8 +443,7 @@ pub(crate) fn writes_index(args: &[&str]) -> bool {
     let Some(sub) = first_non_flag(args) else {
         return false;
     };
-    INDEX_WRITING_SUBCOMMANDS.contains(&sub)
-        || (sub == "restore" && args.contains(&"--staged"))
+    INDEX_WRITING_SUBCOMMANDS.contains(&sub) || (sub == "restore" && args.contains(&"--staged"))
 }
 
 fn guard(args: &[&str], mode: &IndexMode) -> Result<(), GitError> {
@@ -471,10 +462,7 @@ pub(crate) fn build_ssh_git_script(
     mode: &IndexMode,
     extra_env: &[(String, String)],
 ) -> String {
-    let mut assigns = vec![
-        "GIT_TERMINAL_PROMPT=0".to_string(),
-        "LC_ALL=C".to_string(),
-    ];
+    let mut assigns = vec!["GIT_TERMINAL_PROMPT=0".to_string(), "LC_ALL=C".to_string()];
     if let IndexMode::Scratch(index) = mode {
         assigns.push(format!(
             "GIT_INDEX_FILE={}",

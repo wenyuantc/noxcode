@@ -40,13 +40,7 @@ pub(crate) async fn get_status(
     let untracked = format!("--untracked-files={mode}");
     let output = git(
         target,
-        &[
-            "status",
-            "--porcelain=v2",
-            "--branch",
-            &untracked,
-            "-z",
-        ],
+        &["status", "--porcelain=v2", "--branch", &untracked, "-z"],
         &IndexMode::ReadOnly,
     )
     .await?;
@@ -234,7 +228,9 @@ mod tests {
     fn parses_headers_rename_and_special_paths() {
         let mut raw = Vec::new();
         raw.extend_from_slice(b"# branch.oid abcdef\0# branch.head main\0# branch.upstream origin/main\0# branch.ab +1 -2\0");
-        raw.extend_from_slice(b"2 R. N... 100644 100644 100644 111 222 R100 hello  world.txt\0hello world.txt\0");
+        raw.extend_from_slice(
+            b"2 R. N... 100644 100644 100644 111 222 R100 hello  world.txt\0hello world.txt\0",
+        );
         raw.extend_from_slice("? 我的 文件.txt\0".as_bytes());
         raw.extend_from_slice(b"? line\nbreak.txt\0");
         raw.extend_from_slice(b"1 M. N... 100644 100644 100644 aaa bbb src/main.rs\0");

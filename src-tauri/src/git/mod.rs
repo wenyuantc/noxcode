@@ -28,7 +28,9 @@ use self::commit::{
     commit_changes, create_branch, list_branches, push_branch, GitBranch, GitCommitResult,
     GitPushResult,
 };
-use self::diff::{get_file_diff, get_numstat, GitFileDiff, GitFileDiffScope, GitNumstatEntry, GitNumstatScope};
+use self::diff::{
+    get_file_diff, get_numstat, GitFileDiff, GitFileDiffScope, GitNumstatEntry, GitNumstatScope,
+};
 use self::repo::{load_repo_info, GitRepoInfo};
 use self::runner::GitTarget;
 use self::stage::{restore_paths, stage_paths, unstage_paths};
@@ -165,14 +167,9 @@ pub(crate) async fn push_git_branch<R: Runtime>(
     set_upstream: bool,
 ) -> Result<GitPushResult, String> {
     let target = resolve_git_target(&app, &workspace_id).await?;
-    push_branch(
-        &target,
-        remote.as_deref(),
-        branch.as_deref(),
-        set_upstream,
-    )
-    .await
-    .map_err(Into::into)
+    push_branch(&target, remote.as_deref(), branch.as_deref(), set_upstream)
+        .await
+        .map_err(Into::into)
 }
 
 #[tauri::command]

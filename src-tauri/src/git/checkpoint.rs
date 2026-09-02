@@ -9,8 +9,8 @@ use crate::db::models::GitCheckpoint;
 use super::diff::{name_status_against, NameStatusEntry};
 use super::repo::{head_oid, in_progress_operation, is_detached_head, rev_parse_verify};
 use super::runner::{
-    git, git_with, remove_worktree_path, split_nul_strings, with_repo_lock, GitError, GitRunOptions,
-    GitTarget, IndexMode, ScratchIndex,
+    git, git_with, remove_worktree_path, split_nul_strings, with_repo_lock, GitError,
+    GitRunOptions, GitTarget, IndexMode, ScratchIndex,
 };
 
 const CHECKPOINT_AUTHOR_NAME: &str = "noxcode";
@@ -197,7 +197,10 @@ async fn create_objects(
             timeout: None,
             stdin: None,
             extra_env: vec![
-                ("GIT_AUTHOR_NAME".to_string(), CHECKPOINT_AUTHOR_NAME.to_string()),
+                (
+                    "GIT_AUTHOR_NAME".to_string(),
+                    CHECKPOINT_AUTHOR_NAME.to_string(),
+                ),
                 (
                     "GIT_AUTHOR_EMAIL".to_string(),
                     CHECKPOINT_AUTHOR_EMAIL.to_string(),
@@ -379,10 +382,7 @@ async fn validate_restore(
     match rev_parse_verify(target, &row.ref_name).await? {
         Some(oid) if oid == row.commit_oid => {}
         Some(_) => {
-            return Ok((
-                Some("检查点 ref 与数据库不一致".to_string()),
-                warnings,
-            ));
+            return Ok((Some("检查点 ref 与数据库不一致".to_string()), warnings));
         }
         None => {
             return Ok((
@@ -392,10 +392,7 @@ async fn validate_restore(
         }
     }
     if let Some(operation) = in_progress_operation(target).await? {
-        return Ok((
-            Some(format!("请先完成或中止当前 {operation}")),
-            warnings,
-        ));
+        return Ok((Some(format!("请先完成或中止当前 {operation}")), warnings));
     }
     if is_detached_head(target).await? {
         warnings.push("当前处于 detached HEAD".to_string());
@@ -466,11 +463,7 @@ pub(crate) async fn restore_checkpoint(
     if let Some(reason) = preview.blocked_reason {
         return Err(GitError::Blocked(reason));
     }
-    let allowed: HashSet<&str> = preview
-        .wont_be_touched
-        .iter()
-        .map(String::as_str)
-        .collect();
+    let allowed: HashSet<&str> = preview.wont_be_touched.iter().map(String::as_str).collect();
     let ignored_untracked = ignored_untracked_paths(target).await?;
     for path in delete_new_paths {
         super::runner::assert_safe_rel_path(path)?;
@@ -520,8 +513,7 @@ pub(crate) async fn restore_checkpoint(
         }
     }
 
-    let (deleted, skipped_ignored) =
-        delete_new_files(target, delete_new_paths).await?;
+    let (deleted, skipped_ignored) = delete_new_files(target, delete_new_paths).await?;
 
     eprintln!(
         "[git] restore checkpoint={} pre={} overwrite={} recreate={} delete={} failed={}",
@@ -595,13 +587,7 @@ async fn delete_new_files(
 async fn ignored_untracked_paths(target: &GitTarget) -> Result<HashSet<String>, GitError> {
     let output = git(
         target,
-        &[
-            "ls-files",
-            "--others",
-            "-i",
-            "--exclude-standard",
-            "-z",
-        ],
+        &["ls-files", "--others", "-i", "--exclude-standard", "-z"],
         &IndexMode::ReadOnly,
     )
     .await?;
@@ -644,13 +630,12 @@ pub(crate) async fn delete_checkpoints_for_session(
     target: &GitTarget,
     session_id: &str,
 ) -> Result<(), GitError> {
-    let rows = sqlx::query_as::<_, GitCheckpoint>(
-        "SELECT * FROM git_checkpoints WHERE session_id = $1",
-    )
-    .bind(session_id)
-    .fetch_all(pool)
-    .await
-    .map_err(|error| GitError::Parse(format!("读取 session checkpoints 失败: {error}")))?;
+    let rows =
+        sqlx::query_as::<_, GitCheckpoint>("SELECT * FROM git_checkpoints WHERE session_id = $1")
+            .bind(session_id)
+            .fetch_all(pool)
+            .await
+            .map_err(|error| GitError::Parse(format!("读取 session checkpoints 失败: {error}")))?;
     for row in &rows {
         let _ = git(
             target,
