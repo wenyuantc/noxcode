@@ -10,7 +10,7 @@ React (UI) → Tauri IPC commands → Rust service layer → SQLite
 前端永不直接读写 SQLite。`src/lib/database.ts` 是 hard-fail stub（`select` / `execute` / `getDb` 直接抛错）。`src-tauri/capabilities/default.json` 不授予任何 `sql:*` 权限（包括 `sql:default`，因为它含 `allow-select`）。所有读写必须走 `src/lib/backend.ts` 封装的 Tauri command。
 
 ## 开发约束
-- 数据库迁移版本必须连续（`1..N`），后续由 `migration_versions_are_contiguous` 单测强制。
+- 数据库迁移版本必须连续（`1..N`），由 `migration_versions_are_contiguous` 单测强制。baseline 共 9 张表（含 `git_checkpoints`）。
 - 全仓库只允许 `src-tauri/src/git/runner.rs` spawn `git`。业务代码一律通过该 runner。
 - `russh` 必须保持 ring 后端。`cargo tree -i aws-lc-rs` 必须无匹配。
 - 运行时外部依赖只有系统 `git` ≥ 2.11；启动预检失败则弹中文错误并退出。
