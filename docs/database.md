@@ -158,7 +158,7 @@ Git plumbing 快照的数据库索引。真实对象在仓库 `refs/noxcode/chec
 
 | 命令 | 作用 |
 | --- | --- |
-| `health_check` | 库是否加载、当前/最新迁移版本、系统 git 是否 ≥ 2.11 |
+| `health_check` | 库是否加载、当前/最新迁移版本、系统 git 是否 ≥ 2.23 |
 | `backup_database` | 导出 SQL 脚本（含 schema、数据、`_sqlx_migrations`） |
 | `restore_database` | 校验脚本 → 写 `noxcode.pre-import-backup-*.sql` → 清库导入 → 补迁移 → 完整性检查 |
 | `open_database_folder` | 用系统文件管理器打开 `$APPCONFIG` |

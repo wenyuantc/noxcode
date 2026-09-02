@@ -1,7 +1,7 @@
 # 仓库指南
 
 ## 项目结构与模块组织
-该应用由 Vite/React 前端和 Tauri/Rust 桌面壳组成。前端源码位于 `src/`：页面级路由在 `src/pages`，可复用 UI 在 `src/components`，共享辅助函数在 `src/lib`，Zustand 状态在 `src/stores`。原生桌面端代码位于 `src-tauri/src`。架构见 `docs/architecture.md`，数据层见 `docs/database.md`，SSH 见 `docs/ssh.md`，完整构建计划见 `plan.md`。
+该应用由 Vite/React 前端和 Tauri/Rust 桌面壳组成。前端源码位于 `src/`：页面级路由在 `src/pages`，可复用 UI 在 `src/components`，共享辅助函数在 `src/lib`，Zustand 状态在 `src/stores`。原生桌面端代码位于 `src-tauri/src`。架构见 `docs/architecture.md`，数据层见 `docs/database.md`，SSH 见 `docs/ssh.md`，Git 见 `docs/git.md`，完整构建计划见 `plan.md`。
 
 ## 数据流铁律
 ```
@@ -13,7 +13,7 @@ React (UI) → Tauri IPC commands → Rust service layer → SQLite
 - 数据库迁移版本必须连续（`1..N`），由 `migration_versions_are_contiguous` 单测强制。baseline 共 9 张表（含 `git_checkpoints`）。
 - 全仓库只允许 `src-tauri/src/git/runner.rs` spawn `git`。业务代码一律通过该 runner。
 - `russh` 必须保持 ring 后端。`cargo tree -i aws-lc-rs` 必须无匹配。
-- 运行时外部依赖只有系统 `git` ≥ 2.11；启动预检失败则弹中文错误并退出。
+- 运行时外部依赖只有系统 `git` ≥ 2.23；启动预检失败则弹中文错误并退出。
 
 ## 构建、测试与开发命令
 - `npm run dev`：启动仅用于浏览器开发的 Vite 前端。

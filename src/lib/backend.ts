@@ -3,6 +3,19 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 
 import type {
   CreateSshConfigInput,
+  GitBranch,
+  GitCheckpoint,
+  GitCheckpointKind,
+  GitCommitResult,
+  GitFileDiff,
+  GitFileDiffScope,
+  GitNumstatEntry,
+  GitNumstatScope,
+  GitPushResult,
+  GitRepoInfo,
+  GitRestorePreview,
+  GitRestoreResult,
+  GitStatus,
   SshConfig,
   SshConfigFileHost,
   SshConfigFileImport,
@@ -67,4 +80,104 @@ export function onSshHostKeyChanged(
   return listen<SshHostKeyChanged>("ssh-host-key-changed", (event) => {
     callback(event.payload);
   });
+}
+
+export function getGitRepoInfo(workspaceId: string): Promise<GitRepoInfo> {
+  return invoke("get_git_repo_info", { workspaceId });
+}
+
+export function getGitStatus(workspaceId: string, untrackedMode?: string): Promise<GitStatus> {
+  return invoke("get_git_status", { workspaceId, untrackedMode });
+}
+
+export function getGitFileDiff(
+  workspaceId: string,
+  path: string,
+  scope: GitFileDiffScope,
+  oldPath?: string,
+): Promise<GitFileDiff> {
+  return invoke("get_git_file_diff", { workspaceId, path, scope, oldPath });
+}
+
+export function getGitNumstat(
+  workspaceId: string,
+  scope: GitNumstatScope,
+): Promise<GitNumstatEntry[]> {
+  return invoke("get_git_numstat", { workspaceId, scope });
+}
+
+export function stageGitPaths(workspaceId: string, paths: string[]): Promise<void> {
+  return invoke("stage_git_paths", { workspaceId, paths });
+}
+
+export function unstageGitPaths(workspaceId: string, paths: string[]): Promise<void> {
+  return invoke("unstage_git_paths", { workspaceId, paths });
+}
+
+export function restoreGitPaths(workspaceId: string, paths: string[]): Promise<void> {
+  return invoke("restore_git_paths", { workspaceId, paths });
+}
+
+export function commitGitChanges(
+  workspaceId: string,
+  message: string,
+  paths?: string[],
+): Promise<GitCommitResult> {
+  return invoke("commit_git_changes", { workspaceId, message, paths });
+}
+
+export function pushGitBranch(
+  workspaceId: string,
+  remote?: string,
+  branch?: string,
+  setUpstream = false,
+): Promise<GitPushResult> {
+  return invoke("push_git_branch", { workspaceId, remote, branch, setUpstream });
+}
+
+export function listGitBranches(workspaceId: string): Promise<GitBranch[]> {
+  return invoke("list_git_branches", { workspaceId });
+}
+
+export function createGitBranch(
+  workspaceId: string,
+  name: string,
+  checkout: boolean,
+): Promise<GitBranch> {
+  return invoke("create_git_branch", { workspaceId, name, checkout });
+}
+
+export function createGitCheckpoint(
+  workspaceId: string,
+  sessionId: string,
+  label?: string,
+  kind?: GitCheckpointKind,
+): Promise<GitCheckpoint> {
+  return invoke("create_git_checkpoint", { workspaceId, sessionId, label, kind });
+}
+
+export function listGitCheckpoints(
+  workspaceId: string,
+  sessionId: string,
+): Promise<GitCheckpoint[]> {
+  return invoke("list_git_checkpoints", { workspaceId, sessionId });
+}
+
+export function previewGitCheckpointRestore(
+  workspaceId: string,
+  checkpointId: string,
+): Promise<GitRestorePreview> {
+  return invoke("preview_git_checkpoint_restore", { workspaceId, checkpointId });
+}
+
+export function restoreGitCheckpoint(
+  workspaceId: string,
+  checkpointId: string,
+  deleteNewPaths?: string[],
+): Promise<GitRestoreResult> {
+  return invoke("restore_git_checkpoint", { workspaceId, checkpointId, deleteNewPaths });
+}
+
+export function clearGitCheckpoints(workspaceId: string): Promise<number> {
+  return invoke("clear_git_checkpoints", { workspaceId });
 }

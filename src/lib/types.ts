@@ -110,3 +110,112 @@ export interface SshHostKeyChanged {
   known_hosts_path: string;
   line: number;
 }
+
+export interface GitRepoInfo {
+  workspace_id: string;
+  toplevel: string;
+  prefix: string;
+  git_dir: string;
+  common_dir: string;
+  head: string | null;
+  branch: string | null;
+  upstream: string | null;
+  git_version: string;
+}
+
+export interface GitBranchInfo {
+  oid: string | null;
+  head: string | null;
+  upstream: string | null;
+  ahead: number | null;
+  behind: number | null;
+}
+
+export interface GitStatusEntry {
+  kind: "ordinary" | "rename" | "unmerged" | "untracked" | "ignored" | string;
+  xy: string;
+  path: string;
+  orig_path: string | null;
+  score: string | null;
+  mode_head: string | null;
+  mode_index: string | null;
+  mode_worktree: string | null;
+}
+
+export interface GitStatus {
+  branch: GitBranchInfo;
+  entries: GitStatusEntry[];
+}
+
+export type GitFileDiffScope =
+  "worktree" | "staged" | { range: { from_oid: string; to_oid: string } };
+
+export type GitNumstatScope = "worktree" | "staged" | "upstream";
+
+export interface GitFileDiff {
+  path: string;
+  old_path: string | null;
+  patch: string;
+  is_binary: boolean;
+  truncated: boolean;
+}
+
+export interface GitNumstatEntry {
+  path: string;
+  orig_path: string | null;
+  added: number | null;
+  deleted: number | null;
+  is_binary: boolean;
+}
+
+export interface GitBranch {
+  name: string;
+  oid: string;
+  upstream: string | null;
+  is_current: boolean;
+}
+
+export type GitCheckpointKind = "session_start" | "after_tool_call" | "manual" | "auto_pre_restore";
+
+export interface GitCheckpoint {
+  id: string;
+  session_id: string;
+  workspace_id: string;
+  seq: number;
+  ref_name: string;
+  commit_oid: string;
+  parent_oid: string | null;
+  label: string | null;
+  kind: GitCheckpointKind | string;
+  created_at: string;
+  ref_valid: boolean;
+}
+
+export interface GitRestorePreview {
+  checkpoint_id: string;
+  blocked_reason: string | null;
+  warnings: string[];
+  will_overwrite: string[];
+  will_recreate: string[];
+  wont_be_touched: string[];
+}
+
+export interface GitRestoreResult {
+  pre_restore_checkpoint: GitCheckpoint;
+  restored: string[];
+  deleted: string[];
+  skipped_ignored: string[];
+  failed: string[];
+}
+
+export interface GitCommitResult {
+  oid: string;
+  message: string;
+}
+
+export interface GitPushResult {
+  remote: string | null;
+  branch: string | null;
+  set_upstream: boolean;
+  message: string;
+}

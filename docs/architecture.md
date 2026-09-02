@@ -2,7 +2,7 @@
 
 noxcode 是 Tauri 2 桌面应用：进程内 Native Agent、AI 渠道、SSH 工作区、Git checkpoint。业务外壳只保留工作区 + Agent 档案 + 会话，不做项目 / 员工 / 看板 / 任务自动化。
 
-完整分阶段计划见 [`plan.md`](../plan.md)。表结构、迁移与备份见 [`database.md`](database.md)。SSH 实现见 [`ssh.md`](ssh.md)。
+完整分阶段计划见 [`plan.md`](../plan.md)。表结构、迁移与备份见 [`database.md`](database.md)。SSH 实现见 [`ssh.md`](ssh.md)。Git 实现见 [`git.md`](git.md)。
 
 ## 数据流
 
@@ -37,7 +37,7 @@ flowchart LR
 | 后端 | Rust 2021 + Tokio + SQLx 0.8.6（sqlite）+ reqwest 0.12（rustls）+ keyring 3 |
 | 插件 | sql / shell / dialog / opener / notification / process；updater crate 已引入，P6 才注册 |
 | SSH | `russh` 0.63，`default-features = false`，features `ring,flate2,rsa`；`ssh2-config` 0.8 |
-| Git | 无 git 库，直接 spawn 系统 `git` ≥ 2.11 |
+| Git | 无 git 库，直接 spawn 系统 `git` ≥ 2.23 |
 
 `cargo tree -i aws-lc-rs` 必须无匹配。updater 会再拉一份 reqwest 0.13，与业务 0.12 共存。
 
@@ -55,7 +55,7 @@ flowchart LR
 | `app/ssh/` + `app/secret_store` | P2 已落地，见 [`ssh.md`](ssh.md) | P5 补设置页 / 信任横幅 |
 | `app/workspaces` | 仅 `fetch_workspace_by_id` | CRUD |
 | `app/{profiles,sessions}` | 未建 | CRUD |
-| `git/` | `runner.rs` + 启动预检 | status / diff / 临时索引 / checkpoint |
+| `git/` | P2.5 已落地，见 [`git.md`](git.md) | P4.4 接 native session / 写文件后自动打点 |
 | `engine/` | `ExecutionContext`（local \| ssh） | 会话接线后继续用 |
 | `native/` | 未建 | 渠道 + 模型客户端 + agent 循环 + session 外壳 |
 
@@ -63,7 +63,7 @@ flowchart LR
 
 ## 启动与 IPC
 
-1. `git::preflight::run_startup_check()`：解析 `git --version`，低于 2.11 或找不到则记失败原因。
+1. `git::preflight::run_startup_check()`：解析 `git --version`，低于 2.23 或找不到则记失败原因。
 2. 注册 sql（preload `sqlite:noxcode.db` + 迁移）、shell、dialog、notification、opener、process。
 3. debug 下异步打印迁移状态。
 4. `RunEvent::Ready` 时若预检失败，弹中文错误对话框后 `exit(1)`。预检必须等事件循环就绪再弹窗，不能在 `setup` 里阻塞主线程。
@@ -79,8 +79,12 @@ flowchart LR
 | `probe_ssh_password_auth` / `test_ssh_connection` | `app::ssh` |
 | `list_ssh_config_file_hosts` / `import_ssh_config_file_host` | `app::ssh` |
 | `resolve_ssh_host_trust` | `app::ssh`（`ask` 模式确认回传） |
+| `get_git_repo_info` / `get_git_status` / `get_git_file_diff` / `get_git_numstat` | `git` |
+| `stage_git_paths` / `unstage_git_paths` / `restore_git_paths` | `git` |
+| `commit_git_changes` / `push_git_branch` / `list_git_branches` / `create_git_branch` | `git` |
+| `create_git_checkpoint` / `list_git_checkpoints` / `preview_git_checkpoint_restore` / `restore_git_checkpoint` / `clear_git_checkpoints` | `git` |
 
-事件：`ssh-host-trust-request`、`ssh-host-key-changed`。后续约 60 个命令的完整清单见 `plan.md` §4。
+事件：`ssh-host-trust-request`、`ssh-host-key-changed`。后续约 60 个命令的完整清单见 `plan.md` §4。Git 细节见 [`git.md`](git.md)。
 
 ## SSH
 
@@ -133,6 +137,6 @@ P0 脚手架 → P1 数据层 → P2 SSH → P2.5 Git → P3 渠道
 P6 打包  ←  P5 前端  ←  P4.5 ← P4.4 ← P4.3 ← P4.2 ← P4.1
 ```
 
-P2 必须在 tools/ssh 之前；P3 必须在 model 客户端测通之前；P2.5 必须在 session 接线之前。当前仓库已完成 P0、P1、P2。
+P2 必须在 tools/ssh 之前；P3 必须在 model 客户端测通之前；P2.5 必须在 session 接线之前。当前仓库已完成 P0、P1、P2、P2.5。
 
 第一版不做：斜杠命令完整版、插件打包、PTY、内置 ripgrep、浏览器 / CUA、OpenTelemetry。见 `plan.md` §6。

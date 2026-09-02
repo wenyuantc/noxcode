@@ -10,7 +10,7 @@ use super::runner;
 
 pub const MIN_GIT_VERSION: GitVersion = GitVersion {
     major: 2,
-    minor: 11,
+    minor: 23,
     patch: 0,
 };
 
@@ -103,6 +103,9 @@ pub fn check_local_git() -> Result<GitVersion, GitPreflightError> {
 
 static FATAL_STARTUP_ERROR: OnceLock<String> = OnceLock::new();
 
+#[cfg(test)]
+pub(super) static ENV_PATH_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 pub fn run_startup_check() {
     match check_local_git() {
         Ok(version) => eprintln!("git 预检通过：{version}"),
@@ -167,7 +170,7 @@ mod tests {
 
     #[test]
     fn parses_plain_git_version() {
-        let version = parse_git_version("2.11.0").unwrap();
+        let version = parse_git_version("2.23.0").unwrap();
         assert_eq!(version, MIN_GIT_VERSION);
     }
 
@@ -197,14 +200,13 @@ mod tests {
 
     #[test]
     fn minimum_and_current_versions_pass() {
-        assert!(evaluate_git_version_output("git version 2.11.0").is_ok());
+        assert!(evaluate_git_version_output("git version 2.23.0").is_ok());
+        assert!(evaluate_git_version_output("git version 2.11.0").is_err());
         assert!(evaluate_git_version_output("git version 2.39.5 (Apple Git-154)").is_ok());
     }
 
     fn with_path<T>(path: &str, f: impl FnOnce() -> T) -> T {
-        use std::sync::Mutex;
-        static LOCK: Mutex<()> = Mutex::new(());
-        let _guard = LOCK.lock().expect("path lock");
+        let _guard = super::ENV_PATH_LOCK.lock().expect("path lock");
         let previous = std::env::var_os("PATH");
         std::env::set_var("PATH", path);
         let result = f();

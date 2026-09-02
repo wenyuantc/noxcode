@@ -9,10 +9,13 @@ use russh::{Channel, ChannelId};
 use tokio::net::TcpListener;
 use tokio::sync::oneshot;
 
+use crate::process_spawn;
+
 pub(crate) struct TestServerOpts {
     pub password_user: String,
     pub password: String,
     pub authorized_public_key: Option<PublicKey>,
+    pub real_shell: bool,
 }
 
 impl Default for TestServerOpts {
@@ -21,6 +24,7 @@ impl Default for TestServerOpts {
             password_user: "tester".to_string(),
             password: "secret".to_string(),
             authorized_public_key: None,
+            real_shell: false,
         }
     }
 }
@@ -45,12 +49,14 @@ struct Factory {
     password_user: String,
     password: String,
     authorized_public_key: Option<PublicKey>,
+    real_shell: bool,
 }
 
 struct TestHandler {
     password_user: String,
     password: String,
     authorized_public_key: Option<PublicKey>,
+    real_shell: bool,
     cat_channels: HashSet<ChannelId>,
 }
 
@@ -63,6 +69,7 @@ impl russh::server::Server for Factory {
             password_user: self.password_user.clone(),
             password: self.password.clone(),
             authorized_public_key: self.authorized_public_key.clone(),
+            real_shell: self.real_shell,
             cat_channels: HashSet::new(),
         }
     }
@@ -108,6 +115,37 @@ impl Handler for TestHandler {
         session: &mut Session,
     ) -> Result<(), Self::Error> {
         session.channel_success(channel)?;
+        if self.real_shell {
+            let handle = session.handle();
+            let command = String::from_utf8_lossy(data).into_owned();
+            tokio::spawn(async move {
+                match process_spawn::tokio_command("sh")
+                    .arg("-c")
+                    .arg(&command)
+                    .output()
+                    .await
+                {
+                    Ok(output) => {
+                        if !output.stdout.is_empty() {
+                            let _ = handle.data(channel, output.stdout).await;
+                        }
+                        if !output.stderr.is_empty() {
+                            let _ = handle.extended_data(channel, 1, output.stderr).await;
+                        }
+                        let code = output.status.code().unwrap_or(1) as u32;
+                        let _ = handle.exit_status_request(channel, code).await;
+                    }
+                    Err(error) => {
+                        let message = format!("real_shell spawn failed: {error}");
+                        let _ = handle.extended_data(channel, 1, message.into_bytes()).await;
+                        let _ = handle.exit_status_request(channel, 127).await;
+                    }
+                }
+                let _ = handle.eof(channel).await;
+                let _ = handle.close(channel).await;
+            });
+            return Ok(());
+        }
         let command = String::from_utf8_lossy(data);
         if command.starts_with("sh -lc") {
             session.data(
@@ -201,6 +239,7 @@ impl TestSshServer {
             password_user: opts.password_user,
             password: opts.password,
             authorized_public_key: opts.authorized_public_key,
+            real_shell: opts.real_shell,
         };
 
         let (port_tx, port_rx) = oneshot::channel();

@@ -64,6 +64,22 @@ pub fn run() {
             app::ssh::list_ssh_config_file_hosts,
             app::ssh::import_ssh_config_file_host,
             app::ssh::resolve_ssh_host_trust,
+            git::get_git_repo_info,
+            git::get_git_status,
+            git::get_git_file_diff,
+            git::get_git_numstat,
+            git::stage_git_paths,
+            git::unstage_git_paths,
+            git::restore_git_paths,
+            git::commit_git_changes,
+            git::push_git_branch,
+            git::list_git_branches,
+            git::create_git_branch,
+            git::create_git_checkpoint,
+            git::list_git_checkpoints,
+            git::preview_git_checkpoint_restore,
+            git::restore_git_checkpoint,
+            git::clear_git_checkpoints,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
