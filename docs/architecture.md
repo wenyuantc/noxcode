@@ -2,7 +2,7 @@
 
 noxcode 是 Tauri 2 桌面应用：进程内 Native Agent、AI 渠道、SSH 工作区、Git checkpoint。业务外壳只保留工作区 + Agent 档案 + 会话，不做项目 / 员工 / 看板 / 任务自动化。
 
-完整分阶段计划见 [`plan.md`](../plan.md)。表结构、迁移与备份见 [`database.md`](database.md)。SSH 实现见 [`ssh.md`](ssh.md)。Git 实现见 [`git.md`](git.md)。
+完整分阶段计划见 [`plan.md`](../plan.md)。表结构、迁移与备份见 [`database.md`](database.md)。SSH 实现见 [`ssh.md`](ssh.md)。Git 实现见 [`git.md`](git.md)。AI 渠道见 [`channels.md`](channels.md)。
 
 ## 数据流
 
@@ -49,7 +49,7 @@ flowchart LR
 
 | 层 | 现状 | 目标 |
 | --- | --- | --- |
-| 前端 `src/` | 空白页 + `database.ts` stub + `backend.ts` / `types.ts`（SSH 封装） | 单主界面 + 全屏设置页，见下方路由 |
+| 前端 `src/` | 空白页 + `database.ts` stub + `backend.ts` / `types.ts` / `modelCatalog.ts` | 单主界面 + 全屏设置页，见下方路由 |
 | `db/` | version 1 baseline，9 张表 | 只追加连续迁移 `2..N` |
 | `app/database` + `app/shared` | 健康检查 / 备份 / 恢复 | 保持 |
 | `app/ssh/` + `app/secret_store` | P2 已落地，见 [`ssh.md`](ssh.md) | P5 补设置页 / 信任横幅 |
@@ -57,7 +57,7 @@ flowchart LR
 | `app/{profiles,sessions}` | 未建 | CRUD |
 | `git/` | P2.5 已落地，见 [`git.md`](git.md) | P4.4 接 native session / 写文件后自动打点 |
 | `engine/` | `ExecutionContext`（local \| ssh） | 会话接线后继续用 |
-| `native/` | 未建 | 渠道 + 模型客户端 + agent 循环 + session 外壳 |
+| `native/` | P3 已落地渠道 + 精简 model 客户端（probe / list_models） | P4.1 覆盖完整 client；再接 agent 循环 + session 外壳 |
 
 策略是「保留内核 + 替换外壳」：`native/model`、`native/tools`、`native/agent` 从参考实现近乎原样搬运；`native/session.rs` / `manager.rs` 重写（`employee` → `agent_profile`，去掉 task / run_queue / 任务自动化）；SSH 与 Git 按本仓库决策新写，不搬系统 `ssh` 子进程和 Node git bridge。
 
@@ -83,6 +83,10 @@ flowchart LR
 | `stage_git_paths` / `unstage_git_paths` / `restore_git_paths` | `git` |
 | `commit_git_changes` / `push_git_branch` / `list_git_branches` / `create_git_branch` | `git` |
 | `create_git_checkpoint` / `list_git_checkpoints` / `preview_git_checkpoint_restore` / `restore_git_checkpoint` / `clear_git_checkpoints` | `git` |
+| `list_ai_channels` / `create_ai_channel` / `update_ai_channel` / `delete_ai_channel` | `native::channels` |
+| `test_ai_channel` / `list_ai_channel_models` | `native::channels` |
+| `list_model_catalog` | `native::model_catalog` |
+| `get_network_settings` / `update_network_settings` | `app::network_settings` |
 
 事件：`ssh-host-trust-request`、`ssh-host-key-changed`。后续约 60 个命令的完整清单见 `plan.md` §4。Git 细节见 [`git.md`](git.md)。
 
@@ -112,9 +116,11 @@ flowchart LR
 
 ## 模型渠道
 
-渠道配置在表 `ai_channels`（`api_key` 列直接落库）。协议三套：openai chat/completions、anthropic messages、codex Responses。
+渠道配置在表 `ai_channels`（`api_key` 列直接落库）。协议三套：openai chat/completions、anthropic messages、codex Responses。P3 已落地 CRUD、测通、拉模型；细节见 [`channels.md`](channels.md)。
 
-模型目录采用 provider 分层 schema（`noxcode.model-providers.v1`）：一个厂商挂多个协议端点，思考等级用 JSON path 声明式写入请求体。catalog 未命中时回退硬编码逻辑。
+模型目录本阶段是扁平 `model_catalog.json`（`lookup_catalog` 精确 ID / 别名 / 归一化 / 前缀模糊）。§1 决策 4 的 provider 分层 schema（`noxcode.model-providers.v1` + JSON path 注入思考等级）挪到 P4.1，与完整 `ModelClient` 一起做。
+
+HTTP 代理 / 不代理地址 / 自定义 CA 存在 `$APPCONFIG/network-settings.json`，测通与拉模型走 `build_http_client`。
 
 ## 前端形态（P5）
 
@@ -137,6 +143,6 @@ P0 脚手架 → P1 数据层 → P2 SSH → P2.5 Git → P3 渠道
 P6 打包  ←  P5 前端  ←  P4.5 ← P4.4 ← P4.3 ← P4.2 ← P4.1
 ```
 
-P2 必须在 tools/ssh 之前；P3 必须在 model 客户端测通之前；P2.5 必须在 session 接线之前。当前仓库已完成 P0、P1、P2、P2.5。
+P2 必须在 tools/ssh 之前；P3 必须在 model 客户端测通之前；P2.5 必须在 session 接线之前。当前仓库已完成 P0、P1、P2、P2.5、P3。
 
 第一版不做：斜杠命令完整版、插件打包、PTY、内置 ripgrep、浏览器 / CUA、OpenTelemetry。见 `plan.md` §6。

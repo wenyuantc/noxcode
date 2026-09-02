@@ -2,6 +2,7 @@ mod app;
 mod db;
 mod engine;
 mod git;
+mod native;
 mod process_spawn;
 
 use std::sync::Arc;
@@ -80,6 +81,15 @@ pub fn run() {
             git::preview_git_checkpoint_restore,
             git::restore_git_checkpoint,
             git::clear_git_checkpoints,
+            app::network_settings::get_network_settings,
+            app::network_settings::update_network_settings,
+            native::channels::list_ai_channels,
+            native::channels::create_ai_channel,
+            native::channels::update_ai_channel,
+            native::channels::delete_ai_channel,
+            native::channels::test_ai_channel,
+            native::channels::list_ai_channel_models,
+            native::model_catalog::list_model_catalog,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

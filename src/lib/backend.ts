@@ -2,6 +2,8 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 
 import type {
+  AiChannel,
+  CreateAiChannelInput,
   CreateSshConfigInput,
   GitBranch,
   GitCheckpoint,
@@ -16,6 +18,9 @@ import type {
   GitRestorePreview,
   GitRestoreResult,
   GitStatus,
+  ListAiChannelModelsResult,
+  ModelCatalogEntry,
+  NetworkSettings,
   SshConfig,
   SshConfigFileHost,
   SshConfigFileImport,
@@ -23,6 +28,9 @@ import type {
   SshHostKeyChanged,
   SshHostTrustPrompt,
   SshPasswordProbeResult,
+  TestAiChannelInput,
+  TestAiChannelResult,
+  UpdateAiChannelInput,
   UpdateSshConfigInput,
 } from "./types";
 
@@ -180,4 +188,42 @@ export function restoreGitCheckpoint(
 
 export function clearGitCheckpoints(workspaceId: string): Promise<number> {
   return invoke("clear_git_checkpoints", { workspaceId });
+}
+
+export function listAiChannels(): Promise<AiChannel[]> {
+  return invoke("list_ai_channels");
+}
+
+export function createAiChannel(payload: CreateAiChannelInput): Promise<AiChannel> {
+  return invoke("create_ai_channel", { payload });
+}
+
+export function updateAiChannel(id: string, updates: UpdateAiChannelInput): Promise<AiChannel> {
+  return invoke("update_ai_channel", { id, updates });
+}
+
+export function deleteAiChannel(id: string): Promise<void> {
+  return invoke("delete_ai_channel", { id });
+}
+
+export function testAiChannel(payload: TestAiChannelInput): Promise<TestAiChannelResult> {
+  return invoke("test_ai_channel", { payload });
+}
+
+export function listAiChannelModels(
+  payload: TestAiChannelInput,
+): Promise<ListAiChannelModelsResult> {
+  return invoke("list_ai_channel_models", { payload });
+}
+
+export function listModelCatalog(): Promise<ModelCatalogEntry[]> {
+  return invoke("list_model_catalog");
+}
+
+export function getNetworkSettings(): Promise<NetworkSettings> {
+  return invoke("get_network_settings");
+}
+
+export function updateNetworkSettings(payload: NetworkSettings): Promise<NetworkSettings> {
+  return invoke("update_network_settings", { payload });
 }

@@ -219,3 +219,97 @@ export interface GitPushResult {
   set_upstream: boolean;
   message: string;
 }
+
+export type AiChannelProtocol = "openai" | "anthropic" | "codex";
+
+export interface AiChannelModel {
+  id: string;
+  context_tokens: number | null;
+  max_output_tokens: number | null;
+  thinking_enabled: boolean | null;
+  thinking_level: string | null;
+  thinking_levels: string[] | null;
+}
+
+export interface ModelCatalogEntry {
+  id: string;
+  aliases: string[];
+  vendor: string;
+  label: string;
+  context_tokens: number;
+  max_output_tokens: number;
+  thinking: boolean;
+  thinking_levels: string[];
+}
+
+export interface AiChannel {
+  id: string;
+  name: string;
+  protocol: AiChannelProtocol;
+  base_url: string;
+  extra_headers_json: string | null;
+  models: AiChannelModel[];
+  enabled: boolean;
+  api_key: string | null;
+  api_key_configured: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface CreateAiChannelInput {
+  name: string;
+  protocol: AiChannelProtocol;
+  base_url: string;
+  api_key?: string | null;
+  extra_headers_json?: string | null;
+  models?: AiChannelModel[];
+  enabled?: boolean;
+}
+
+export interface UpdateAiChannelInput {
+  name?: string;
+  protocol?: AiChannelProtocol;
+  base_url?: string;
+  api_key?: string | null;
+  extra_headers_json?: string | null;
+  models?: AiChannelModel[];
+  enabled?: boolean;
+}
+
+export interface TestAiChannelInput {
+  id?: string | null;
+  protocol?: AiChannelProtocol;
+  base_url?: string;
+  api_key?: string | null;
+  extra_headers_json?: string | null;
+  model?: string | null;
+}
+
+export interface TestAiChannelResult {
+  ok: boolean;
+  status: number | null;
+  message: string;
+}
+
+export interface ListAiChannelModelsResult {
+  models: string[];
+  message: string;
+  truncated?: boolean;
+}
+
+export interface NetworkSettings {
+  http_proxy: string | null;
+  no_proxy: string | null;
+  ca_cert_path: string | null;
+}
+
+export const NATIVE_THINKING_LEVELS = [
+  "none",
+  "no_think",
+  "minimal",
+  "low",
+  "medium",
+  "high",
+  "xhigh",
+  "max",
+] as const;
