@@ -2,7 +2,7 @@
 
 桌面端 AI coding 工具：内置 Agent、AI 渠道、SSH 工作区、Git checkpoint。基于 Tauri 2 + React 19。
 
-完整构建计划见 [plan.md](plan.md)。
+架构见 [docs/architecture.md](docs/architecture.md)，数据层见 [docs/database.md](docs/database.md)。完整构建计划见 [plan.md](plan.md)。
 
 ## 要求
 

@@ -33,7 +33,7 @@ Lint gate: ESLint + Prettier + `npm run test:ci` + `cargo clippy --all-targets -
 
 ## Architecture
 
-**noxcode** is a Tauri v2 desktop app: an in-process native Agent with AI channels, SSH workspaces, and Git checkpoints. See `plan.md` for the full build plan.
+**noxcode** is a Tauri v2 desktop app: an in-process native Agent with AI channels, SSH workspaces, and Git checkpoints. Architecture: `docs/architecture.md`. Database schema: `docs/database.md`. Full build plan: `plan.md`.
 
 The data flow is strictly:
 
