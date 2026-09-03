@@ -45,18 +45,30 @@ export function GitPanel() {
   const [preview, setPreview] = useState<GitRestorePreview | null>(null);
   const [busy, setBusy] = useState(false);
 
-  const reload = useCallback(async () => {
+  const reloadStatus = useCallback(async () => {
     if (!workspaceId) return;
-    const next = await getGitStatus(workspaceId);
-    setStatus(next);
-    if (sessionId) {
-      setCheckpoints(await listGitCheckpoints(workspaceId, sessionId));
+    setStatus(await getGitStatus(workspaceId));
+  }, [workspaceId]);
+
+  const reloadCheckpoints = useCallback(async () => {
+    if (!workspaceId || !sessionId) {
+      setCheckpoints([]);
+      return;
     }
+    setCheckpoints(await listGitCheckpoints(workspaceId, sessionId));
   }, [sessionId, workspaceId]);
 
+  const reload = useCallback(async () => {
+    await Promise.all([reloadStatus(), reloadCheckpoints()]);
+  }, [reloadCheckpoints, reloadStatus]);
+
   useEffect(() => {
-    void reload();
-  }, [reload]);
+    void reloadStatus();
+  }, [reloadStatus]);
+
+  useEffect(() => {
+    void reloadCheckpoints();
+  }, [reloadCheckpoints]);
 
   useEffect(() => {
     if (!workspaceId || !gitFocusPath) return;

@@ -60,10 +60,13 @@ pub(crate) async fn get_agent_session_log_lines_with(
     } else {
         sqlx::query_as::<_, AgentSessionEvent>(
             r#"
-            SELECT * FROM agent_session_events
-            WHERE session_id = $1
+            SELECT * FROM (
+                SELECT * FROM agent_session_events
+                WHERE session_id = $1
+                ORDER BY created_at DESC
+                LIMIT $2
+            ) AS recent
             ORDER BY created_at ASC
-            LIMIT $2
             "#,
         )
         .bind(session_id)
@@ -320,6 +323,48 @@ mod tests {
             missing
                 .expect_err("missing session")
                 .contains("会话不存在: missing")
+        );
+    }
+
+    #[tokio::test]
+    async fn log_lines_return_latest_window_in_asc_order() {
+        let pool = setup_migrated_pool().await;
+        sqlx::query(
+            "INSERT INTO workspaces (id, name, workspace_type) VALUES ('ws-1', 'ws', 'local')",
+        )
+        .execute(&pool)
+        .await
+        .expect("ws");
+        sqlx::query(
+            "INSERT INTO agent_sessions (id, workspace_id, status, started_at, created_at) VALUES ('sess-1', 'ws-1', 'exited', '2026-01-01 00:00:00', '2026-01-01 00:00:00')",
+        )
+        .execute(&pool)
+        .await
+        .expect("session");
+        for (id, created_at, message) in [
+            ("evt-1", "2026-01-01 00:00:01", "oldest"),
+            ("evt-2", "2026-01-01 00:00:02", "middle"),
+            ("evt-3", "2026-01-01 00:00:03", "newest"),
+        ] {
+            sqlx::query(
+                "INSERT INTO agent_session_events (id, session_id, event_type, message, created_at) VALUES ($1, 'sess-1', 'stdout', $2, $3)",
+            )
+            .bind(id)
+            .bind(message)
+            .bind(created_at)
+            .execute(&pool)
+            .await
+            .expect("event");
+        }
+
+        let rows = get_agent_session_log_lines_with(&pool, "sess-1", None, Some(2))
+            .await
+            .expect("latest window");
+        assert_eq!(
+            rows.iter()
+                .map(|event| (event.id.as_str(), event.message.as_deref()))
+                .collect::<Vec<_>>(),
+            vec![("evt-2", Some("middle")), ("evt-3", Some("newest"))]
         );
     }
 }

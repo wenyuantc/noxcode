@@ -349,7 +349,7 @@ export function parseTodoList(text: string): ParsedTodoList | null {
   };
 }
 
-export function latestTodos(items: GroupedSessionItem[]): ParsedTodoList | null {
+export function latestTodos(items: { text: string }[]): ParsedTodoList | null {
   for (let index = items.length - 1; index >= 0; index -= 1) {
     const parsed = parseTodoList(items[index]?.text ?? "");
     if (parsed) return parsed;
@@ -368,12 +368,17 @@ export function groupSessionLines(lines: RawSessionLine[]): GroupedSessionItem[]
   for (const line of lines) {
     const kind = classifyLine(line.text);
     if (kind === "tool_result") {
-      const lastTool = [...grouped].reverse().find((item) => item.kind === "tool" && !item.result);
       const result = line.text.replace(/^\[工具结果\]\s*/, "");
-      if (lastTool) {
-        lastTool.result = result;
-        continue;
+      let paired = false;
+      for (let index = grouped.length - 1; index >= 0; index -= 1) {
+        const item = grouped[index];
+        if (item?.kind === "tool" && !item.result) {
+          item.result = result;
+          paired = true;
+          break;
+        }
       }
+      if (paired) continue;
     }
     grouped.push({
       id: line.id,

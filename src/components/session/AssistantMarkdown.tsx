@@ -1,3 +1,4 @@
+import { memo } from "react";
 import type { Components } from "react-markdown";
 import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -41,7 +42,7 @@ const components: Components = {
   td: ({ children }) => <td className="border-b px-2 py-1 align-top">{children}</td>,
 };
 
-export function AssistantMarkdown({ text }: { text: string }) {
+export const AssistantMarkdown = memo(function AssistantMarkdown({ text }: { text: string }) {
   return (
     <div className="text-sm leading-6">
       <Markdown remarkPlugins={[remarkGfm]} components={components}>
@@ -49,4 +50,4 @@ export function AssistantMarkdown({ text }: { text: string }) {
       </Markdown>
     </div>
   );
-}
+});

@@ -190,6 +190,12 @@ describe("sessionLines", () => {
     expect(latest?.total).toBe(5);
     expect(latest?.completed).toBe(2);
     expect(latest?.current?.content).toBe("当前项");
+    expect(
+      latestTodos([
+        line("1", "[待办] 读取任务清单"),
+        line("2", "[待办]\n- [completed] a (low)\n- [in_progress] 当前项 (high)"),
+      ])?.current?.content,
+    ).toBe("当前项");
   });
 
   it("strips permission hints", () => {

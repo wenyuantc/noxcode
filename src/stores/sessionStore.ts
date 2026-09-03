@@ -23,6 +23,7 @@ interface SessionState {
   permission: NativePermissionRequest | null;
   planQuestion: NativePlanQuestionRequest | null;
   selectSession: (id: string | null) => void;
+  ensureHistory: (sessionId: string) => Promise<void>;
   loadHistory: (sessionId: string) => Promise<void>;
   onStarted: (session: AgentSessionStarted) => void;
   onStdout: (output: AgentSessionOutput) => void;
@@ -44,10 +45,11 @@ export const useSessionStore = create<SessionState>((set, get) => ({
   permission: null,
   planQuestion: null,
   selectSession: (id) => set({ selectedSessionId: id }),
-  loadHistory: async (sessionId) => {
+  ensureHistory: async (sessionId) => {
+    if (get().lines[sessionId]) return;
     const events = await getAgentSessionLogLines(sessionId);
+    if (get().lines[sessionId]) return;
     set({
-      selectedSessionId: sessionId,
       lines: {
         ...get().lines,
         [sessionId]: events.map((event) => ({
@@ -58,6 +60,9 @@ export const useSessionStore = create<SessionState>((set, get) => ({
         })),
       },
     });
+  },
+  loadHistory: async (sessionId) => {
+    set({ selectedSessionId: sessionId });
     const workspace = useWorkspaceStore.getState();
     const workspaceId = workspace.sessions.find(
       (session) => session.id === sessionId,
@@ -65,6 +70,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
     if (workspaceId && workspaceId !== workspace.activeWorkspaceId) {
       void workspace.setActive(workspaceId);
     }
+    await get().ensureHistory(sessionId);
   },
   onStarted: (session) => {
     set({

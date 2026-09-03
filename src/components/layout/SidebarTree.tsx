@@ -27,20 +27,31 @@ function SessionRow({
 
   return (
     <div
+      role="button"
+      tabIndex={0}
       className={cn(
         "group flex items-center rounded-md p-[10px] hover:bg-sidebar-accent",
         indent && "ml-[10px]",
         selected && "bg-sidebar-accent",
       )}
+      onClick={() => void loadHistory(session.id)}
+      onKeyDown={(event) => {
+        if (event.key !== "Enter" && event.key !== " ") return;
+        event.preventDefault();
+        void loadHistory(session.id);
+      }}
     >
       <button
         type="button"
         className={cn(
           "rounded p-1 text-muted-foreground hover:text-foreground",
-          pinned ? "visible" : "invisible group-hover:visible",
+          pinned
+            ? "visible"
+            : "invisible pointer-events-none group-hover:visible group-hover:pointer-events-auto",
         )}
         aria-label={pinned ? t("unpinSession") : t("pinSession")}
-        onClick={() => {
+        onClick={(event) => {
+          event.stopPropagation();
           void setAgentSessionPinned(session.id, !pinned).then(() =>
             useWorkspaceStore.getState().refreshSessions(),
           );
@@ -48,11 +59,7 @@ function SessionRow({
       >
         <Pin className={cn("size-3.5", pinned && "fill-current")} />
       </button>
-      <button
-        type="button"
-        className="flex min-w-0 flex-1 items-center gap-2 text-sm"
-        onClick={() => void loadHistory(session.id)}
-      >
+      <span className="flex min-w-0 flex-1 items-center gap-2 text-sm">
         <span className="min-w-0 flex-1 truncate text-left">
           {displaySessionTitle(session.title) ||
             (session.session_kind === "plan" ? "Plan" : t("sessions"))}
@@ -60,11 +67,12 @@ function SessionRow({
         <span className="shrink-0 text-[10px] text-muted-foreground">
           {formatRelativeTime(session.started_at, locale)}
         </span>
-      </button>
+      </span>
       <button
         type="button"
-        className="invisible rounded p-1 text-muted-foreground hover:text-destructive group-hover:visible"
-        onClick={() => {
+        className="invisible pointer-events-none rounded p-1 text-muted-foreground group-hover:visible group-hover:pointer-events-auto hover:text-destructive"
+        onClick={(event) => {
+          event.stopPropagation();
           void deleteAgentSession(session.id).then(() =>
             useWorkspaceStore.getState().refreshSessions(),
           );

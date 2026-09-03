@@ -2,7 +2,7 @@ import { ArrowRight, Check, Circle, Loader2, Minimize2 } from "lucide-react";
 import { useEffect, useState, type RefObject } from "react";
 import { useTranslation } from "react-i18next";
 
-import { groupSessionLines, latestTodos, type RawSessionLine } from "@/lib/sessionLines";
+import { latestTodos, type RawSessionLine } from "@/lib/sessionLines";
 import { cn } from "@/lib/utils";
 import { useSessionStore } from "@/stores/sessionStore";
 
@@ -18,7 +18,7 @@ export function TodoProcessPanel({
 }) {
   const { t } = useTranslation("sessions");
   const lines = useSessionStore((state) => state.lines[sessionId]) ?? EMPTY_LINES;
-  const todos = latestTodos(groupSessionLines(lines));
+  const todos = latestTodos(lines);
   const [width, setWidth] = useState(NARROW);
   const [collapsed, setCollapsed] = useState(false);
   const [pinnedOpen, setPinnedOpen] = useState(false);

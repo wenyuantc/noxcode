@@ -1,6 +1,6 @@
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { ArrowDown, Loader2 } from "lucide-react";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 
 import {
@@ -133,14 +133,25 @@ function isNearBottom(node: HTMLElement) {
   return node.scrollHeight - node.scrollTop - node.clientHeight <= BOTTOM_THRESHOLD;
 }
 
-export function EventStream({ sessionId }: { sessionId: string }) {
+export const EventStream = memo(function EventStream({
+  sessionId,
+  active = true,
+}: {
+  sessionId: string;
+  active?: boolean;
+}) {
   const { t } = useTranslation("sessions");
   const lines = useSessionStore((state) => state.lines[sessionId]) ?? EMPTY_LINES;
   const stream = useSessionStore((state) => state.stream[sessionId]);
   const turnState = useSessionStore((state) => state.turnState[sessionId]);
-  const items = groupSessionLines(lines);
-  const blocks = buildTurnBlocks(items);
-  const lastUserBlockId = [...blocks].reverse().find((block) => block.user)?.id;
+  const items = useMemo(() => groupSessionLines(lines), [lines]);
+  const blocks = useMemo(() => buildTurnBlocks(items), [items]);
+  const lastUserBlockId = useMemo(() => {
+    for (let index = blocks.length - 1; index >= 0; index -= 1) {
+      if (blocks[index]?.user) return blocks[index]?.id;
+    }
+    return undefined;
+  }, [blocks]);
   const working = turnState === "working";
   const [nowMs, setNowMs] = useState(() => Date.now());
   const [showLatest, setShowLatest] = useState(false);
@@ -152,7 +163,7 @@ export function EventStream({ sessionId }: { sessionId: string }) {
     count: blocks.length,
     getScrollElement: () => parentRef.current,
     estimateSize: () => 64,
-    overscan: 8,
+    overscan: 3,
     gap: 16,
     getItemKey: (index) => blocks[index]?.id ?? index,
     measureElement: (element) => (element as HTMLElement).offsetHeight,
@@ -179,10 +190,15 @@ export function EventStream({ sessionId }: { sessionId: string }) {
   }, [sessionId]);
 
   useEffect(() => {
-    if (!working) return;
+    if (!active || !working) return;
     const timer = window.setInterval(() => setNowMs(Date.now()), 1000);
     return () => window.clearInterval(timer);
-  }, [working]);
+  }, [active, working]);
+
+  useEffect(() => {
+    if (!active) return;
+    virtualizer.measure();
+  }, [active, virtualizer]);
 
   useEffect(() => {
     const hasStream = Boolean(stream?.text);
@@ -224,7 +240,7 @@ export function EventStream({ sessionId }: { sessionId: string }) {
                   block={block}
                   sessionId={sessionId}
                   working={isLast && working}
-                  nowMs={nowMs}
+                  nowMs={isLast && working ? nowMs : undefined}
                   editableUser={block.id === lastUserBlockId}
                 />
               </div>
@@ -245,9 +261,9 @@ export function EventStream({ sessionId }: { sessionId: string }) {
       ) : null}
     </div>
   );
-}
+});
 
-function TurnBlockView({
+const TurnBlockView = memo(function TurnBlockView({
   block,
   sessionId,
   working,
@@ -257,7 +273,7 @@ function TurnBlockView({
   block: SessionTurnBlock;
   sessionId: string;
   working: boolean;
-  nowMs: number;
+  nowMs?: number;
   editableUser: boolean;
 }) {
   const showWork =
@@ -296,4 +312,4 @@ function TurnBlockView({
       {working ? <Loader2 className="size-4 animate-spin text-muted-foreground" /> : null}
     </div>
   );
-}
+});

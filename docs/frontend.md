@@ -49,6 +49,8 @@ src/components/git/      GitPanel · DiffView · CheckpointTimeline
 
 `native-session` / `native-stdout` / `native-text-delta` / `native-context-usage` / `native-turn-state` / `native-exit` / `native-permission-request` / `native-plan-question`。
 
+打开历史会话立即改 `selectedSessionId`（侧栏高亮）；`lines` 已缓存则不重拉，无缓存拉最近 200 条。事件流等该会话有缓存再切换，并保活最近 3 个已打开流（`visibility` 隐藏，不卸 DOM）。live 行只走 `onStdout`，历史结果不得覆盖已有缓存。
+
 Composer：只看**当前选中会话**是否 live。首页或非 live 会话走 `startNativeSession`（新开一条，不挡同工作区其它 live）；当前会话 live 则 `sendNativeInput` / `stopNativeSession`。`sessionStore.liveBySession` 按 `session_record_id` 索引。权限菜单四项：变更前确认 / 自动编辑 / 计划模式 / 完全访问。前两项与完全访问写入 `permission_mode`；计划模式存在 `uiStore.composerPlanMode`，新会话传 `plan_mode`。模型控件是渠道→模型级联菜单，底部「管理模型」进 `/settings/channels`。思考等级右侧是 `ContextCapacity`：`used/limit` 含工具 schema，弹层展示分类占比与上次调用缓存率（`cached/prompt`）。历史会话点「继续对话」先 `prepareAgentSessionResume`，可续则 `resumeNativeSession`。`native-turn-state` 的 `waiting_input` / `working` 驱动发送按钮（发送中与工作中显示转圈并禁用）和停止按钮（仅 `working` 显示），不靠猜前缀。思考结束后事件行写入完整 `reasoning`，不再只记「已生成 N 字」。
 
 `@` 调 `list_git_files` 插入 `@path`。`/` 列出全局技能，插入「使用技能：name」。
