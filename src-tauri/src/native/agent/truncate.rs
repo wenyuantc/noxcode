@@ -98,15 +98,86 @@ pub fn total_message_tokens(messages: &[Message]) -> usize {
 /// schemas are part of every non-final input and can be surprisingly large for
 /// MCP servers, so they must count toward both the context and rollout guards.
 pub fn total_tool_tokens(tools: &[ToolSpec]) -> usize {
-    tools
-        .iter()
-        .map(|tool| {
-            4usize
-                .saturating_add(estimate_text_tokens(&tool.name))
-                .saturating_add(estimate_text_tokens(&tool.description))
-                .saturating_add(estimate_text_tokens(&tool.parameters.to_string()))
-        })
-        .sum()
+    tools.iter().map(tool_schema_tokens).sum()
+}
+
+fn tool_schema_tokens(tool: &ToolSpec) -> usize {
+    4usize
+        .saturating_add(estimate_text_tokens(&tool.name))
+        .saturating_add(estimate_text_tokens(&tool.description))
+        .saturating_add(estimate_text_tokens(&tool.parameters.to_string()))
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct ContextUsageBreakdown {
+    pub used_tokens: usize,
+    pub mcp_tokens: usize,
+    pub system_tool_tokens: usize,
+    pub skill_tokens: usize,
+    pub system_prompt_tokens: usize,
+    pub other_tokens: usize,
+    pub message_tokens: usize,
+}
+
+pub fn context_usage_breakdown(
+    messages: &[Message],
+    tools: &[ToolSpec],
+    skills_prompt: &str,
+) -> ContextUsageBreakdown {
+    let mut mcp_tokens = 0usize;
+    let mut system_tool_tokens = 0usize;
+    for tool in tools {
+        let tokens = tool_schema_tokens(tool);
+        if tool.name.starts_with("mcp_") {
+            mcp_tokens = mcp_tokens.saturating_add(tokens);
+        } else {
+            system_tool_tokens = system_tool_tokens.saturating_add(tokens);
+        }
+    }
+
+    let mut first_system = None;
+    let mut other_system = 0usize;
+    let mut conversation = 0usize;
+    for message in messages {
+        let tokens = message_tokens(message);
+        match message.role {
+            Role::System => {
+                if first_system.is_none() {
+                    first_system = Some(tokens);
+                } else {
+                    other_system = other_system.saturating_add(tokens);
+                }
+            }
+            Role::User | Role::Assistant | Role::Tool => {
+                conversation = conversation.saturating_add(tokens);
+            }
+        }
+    }
+
+    let first_system_tokens = first_system.unwrap_or(0);
+    let skill_raw = if skills_prompt.trim().is_empty() {
+        0
+    } else {
+        estimate_text_tokens(skills_prompt)
+    };
+    let skill_tokens = skill_raw.min(first_system_tokens);
+    let system_prompt_tokens = first_system_tokens.saturating_sub(skill_tokens);
+    let used = total_tool_tokens(tools).saturating_add(total_message_tokens(messages));
+    let accounted = mcp_tokens
+        .saturating_add(system_tool_tokens)
+        .saturating_add(skill_tokens)
+        .saturating_add(system_prompt_tokens)
+        .saturating_add(conversation)
+        .saturating_add(other_system);
+    ContextUsageBreakdown {
+        used_tokens: used,
+        mcp_tokens,
+        system_tool_tokens,
+        skill_tokens,
+        system_prompt_tokens,
+        other_tokens: other_system.saturating_add(used.saturating_sub(accounted)),
+        message_tokens: conversation,
+    }
 }
 
 /// Convert the legacy character setting to a conservative token budget.
@@ -756,5 +827,51 @@ mod tests {
             .expect("user")
             .content
             .contains(IMAGE_REMOVED_NOTICE));
+    }
+
+    #[test]
+    fn context_usage_breakdown_splits_tools_skills_and_messages() {
+        let skills = "可用技能：demo";
+        let system = format!("identity\n\n{skills}");
+        let tools = vec![
+            ToolSpec {
+                name: "Read".to_string(),
+                description: "read a file".to_string(),
+                parameters: serde_json::json!({"type": "object"}),
+            },
+            ToolSpec {
+                name: "mcp_fs_list".to_string(),
+                description: "list remote files".to_string(),
+                parameters: serde_json::json!({"type": "object"}),
+            },
+        ];
+        let messages = vec![
+            Message::system(system),
+            Message::user("看一下入口"),
+            Message::assistant_text("好的"),
+        ];
+        let breakdown = context_usage_breakdown(&messages, &tools, skills);
+        assert_eq!(
+            breakdown.used_tokens,
+            breakdown.mcp_tokens
+                + breakdown.system_tool_tokens
+                + breakdown.skill_tokens
+                + breakdown.system_prompt_tokens
+                + breakdown.other_tokens
+                + breakdown.message_tokens
+        );
+        assert!(breakdown.mcp_tokens > 0);
+        assert!(breakdown.system_tool_tokens > 0);
+        assert!(breakdown.skill_tokens > 0);
+        assert!(breakdown.system_prompt_tokens > 0);
+        assert!(breakdown.message_tokens > 0);
+        assert_eq!(breakdown.other_tokens, 0);
+    }
+
+    #[test]
+    fn cache_rate_is_cached_over_prompt() {
+        let prompt = 100u32;
+        let cached = 40u32;
+        assert_eq!(cached.saturating_mul(100) / prompt, 40);
     }
 }

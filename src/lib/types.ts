@@ -367,6 +367,7 @@ export interface AgentSession {
   ended_at: string | null;
   exit_code: number | null;
   resume_session_id: string | null;
+  title?: string | null;
   input_tokens: number | null;
   output_tokens: number | null;
   total_tokens: number | null;
@@ -471,6 +472,14 @@ export interface NativeContextUsage {
   limit_tokens: number;
   generation: number;
   compactions: number;
+  mcp_tokens?: number;
+  system_tool_tokens?: number;
+  skill_tokens?: number;
+  system_prompt_tokens?: number;
+  other_tokens?: number;
+  message_tokens?: number;
+  prompt_tokens?: number;
+  cached_tokens?: number;
 }
 
 export type NativeTurnStateKind = "waiting_input" | "working";

@@ -1,5 +1,5 @@
-import { ArrowUp, Square } from "lucide-react";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { ArrowUp, Loader2, Square } from "lucide-react";
+import { useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 
 import { Button } from "@/components/ui/button";
@@ -11,7 +11,6 @@ import {
   stopNativeSession,
 } from "@/lib/backend";
 import { FALLBACK_THINKING_LEVELS } from "@/lib/modelCatalog";
-import { formatTokenCount } from "@/lib/utils";
 import type { NativeSkill } from "@/lib/types";
 import { useChannelStore } from "@/stores/channelStore";
 import { useSessionStore } from "@/stores/sessionStore";
@@ -19,6 +18,7 @@ import { useUiStore } from "@/stores/uiStore";
 import { useWorkspaceStore } from "@/stores/workspaceStore";
 import { BranchPicker } from "./BranchPicker";
 import { ChannelModelPicker } from "./ChannelModelPicker";
+import { ContextCapacity } from "./ContextCapacity";
 import { PermissionModePicker } from "./PermissionModePicker";
 import { ThinkingLevelPicker } from "./ThinkingLevelPicker";
 import { WorkspacePicker } from "./WorkspacePicker";
@@ -32,8 +32,9 @@ export function Composer({ compact = false }: { compact?: boolean }) {
   const channelId = useChannelStore((state) => state.activeChannelId);
   const activeModelId = useChannelStore((state) => state.activeModelId);
   const composerPlanMode = useUiStore((state) => state.composerPlanMode);
+  const selectedSessionId = useSessionStore((state) => state.selectedSessionId);
   const live = useSessionStore((state) =>
-    workspaceId ? state.liveByWorkspace[workspaceId] : undefined,
+    selectedSessionId ? state.liveBySession[selectedSessionId] : undefined,
   );
   const usage = useSessionStore((state) =>
     live ? state.usage[live.session_record_id] : undefined,
@@ -48,6 +49,7 @@ export function Composer({ compact = false }: { compact?: boolean }) {
   const [files, setFiles] = useState<string[]>([]);
   const [skills, setSkills] = useState<NativeSkill[]>([]);
   const [mentionOpen, setMentionOpen] = useState<"@" | "/" | null>(null);
+  const [sending, setSending] = useState(false);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
   const selectedModel = channel?.models.find((item) => item.id === model);
@@ -86,6 +88,7 @@ export function Composer({ compact = false }: { compact?: boolean }) {
   }, [draft, workspaceId]);
 
   const working = Boolean(live) && turnState !== "waiting_input" && turnState !== "ended";
+  const sendBusy = sending || working;
 
   const send = async () => {
     const prompt = draft.trim();
@@ -101,7 +104,9 @@ export function Composer({ compact = false }: { compact?: boolean }) {
       setError(t("sessions:needChannel"));
       return;
     }
+    if (sendBusy) return;
     setError(null);
+    setSending(true);
     try {
       if (live) {
         await sendNativeInput(live.session_record_id, prompt);
@@ -118,6 +123,8 @@ export function Composer({ compact = false }: { compact?: boolean }) {
       setDraft("");
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setSending(false);
     }
   };
 
@@ -128,14 +135,6 @@ export function Composer({ compact = false }: { compact?: boolean }) {
     setMentionOpen(null);
     textareaRef.current?.focus();
   };
-
-  const usageLabel = useMemo(() => {
-    if (!usage) return null;
-    return t("sessions:contextUsage", {
-      used: formatTokenCount(usage.used_tokens),
-      limit: formatTokenCount(usage.limit_tokens),
-    });
-  }, [t, usage]);
 
   return (
     <div className="mx-auto w-full max-w-3xl">
@@ -153,7 +152,7 @@ export function Composer({ compact = false }: { compact?: boolean }) {
           onKeyDown={(event) => {
             if (event.key === "Enter" && !event.shiftKey) {
               event.preventDefault();
-              void send();
+              if (!sendBusy) void send();
             }
           }}
           placeholder={t("layout:composerPlaceholder")}
@@ -195,9 +194,9 @@ export function Composer({ compact = false }: { compact?: boolean }) {
           <PermissionModePicker />
           <ChannelModelPicker />
           <ThinkingLevelPicker value={resolvedEffort} levels={efforts} onChange={setEffort} />
-          {usageLabel ? <span className="text-muted-foreground">{usageLabel}</span> : null}
+          <ContextCapacity usage={usage} />
           <span className="flex-1" />
-          {live ? (
+          {working && live ? (
             <Button
               size="sm"
               variant="outline"
@@ -207,8 +206,12 @@ export function Composer({ compact = false }: { compact?: boolean }) {
               {t("sessions:stop")}
             </Button>
           ) : null}
-          <Button size="sm" onClick={() => void send()} disabled={working && !live}>
-            <ArrowUp className="size-3.5" />
+          <Button size="sm" onClick={() => void send()} disabled={sendBusy}>
+            {sendBusy ? (
+              <Loader2 className="size-3.5 animate-spin" />
+            ) : (
+              <ArrowUp className="size-3.5" />
+            )}
             {t("sessions:send")}
           </Button>
         </div>

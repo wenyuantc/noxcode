@@ -2,6 +2,7 @@ import { GitBranch } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
 import { prepareAgentSessionResume, resumeNativeSession } from "@/lib/backend";
+import { displaySessionTitle } from "@/lib/sessionLines";
 import { Button } from "@/components/ui/button";
 import { useChannelStore } from "@/stores/channelStore";
 import { useSessionStore } from "@/stores/sessionStore";
@@ -13,19 +14,23 @@ import { WorkspacePicker } from "./WorkspacePicker";
 export function SessionHeader() {
   const { t } = useTranslation("sessions");
   const selected = useSessionStore((state) => state.selectedSessionId);
-  const liveByWorkspace = useSessionStore((state) => state.liveByWorkspace);
+  const live = useSessionStore((state) => (selected ? state.liveBySession[selected] : undefined));
+  const sessions = useWorkspaceStore((state) => state.sessions);
   const workspaceId = useWorkspaceStore((state) => state.activeWorkspaceId);
+  const session = sessions.find((item) => item.id === selected);
+  const title = displaySessionTitle(session?.title);
   const channelId = useChannelStore((state) => state.activeChannelId);
   const modelId = useChannelStore((state) => state.activeModelId);
   const toggleGit = useUiStore((state) => state.toggleGit);
-  const live = workspaceId ? liveByWorkspace[workspaceId] : undefined;
   const canResume = Boolean(selected && workspaceId && channelId && !live);
 
   return (
     <div className="flex items-center gap-2 border-b px-4 py-2">
       <WorkspacePicker />
       <BranchPicker />
-      <span className="flex-1" />
+      <span className="min-w-0 flex-1 truncate px-2 text-center text-sm text-muted-foreground">
+        {title}
+      </span>
       {canResume ? (
         <Button
           size="sm"

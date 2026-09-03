@@ -2,6 +2,7 @@ import { ChevronDown, Folder, Trash2 } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
 import { deleteAgentSession } from "@/lib/backend";
+import { displaySessionTitle } from "@/lib/sessionLines";
 import { formatRelativeTime } from "@/lib/utils";
 import { getCurrentAppLocale, getDateLocale } from "@/lib/i18n/locale";
 import { useSessionStore } from "@/stores/sessionStore";
@@ -19,7 +20,6 @@ export function SidebarTree() {
   const setActive = useWorkspaceStore((state) => state.setActive);
   const activeWorkspaceId = useWorkspaceStore((state) => state.activeWorkspaceId);
   const selectedSessionId = useSessionStore((state) => state.selectedSessionId);
-  const liveByWorkspace = useSessionStore((state) => state.liveByWorkspace);
   const loadHistory = useSessionStore((state) => state.loadHistory);
   const locale = getDateLocale(getCurrentAppLocale());
 
@@ -31,10 +31,9 @@ export function SidebarTree() {
           .sort((a, b) => b.started_at.localeCompare(a.started_at));
         const limit = shownCount[workspace.id] ?? 5;
         const visible = items.slice(0, limit);
-        const live = liveByWorkspace[workspace.id];
         const open = expanded[workspace.id] !== false;
         return (
-          <div key={workspace.id} className="mb-1">
+          <div key={workspace.id} className="mb-2">
             <button
               type="button"
               className={cn(
@@ -50,55 +49,49 @@ export function SidebarTree() {
               <Folder className="size-3.5 text-muted-foreground" />
               <span className="flex-1 truncate text-left">{workspace.name}</span>
             </button>
-            {open
-              ? visible.map((session) => {
-                  const running = live?.session_record_id === session.id;
-                  return (
-                    <div key={session.id} className="group flex items-center pl-6">
-                      <button
-                        type="button"
-                        className={cn(
-                          "flex min-w-0 flex-1 items-center gap-2 rounded-md px-2 py-1 text-sm hover:bg-sidebar-accent",
-                          selectedSessionId === session.id && "bg-sidebar-accent",
-                        )}
-                        onClick={() => void loadHistory(session.id)}
-                      >
-                        <span
-                          className={cn(
-                            "size-1.5 shrink-0 rounded-full",
-                            running ? "bg-emerald-500" : "bg-muted-foreground/40",
-                          )}
-                        />
-                        <span className="min-w-0 flex-1 truncate text-left">
-                          {session.session_kind === "plan" ? "Plan" : t("sessions")}
-                        </span>
-                        <span className="shrink-0 text-[10px] text-muted-foreground">
-                          {formatRelativeTime(session.started_at, locale)}
-                        </span>
-                      </button>
-                      <button
-                        type="button"
-                        className="invisible rounded p-1 text-muted-foreground hover:text-destructive group-hover:visible"
-                        onClick={() => {
-                          void deleteAgentSession(session.id).then(() =>
-                            useWorkspaceStore.getState().refreshSessions(),
-                          );
-                        }}
-                      >
-                        <Trash2 className="size-3.5" />
-                      </button>
-                    </div>
-                  );
-                })
-              : null}
-            {open && items.length > limit ? (
-              <button
-                type="button"
-                className="pl-8 text-xs text-muted-foreground hover:underline"
-                onClick={() => showMore(workspace.id)}
-              >
-                {t("moreSessions")}
-              </button>
+            {open ? (
+              <div className="mt-1 space-y-1">
+                {visible.map((session) => (
+                  <div key={session.id} className="group flex items-center pl-6">
+                    <button
+                      type="button"
+                      className={cn(
+                        "flex min-w-0 flex-1 items-center gap-2 rounded-md px-2 py-2 text-sm hover:bg-sidebar-accent",
+                        selectedSessionId === session.id && "bg-sidebar-accent",
+                      )}
+                      onClick={() => void loadHistory(session.id)}
+                    >
+                      <span className="min-w-0 flex-1 truncate text-left">
+                        {displaySessionTitle(session.title) ||
+                          (session.session_kind === "plan" ? "Plan" : t("sessions"))}
+                      </span>
+                      <span className="shrink-0 text-[10px] text-muted-foreground">
+                        {formatRelativeTime(session.started_at, locale)}
+                      </span>
+                    </button>
+                    <button
+                      type="button"
+                      className="invisible rounded p-1 text-muted-foreground hover:text-destructive group-hover:visible"
+                      onClick={() => {
+                        void deleteAgentSession(session.id).then(() =>
+                          useWorkspaceStore.getState().refreshSessions(),
+                        );
+                      }}
+                    >
+                      <Trash2 className="size-3.5" />
+                    </button>
+                  </div>
+                ))}
+                {items.length > limit ? (
+                  <button
+                    type="button"
+                    className="px-2 pl-8 text-left text-xs text-muted-foreground"
+                    onClick={() => showMore(workspace.id)}
+                  >
+                    {t("moreSessions")}
+                  </button>
+                ) : null}
+              </div>
             ) : null}
           </div>
         );

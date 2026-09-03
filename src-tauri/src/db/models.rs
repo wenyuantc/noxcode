@@ -250,6 +250,7 @@ pub struct AgentSessionRecord {
     pub reasoning_tokens: Option<i64>,
     pub cached_tokens: Option<i64>,
     pub created_at: String,
+    pub title: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
@@ -473,6 +474,22 @@ pub struct NativeContextUsage {
     pub limit_tokens: usize,
     pub generation: u32,
     pub compactions: u32,
+    #[serde(default)]
+    pub mcp_tokens: usize,
+    #[serde(default)]
+    pub system_tool_tokens: usize,
+    #[serde(default)]
+    pub skill_tokens: usize,
+    #[serde(default)]
+    pub system_prompt_tokens: usize,
+    #[serde(default)]
+    pub other_tokens: usize,
+    #[serde(default)]
+    pub message_tokens: usize,
+    #[serde(default)]
+    pub prompt_tokens: usize,
+    #[serde(default)]
+    pub cached_tokens: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

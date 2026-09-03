@@ -50,7 +50,7 @@ flowchart LR
 | 层 | 现状 | 目标 |
 | --- | --- | --- |
 | 前端 `src/` | P5 单主界面 + 全屏设置 + Git 抽屉 + API 日志，见 [`frontend.md`](frontend.md) | 保持；斜杠命令完整版 / Markdown 富渲染留 backlog |
-| `db/` | version 2（8 张表，已去掉 `agent_profiles`） | 只追加连续迁移 `3..N` |
+| `db/` | version 3（8 张表 + `agent_sessions.title`，已去掉 `agent_profiles`） | 只追加连续迁移 `4..N` |
 | `app/database` + `app/shared` | 健康检查 / 备份 / 恢复 | 保持 |
 | `app/ssh/` + `app/secret_store` | P2 + P5 设置页 / 信任对话框，见 [`ssh.md`](ssh.md) | 保持 |
 | `app/workspaces` | CRUD + 健康检查 + scratch 工作区 | 保持 |

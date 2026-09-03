@@ -25,6 +25,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { useSessionStore } from "@/stores/sessionStore";
+import { useUiStore } from "@/stores/uiStore";
 import { useWorkspaceStore } from "@/stores/workspaceStore";
 import { CheckpointTimeline } from "./CheckpointTimeline";
 import { DiffView } from "./DiffView";
@@ -34,6 +35,7 @@ export function GitPanel() {
   const { t } = useTranslation("git");
   const workspaceId = useWorkspaceStore((state) => state.activeWorkspaceId);
   const sessionId = useSessionStore((state) => state.selectedSessionId);
+  const gitFocusPath = useUiStore((state) => state.gitFocusPath);
   const [status, setStatus] = useState<GitStatus | null>(null);
   const [checkpoints, setCheckpoints] = useState<GitCheckpoint[]>([]);
   const [selected, setSelected] = useState<Set<string>>(new Set());
@@ -55,6 +57,11 @@ export function GitPanel() {
   useEffect(() => {
     void reload();
   }, [reload]);
+
+  useEffect(() => {
+    if (!workspaceId || !gitFocusPath) return;
+    void getGitFileDiff(workspaceId, gitFocusPath, "worktree").then(setDiff);
+  }, [gitFocusPath, workspaceId]);
 
   const groups = groupGitStatus(status);
   const toggle = (path: string) => {

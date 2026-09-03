@@ -220,11 +220,9 @@ async fn repo_status_stage_commit_push_and_branch() {
         assert!(switched.is_current);
         let branches = list_branches(&target).await.expect("list");
         assert!(branches.iter().any(|branch| branch.name == "main"));
-        assert!(
-            branches
-                .iter()
-                .any(|branch| branch.name == "feature" && !branch.is_current)
-        );
+        assert!(branches
+            .iter()
+            .any(|branch| branch.name == "feature" && !branch.is_current));
 
         let remote_dir = tempfile::tempdir().expect("remote");
         let remote = GitTarget::Local(remote_dir.path().to_path_buf());

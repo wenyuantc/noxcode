@@ -17,6 +17,7 @@ interface UiState {
   sidebarCollapsed: boolean;
   commandOpen: boolean;
   gitOpen: boolean;
+  gitFocusPath: string | null;
   composerDraft: string;
   composerPlanMode: boolean;
   theme: ThemeMode;
@@ -24,6 +25,7 @@ interface UiState {
   toggleSidebar: () => void;
   setCommandOpen: (open: boolean) => void;
   toggleGit: () => void;
+  openGitPreview: (path: string | null) => void;
   setComposerDraft: (value: string) => void;
   setComposerPlanMode: (value: boolean) => void;
   setTheme: (mode: ThemeMode) => void;
@@ -35,6 +37,7 @@ export const useUiStore = create<UiState>((set, get) => ({
   sidebarCollapsed: typeof window !== "undefined" && localStorage.getItem(COLLAPSED_KEY) === "1",
   commandOpen: false,
   gitOpen: false,
+  gitFocusPath: null,
   composerDraft: "",
   composerPlanMode: typeof window !== "undefined" && localStorage.getItem(PLAN_MODE_KEY) === "1",
   theme: getThemePreference(),
@@ -50,6 +53,7 @@ export const useUiStore = create<UiState>((set, get) => ({
   },
   setCommandOpen: (open) => set({ commandOpen: open }),
   toggleGit: () => set({ gitOpen: !get().gitOpen }),
+  openGitPreview: (path) => set({ gitOpen: true, gitFocusPath: path }),
   setComposerDraft: (value) => set({ composerDraft: value }),
   setComposerPlanMode: (value) => {
     localStorage.setItem(PLAN_MODE_KEY, value ? "1" : "0");

@@ -10,14 +10,14 @@ P4 把进程内编程 Agent 接到渠道 + 工作区外壳。数据流仍是 `Re
 | `src-tauri/src/native/tools/` | 本地 / SSH 工具、MCP、权限、hooks |
 | `src-tauri/src/native/agent/` | 主循环、压缩、截断、子 Agent |
 | `src-tauri/src/native/session.rs` | 启动 / 停止 / 续聊 / 权限 / 计划提问 |
-| `src-tauri/src/native/manager.rs` | 运行中会话、同一工作区单会话门控 |
+| `src-tauri/src/native/manager.rs` | 运行中会话（同一工作区可多个 live） |
 | `src-tauri/src/native/prompt/` | identity + 环境 / Git / 项目指令 |
 | `src-tauri/src/app/workspaces.rs` | 工作区 CRUD 与健康检查 |
 | `src-tauri/src/app/sessions.rs` | 历史会话列表、日志、续聊判定、删除 |
 
 ## 会话生命周期
 
-1. `has_workspace_processes`：同一工作区同时只允许一个 live session。
+1. 同一工作区可以同时有多个 live session；同一 `session_record_id` 不能重复拉起。删除工作区仍要求该工作区没有 live。
 2. 解析工作区执行上下文（本地目录或 SSH 远端路径）。
 3. 读取渠道，允许本次覆盖 model / effort / system_prompt。
 4. 建 `ModelClient`（渠道密钥 + 网络设置 + SQLite call log）。
@@ -31,7 +31,7 @@ P4 把进程内编程 Agent 接到渠道 + 工作区外壳。数据流仍是 `Re
 
 权限模式（`permission_mode`）三档：`confirm` 变更前确认；`auto_edit` 自动编辑（只放行 `Overwrite`，删除 / 推送 / 强制 Git / 不透明命令 / MCP 仍弹确认）；`full` 完全访问（`allow_all_high_risk=true`）。旧文件的 `confirm_high_risk: false` 读成 `full`。
 
-并发门控按工作区。`send_native_input` / `finish_native_input` 按 `session_record_id` 寻址。
+`send_native_input` / `finish_native_input` 按 `session_record_id` 寻址。续聊若源会话仍在跑则拒绝。
 
 ## 命令
 
@@ -50,7 +50,7 @@ P4 把进程内编程 Agent 接到渠道 + 工作区外壳。数据流仍是 `Re
 | `native-session` | `AgentSessionStarted` |
 | `native-stdout` | `AgentSessionOutput`（已写入 `agent_session_events`） |
 | `native-text-delta` | `NativeTextDelta`（仅展示，不落库） |
-| `native-context-usage` | `NativeContextUsage` |
+| `native-context-usage` | `NativeContextUsage`（`used` = 工具 schema + 消息；分类字段 + 上次调用 `prompt_tokens` / `cached_tokens`；仅父 Agent） |
 | `native-turn-state` | `NativeTurnState`（`waiting_input` / `working`，不落库） |
 | `native-permission-request` | 高风险工具确认 |
 | `native-plan-question` | 计划模式提问 |

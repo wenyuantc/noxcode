@@ -20,14 +20,14 @@ src/main.tsx             i18n init → applyTheme → App
 src/App.tsx              四条路由 + 权限 / 计划提问 / SSH 信任对话框
 src/lib/backend.ts       唯一 IPC 出口
 src/lib/apiLogs.ts       API 调用记录格式化 / 分页
-src/lib/sessionLines.ts  行前缀解析、工具/结果配对、回合折叠
+src/lib/sessionLines.ts  行前缀解析、工具/结果配对、时序 segments / 待办解析
 src/lib/gitHelpers.ts    暂存分组、diff 行着色
 src/locales/{zh-CN,en}   九个命名空间
 src/stores/              ui / workspace / channel / session / settings
 src/hooks/               useNativeEvents · useSshTrustEvents · useAppHotkeys
 src/components/ui/       17 个 shadcn 底座
 src/components/layout/   AppShell · Sidebar*
-src/components/session/  Composer · EventStream · pickers · 权限对话框
+src/components/session/  Composer · EventStream · 回合行 / 待办面板 · pickers · 权限对话框
 src/components/settings/ SettingsLayout + 分节
 src/components/apiLogs/  调用详情弹层
 src/components/git/      GitPanel · DiffView · CheckpointTimeline
@@ -49,11 +49,11 @@ src/components/git/      GitPanel · DiffView · CheckpointTimeline
 
 `native-session` / `native-stdout` / `native-text-delta` / `native-context-usage` / `native-turn-state` / `native-exit` / `native-permission-request` / `native-plan-question`。
 
-Composer：无 live 会话走 `startNativeSession`（`ai_channel_id` + 模型）；有 live 走 `sendNativeInput`；停止走 `stopNativeSession`。权限菜单四项：变更前确认 / 自动编辑 / 计划模式 / 完全访问。前两项与完全访问写入 `permission_mode`；计划模式存在 `uiStore.composerPlanMode`，新会话传 `plan_mode`。模型控件是渠道→模型级联菜单，底部「管理模型」进 `/settings/channels`。历史会话点「继续对话」先 `prepareAgentSessionResume`，可续则 `resumeNativeSession`。`native-turn-state` 的 `waiting_input` / `working` 驱动发送按钮，不靠猜前缀。
+Composer：只看**当前选中会话**是否 live。首页或非 live 会话走 `startNativeSession`（新开一条，不挡同工作区其它 live）；当前会话 live 则 `sendNativeInput` / `stopNativeSession`。`sessionStore.liveBySession` 按 `session_record_id` 索引。权限菜单四项：变更前确认 / 自动编辑 / 计划模式 / 完全访问。前两项与完全访问写入 `permission_mode`；计划模式存在 `uiStore.composerPlanMode`，新会话传 `plan_mode`。模型控件是渠道→模型级联菜单，底部「管理模型」进 `/settings/channels`。思考等级右侧是 `ContextCapacity`：`used/limit` 含工具 schema，弹层展示分类占比与上次调用缓存率（`cached/prompt`）。历史会话点「继续对话」先 `prepareAgentSessionResume`，可续则 `resumeNativeSession`。`native-turn-state` 的 `waiting_input` / `working` 驱动发送按钮（发送中与工作中显示转圈并禁用）和停止按钮（仅 `working` 显示），不靠猜前缀。思考结束后事件行写入完整 `reasoning`，不再只记「已生成 N 字」。
 
 `@` 调 `list_git_files` 插入 `@path`。`/` 列出全局技能，插入「使用技能：name」。
 
-事件流：`[USER_INPUT]` 用户气泡；`[读取]` / `[写入]` / `[编辑]` / `[命令]` / `[工具]` / `[技能]` / `[待办]` / `[子 Agent…]` 为工具项，紧随的 `[工具结果]` 挂到该项；`[思考]` / `[PLAN]` / `[PERMISSION]` / `[MCP]` / `[续聊]` / `[重试]` / `[ERROR]` 为系统行。连续工具折叠成 WorkSummaryBar。`@tanstack/react-virtual` + `measureElement` 动态高度。
+事件流按时序渲染 `TurnSegment`（思考 / 查阅汇总 / 终端 / 写入或更改 / 待办摘要 / 用量芯片 / 助手 markdown / 其它系统行），不再把工具、思考、正文拆成三个乱序数组。启动行 `[PERMISSION]` / `[内置 Agent]` / `[MCP]` 收成带图标的状态提示，不改后端原文。查阅展开后直接出 cyan 路径 + 行号卡片，不再二次折叠。`[用量]` 解析成输入/输出/缓存芯片。工作头显示「已工作 / 工作中 N 秒」。可解析的 `[待办]` 只在流里一行摘要，完整清单叠在会话列右上角 `TodoProcessPanel`（宽卡 / 窄窗胶囊）。已结束回合若本回合有 Write/Edit/ApplyPatch 路径，底部「N 个文件已更改」卡片只列这些路径；点文件或「审查」打开 Git 抽屉，用现有 `DiffView` 预览。会话标题来自 `agent_sessions.title`（侧栏 / 命令面板 / SessionHeader），空则仍显示「会话」或 `Plan`。侧栏每个工作区默认 5 条会话，「显示更多」每次 +10。`@tanstack/react-virtual` + `measureElement` 动态高度。
 
 ## 工作区 / 分支 / 命令面板
 

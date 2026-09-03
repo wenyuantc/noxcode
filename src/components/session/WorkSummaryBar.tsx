@@ -9,22 +9,33 @@ import { ToolCallLine } from "./ToolCallLine";
 export function WorkSummaryBar({
   block,
   tools,
+  working,
+  nowMs,
 }: {
   block: SessionTurnBlock;
   tools: GroupedSessionItem[];
+  working?: boolean;
+  nowMs?: number;
 }) {
   const { t } = useTranslation("sessions");
   const [open, setOpen] = useState(false);
-  if (tools.length === 0) return null;
+  const seconds = workDurationSeconds(block, working ? nowMs : undefined);
+  const label = working ? t("workingFor", { seconds }) : t("workedFor", { seconds });
+
   return (
-    <div className="rounded-lg border bg-muted/30">
+    <div>
       <button
         type="button"
-        className="flex w-full items-center gap-2 px-3 py-2 text-sm"
-        onClick={() => setOpen((value) => !value)}
+        className="flex items-center gap-1 text-sm text-muted-foreground"
+        onClick={() => {
+          if (tools.length === 0) return;
+          setOpen((value) => !value);
+        }}
       >
-        <ChevronDown className={`size-3.5 transition ${open ? "" : "-rotate-90"}`} />
-        {t("workSummary", { seconds: workDurationSeconds(block), count: tools.length })}
+        <span>{label}</span>
+        {tools.length > 0 ? (
+          <ChevronDown className={`size-3.5 transition ${open ? "" : "-rotate-90"}`} />
+        ) : null}
       </button>
       {open ? tools.map((item) => <ToolCallLine key={item.id} item={item} />) : null}
     </div>

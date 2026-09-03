@@ -3,6 +3,7 @@ import { useTranslation } from "react-i18next";
 import { useNavigate } from "react-router-dom";
 
 import { listGitFiles } from "@/lib/backend";
+import { displaySessionTitle } from "@/lib/sessionLines";
 import { shortcutDisplay, GLOBAL_SHORTCUTS } from "@/lib/shortcuts";
 import { Dialog, DialogContent } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
@@ -95,7 +96,13 @@ export function CommandPalette({
     item.label.toLowerCase().includes(query.toLowerCase()),
   );
   const filteredSessions = sessions
-    .filter((item) => item.id.includes(query) || (item.working_dir ?? "").includes(query))
+    .filter((item) => {
+      const title = displaySessionTitle(item.title).toLowerCase();
+      const q = query.toLowerCase();
+      return (
+        item.id.includes(query) || title.includes(q) || (item.working_dir ?? "").includes(query)
+      );
+    })
     .slice(0, 8);
 
   type Row = { id: string; label: string; hint?: string; run: () => void; group: string };
@@ -107,7 +114,7 @@ export function CommandPalette({
     rows.push(
       ...filteredSessions.map((session) => ({
         id: `s-${session.id}`,
-        label: session.id.slice(0, 8),
+        label: displaySessionTitle(session.title) || session.id.slice(0, 8),
         hint: session.started_at,
         group: "sessions",
         run: () => void loadHistory(session.id),

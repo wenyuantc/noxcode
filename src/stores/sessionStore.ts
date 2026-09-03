@@ -14,7 +14,7 @@ import type {
 
 interface SessionState {
   selectedSessionId: string | null;
-  liveByWorkspace: Record<string, AgentSessionStarted>;
+  liveBySession: Record<string, AgentSessionStarted>;
   lines: Record<string, RawSessionLine[]>;
   turnState: Record<string, string>;
   usage: Record<string, NativeContextUsage>;
@@ -35,7 +35,7 @@ interface SessionState {
 
 export const useSessionStore = create<SessionState>((set, get) => ({
   selectedSessionId: null,
-  liveByWorkspace: {},
+  liveBySession: {},
   lines: {},
   turnState: {},
   usage: {},
@@ -61,9 +61,9 @@ export const useSessionStore = create<SessionState>((set, get) => ({
   onStarted: (session) => {
     set({
       selectedSessionId: session.session_record_id,
-      liveByWorkspace: {
-        ...get().liveByWorkspace,
-        [session.workspace_id]: session,
+      liveBySession: {
+        ...get().liveBySession,
+        [session.session_record_id]: session,
       },
       turnState: { ...get().turnState, [session.session_record_id]: "working" },
     });
@@ -106,16 +106,12 @@ export const useSessionStore = create<SessionState>((set, get) => ({
   onUsage: (usage) => set({ usage: { ...get().usage, [usage.session_record_id]: usage } }),
   onTurnState: (sessionId, state) => set({ turnState: { ...get().turnState, [sessionId]: state } }),
   onExit: (exit) => {
-    const liveByWorkspace = { ...get().liveByWorkspace };
-    for (const [workspaceId, live] of Object.entries(liveByWorkspace)) {
-      if (live.session_record_id === exit.session_record_id) {
-        delete liveByWorkspace[workspaceId];
-      }
-    }
+    const liveBySession = { ...get().liveBySession };
+    delete liveBySession[exit.session_record_id];
     const stream = { ...get().stream };
     delete stream[exit.session_record_id];
     set({
-      liveByWorkspace,
+      liveBySession,
       stream,
       turnState: { ...get().turnState, [exit.session_record_id]: "ended" },
     });

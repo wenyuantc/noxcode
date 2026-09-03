@@ -224,6 +224,7 @@ async fn attach_skills_and_hooks(
     )
     .await;
     parts.skills = crate::native::skills::format_skills_prompt(&skills);
+    runner.skills_prompt = parts.skills.clone();
     runner.ctx.skills = skills;
 }
 
@@ -383,6 +384,14 @@ async fn forward_native_events(
                                 limit_tokens: snapshot.limit_tokens,
                                 generation: snapshot.generation,
                                 compactions: snapshot.compactions,
+                                mcp_tokens: snapshot.mcp_tokens,
+                                system_tool_tokens: snapshot.system_tool_tokens,
+                                skill_tokens: snapshot.skill_tokens,
+                                system_prompt_tokens: snapshot.system_prompt_tokens,
+                                other_tokens: snapshot.other_tokens,
+                                message_tokens: snapshot.message_tokens,
+                                prompt_tokens: snapshot.prompt_tokens,
+                                cached_tokens: snapshot.cached_tokens,
                             },
                         );
                     }
@@ -739,6 +748,34 @@ pub(crate) async fn run_native_one_shot(
     run_native_one_shot_with_run(run, prompt, image_paths).await
 }
 
+pub(crate) fn session_title(prompt: &str) -> Option<String> {
+    let trimmed = prompt.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    Some(trimmed.chars().take(30).collect())
+}
+
+async fn resolve_insert_title(
+    pool: &sqlx::SqlitePool,
+    prompt: &str,
+    resume_session_id: Option<&str>,
+) -> Result<Option<String>, String> {
+    if let Some(resume_id) = resume_session_id {
+        let inherited = sqlx::query_scalar::<_, Option<String>>(
+            "SELECT title FROM agent_sessions WHERE id = $1 LIMIT 1",
+        )
+        .bind(resume_id)
+        .fetch_optional(pool)
+        .await
+        .map_err(|error| format!("读取续聊标题失败: {error}"))?;
+        if let Some(title) = inherited {
+            return Ok(title);
+        }
+    }
+    Ok(session_title(prompt))
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn insert_agent_session(
     pool: &sqlx::SqlitePool,
@@ -750,16 +787,18 @@ async fn insert_agent_session(
     target_host_label: Option<&str>,
     kind: &str,
     resume_session_id: Option<&str>,
+    prompt: &str,
 ) -> Result<String, String> {
     let id = new_id();
     let now = now_sqlite();
+    let title = resolve_insert_title(pool, prompt, resume_session_id).await?;
     sqlx::query(
         r#"
         INSERT INTO agent_sessions (
             id, ai_channel_id, workspace_id, working_dir, execution_target,
             ssh_config_id, target_host_label, session_kind, status,
-            started_at, resume_session_id, created_at
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'running', $9, $10, $9)
+            started_at, resume_session_id, created_at, title
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'running', $9, $10, $9, $11)
         "#,
     )
     .bind(&id)
@@ -772,6 +811,7 @@ async fn insert_agent_session(
     .bind(kind)
     .bind(&now)
     .bind(resume_session_id)
+    .bind(title)
     .execute(pool)
     .await
     .map_err(|error| format!("创建会话失败: {error}"))?;
@@ -891,10 +931,15 @@ async fn start_native_with_manager(
     if workspace_id.is_empty() {
         return Err("必须选择工作区".to_string());
     }
+    if let Some(resume_id) = payload
+        .resume_session_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|item| !item.is_empty())
     {
         let manager = manager_state.lock().await;
-        if manager.has_workspace_processes(&workspace_id) {
-            return Err(format!("工作区 {workspace_id} 已有运行中的内置 Agent 会话"));
+        if manager.get_session(resume_id).is_some() {
+            return Err(format!("会话 {resume_id} 已在运行"));
         }
     }
 
@@ -947,6 +992,7 @@ async fn start_native_with_manager(
         execution_context.target_host_label.as_deref(),
         &kind,
         payload.resume_session_id.as_deref(),
+        &payload.prompt,
     )
     .await?;
 
@@ -1913,47 +1959,21 @@ pub async fn restart_native_session(
     state: State<'_, Arc<Mutex<NativeAgentManager>>>,
     payload: StartNativeSessionInput,
 ) -> Result<AgentSessionStarted, String> {
-    let workspace_id = payload.workspace_id.trim().to_string();
-    let running = {
-        let manager = state.lock().await;
-        manager
-            .has_workspace_processes(&workspace_id)
-            .then(|| {
-                manager
-                    .get_workspace_processes(&workspace_id)
-                    .into_iter()
-                    .next()
-            })
-            .flatten()
-    };
-    if let Some(info) = running {
+    let restart_id = payload
+        .resume_session_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|item| !item.is_empty())
+        .map(ToOwned::to_owned);
+    if let Some(session_id) = restart_id {
         let _ = stop_native_process(
             &app,
             state.inner(),
-            &info.session_record_id,
+            &session_id,
             "restart_requested",
             "收到重启请求",
         )
         .await?;
-    } else {
-        let ids: Vec<String> = {
-            let manager = state.lock().await;
-            manager
-                .get_workspace_processes(&workspace_id)
-                .into_iter()
-                .map(|item| item.session_record_id)
-                .collect()
-        };
-        for id in ids {
-            let _ = stop_native_process(
-                &app,
-                state.inner(),
-                &id,
-                "restart_requested",
-                "收到重启请求",
-            )
-            .await?;
-        }
     }
     start_native_with_manager(app, state.inner().clone(), payload).await
 }
@@ -2135,5 +2155,83 @@ mod tests {
             crate::native::model::types::Message::user("c"),
         ];
         assert_eq!(super::user_turn_count(&messages), 2);
+    }
+
+    #[test]
+    fn session_title_truncates_unicode_scalars() {
+        assert_eq!(super::session_title("  hello  ").as_deref(), Some("hello"));
+        assert_eq!(super::session_title("   "), None);
+        let chinese = "一二三四五六七八九十";
+        let thirty = format!("{chinese}{chinese}{chinese}");
+        let over = format!("{thirty}超出");
+        assert_eq!(thirty.chars().count(), 30);
+        assert!(over.len() > 30);
+        assert_eq!(
+            super::session_title(&over).as_deref(),
+            Some(thirty.as_str())
+        );
+    }
+
+    #[tokio::test]
+    async fn insert_resume_inherits_source_title() {
+        let pool = crate::db::test_support::setup_migrated_pool().await;
+        sqlx::query(
+            "INSERT INTO workspaces (id, name, workspace_type) VALUES ('ws-t', 'ws', 'local')",
+        )
+        .execute(&pool)
+        .await
+        .expect("ws");
+        sqlx::query(
+            "INSERT INTO ai_channels (id, name, protocol, base_url) VALUES ('ch-t', 'ch', 'openai', 'http://x')",
+        )
+        .execute(&pool)
+        .await
+        .expect("ch");
+        let prompt = "一二三四五六七八九十一二三四五六七八九十一二三四五六七八九十超出";
+        let source = super::insert_agent_session(
+            &pool,
+            "ch-t",
+            "ws-t",
+            "/tmp",
+            "local",
+            None,
+            None,
+            "execution",
+            None,
+            prompt,
+        )
+        .await
+        .expect("source");
+        let source_title: Option<String> =
+            sqlx::query_scalar("SELECT title FROM agent_sessions WHERE id = $1")
+                .bind(&source)
+                .fetch_one(&pool)
+                .await
+                .expect("source title");
+        let resumed = super::insert_agent_session(
+            &pool,
+            "ch-t",
+            "ws-t",
+            "/tmp",
+            "local",
+            None,
+            None,
+            "execution",
+            Some(&source),
+            "继续",
+        )
+        .await
+        .expect("resume");
+        let resume_title: Option<String> =
+            sqlx::query_scalar("SELECT title FROM agent_sessions WHERE id = $1")
+                .bind(&resumed)
+                .fetch_one(&pool)
+                .await
+                .expect("resume title");
+        assert_eq!(
+            source_title.as_deref(),
+            Some("一二三四五六七八九十一二三四五六七八九十一二三四五六七八九十")
+        );
+        assert_eq!(resume_title, source_title);
     }
 }

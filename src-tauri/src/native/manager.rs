@@ -274,8 +274,12 @@ mod tests {
         assert!(manager.has_workspace_processes("ws-1"));
         assert!(!manager.has_workspace_processes("ws-other"));
         assert_eq!(manager.len(), 1);
+        manager.add_session(live_session("sess-2"));
+        assert_eq!(manager.get_workspace_processes("ws-1").len(), 2);
+        assert_eq!(manager.len(), 2);
         manager.cancel_all();
         manager.remove_session("sess-1");
+        manager.remove_session("sess-2");
         assert_eq!(manager.len(), 0);
     }
 

@@ -276,6 +276,34 @@ pub fn get_all_migrations() -> Vec<Migration> {
             "#,
             kind: tauri_plugin_sql::MigrationKind::Up,
         },
+        Migration {
+            version: 3,
+            description: "agent_sessions.title from first user prompt",
+            sql: r#"
+                ALTER TABLE agent_sessions ADD COLUMN title TEXT;
+
+                UPDATE agent_sessions
+                SET title = (
+                    SELECT TRIM(
+                        CASE
+                            WHEN e.message LIKE '[USER_INPUT]%' THEN substr(e.message, 13)
+                            WHEN e.message LIKE '[用户输入]%' THEN substr(e.message, 7)
+                            ELSE e.message
+                        END
+                    )
+                    FROM agent_session_events e
+                    WHERE e.session_id = agent_sessions.id
+                      AND (
+                          e.message LIKE '[USER_INPUT]%'
+                          OR e.message LIKE '[用户输入]%'
+                      )
+                    ORDER BY e.created_at ASC
+                    LIMIT 1
+                )
+                WHERE title IS NULL;
+            "#,
+            kind: tauri_plugin_sql::MigrationKind::Up,
+        },
     ]
 }
 
@@ -321,13 +349,30 @@ mod tests {
         for (index, migration) in get_all_migrations().iter().enumerate() {
             assert_eq!(migration.version, index as i64 + 1);
         }
-        assert_eq!(latest_migration_version(), 2);
+        assert_eq!(latest_migration_version(), 3);
         assert_eq!(
             get_all_migrations()
                 .last()
                 .map(|migration| migration.version),
             Some(latest_migration_version())
         );
+    }
+
+    #[test]
+    fn agent_sessions_has_title_column() {
+        tauri::async_runtime::block_on(async {
+            let pool = setup_test_pool().await;
+            let columns: Vec<String> = sqlx::query(
+                "SELECT name FROM pragma_table_info('agent_sessions') WHERE name = 'title'",
+            )
+            .fetch_all(&pool)
+            .await
+            .expect("read title column")
+            .into_iter()
+            .map(|row| row.get::<String, _>("name"))
+            .collect();
+            assert_eq!(columns, vec!["title"]);
+        });
     }
 
     #[test]

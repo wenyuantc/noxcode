@@ -45,6 +45,21 @@ export function formatTokenCount(value: number): string {
   return new Intl.NumberFormat("en-US").format(Math.max(0, Math.round(value)));
 }
 
+function compactNumber(value: number, unit: string): string {
+  const text = value >= 100 ? Math.round(value).toString() : value.toFixed(1).replace(/\.0$/, "");
+  return `${text}${unit}`;
+}
+
+export function formatCompactTokens(value: number, locale = getCurrentAppLocale()): string {
+  const count = Math.max(0, Math.round(value));
+  if (locale.startsWith("zh")) {
+    return count >= 10_000 ? compactNumber(count / 10_000, "万") : String(count);
+  }
+  if (count >= 1_000_000) return compactNumber(count / 1_000_000, "M");
+  if (count >= 1_000) return compactNumber(count / 1_000, "K");
+  return String(count);
+}
+
 export function greetingPeriod(now = new Date()): "morning" | "afternoon" | "evening" {
   const hour = now.getHours();
   if (hour < 12) return "morning";

@@ -34,8 +34,9 @@ use super::subagent::{
     format_subagent_result, parse_subagent_args_with, SubagentKind, SubagentSpec,
 };
 use super::truncate::{
-    chars_to_tokens, message_tokens, total_message_tokens, total_tool_tokens,
-    truncate_messages_tokens, truncate_tool_result, DEFAULT_TOOL_RESULT_TOKEN_LIMIT,
+    chars_to_tokens, context_usage_breakdown, message_tokens, total_message_tokens,
+    total_tool_tokens, truncate_messages_tokens, truncate_tool_result,
+    DEFAULT_TOOL_RESULT_TOKEN_LIMIT,
 };
 const DEFAULT_CONTEXT_CHARS: usize = 120_000;
 /// A finite default prevents a runaway rollout when older settings files do
@@ -129,6 +130,8 @@ pub struct AgentRunner {
     pub project_agents: String,
     pub required_subagent_type: Option<String>,
     extra_tools: Vec<ToolSpec>,
+    pub skills_prompt: String,
+    last_usage: Option<Usage>,
     allowed_tools: Option<HashSet<String>>,
     plan_mode: bool,
     turns: u32,
@@ -160,6 +163,14 @@ pub struct ContextUsageSnapshot {
     pub limit_tokens: usize,
     pub generation: u32,
     pub compactions: u32,
+    pub mcp_tokens: usize,
+    pub system_tool_tokens: usize,
+    pub skill_tokens: usize,
+    pub system_prompt_tokens: usize,
+    pub other_tokens: usize,
+    pub message_tokens: usize,
+    pub prompt_tokens: usize,
+    pub cached_tokens: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -219,6 +230,8 @@ impl AgentRunner {
             project_agents: String::new(),
             required_subagent_type: None,
             extra_tools: Vec::new(),
+            skills_prompt: String::new(),
+            last_usage: None,
             allowed_tools: None,
             plan_mode: false,
             turns: 0,
@@ -441,7 +454,7 @@ impl AgentRunner {
         }
     }
 
-    fn emit_usage(&self, usage: crate::native::model::types::Usage) {
+    fn emit_usage(&mut self, usage: crate::native::model::types::Usage) {
         let Some(delta) = usage_to_delta(usage) else {
             return;
         };
@@ -451,6 +464,8 @@ impl AgentRunner {
         if let Some(tx) = &self.on_usage {
             let _ = tx.send(delta);
         }
+        self.last_usage = Some(usage);
+        self.emit_context_usage();
     }
 
     fn settle_model_usage(&mut self, usage: Usage, assistant: Option<&Message>) {
@@ -809,12 +824,29 @@ impl AgentRunner {
     }
 
     fn emit_context_usage(&self) {
+        if self.depth != 0 {
+            return;
+        }
         if let Some(tx) = &self.on_event {
+            let breakdown =
+                context_usage_breakdown(&self.messages, &self.combined_tools(), &self.skills_prompt);
+            let (prompt_tokens, cached_tokens) = self
+                .last_usage
+                .map(|usage| (usage.prompt_tokens as usize, usage.cached_tokens as usize))
+                .unwrap_or((0, 0));
             let _ = tx.send(NativeEvent::ContextUsage(ContextUsageSnapshot {
-                used_tokens: total_message_tokens(&self.messages),
+                used_tokens: breakdown.used_tokens,
                 limit_tokens: self.context_window.token_limit,
                 generation: self.context_window.generation,
                 compactions: self.context_window.compactions,
+                mcp_tokens: breakdown.mcp_tokens,
+                system_tool_tokens: breakdown.system_tool_tokens,
+                skill_tokens: breakdown.skill_tokens,
+                system_prompt_tokens: breakdown.system_prompt_tokens,
+                other_tokens: breakdown.other_tokens,
+                message_tokens: breakdown.message_tokens,
+                prompt_tokens,
+                cached_tokens,
             }));
         }
     }
@@ -1010,9 +1042,8 @@ impl AgentRunner {
         }
         // The persisted lines below supersede whatever streamed live.
         self.emit_delta_clear();
-        if !assistant.reasoning_content.is_empty() {
-            let chars = assistant.reasoning_content.chars().count();
-            self.emit(format!("[思考] 已生成 {chars} 字"));
+        if let Some(line) = thinking_start_line(&assistant.reasoning_content) {
+            self.emit(line);
         }
         let text = assistant.content.clone();
         let tool_calls = assistant.tool_calls.clone();
@@ -1047,9 +1078,8 @@ impl AgentRunner {
         if last_turn {
             assistant.tool_calls.clear();
         }
-        if !assistant.reasoning_content.is_empty() {
-            let chars = assistant.reasoning_content.chars().count();
-            self.emit(format!("[思考] 已生成 {chars} 字"));
+        if let Some(line) = thinking_start_line(&assistant.reasoning_content) {
+            self.emit(line);
         }
         let text = assistant.content.clone();
         let tool_calls = assistant.tool_calls.clone();
@@ -1162,6 +1192,7 @@ impl AgentRunner {
         child.ctx.permission_timeout = self.ctx.permission_timeout;
         child.ctx.skills = self.ctx.skills.clone();
         child.ctx.hooks = self.ctx.hooks.clone();
+        child.skills_prompt = self.skills_prompt.clone();
         child.depth = self.depth.saturating_add(1);
         child.event_prefix = format!(
             "{} ",
@@ -1428,6 +1459,14 @@ fn append_last_turn_reminder(messages: &mut Vec<Message>) {
         }
     }
     messages.push(Message::user(LAST_TURN_REMINDER.to_string()));
+}
+
+fn thinking_start_line(content: &str) -> Option<String> {
+    let trimmed = content.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    Some(format!("[思考]\n{trimmed}"))
 }
 
 fn tool_start_line(name: &str, arguments: &str) -> String {
@@ -1842,6 +1881,15 @@ mod tests {
         let text = runner.run_scripted("go", vec![dummy]).await.expect("run");
         assert_eq!(text, "hello");
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn thinking_start_line_keeps_full_content() {
+        assert_eq!(thinking_start_line("   "), None);
+        assert_eq!(
+            thinking_start_line("先看入口再改 Composer"),
+            Some("[思考]\n先看入口再改 Composer".to_string())
+        );
     }
 
     #[test]
