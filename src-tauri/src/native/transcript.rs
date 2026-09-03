@@ -206,6 +206,88 @@ mod tests {
             .is_none());
     }
 
+    #[tokio::test]
+    async fn save_in_progress_user_turn_round_trip() {
+        let pool = setup_migrated_pool().await;
+        let messages = vec![Message::system("sys"), Message::user("分析项目")];
+        save_transcript(&pool, "sess-mid", &messages, &meta())
+            .await
+            .expect("save");
+        let loaded = load_transcript(&pool, "sess-mid")
+            .await
+            .expect("load")
+            .expect("present");
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].role, Role::User);
+        assert_eq!(loaded[0].content, "分析项目");
+    }
+
+    #[tokio::test]
+    async fn save_completed_tool_round_round_trip() {
+        let pool = setup_migrated_pool().await;
+        let messages = vec![
+            Message::user("分析项目"),
+            Message {
+                role: Role::Assistant,
+                content: String::new(),
+                tool_calls: vec![ToolCall {
+                    id: "call_1".to_string(),
+                    name: "Read".to_string(),
+                    arguments: r#"{"file_path":"README.md"}"#.to_string(),
+                }],
+                tool_call_id: String::new(),
+                name: String::new(),
+                reasoning_content: String::new(),
+                images: Vec::new(),
+            },
+            Message::tool_result("call_1", "readme contents"),
+        ];
+        save_transcript(&pool, "sess-tools", &messages, &meta())
+            .await
+            .expect("save");
+        let loaded = load_transcript(&pool, "sess-tools")
+            .await
+            .expect("load")
+            .expect("present");
+        assert_eq!(loaded.len(), 3);
+        assert_eq!(loaded[0].content, "分析项目");
+        assert_eq!(loaded[1].tool_calls[0].id, "call_1");
+        assert_eq!(loaded[2].content, "readme contents");
+    }
+
+    #[tokio::test]
+    async fn in_progress_orphan_tool_call_is_stripped_but_user_kept() {
+        let pool = setup_migrated_pool().await;
+        let messages = vec![
+            Message::user("分析项目"),
+            Message {
+                role: Role::Assistant,
+                content: String::new(),
+                tool_calls: vec![ToolCall {
+                    id: "call_open".to_string(),
+                    name: "Bash".to_string(),
+                    arguments: r#"{"command":"go test"}"#.to_string(),
+                }],
+                tool_call_id: String::new(),
+                name: String::new(),
+                reasoning_content: String::new(),
+                images: Vec::new(),
+            },
+        ];
+        save_transcript(&pool, "sess-orphan", &messages, &meta())
+            .await
+            .expect("save");
+        let loaded = load_transcript(&pool, "sess-orphan")
+            .await
+            .expect("load")
+            .expect("present");
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].content, "分析项目");
+        assert!(!loaded
+            .iter()
+            .any(|message| !message.tool_calls.is_empty() || message.role == Role::Tool));
+    }
+
     #[test]
     fn fingerprint_changes_only_when_messages_change() {
         let messages = vec![Message::user("fix login"), Message::assistant_text("done")];

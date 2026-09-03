@@ -156,7 +156,7 @@ pub fn run() {
             tauri::RunEvent::Exit => {
                 if let Some(manager) = app.try_state::<Arc<Mutex<NativeAgentManager>>>() {
                     tauri::async_runtime::block_on(async {
-                        manager.lock().await.cancel_all();
+                        crate::native::manager::shutdown_all_sessions(&manager).await;
                     });
                 }
                 if let Some(pool) = app.try_state::<SshPool>() {

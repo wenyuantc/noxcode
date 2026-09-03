@@ -245,6 +245,25 @@ impl NativeAgentManager {
             session.cancel.cancel();
         }
     }
+
+    pub fn take_all(&mut self) -> Vec<NativeLiveSession> {
+        let ids: Vec<String> = self.sessions.keys().cloned().collect();
+        for id in &ids {
+            self.deny_pending_permission(id);
+        }
+        ids.into_iter()
+            .filter_map(|id| self.remove_session(&id))
+            .collect()
+    }
+}
+
+pub async fn shutdown_all_sessions(manager: &tokio::sync::Mutex<NativeAgentManager>) {
+    let sessions = manager.lock().await.take_all();
+    for session in sessions {
+        session.cancel.cancel();
+        let _ = session.followup_tx.send(NativeFollowup::Finish).await;
+        let _ = session.join.await;
+    }
 }
 
 #[cfg(test)]
@@ -385,6 +404,47 @@ mod tests {
             NativePermissionDecision::Deny
         );
         assert!(second_rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn shutdown_all_sessions_sends_finish_and_awaits_join() {
+        let mut manager = NativeAgentManager::new();
+        let (tx, mut rx) = mpsc::channel(1);
+        let finished = Arc::new(AtomicBool::new(false));
+        let flag = finished.clone();
+        let join = tokio::spawn(async move {
+            match rx.recv().await {
+                Some(NativeFollowup::Finish) => {}
+                Some(NativeFollowup::Input(_)) => panic!("unexpected input"),
+                None => panic!("channel closed"),
+            }
+            flag.store(true, std::sync::atomic::Ordering::SeqCst);
+        });
+        manager.add_session(NativeLiveSession {
+            info: NativeSessionInfo {
+                profile_id: String::new(),
+                channel_id: "ch-1".to_string(),
+                workspace_id: Some("ws-1".to_string()),
+                session_kind: "execution".to_string(),
+                session_record_id: "sess-shutdown".to_string(),
+            },
+            cancel: CancelFlag::new(),
+            followup_tx: tx,
+            join,
+            allow_all_high_risk: Arc::new(AtomicBool::new(false)),
+            pending_permission: VecDeque::new(),
+            pending_question: VecDeque::new(),
+        });
+        let (pending, pending_rx) = pending("r1", "Write");
+        let _ = manager.enqueue_permission("sess-shutdown", pending);
+        let manager = tokio::sync::Mutex::new(manager);
+        shutdown_all_sessions(&manager).await;
+        assert!(finished.load(std::sync::atomic::Ordering::SeqCst));
+        assert_eq!(manager.lock().await.len(), 0);
+        assert_eq!(
+            pending_rx.await.expect("denied"),
+            NativePermissionDecision::Deny
+        );
     }
 
     #[tokio::test]

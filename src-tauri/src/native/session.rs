@@ -21,7 +21,7 @@ use crate::engine::UsageDelta;
 use crate::git::create_checkpoint;
 use crate::native::agent::compact::{BudgetSnapshot, ContextWindow};
 use crate::native::agent::r#loop::AgentDiagnosticsSnapshot;
-use crate::native::agent::r#loop::{AgentRunner, NativeEvent};
+use crate::native::agent::r#loop::{AgentRunner, NativeEvent, TranscriptCheckpoint};
 use crate::native::api_logs::sqlite_call_log_sink;
 use crate::native::channels::{fetch_channel_record, require_channel_api_key};
 use crate::native::manager::{
@@ -123,6 +123,61 @@ async fn persist_native_transcript(
         Ok(()) => *last_fingerprint = Some(fingerprint),
         Err(error) => eprintln!("[native] 保存会话上下文失败: {error}"),
     }
+}
+
+async fn persist_runner_transcript(
+    app: &AppHandle,
+    session_record_id: &str,
+    profile_id: &str,
+    workspace_id: &str,
+    model: &str,
+    messages: &[crate::native::model::types::Message],
+    last_fingerprint: &Mutex<Option<u64>>,
+) {
+    let mut last = last_fingerprint.lock().await;
+    persist_native_transcript(
+        app,
+        session_record_id,
+        profile_id,
+        Some(workspace_id),
+        model,
+        user_turn_count(messages),
+        messages,
+        &mut last,
+    )
+    .await;
+}
+
+fn attach_transcript_checkpoint(
+    runner: &mut AgentRunner,
+    app: AppHandle,
+    session_record_id: String,
+    profile_id: String,
+    workspace_id: String,
+    model: String,
+    last_fingerprint: Arc<Mutex<Option<u64>>>,
+) {
+    let hook: TranscriptCheckpoint = Arc::new(move |messages| {
+        let app = app.clone();
+        let session_record_id = session_record_id.clone();
+        let profile_id = profile_id.clone();
+        let workspace_id = workspace_id.clone();
+        let model = model.clone();
+        let last_fingerprint = last_fingerprint.clone();
+        Box::pin(async move {
+            persist_runner_transcript(
+                &app,
+                &session_record_id,
+                &profile_id,
+                &workspace_id,
+                &model,
+                &messages,
+                last_fingerprint.as_ref(),
+            )
+            .await;
+        })
+    });
+    runner.on_checkpoint = Some(hook);
 }
 
 fn user_turn_count(messages: &[crate::native::model::types::Message]) -> u32 {
@@ -1536,6 +1591,16 @@ async fn run_native_loop(
             }
         }
     }
+    let last_transcript_fingerprint = Arc::new(Mutex::new(None));
+    attach_transcript_checkpoint(
+        &mut runner,
+        app.clone(),
+        session_record_id.clone(),
+        profile_id.clone(),
+        workspace_id.clone(),
+        run.model.clone(),
+        last_transcript_fingerprint.clone(),
+    );
     let (event_tx, event_rx) = mpsc::unbounded_channel();
     runner.on_event = Some(event_tx);
     let (usage_tx, mut usage_rx) = mpsc::unbounded_channel();
@@ -1693,7 +1758,6 @@ async fn run_native_loop(
     let mut next = Some(first_prompt);
     let mut last_error: Option<String> = None;
     let mut plan_pending = plan_mode;
-    let mut last_transcript_fingerprint: Option<u64> = None;
     let await_followups = true;
     while let Some(prompt) = next.take() {
         emit_turn_state(&app, &session_record_id, "working");
@@ -1741,15 +1805,14 @@ async fn run_native_loop(
                 break;
             }
         };
-        persist_native_transcript(
+        persist_runner_transcript(
             &app,
             &session_record_id,
             &profile_id,
-            Some(&workspace_id),
+            &workspace_id,
             &run.model,
-            user_turn_count(&runner.messages),
             &runner.messages,
-            &mut last_transcript_fingerprint,
+            last_transcript_fingerprint.as_ref(),
         )
         .await;
         match next_loop_step(
@@ -1825,15 +1888,14 @@ async fn run_native_loop(
         }
     }
 
-    persist_native_transcript(
+    persist_runner_transcript(
         &app,
         &session_record_id,
         &profile_id,
-        Some(&workspace_id),
+        &workspace_id,
         &run.model,
-        user_turn_count(&runner.messages),
         &runner.messages,
-        &mut last_transcript_fingerprint,
+        last_transcript_fingerprint.as_ref(),
     )
     .await;
 
@@ -2111,9 +2173,8 @@ pub async fn resume_native_session(
 mod tests {
     use super::{
         format_native_diagnostics, is_cancelled_run_error, is_mcp_error_status,
-        native_startup_banner, next_loop_step,
-        should_announce_session_startup, usable_native_plan_text, NativeLoopAction,
-        NativeLoopEvent,
+        native_startup_banner, next_loop_step, should_announce_session_startup,
+        usable_native_plan_text, NativeLoopAction, NativeLoopEvent,
     };
     use crate::native::agent::compact::{BudgetSnapshot, ContextWindow};
     use crate::native::agent::r#loop::AgentDiagnosticsSnapshot;

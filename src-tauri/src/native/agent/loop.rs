@@ -78,6 +78,8 @@ pub(crate) type ChildModelLoader = Arc<
         + Send
         + Sync,
 >;
+pub(crate) type TranscriptCheckpoint =
+    Arc<dyn Fn(Vec<Message>) -> Pin<Box<dyn Future<Output = ()> + Send>> + Send + Sync>;
 
 #[derive(Debug, Default)]
 pub struct AgentDiagnostics {
@@ -123,6 +125,7 @@ pub struct AgentRunner {
     pub on_event: Option<mpsc::UnboundedSender<NativeEvent>>,
     pub on_usage: Option<mpsc::UnboundedSender<UsageDelta>>,
     pub on_activity: Option<mpsc::UnboundedSender<(String, String)>>,
+    pub on_checkpoint: Option<TranscriptCheckpoint>,
     pub subagent_stub: Option<SubagentStub>,
     pub custom_subagents: Vec<NativeSubagent>,
     pub reload_custom_subagents: Option<CustomSubagentReloader>,
@@ -225,6 +228,7 @@ impl AgentRunner {
             on_event: None,
             on_usage: None,
             on_activity: None,
+            on_checkpoint: None,
             subagent_stub: None,
             custom_subagents: Vec::new(),
             reload_custom_subagents: None,
@@ -278,24 +282,37 @@ impl AgentRunner {
         std::mem::take(&mut self.pending_steer_finish)
     }
 
-    fn inject_steer_messages(&mut self) {
+    fn inject_steer_messages(&mut self) -> bool {
         let Some(rx) = self.steer_rx.clone() else {
-            return;
+            return false;
         };
         let Ok(mut guard) = rx.try_lock() else {
-            return;
+            return false;
         };
+        let mut injected = false;
         while let Ok(item) = guard.try_recv() {
             match item {
                 NativeFollowup::Input(text) => {
                     self.emit(format!("[USER_INPUT] {text}"));
                     self.messages.push(Message::user(text));
+                    injected = true;
                 }
                 NativeFollowup::Finish => {
                     self.pending_steer_finish = true;
                 }
             }
         }
+        injected
+    }
+
+    async fn checkpoint_transcript(&self) {
+        if self.depth > 0 {
+            return;
+        }
+        let Some(hook) = &self.on_checkpoint else {
+            return;
+        };
+        hook(self.messages.clone()).await;
     }
 
     pub fn set_rollout_budget(&mut self, budget: Arc<RolloutBudget>) {
@@ -575,10 +592,13 @@ impl AgentRunner {
             thinking_enabled,
         });
         self.begin_user_turn(user, images)?;
+        self.checkpoint_transcript().await;
         let client = self.observe_client(client);
         self.streaming = true;
         loop {
-            self.inject_steer_messages();
+            if self.inject_steer_messages() {
+                self.checkpoint_transcript().await;
+            }
             let mut last_turn = self.prepare_model_call(Some(&client)).await?;
             if self.pending_steer_finish {
                 last_turn = true;
@@ -659,6 +679,7 @@ impl AgentRunner {
             thinking_enabled,
         });
         self.begin_user_turn(user, Vec::new())?;
+        self.checkpoint_transcript().await;
         let client = self.observe_child_client(parent, client, spec);
         loop {
             let mut last_turn = self.prepare_model_call(Some(&client)).await?;
@@ -718,6 +739,7 @@ impl AgentRunner {
         replies: Vec<Message>,
     ) -> Result<String, String> {
         self.begin_user_turn(user, Vec::new())?;
+        self.checkpoint_transcript().await;
         let mut queue = VecDeque::from(replies);
         loop {
             let mut last_turn = self.prepare_model_call(None).await?;
@@ -1093,9 +1115,11 @@ impl AgentRunner {
             } else {
                 text
             };
+            self.checkpoint_transcript().await;
             return Ok(TurnControl::Stop(text));
         }
         self.execute_tool_calls(tool_calls, client).await?;
+        self.checkpoint_transcript().await;
         Ok(TurnControl::Continue)
     }
 
@@ -1702,6 +1726,121 @@ mod tests {
             }
         }
         lines
+    }
+
+    fn capture_checkpoints(runner: &mut AgentRunner) -> Arc<tokio::sync::Mutex<Vec<Vec<Message>>>> {
+        let snapshots = Arc::new(tokio::sync::Mutex::new(Vec::<Vec<Message>>::new()));
+        let captured = snapshots.clone();
+        runner.on_checkpoint = Some(Arc::new(move |messages| {
+            let captured = captured.clone();
+            Box::pin(async move {
+                captured.lock().await.push(messages);
+            })
+        }));
+        snapshots
+    }
+
+    #[tokio::test]
+    async fn checkpoints_user_message_before_model_and_after_tool_round() {
+        let (mut runner, root) = temp_runner();
+        let snapshots = capture_checkpoints(&mut runner);
+        let text = runner
+            .run_scripted(
+                "分析项目",
+                vec![
+                    assistant_tool_call("c1", "Read", r#"{"file_path":"hello.txt"}"#),
+                    Message::assistant_text("done"),
+                ],
+            )
+            .await
+            .expect("run");
+        assert_eq!(text, "done");
+        let snaps = snapshots.lock().await;
+        assert!(
+            snaps.len() >= 3,
+            "expected user, tool-round, and final checkpoints: {}",
+            snaps.len()
+        );
+        assert_eq!(
+            snaps[0]
+                .iter()
+                .map(|message| (message.role, message.content.as_str()))
+                .collect::<Vec<_>>(),
+            vec![(Role::User, "分析项目")]
+        );
+        assert!(!snaps[0]
+            .iter()
+            .any(|message| message.role == Role::Assistant));
+        let after_tools = snaps
+            .iter()
+            .find(|snapshot| snapshot.iter().any(|message| message.role == Role::Tool))
+            .expect("tool-round checkpoint");
+        assert!(after_tools
+            .iter()
+            .any(|message| { message.role == Role::Assistant && !message.tool_calls.is_empty() }));
+        assert!(after_tools
+            .iter()
+            .any(|message| message.role == Role::Tool && message.content.contains("hello world")));
+        let last = snaps.last().expect("final checkpoint");
+        assert!(last
+            .iter()
+            .any(|message| message.role == Role::Assistant && message.content == "done"));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn checkpoints_injected_steer_before_next_model_call() {
+        let (mut runner, root) = temp_runner();
+        runner.set_rollout_budget_limit(1);
+        let (steer_tx, steer_rx) = mpsc::channel(1);
+        runner.steer_rx = Some(Arc::new(Mutex::new(steer_rx)));
+        steer_tx
+            .send(NativeFollowup::Input("补充约束".to_string()))
+            .await
+            .expect("steer");
+        let snapshots = capture_checkpoints(&mut runner);
+        let client = ModelClient::new(crate::native::model::client::ModelClientConfig {
+            protocol: crate::native::protocol::PROTOCOL_OPENAI.to_string(),
+            base_url: "http://127.0.0.1:1".to_string(),
+            api_key: "test".to_string(),
+            extra_headers: std::collections::HashMap::new(),
+            retry: crate::native::model::RetryConfig::none(),
+            timeout: Duration::from_millis(50),
+            network: crate::app::network_settings::NetworkSettings::default(),
+        })
+        .expect("client");
+        let text = runner
+            .run_with_client(&client, "go", "test-model", None, None, false, Vec::new())
+            .await
+            .expect("budget stop");
+        assert_eq!(text, LAST_TURN_FALLBACK);
+        let snaps = snapshots.lock().await;
+        assert!(
+            snaps.iter().any(|snapshot| snapshot
+                .iter()
+                .any(|message| { message.role == Role::User && message.content == "go" })),
+            "missing first user checkpoint: {snaps:?}"
+        );
+        let with_steer = snaps
+            .iter()
+            .find(|snapshot| {
+                snapshot
+                    .iter()
+                    .any(|message| message.role == Role::User && message.content == "补充约束")
+            })
+            .expect("steer checkpoint");
+        assert_eq!(
+            with_steer
+                .iter()
+                .filter(|message| message.role == Role::User)
+                .map(|message| message.content.as_str())
+                .collect::<Vec<_>>(),
+            vec!["go", "补充约束"]
+        );
+        assert!(!with_steer
+            .iter()
+            .any(|message| message.role == Role::Assistant));
+        let _ = fs::remove_dir_all(root);
     }
 
     #[tokio::test]
