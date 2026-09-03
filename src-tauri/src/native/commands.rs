@@ -261,7 +261,7 @@ fn command_name_for(root: &Path, file: &Path) -> Option<String> {
     normalize_command_name(&joined)
 }
 
-fn walk_markdown(root: &Path, current: &Path, depth: usize, out: &mut Vec<PathBuf>) {
+fn walk_markdown(current: &Path, depth: usize, out: &mut Vec<PathBuf>) {
     if depth > 2 || out.len() >= MAX_COMMANDS {
         return;
     }
@@ -279,7 +279,7 @@ fn walk_markdown(root: &Path, current: &Path, depth: usize, out: &mut Vec<PathBu
             {
                 continue;
             }
-            walk_markdown(root, &path, depth + 1, out);
+            walk_markdown(&path, depth + 1, out);
         } else if path.extension().and_then(|ext| ext.to_str()) == Some("md") {
             out.push(path);
             if out.len() >= MAX_COMMANDS {
@@ -296,7 +296,7 @@ pub fn collect_command_dir(
     out: &mut Vec<NativeSlashCommand>,
 ) {
     let mut files = Vec::new();
-    walk_markdown(dir, dir, 0, &mut files);
+    walk_markdown(dir, 0, &mut files);
     for file in files {
         let Some(name) = command_name_for(dir, &file) else {
             continue;
