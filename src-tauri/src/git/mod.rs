@@ -19,8 +19,12 @@ use crate::app::shared::sqlite_pool;
 use crate::app::ssh::configs::fetch_ssh_config_record_by_id;
 use crate::app::ssh::{resolve_connect_params, SshPool};
 use crate::engine::context::resolve_workspace_execution_context_with_pool;
+use crate::native::settings::load_native_settings;
 
-use self::checkpoint::{list_checkpoints, preview_restore, restore_checkpoint, sweep_orphan_refs};
+use self::checkpoint::{
+    list_checkpoints, preview_restore, prune_expired_checkpoints, restore_checkpoint,
+    sweep_orphan_refs,
+};
 use self::commit::{
     checkout_branch, commit_changes, create_branch, list_branches, push_branch, GitBranch,
     GitCommitResult, GitPushResult,
@@ -74,6 +78,21 @@ pub(crate) async fn get_git_repo_info<R: Runtime>(
     let pool = sqlite_pool(&app).await?;
     if let Err(error) = sweep_orphan_refs(&pool, &target).await {
         eprintln!("[git] 清扫孤儿 checkpoint ref 失败: {error}");
+    }
+    match load_native_settings(&app) {
+        Ok(settings) => {
+            if let Err(error) = prune_expired_checkpoints(
+                &pool,
+                &target,
+                &workspace_id,
+                settings.checkpoint_retention_days,
+            )
+            .await
+            {
+                eprintln!("[git] 清理过期 checkpoint 失败: {error}");
+            }
+        }
+        Err(error) => eprintln!("[git] 读取 checkpoint 保留期失败: {error}"),
     }
     load_repo_info(&target, &workspace_id)
         .await

@@ -10,7 +10,7 @@ use crate::db::test_support::setup_migrated_pool;
 
 use super::checkpoint::{
     create_checkpoint, delete_checkpoints_for_session, list_checkpoints, preview_restore,
-    restore_checkpoint,
+    prune_expired_checkpoints, restore_checkpoint,
 };
 use super::commit::{checkout_branch, commit_changes, create_branch, list_branches, push_branch};
 use super::diff::{get_file_diff, get_numstat, GitFileDiffScope, GitNumstatScope};
@@ -454,6 +454,70 @@ async fn checkpoint_restore_three_classes_and_visibility() {
         .await
         .expect("restore pre");
         assert!(!again.restored.is_empty() || dir.join("keep.txt").exists());
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn prune_removes_only_expired_after_tool_call_checkpoints() {
+    run_on_targets(|target, _dir| async move {
+        let (pool, workspace_id, session_id) = seed_session().await;
+        let expired = create_checkpoint(
+            &pool,
+            &target,
+            &workspace_id,
+            &session_id,
+            Some("工具后"),
+            Some("after_tool_call"),
+        )
+        .await
+        .expect("after tool checkpoint");
+        let manual = create_checkpoint(
+            &pool,
+            &target,
+            &workspace_id,
+            &session_id,
+            Some("手动"),
+            Some("manual"),
+        )
+        .await
+        .expect("manual checkpoint");
+
+        sqlx::query(
+            "UPDATE agent_sessions SET status = 'exited', ended_at = datetime('now', '-10 days') WHERE id = $1",
+        )
+        .bind(&session_id)
+        .execute(&pool)
+        .await
+        .expect("end session");
+
+        assert!(
+            prune_expired_checkpoints(&pool, &target, &workspace_id, 0)
+                .await
+                .expect("retention disabled")
+                .is_empty()
+        );
+
+        let deleted = prune_expired_checkpoints(&pool, &target, &workspace_id, 7)
+            .await
+            .expect("prune");
+        assert_eq!(deleted, vec![expired.ref_name.clone()]);
+
+        let listed = list_checkpoints(&pool, &target, &workspace_id, &session_id)
+            .await
+            .expect("list");
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].id, manual.id);
+        assert!(listed[0].ref_valid);
+
+        let expired_ref = git(
+            &target,
+            &["rev-parse", "--verify", &expired.ref_name],
+            &IndexMode::ReadOnly,
+        )
+        .await
+        .expect("verify expired ref");
+        assert!(!expired_ref.success());
     })
     .await;
 }

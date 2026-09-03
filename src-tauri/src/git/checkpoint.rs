@@ -674,6 +674,60 @@ pub(crate) async fn clear_workspace_checkpoints(
     Ok(result.rows_affected())
 }
 
+pub(crate) async fn prune_expired_checkpoints(
+    pool: &SqlitePool,
+    target: &GitTarget,
+    workspace_id: &str,
+    retention_days: i32,
+) -> Result<Vec<String>, GitError> {
+    if retention_days <= 0 {
+        return Ok(Vec::new());
+    }
+
+    let modifier = format!("-{retention_days} days");
+    let rows = sqlx::query_as::<_, GitCheckpoint>(
+        r#"
+        SELECT c.*
+        FROM git_checkpoints c
+        JOIN agent_sessions s ON s.id = c.session_id
+        WHERE c.workspace_id = $1
+          AND c.kind = 'after_tool_call'
+          AND s.ended_at IS NOT NULL
+          AND s.ended_at < datetime('now', $2)
+        ORDER BY c.created_at
+        "#,
+    )
+    .bind(workspace_id)
+    .bind(&modifier)
+    .fetch_all(pool)
+    .await
+    .map_err(|error| GitError::Parse(format!("读取过期 checkpoints 失败: {error}")))?;
+
+    with_repo_lock(target, || async {
+        let mut deleted = Vec::with_capacity(rows.len());
+        for row in rows {
+            git(
+                target,
+                &["update-ref", "-d", &row.ref_name],
+                &IndexMode::ReadOnly,
+            )
+            .await?
+            .require_success(&["update-ref", "-d"])?;
+
+            sqlx::query("DELETE FROM git_checkpoints WHERE id = $1")
+                .bind(&row.id)
+                .execute(pool)
+                .await
+                .map_err(|error| {
+                    GitError::Parse(format!("删除过期 checkpoint 记录失败: {error}"))
+                })?;
+            deleted.push(row.ref_name);
+        }
+        Ok(deleted)
+    })
+    .await
+}
+
 pub(crate) async fn sweep_orphan_refs(
     pool: &SqlitePool,
     target: &GitTarget,
