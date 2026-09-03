@@ -317,7 +317,8 @@ fn attach_subagent_runtime(
     }));
 }
 
-fn emit_turn_state(app: &AppHandle, session_record_id: &str, state: &str) {
+fn emit_turn_state(app: &AppHandle, session_record_id: &str, working: &AtomicBool, state: &str) {
+    working.store(state == "working", Ordering::SeqCst);
     let _ = app.emit(
         "native-turn-state",
         NativeTurnState {
@@ -1245,11 +1246,13 @@ async fn start_native_with_manager(
     let allow_all_high_risk = Arc::new(AtomicBool::new(
         permission_mode == crate::native::settings::PERMISSION_MODE_FULL,
     ));
+    let working = Arc::new(AtomicBool::new(true));
     let (loop_ready_tx, loop_ready_rx) = tokio::sync::oneshot::channel();
     let manager_spawn = manager_state.clone();
     let app_spawn = app.clone();
     let cancel_run = cancel.clone();
     let allow_all_run = allow_all_high_risk.clone();
+    let working_run = working.clone();
     let session_spawn = session_record_id.clone();
     let profile_spawn = String::new();
     let workspace_spawn = workspace_id.clone();
@@ -1267,6 +1270,7 @@ async fn start_native_with_manager(
             ssh,
             cancel_run,
             allow_all_run,
+            working_run,
             followup_rx,
             session_spawn,
             profile_spawn,
@@ -1291,6 +1295,7 @@ async fn start_native_with_manager(
         followup_tx,
         join,
         allow_all_high_risk,
+        working,
         pending_permission: std::collections::VecDeque::new(),
         pending_question: std::collections::VecDeque::new(),
     });
@@ -1308,6 +1313,7 @@ async fn run_native_loop(
     ssh: Option<SshToolRuntime>,
     cancel: crate::native::tools::CancelFlag,
     allow_all_high_risk: Arc<AtomicBool>,
+    working: Arc<AtomicBool>,
     followup_rx: mpsc::Receiver<NativeFollowup>,
     session_record_id: String,
     profile_id: String,
@@ -1760,7 +1766,7 @@ async fn run_native_loop(
     let mut plan_pending = plan_mode;
     let await_followups = true;
     while let Some(prompt) = next.take() {
-        emit_turn_state(&app, &session_record_id, "working");
+        emit_turn_state(&app, &session_record_id, &working, "working");
         emit_native_line(
             &app,
             &session_record_id,
@@ -1867,12 +1873,12 @@ async fn run_native_loop(
                     let _ = next_loop_step(await_followups, NativeLoopEvent::FollowupFinish);
                     break;
                 }
-                emit_turn_state(&app, &session_record_id, "waiting_input");
+                emit_turn_state(&app, &session_record_id, &working, "waiting_input");
                 match followup_rx.lock().await.recv().await {
                     Some(NativeFollowup::Input(input)) => {
                         match next_loop_step(await_followups, NativeLoopEvent::FollowupInput) {
                             NativeLoopAction::RunFollowup => {
-                                emit_turn_state(&app, &session_record_id, "working");
+                                emit_turn_state(&app, &session_record_id, &working, "working");
                                 next = Some(input);
                             }
                             _ => break,
@@ -2445,6 +2451,7 @@ mod tests {
             followup_tx: tx,
             join: tokio::spawn(async {}),
             allow_all_high_risk: Arc::new(AtomicBool::new(false)),
+            working: Arc::new(AtomicBool::new(false)),
             pending_permission: VecDeque::new(),
             pending_question: VecDeque::new(),
         });

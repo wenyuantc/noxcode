@@ -1,7 +1,7 @@
 #![allow(dead_code)]
 
 use std::collections::{HashMap, VecDeque};
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use tokio::sync::{mpsc, oneshot};
@@ -63,6 +63,7 @@ pub struct NativeLiveSession {
     pub followup_tx: mpsc::Sender<NativeFollowup>,
     pub join: JoinHandle<()>,
     pub allow_all_high_risk: Arc<AtomicBool>,
+    pub working: Arc<AtomicBool>,
     pub pending_permission: VecDeque<PendingPermission>,
     pub pending_question: VecDeque<PendingPlanQuestion>,
 }
@@ -240,6 +241,13 @@ impl NativeAgentManager {
             .any(|session| session.info.workspace_id.as_deref() == Some(workspace_id))
     }
 
+    pub fn has_working_workspace_processes(&self, workspace_id: &str) -> bool {
+        self.sessions.values().any(|session| {
+            session.info.workspace_id.as_deref() == Some(workspace_id)
+                && session.working.load(Ordering::SeqCst)
+        })
+    }
+
     pub fn cancel_all(&mut self) {
         for session in self.sessions.values() {
             session.cancel.cancel();
@@ -286,11 +294,13 @@ mod tests {
             followup_tx: tx,
             join: tokio::spawn(async {}),
             allow_all_high_risk: Arc::new(AtomicBool::new(false)),
+            working: Arc::new(AtomicBool::new(true)),
             pending_permission: VecDeque::new(),
             pending_question: VecDeque::new(),
         });
         assert!(manager.has_channel_processes("ch-1"));
         assert!(manager.has_workspace_processes("ws-1"));
+        assert!(manager.has_working_workspace_processes("ws-1"));
         assert!(!manager.has_workspace_processes("ws-other"));
         assert_eq!(manager.len(), 1);
         manager.add_session(live_session("sess-2"));
@@ -316,6 +326,7 @@ mod tests {
             followup_tx: tx,
             join: tokio::spawn(async {}),
             allow_all_high_risk: Arc::new(AtomicBool::new(false)),
+            working: Arc::new(AtomicBool::new(false)),
             pending_permission: VecDeque::new(),
             pending_question: VecDeque::new(),
         }
@@ -432,6 +443,7 @@ mod tests {
             followup_tx: tx,
             join,
             allow_all_high_risk: Arc::new(AtomicBool::new(false)),
+            working: Arc::new(AtomicBool::new(true)),
             pending_permission: VecDeque::new(),
             pending_question: VecDeque::new(),
         });

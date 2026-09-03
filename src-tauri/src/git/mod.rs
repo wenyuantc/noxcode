@@ -12,13 +12,16 @@ mod status;
 mod tests;
 
 use std::path::PathBuf;
+use std::sync::Arc;
 
-use tauri::{AppHandle, Manager, Runtime};
+use tauri::{AppHandle, Manager, Runtime, State};
+use tokio::sync::Mutex;
 
 use crate::app::shared::sqlite_pool;
 use crate::app::ssh::configs::fetch_ssh_config_record_by_id;
 use crate::app::ssh::{resolve_connect_params, SshPool};
 use crate::engine::context::resolve_workspace_execution_context_with_pool;
+use crate::native::manager::NativeAgentManager;
 use crate::native::settings::load_native_settings;
 
 use self::checkpoint::{
@@ -262,25 +265,45 @@ pub(crate) async fn list_git_checkpoints<R: Runtime>(
 #[tauri::command]
 pub(crate) async fn preview_git_checkpoint_restore<R: Runtime>(
     app: AppHandle<R>,
+    state: State<'_, Arc<Mutex<NativeAgentManager>>>,
     workspace_id: String,
     checkpoint_id: String,
 ) -> Result<GitRestorePreview, String> {
     let target = resolve_git_target(&app, &workspace_id).await?;
     let pool = sqlite_pool(&app).await?;
-    preview_restore(&pool, &target, &checkpoint_id)
+    let mut preview = preview_restore(&pool, &target, &checkpoint_id)
         .await
-        .map_err(Into::into)
+        .map_err(String::from)?;
+    if state
+        .lock()
+        .await
+        .has_working_workspace_processes(&workspace_id)
+    {
+        preview.blocked_reason =
+            Some("该工作区有正在执行的会话，请等待本轮结束或停止后再回滚".to_string());
+    }
+    Ok(preview)
 }
 
 #[tauri::command]
 pub(crate) async fn restore_git_checkpoint<R: Runtime>(
     app: AppHandle<R>,
+    state: State<'_, Arc<Mutex<NativeAgentManager>>>,
     workspace_id: String,
     checkpoint_id: String,
     delete_new_paths: Option<Vec<String>>,
 ) -> Result<GitRestoreResult, String> {
-    let target = resolve_git_target(&app, &workspace_id).await?;
     let pool = sqlite_pool(&app).await?;
+    if state
+        .lock()
+        .await
+        .has_working_workspace_processes(&workspace_id)
+    {
+        let error = "该工作区有正在执行的会话，请等待本轮结束或停止后再回滚".to_string();
+        return Err(error);
+    }
+
+    let target = resolve_git_target(&app, &workspace_id).await?;
     restore_checkpoint(
         &pool,
         &target,
