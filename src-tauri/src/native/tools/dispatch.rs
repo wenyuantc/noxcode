@@ -54,6 +54,7 @@ pub type MutationHook = Arc<dyn Fn(&str) + Send + Sync>;
 pub struct ToolCtx {
     pub workspace: LocalWorkspace,
     pub ssh: Option<SshToolRuntime>,
+    pub extra_env: Vec<(String, String)>,
     pub cancel: CancelFlag,
     pub read_files: HashSet<String>,
     pub todos: Vec<TodoItem>,
@@ -537,7 +538,9 @@ async fn call_bash(ctx: &ToolCtx, arguments: &str) -> Result<String, String> {
     if let Some(ssh) = ctx.ssh.as_ref() {
         return ssh.bash(&command).await;
     }
-    ctx.workspace.bash(&command, timeout, &ctx.cancel).await
+    ctx.workspace
+        .bash(&command, timeout, &ctx.cancel, &ctx.extra_env)
+        .await
 }
 
 fn call_todo_write(ctx: &mut ToolCtx, arguments: &str) -> Result<String, String> {
@@ -603,6 +606,7 @@ mod tests {
         let mut ctx = ToolCtx {
             workspace: LocalWorkspace::new(root.clone()),
             ssh: None,
+            extra_env: Vec::new(),
             cancel: CancelFlag::new(),
             read_files: HashSet::new(),
             todos: Vec::new(),
@@ -650,6 +654,7 @@ mod tests {
         let mut ctx = ToolCtx {
             workspace: LocalWorkspace::new(root.clone()),
             ssh: None,
+            extra_env: Vec::new(),
             cancel: CancelFlag::new(),
             read_files: HashSet::new(),
             todos: Vec::new(),
@@ -685,6 +690,7 @@ mod tests {
         let mut ctx = ToolCtx {
             workspace: LocalWorkspace::new(root.clone()),
             ssh: None,
+            extra_env: Vec::new(),
             cancel: CancelFlag::new(),
             read_files: HashSet::new(),
             todos: Vec::new(),
@@ -719,6 +725,7 @@ mod tests {
         let mut ctx = ToolCtx {
             workspace: LocalWorkspace::new(root.clone()),
             ssh: None,
+            extra_env: Vec::new(),
             cancel: CancelFlag::new(),
             read_files: HashSet::new(),
             todos: Vec::new(),
@@ -763,6 +770,7 @@ mod tests {
         let mut ctx = ToolCtx {
             workspace: LocalWorkspace::new(root.clone()),
             ssh: None,
+            extra_env: Vec::new(),
             cancel: CancelFlag::new(),
             read_files: HashSet::new(),
             todos: Vec::new(),
@@ -820,6 +828,7 @@ mod tests {
         let mut ctx = ToolCtx {
             workspace: LocalWorkspace::new(root.clone()),
             ssh: None,
+            extra_env: Vec::new(),
             cancel: CancelFlag::new(),
             read_files: HashSet::new(),
             todos: Vec::new(),
@@ -879,6 +888,7 @@ mod tests {
         let mut ctx = ToolCtx {
             workspace: LocalWorkspace::new(root.clone()),
             ssh: None,
+            extra_env: Vec::new(),
             cancel: CancelFlag::new(),
             read_files: HashSet::new(),
             todos: Vec::new(),

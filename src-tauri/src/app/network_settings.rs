@@ -132,6 +132,41 @@ pub(crate) fn load_network_settings<R: Runtime>(
     load_network_settings_from(&config_dir)
 }
 
+pub(crate) fn proxy_env_vars(settings: &NetworkSettings) -> Vec<(String, String)> {
+    let mut vars = Vec::new();
+    if let Some(proxy) = settings
+        .http_proxy
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        for key in ["HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"] {
+            vars.push((key.to_string(), proxy.to_string()));
+        }
+    }
+    if let Some(no_proxy) = settings
+        .no_proxy
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        for key in ["NO_PROXY", "no_proxy"] {
+            vars.push((key.to_string(), no_proxy.to_string()));
+        }
+    }
+    if let Some(ca_cert_path) = settings
+        .ca_cert_path
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        for key in ["SSL_CERT_FILE", "NODE_EXTRA_CA_CERTS"] {
+            vars.push((key.to_string(), ca_cert_path.to_string()));
+        }
+    }
+    vars
+}
+
 #[tauri::command]
 pub async fn get_network_settings<R: Runtime>(
     app: AppHandle<R>,
@@ -274,5 +309,39 @@ VpiXFfRk10cn5rvzDr655on4hQsQgb5slhhR4Byx8FmA6gOmSNnfCD6ZF0FahKoj
         })
         .expect("normalize");
         assert_eq!(settings, NetworkSettings::default());
+    }
+
+    #[test]
+    fn builds_proxy_environment_for_child_processes() {
+        let vars = proxy_env_vars(&NetworkSettings {
+            http_proxy: Some("http://127.0.0.1:8080".to_string()),
+            no_proxy: Some("localhost".to_string()),
+            ca_cert_path: Some("/tmp/ca.pem".to_string()),
+        });
+        assert_eq!(
+            vars,
+            vec![
+                (
+                    "HTTP_PROXY".to_string(),
+                    "http://127.0.0.1:8080".to_string()
+                ),
+                (
+                    "HTTPS_PROXY".to_string(),
+                    "http://127.0.0.1:8080".to_string()
+                ),
+                (
+                    "http_proxy".to_string(),
+                    "http://127.0.0.1:8080".to_string()
+                ),
+                (
+                    "https_proxy".to_string(),
+                    "http://127.0.0.1:8080".to_string()
+                ),
+                ("NO_PROXY".to_string(), "localhost".to_string()),
+                ("no_proxy".to_string(), "localhost".to_string()),
+                ("SSL_CERT_FILE".to_string(), "/tmp/ca.pem".to_string()),
+                ("NODE_EXTRA_CA_CERTS".to_string(), "/tmp/ca.pem".to_string()),
+            ]
+        );
     }
 }

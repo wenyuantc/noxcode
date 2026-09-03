@@ -148,7 +148,7 @@ async fn run_one(
                 &hook.command,
                 Some(timeout_ms),
                 cancel,
-                &[("NATIVE_HOOK_PAYLOAD", payload)],
+                &[("NATIVE_HOOK_PAYLOAD".to_string(), payload)],
             )
             .await
     }

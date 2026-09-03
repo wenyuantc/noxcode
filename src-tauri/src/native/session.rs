@@ -8,7 +8,7 @@ use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, State};
 use tokio::sync::{mpsc, Mutex};
 
-use crate::app::network_settings::load_network_settings;
+use crate::app::network_settings::{load_network_settings, proxy_env_vars};
 use crate::app::sessions::persist_context_usage_with;
 use crate::app::shared::{new_id, now_sqlite, sqlite_pool, EXECUTION_TARGET_SSH};
 use crate::app::ssh::configs::fetch_ssh_config_record_by_id;
@@ -1334,6 +1334,9 @@ async fn run_native_loop(
     let followup_rx = Arc::new(Mutex::new(followup_rx));
     let mut runner = AgentRunner::new(LocalWorkspace::new(PathBuf::from(&run_cwd)));
     runner.ctx.ssh = ssh;
+    runner.ctx.extra_env = load_network_settings(&app)
+        .map(|settings| proxy_env_vars(&settings))
+        .unwrap_or_default();
     runner.ctx.cancel = cancel.clone();
     runner.ctx.allow_all_high_risk = allow_all_high_risk;
     runner.steer_rx = Some(followup_rx.clone());

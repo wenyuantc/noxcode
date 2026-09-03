@@ -192,6 +192,7 @@ impl AgentRunner {
             ctx: ToolCtx {
                 workspace,
                 ssh: None,
+                extra_env: Vec::new(),
                 cancel: CancelFlag::new(),
                 read_files: HashSet::new(),
                 todos: Vec::new(),
@@ -1245,6 +1246,7 @@ impl AgentRunner {
     ) -> AgentRunner {
         let mut child = AgentRunner::new(self.ctx.workspace.clone());
         child.ctx.ssh = self.ctx.ssh.clone();
+        child.ctx.extra_env = self.ctx.extra_env.clone();
         child.ctx.cancel = self.ctx.cancel.clone();
         child.ctx.allow_all_high_risk = self.ctx.allow_all_high_risk.clone();
         child.ctx.auto_approve_overwrite = self.ctx.auto_approve_overwrite;
@@ -2259,12 +2261,14 @@ mod tests {
 
     #[test]
     fn parent_has_agent_child_and_readonly_do_not() {
-        let (runner, root) = temp_runner();
+        let (mut runner, root) = temp_runner();
+        runner.ctx.extra_env = vec![("HTTPS_PROXY".to_string(), "http://proxy".to_string())];
         assert!(runner.tool_names().iter().any(|name| name == "Agent"));
         let general = parse_subagent_args(r#"{"prompt":"go","description":"改文件"}"#).unwrap();
         let child = runner.spawn_child_runner(&general, 1);
         assert!(!child.tool_names().iter().any(|name| name == "Agent"));
         assert!(!child.ctx.read_only);
+        assert_eq!(child.ctx.extra_env, runner.ctx.extra_env);
         assert_eq!(child.event_prefix, "[子 Agent 1(general) - 改文件] ");
         let explore = parse_subagent_args(r#"{"prompt":"go","subagent_type":"explore"}"#).unwrap();
         let explore_child = runner.spawn_child_runner(&explore, 2);

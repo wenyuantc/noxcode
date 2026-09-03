@@ -164,9 +164,10 @@ impl LocalWorkspace {
         command: &str,
         timeout_ms: Option<i64>,
         cancel: &CancelFlag,
+        extra_env: &[(String, String)],
     ) -> Result<String, String> {
         let status = self
-            .bash_with_status(command, timeout_ms, cancel, &[])
+            .bash_with_status(command, timeout_ms, cancel, extra_env)
             .await?;
         if status.timed_out {
             return Err("Bash 超时".to_string());
@@ -190,7 +191,7 @@ impl LocalWorkspace {
         command: &str,
         timeout_ms: Option<i64>,
         cancel: &CancelFlag,
-        extra_env: &[(&str, String)],
+        extra_env: &[(String, String)],
     ) -> Result<CommandStatus, String> {
         if command.trim().is_empty() {
             return Err("command 不能为空".to_string());
@@ -390,10 +391,27 @@ mod tests {
         let ws = temp_workspace();
         let cancel = CancelFlag::new();
         let out = ws
-            .bash("echo native-bash", None, &cancel)
+            .bash("echo native-bash", None, &cancel, &[])
             .await
             .expect("bash");
         assert!(out.contains("native-bash"));
+        let _ = fs::remove_dir_all(&ws.root);
+    }
+
+    #[tokio::test]
+    async fn bash_receives_extra_environment() {
+        let ws = temp_workspace();
+        let cancel = CancelFlag::new();
+        let out = ws
+            .bash(
+                "printf '%s' \"$NOXCODE_PROXY_TEST\"",
+                None,
+                &cancel,
+                &[("NOXCODE_PROXY_TEST".to_string(), "injected".to_string())],
+            )
+            .await
+            .expect("bash");
+        assert_eq!(out, "injected");
         let _ = fs::remove_dir_all(&ws.root);
     }
 }

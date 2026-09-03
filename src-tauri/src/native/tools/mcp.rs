@@ -8,6 +8,7 @@ use tauri::{AppHandle, Runtime};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStdin, ChildStdout, Command};
 
+use crate::app::network_settings::{load_network_settings, proxy_env_vars};
 use crate::app::ssh::exec::{spawn_ssh_command, SshCommandStream, SshStreamEvent};
 use crate::app::ssh::shell::shell_escape_single_quoted;
 use crate::db::models::{McpServerConfig, SshConfigRecord};
@@ -624,12 +625,18 @@ async fn handshake(server: &mut McpLiveServer) -> Result<(), String> {
     Ok(())
 }
 
-async fn spawn_local(server: &McpServerConfig) -> Result<McpLiveServer, String> {
+async fn spawn_local(
+    server: &McpServerConfig,
+    extra_env: &[(String, String)],
+) -> Result<McpLiveServer, String> {
     if server.command.trim().is_empty() {
         return Err("MCP 启动命令不能为空".to_string());
     }
     let mut command = Command::new(server.command.trim());
     command.args(&server.args);
+    for (key, value) in extra_env {
+        command.env(key, value);
+    }
     let mut seen = HashMap::new();
     for env in &server.env {
         let key = env.key.trim();
@@ -698,6 +705,17 @@ pub async fn connect_mcp_servers<R: Runtime>(
     let mut session = McpSession::empty();
     let mut warnings = Vec::new();
     let mut connected = Vec::new();
+    let local_extra_env = if ssh_config.is_none() {
+        match load_network_settings(app) {
+            Ok(settings) => proxy_env_vars(&settings),
+            Err(error) => {
+                warnings.push(format!("[MCP] 读取网络设置失败：{error}"));
+                Vec::new()
+            }
+        }
+    } else {
+        Vec::new()
+    };
     for server in servers {
         if cancel.is_cancelled() {
             warnings.push("[MCP] 已取消，剩余服务器未连接".to_string());
@@ -706,7 +724,7 @@ pub async fn connect_mcp_servers<R: Runtime>(
         let spawned = if let Some(ssh_config) = ssh_config {
             spawn_remote(app, ssh_config, server).await
         } else {
-            spawn_local(server).await
+            spawn_local(server, &local_extra_env).await
         };
         let mut live = match spawned {
             Ok(live) => live,
