@@ -320,6 +320,32 @@ pub fn get_all_migrations() -> Vec<Migration> {
             "#,
             kind: tauri_plugin_sql::MigrationKind::Up,
         },
+        Migration {
+            version: 6,
+            description: "ssh_configs configurable algorithms",
+            sql: r#"
+                ALTER TABLE ssh_configs ADD COLUMN algorithms_json TEXT;
+            "#,
+            kind: tauri_plugin_sql::MigrationKind::Up,
+        },
+        Migration {
+            version: 7,
+            description: "activity audit logs",
+            sql: r#"
+                CREATE TABLE activity_logs (
+                    id TEXT PRIMARY KEY,
+                    kind TEXT NOT NULL,
+                    workspace_id TEXT,
+                    session_id TEXT,
+                    summary TEXT NOT NULL,
+                    payload_json TEXT,
+                    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+                );
+                CREATE INDEX idx_activity_logs_workspace_created
+                    ON activity_logs(workspace_id, created_at DESC);
+            "#,
+            kind: tauri_plugin_sql::MigrationKind::Up,
+        },
     ]
 }
 
@@ -365,7 +391,7 @@ mod tests {
         for (index, migration) in get_all_migrations().iter().enumerate() {
             assert_eq!(migration.version, index as i64 + 1);
         }
-        assert_eq!(latest_migration_version(), 5);
+        assert_eq!(latest_migration_version(), 7);
         assert_eq!(
             get_all_migrations()
                 .last()
@@ -426,7 +452,7 @@ mod tests {
     }
 
     #[test]
-    fn latest_schema_has_eight_tables_without_profiles() {
+    fn latest_schema_has_nine_tables_without_profiles() {
         tauri::async_runtime::block_on(async {
             let pool = setup_test_pool().await;
             let tables: Vec<String> = sqlx::query(table_names_query())
@@ -440,6 +466,7 @@ mod tests {
             assert_eq!(
                 tables,
                 vec![
+                    "activity_logs",
                     "agent_session_events",
                     "agent_sessions",
                     "ai_channels",
@@ -469,6 +496,7 @@ mod tests {
             assert_eq!(
                 columns,
                 vec![
+                    "algorithms_json",
                     "auth_type",
                     "created_at",
                     "host",
