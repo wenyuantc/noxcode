@@ -155,6 +155,7 @@ mod tests {
                     password: None,
                     passphrase: None,
                     known_hosts_mode: Some("accept-new".to_string()),
+                    algorithms: None,
                 },
             )
             .await

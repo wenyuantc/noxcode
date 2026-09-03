@@ -5,6 +5,7 @@ use std::time::Duration;
 use russh::keys::ssh_key::LineEnding;
 use russh::keys::{Algorithm, PrivateKey};
 
+use super::algorithms::{legacy_preset, SshAlgorithms};
 use super::client::{AuthMaterial, ConnectParams};
 use super::error::SshError;
 use super::exec::ExecOptions;
@@ -36,6 +37,7 @@ fn password_params(port: u16, known_hosts: PathBuf, policy: KnownHostsPolicy) ->
         auth: AuthMaterial::Password("secret".to_string()),
         policy,
         known_hosts_path: known_hosts,
+        algorithms: None,
     }
 }
 
@@ -89,6 +91,7 @@ async fn publickey_auth_plain_and_encrypted() {
         },
         policy: KnownHostsPolicy::Off,
         known_hosts_path: known_hosts,
+        algorithms: None,
     };
     let output = pool
         .exec(&params, "echo pubkey", ExecOptions::default())
@@ -308,6 +311,35 @@ async fn known_hosts_end_to_end() {
 }
 
 #[tokio::test]
+async fn configured_algorithms_connect_with_legacy_preset_and_fail_without_overlap() {
+    let server = TestSshServer::start(TestServerOpts::default()).await;
+    let pool = test_pool();
+
+    let mut legacy = password_params(server.port, temp_known_hosts(), KnownHostsPolicy::Off);
+    legacy.algorithms = Some(Box::new(legacy_preset()));
+    pool.exec(&legacy, "echo legacy", ExecOptions::default())
+        .await
+        .expect("legacy preset should retain modern defaults");
+
+    let mut incompatible = password_params(server.port, temp_known_hosts(), KnownHostsPolicy::Off);
+    incompatible.ssh_config_id = "test-cfg-no-overlap".to_string();
+    incompatible.algorithms = Some(Box::new(SshAlgorithms {
+        kex: vec!["diffie-hellman-group1-sha1".to_string()],
+        ..SshAlgorithms::default()
+    }));
+    let error = pool
+        .exec(&incompatible, "echo no", ExecOptions::default())
+        .await
+        .expect_err("server defaults do not offer group1-sha1");
+    assert!(
+        error.to_string().contains("key exchange")
+            || error.to_string().contains("Kex")
+            || error.to_string().contains("NoCommon"),
+        "unexpected negotiation error: {error}"
+    );
+}
+
+#[tokio::test]
 #[ignore]
 async fn real_server_smoke() {
     let host = std::env::var("NOXCODE_SSH_TEST_HOST").expect("NOXCODE_SSH_TEST_HOST");
@@ -336,6 +368,7 @@ async fn real_server_smoke() {
         auth,
         policy: KnownHostsPolicy::Off,
         known_hosts_path: temp_known_hosts(),
+        algorithms: None,
     };
     let output = pool
         .exec(&params, "uname -a", ExecOptions::default())

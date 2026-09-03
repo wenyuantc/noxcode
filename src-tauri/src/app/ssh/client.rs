@@ -7,6 +7,7 @@ use russh::client::{AuthResult, Handle, Handler};
 use russh::keys::{load_secret_key, PrivateKeyWithHashAlg, PublicKeyOrCertificate};
 use russh::{client, Preferred};
 
+use super::algorithms::{apply as apply_algorithms, SshAlgorithms};
 use super::error::SshError;
 use super::known_hosts::{
     preferred_key_algorithms, verify_server_key, HostTrustBroker, HostVerifyContext,
@@ -32,6 +33,7 @@ pub(crate) struct ConnectParams {
     pub auth: AuthMaterial,
     pub policy: KnownHostsPolicy,
     pub known_hosts_path: PathBuf,
+    pub algorithms: Option<Box<SshAlgorithms>>,
 }
 
 impl ConnectParams {
@@ -43,13 +45,14 @@ impl ConnectParams {
             }
         };
         format!(
-            "{}|{}|{}|{}|{:?}|{}|{auth}",
+            "{}|{}|{}|{}|{:?}|{}|{}|{auth}",
             self.ssh_config_id,
             self.host,
             self.port,
             self.username,
             self.policy,
-            self.known_hosts_path.display()
+            self.known_hosts_path.display(),
+            serde_json::to_string(&self.algorithms).unwrap_or_default()
         )
     }
 
@@ -86,10 +89,23 @@ pub(crate) async fn connect_and_authenticate(
     trust: &Arc<HostTrustBroker>,
 ) -> Result<Handle<ClientHandler>, SshError> {
     let mut preferred = Preferred::DEFAULT.clone();
+    if let Some(algorithms) = &params.algorithms {
+        apply_algorithms(algorithms, &mut preferred);
+    }
     if let Some(algorithms) =
         preferred_key_algorithms(&params.host, params.port, &params.known_hosts_path)
     {
-        preferred.key = Cow::Owned(algorithms);
+        let configured = preferred.key.to_vec();
+        let mut reordered = algorithms
+            .into_iter()
+            .filter(|algorithm| configured.contains(algorithm))
+            .collect::<Vec<_>>();
+        for algorithm in configured {
+            if !reordered.contains(&algorithm) {
+                reordered.push(algorithm);
+            }
+        }
+        preferred.key = Cow::Owned(reordered);
     }
 
     let config = client::Config {

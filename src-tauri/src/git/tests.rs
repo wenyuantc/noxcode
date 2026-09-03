@@ -89,6 +89,7 @@ async fn ssh_env() -> RepoEnv {
             auth: AuthMaterial::Password("secret".to_string()),
             policy: KnownHostsPolicy::Off,
             known_hosts_path: temp_known_hosts(),
+            algorithms: None,
         },
         repo_path: dir.path().to_string_lossy().into_owned(),
     };

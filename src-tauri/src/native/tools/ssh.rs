@@ -227,6 +227,7 @@ mod tests {
             auth: AuthMaterial::Password("secret".to_string()),
             policy: KnownHostsPolicy::Off,
             known_hosts_path: known_hosts_dir.path().join("known_hosts"),
+            algorithms: None,
         };
         let pool = SshPool::new(
             Arc::new(HostTrustBroker::new(Duration::from_secs(5))),

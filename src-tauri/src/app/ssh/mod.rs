@@ -1,3 +1,4 @@
+pub(crate) mod algorithms;
 pub(crate) mod client;
 pub(crate) mod config_file;
 pub(crate) mod configs;
@@ -22,6 +23,7 @@ use crate::db::models::{
     CreateSshConfig, PasswordAuthProbeResult, SshConfig, SshConfigRecord, UpdateSshConfig,
 };
 
+use self::algorithms::{validate as validate_algorithms, SshAlgorithms};
 use self::client::{AuthMaterial, ConnectParams};
 use self::config_file::{import_host, list_hosts, load_default_ssh_config};
 use self::configs::{
@@ -86,6 +88,15 @@ pub(crate) fn resolve_connect_params<R: Runtime>(
     };
 
     let port = u16::try_from(record.port).unwrap_or(22);
+    let algorithms = match record.algorithms_json.as_deref() {
+        Some(json) => {
+            let algorithms: SshAlgorithms = serde_json::from_str(json)
+                .map_err(|error| format!("解析 SSH 算法配置失败: {error}"))?;
+            validate_algorithms(&algorithms)?;
+            Some(algorithms)
+        }
+        None => None,
+    };
     Ok(ConnectParams {
         ssh_config_id: record.id.clone(),
         name: record.name.clone(),
@@ -95,6 +106,7 @@ pub(crate) fn resolve_connect_params<R: Runtime>(
         auth,
         policy: KnownHostsPolicy::from_mode(&record.known_hosts_mode),
         known_hosts_path: default_known_hosts_path(),
+        algorithms: algorithms.map(Box::new),
     })
 }
 

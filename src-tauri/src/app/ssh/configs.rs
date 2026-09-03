@@ -6,6 +6,8 @@ use crate::app::secret_store::SecretStore;
 use crate::app::shared::{new_id, normalize_optional_text, now_sqlite};
 use crate::db::models::{CreateSshConfig, SshConfig, SshConfigRecord, UpdateSshConfig};
 
+use super::algorithms::{validate, SshAlgorithms};
+
 pub(crate) fn normalize_ssh_auth_type(value: Option<&str>) -> Result<String, String> {
     match value.map(str::trim).filter(|value| !value.is_empty()) {
         None | Some("key") => Ok("key".to_string()),
@@ -27,6 +29,49 @@ pub(crate) fn ssh_config_target_host_label(record: &SshConfigRecord) -> String {
     format!("{}@{}:{}", record.username, record.host, record.port)
 }
 
+fn normalize_ssh_algorithms(algorithms: Option<SshAlgorithms>) -> Result<Option<String>, String> {
+    let Some(mut algorithms) = algorithms else {
+        return Ok(None);
+    };
+    for names in [
+        &mut algorithms.kex,
+        &mut algorithms.host_key,
+        &mut algorithms.cipher,
+        &mut algorithms.mac,
+    ] {
+        let mut normalized = Vec::new();
+        for name in std::mem::take(names) {
+            let name = name.trim();
+            if !name.is_empty() && !normalized.iter().any(|item| item == name) {
+                normalized.push(name.to_string());
+            }
+        }
+        *names = normalized;
+    }
+    if algorithms.is_empty() {
+        return Ok(None);
+    }
+    validate(&algorithms)?;
+    serde_json::to_string(&algorithms)
+        .map(Some)
+        .map_err(|error| format!("序列化 SSH 算法配置失败: {error}"))
+}
+
+fn record_to_config(record: SshConfigRecord) -> Result<SshConfig, String> {
+    let algorithms = match record.algorithms_json.as_deref() {
+        Some(json) => {
+            let algorithms: SshAlgorithms = serde_json::from_str(json)
+                .map_err(|error| format!("解析 SSH 算法配置失败: {error}"))?;
+            validate(&algorithms)?;
+            Some(algorithms)
+        }
+        None => None,
+    };
+    let mut config = SshConfig::from(record);
+    config.algorithms = algorithms;
+    Ok(config)
+}
+
 pub(crate) async fn fetch_ssh_config_record_by_id(
     pool: &SqlitePool,
     id: &str,
@@ -45,7 +90,7 @@ pub(crate) async fn fetch_ssh_config_by_id(
 ) -> Result<SshConfig, String> {
     fetch_ssh_config_record_by_id(pool, id)
         .await
-        .map(Into::into)
+        .and_then(record_to_config)
 }
 
 pub(crate) async fn list_ssh_config_records(pool: &SqlitePool) -> Result<Vec<SshConfig>, String> {
@@ -56,7 +101,7 @@ pub(crate) async fn list_ssh_config_records(pool: &SqlitePool) -> Result<Vec<Ssh
     .await
     .map_err(|error| format!("Failed to list ssh configs: {error}"))?;
 
-    Ok(records.into_iter().map(Into::into).collect())
+    records.into_iter().map(record_to_config).collect()
 }
 
 async fn collect_all_ssh_secret_refs(pool: &SqlitePool) -> Result<HashSet<String>, String> {
@@ -96,6 +141,7 @@ pub(crate) async fn create_ssh_config_with(
     let auth_type = normalize_ssh_auth_type(Some(&payload.auth_type))?;
     let private_key_path = normalize_optional_text(payload.private_key_path.as_deref());
     let known_hosts_mode = normalize_known_hosts_mode(payload.known_hosts_mode.as_deref());
+    let algorithms_json = normalize_ssh_algorithms(payload.algorithms)?;
     let port = payload.port.unwrap_or(22).clamp(1, 65535);
 
     if name.is_empty() || host.is_empty() || username.is_empty() {
@@ -121,9 +167,10 @@ pub(crate) async fn create_ssh_config_with(
             password_ref,
             passphrase_ref,
             known_hosts_mode,
+            algorithms_json,
             created_at,
             updated_at
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
         "#,
     )
     .bind(&id)
@@ -136,6 +183,7 @@ pub(crate) async fn create_ssh_config_with(
     .bind(&password_ref)
     .bind(&passphrase_ref)
     .bind(&known_hosts_mode)
+    .bind(&algorithms_json)
     .bind(now_sqlite())
     .bind(now_sqlite())
     .execute(pool)
@@ -186,6 +234,10 @@ pub(crate) async fn update_ssh_config_with(
         .known_hosts_mode
         .map(|value| normalize_known_hosts_mode(Some(&value)))
         .unwrap_or_else(|| current.known_hosts_mode.clone());
+    let algorithms_json = match updates.algorithms {
+        Some(algorithms) => normalize_ssh_algorithms(algorithms)?,
+        None => current.algorithms_json.clone(),
+    };
     let port = updates.port.unwrap_or(current.port).clamp(1, 65535);
 
     if name.is_empty() || host.is_empty() || username.is_empty() {
@@ -262,7 +314,8 @@ pub(crate) async fn update_ssh_config_with(
             password_probe_checked_at = $11,
             password_probe_status = $12,
             password_probe_message = $13,
-            updated_at = $14
+            algorithms_json = $14,
+            updated_at = $15
         WHERE id = $1
         "#,
     )
@@ -279,6 +332,7 @@ pub(crate) async fn update_ssh_config_with(
     .bind(&password_probe_checked_at)
     .bind(&password_probe_status)
     .bind(&password_probe_message)
+    .bind(&algorithms_json)
     .bind(now_sqlite())
     .execute(pool)
     .await;
@@ -422,6 +476,7 @@ mod tests {
             },
             passphrase: None,
             known_hosts_mode: Some("accept-new".to_string()),
+            algorithms: None,
         }
     }
 
@@ -486,6 +541,7 @@ mod tests {
                     password: Some(Some("newer".to_string())),
                     passphrase: None,
                     known_hosts_mode: None,
+                    algorithms: None,
                 },
             )
             .await
@@ -538,6 +594,7 @@ mod tests {
                     password: None,
                     passphrase: Some(Some("phrase".to_string())),
                     known_hosts_mode: None,
+                    algorithms: None,
                 },
             )
             .await
@@ -594,6 +651,49 @@ mod tests {
                 .resolve(Some(&password_ref))
                 .expect("resolve")
                 .is_none());
+            let _ = std::fs::remove_dir_all(dir);
+        });
+    }
+
+    #[test]
+    fn algorithms_roundtrip_and_can_be_cleared() {
+        tauri::async_runtime::block_on(async {
+            let pool = setup_migrated_pool().await;
+            let dir = temp_secret_dir();
+            let secrets = SecretStore::in_memory(dir.clone());
+            let mut payload = sample_create("password");
+            let algorithms = SshAlgorithms {
+                kex: vec!["curve25519-sha256".to_string()],
+                host_key: vec!["ssh-ed25519".to_string()],
+                cipher: vec!["aes256-ctr".to_string()],
+                mac: vec!["hmac-sha2-256".to_string()],
+            };
+            payload.algorithms = Some(algorithms.clone());
+            let created = create_ssh_config_with(&pool, &secrets, payload)
+                .await
+                .expect("create");
+            assert_eq!(created.algorithms, Some(algorithms));
+
+            let cleared = update_ssh_config_with(
+                &pool,
+                &secrets,
+                &created.id,
+                UpdateSshConfig {
+                    name: None,
+                    host: None,
+                    port: None,
+                    username: None,
+                    auth_type: None,
+                    private_key_path: None,
+                    password: None,
+                    passphrase: None,
+                    known_hosts_mode: None,
+                    algorithms: Some(None),
+                },
+            )
+            .await
+            .expect("clear algorithms");
+            assert!(cleared.algorithms.is_none());
             let _ = std::fs::remove_dir_all(dir);
         });
     }

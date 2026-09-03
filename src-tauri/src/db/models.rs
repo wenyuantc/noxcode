@@ -3,6 +3,8 @@
 use serde::{Deserialize, Deserializer, Serialize};
 use sqlx::FromRow;
 
+use crate::app::ssh::algorithms::SshAlgorithms;
+
 fn deserialize_explicit_nullable<'de, D, T>(deserializer: D) -> Result<Option<Option<T>>, D::Error>
 where
     D: Deserializer<'de>,
@@ -27,6 +29,7 @@ pub struct SshConfigRecord {
     pub password_ref: Option<String>,
     pub passphrase_ref: Option<String>,
     pub known_hosts_mode: String,
+    pub algorithms_json: Option<String>,
     pub last_checked_at: Option<String>,
     pub last_check_status: Option<String>,
     pub last_check_message: Option<String>,
@@ -47,6 +50,7 @@ pub struct SshConfig {
     pub auth_type: String,
     pub private_key_path: Option<String>,
     pub known_hosts_mode: String,
+    pub algorithms: Option<SshAlgorithms>,
     pub last_checked_at: Option<String>,
     pub last_check_status: Option<String>,
     pub last_check_message: Option<String>,
@@ -72,6 +76,10 @@ impl From<SshConfigRecord> for SshConfig {
             auth_type: value.auth_type,
             private_key_path: value.private_key_path,
             known_hosts_mode: value.known_hosts_mode,
+            algorithms: value
+                .algorithms_json
+                .as_deref()
+                .and_then(|json| serde_json::from_str(json).ok()),
             last_checked_at: value.last_checked_at,
             last_check_status: value.last_check_status,
             last_check_message: value.last_check_message,
@@ -101,6 +109,7 @@ pub struct CreateSshConfig {
     pub password: Option<String>,
     pub passphrase: Option<String>,
     pub known_hosts_mode: Option<String>,
+    pub algorithms: Option<SshAlgorithms>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -117,6 +126,8 @@ pub struct UpdateSshConfig {
     #[serde(default, deserialize_with = "deserialize_explicit_nullable")]
     pub passphrase: Option<Option<String>>,
     pub known_hosts_mode: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_explicit_nullable")]
+    pub algorithms: Option<Option<SshAlgorithms>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
