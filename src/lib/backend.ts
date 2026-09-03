@@ -401,6 +401,22 @@ export function openNativeSkillsDir(): Promise<void> {
   return invoke("open_native_skills_dir");
 }
 
+export const NATIVE_SUBAGENT_CUSTOM_TOOLS = [
+  "Read",
+  "Grep",
+  "Glob",
+  "Bash",
+  "Edit",
+  "Write",
+  "WebFetch",
+  "WebSearch",
+  "TodoWrite",
+  "ApplyPatch",
+  "Skill",
+] as const;
+
+export type NativeSubagentCustomTool = (typeof NATIVE_SUBAGENT_CUSTOM_TOOLS)[number];
+
 export function listNativeSubagents(): Promise<NativeSubagent[]> {
   return invoke("list_native_subagents");
 }

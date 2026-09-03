@@ -63,7 +63,7 @@ Composer：无 live 会话走 `startNativeSession`（`ai_channel_id` + 模型）
 
 ## 设置
 
-左导航三组：基础设置（general / appearance / channels / ssh）、Agent 能力（runtime / subagents / mcp / skills / hooks）、数据与统计（usage / database / about）。开关即时生效，文本输入配「保存」。渠道删除时若有 live session 则后端拒绝，错误原文展示。
+左导航三组：基础设置（general / appearance / channels / ssh）、Agent 能力（runtime / subagents / mcp / skills / hooks）、数据与统计（usage / database / about）。开关即时生效，文本输入配「保存」。渠道删除时若有 live session 则后端拒绝，错误原文展示。子智能体是列表 + 弹窗 CRUD，可配模型、工具与工作区作用域。
 
 ## Git 抽屉
 
