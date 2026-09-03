@@ -22,6 +22,8 @@
   "general": {
     "language": "Language",
     "languageHint": "Language used by the app UI.",
+    "desktopNotifications": "Desktop notifications",
+    "desktopNotificationsHint": "Send a system notification when the app is unfocused and a session finishes or waits for permission or a plan answer.",
     "proxy": "HTTP proxy",
     "proxyHint": "http/https only. Leave empty to use system env vars.",
     "noProxy": "No-proxy hosts",
@@ -225,6 +227,10 @@
     "permissionModeHint": "Confirm before change: ask before editing files. Automatic editing: overwrite files immediately; delete / push / force Git / opaque commands / MCP still prompt. Full access: fewer confirmations. Plan mode is chosen in the Composer and is not stored here. Applies to sessions started after you change it.",
     "permissionTimeout": "High-risk confirmation timeout (seconds)",
     "permissionTimeoutHint": "How long to wait for confirmation. Timeout is treated as deny and the session continues. 0 = no timeout, default 300.",
+    "checkpoints": "Git checkpoints",
+    "checkpointsHint": "Optionally save a Git checkpoint after successful file-writing tools. Expired post-tool checkpoints from ended sessions are pruned when a repository opens.",
+    "autoCheckpoint": "Create a checkpoint after file changes",
+    "checkpointRetention": "Post-tool checkpoint retention days (0 = never prune)",
     "globalPrompt": "Global prompt template",
     "globalPromptHint": "Inserted as the Global prompt block after environment context and before AGENTS.md / profile settings. Leave empty to skip. Applies to sessions started after you change it."
   },

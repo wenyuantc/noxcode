@@ -152,6 +152,45 @@ export function NativeRuntimeSection() {
         />
       </SettingCard>
       <SettingCard
+        title={t("settings:runtime.checkpoints")}
+        description={t("settings:runtime.checkpointsHint")}
+      >
+        <div className="space-y-3">
+          <label
+            htmlFor="native-auto-checkpoint"
+            className="flex max-w-xs cursor-pointer items-center justify-between gap-3 text-sm"
+          >
+            <span>{t("settings:runtime.autoCheckpoint")}</span>
+            <Switch
+              id="native-auto-checkpoint"
+              checked={draft.auto_checkpoint_after_tool_call}
+              onCheckedChange={(checked) => {
+                const next = { ...draft, auto_checkpoint_after_tool_call: checked };
+                setDraft(next);
+                void updateNativeSettings({ auto_checkpoint_after_tool_call: checked }).then(
+                  setNative,
+                );
+              }}
+            />
+          </label>
+          <label htmlFor="native-checkpoint-retention" className="block max-w-xs text-sm">
+            <span>{t("settings:runtime.checkpointRetention")}</span>
+            <Input
+              id="native-checkpoint-retention"
+              className="mt-1"
+              type="number"
+              min={0}
+              max={365}
+              step={1}
+              value={draft.checkpoint_retention_days}
+              onChange={(event) =>
+                setDraft({ ...draft, checkpoint_retention_days: Number(event.target.value) })
+              }
+            />
+          </label>
+        </div>
+      </SettingCard>
+      <SettingCard
         title={t("settings:runtime.contextWindow")}
         description={t("settings:runtime.contextWindowHint")}
       >

@@ -22,6 +22,8 @@
   "general": {
     "language": "界面语言",
     "languageHint": "选择应用 UI 的显示语言。",
+    "desktopNotifications": "桌面通知",
+    "desktopNotificationsHint": "应用窗口未聚焦时，在会话结束、等待权限确认或等待计划回答时发送系统通知。",
     "proxy": "HTTP 代理",
     "proxyHint": "仅支持 http/https。留空则沿用系统环境变量。",
     "noProxy": "不使用代理的地址",
@@ -225,6 +227,10 @@
     "permissionModeHint": "变更前确认：改文件前先问。自动编辑：覆盖文件直接执行，删除 / 推送 / 强制 Git / 不透明命令 / MCP 仍需确认。完全访问：减少确认次数。计划模式在 Composer 选择，不写入此项。改完对之后新开的会话生效。",
     "permissionTimeout": "高风险确认超时（秒）",
     "permissionTimeoutHint": "等待确认的秒数。超时按拒绝处理并继续会话。0 = 不超时，默认 300。",
+    "checkpoints": "Git 检查点",
+    "checkpointsHint": "写文件工具成功后可自动保存 Git 检查点。已结束会话中过期的工具后检查点会在打开仓库时清理。",
+    "autoCheckpoint": "写文件后自动创建检查点",
+    "checkpointRetention": "工具后检查点保留天数（0 = 永不清理）",
     "globalPrompt": "全局提示词模板",
     "globalPromptHint": "会插入系统提示的「全局提示词」段，位于环境信息之后、AGENTS.md / 档案设定之前。留空则不注入。改完对之后新开的会话生效。"
   },

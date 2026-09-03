@@ -29,6 +29,8 @@ const MIN_NATIVE_MAX_TOOL_OUTPUT_TOKENS: i32 = 256;
 const MAX_NATIVE_MAX_TOOL_OUTPUT_TOKENS: i32 = 65_536;
 pub const DEFAULT_NATIVE_PERMISSION_TIMEOUT_SECS: i32 = 300;
 const MAX_NATIVE_PERMISSION_TIMEOUT_SECS: i32 = 86_400;
+pub const DEFAULT_NATIVE_CHECKPOINT_RETENTION_DAYS: i32 = 7;
+const MAX_NATIVE_CHECKPOINT_RETENTION_DAYS: i32 = 365;
 pub const DEFAULT_NATIVE_SUBAGENT_BUDGET_SHARE_PERCENT: i32 = 40;
 const MIN_NATIVE_SUBAGENT_BUDGET_SHARE_PERCENT: i32 = 5;
 const MAX_NATIVE_SUBAGENT_BUDGET_SHARE_PERCENT: i32 = 100;
@@ -72,6 +74,12 @@ struct RawNativeSettings {
     permission_timeout_secs: Option<i32>,
     #[serde(default)]
     subagent_budget_share_percent: Option<i32>,
+    #[serde(default)]
+    auto_checkpoint_after_tool_call: Option<bool>,
+    #[serde(default)]
+    checkpoint_retention_days: Option<i32>,
+    #[serde(default)]
+    desktop_notifications: Option<bool>,
     #[serde(default)]
     hooks: Option<Vec<NativeHook>>,
     #[serde(default)]
@@ -122,6 +130,13 @@ pub fn normalize_native_permission_timeout_secs(value: Option<i32>) -> i32 {
     match value {
         Some(value) if (0..=MAX_NATIVE_PERMISSION_TIMEOUT_SECS).contains(&value) => value,
         _ => DEFAULT_NATIVE_PERMISSION_TIMEOUT_SECS,
+    }
+}
+
+pub fn normalize_native_checkpoint_retention_days(value: Option<i32>) -> i32 {
+    match value {
+        Some(value) if (0..=MAX_NATIVE_CHECKPOINT_RETENTION_DAYS).contains(&value) => value,
+        _ => DEFAULT_NATIVE_CHECKPOINT_RETENTION_DAYS,
     }
 }
 
@@ -223,6 +238,9 @@ fn default_settings() -> NativeSettings {
         max_tool_output_tokens: DEFAULT_NATIVE_MAX_TOOL_OUTPUT_TOKENS,
         permission_timeout_secs: DEFAULT_NATIVE_PERMISSION_TIMEOUT_SECS,
         subagent_budget_share_percent: DEFAULT_NATIVE_SUBAGENT_BUDGET_SHARE_PERCENT,
+        auto_checkpoint_after_tool_call: true,
+        checkpoint_retention_days: DEFAULT_NATIVE_CHECKPOINT_RETENTION_DAYS,
+        desktop_notifications: true,
         hooks: Vec::new(),
         global_prompt_template: String::new(),
     }
@@ -247,6 +265,11 @@ fn normalize_settings(raw: RawNativeSettings) -> NativeSettings {
         subagent_budget_share_percent: normalize_native_subagent_budget_share_percent(
             raw.subagent_budget_share_percent,
         ),
+        auto_checkpoint_after_tool_call: raw.auto_checkpoint_after_tool_call.unwrap_or(true),
+        checkpoint_retention_days: normalize_native_checkpoint_retention_days(
+            raw.checkpoint_retention_days,
+        ),
+        desktop_notifications: raw.desktop_notifications.unwrap_or(true),
         hooks: normalize_native_hooks(raw.hooks.unwrap_or_default()),
         global_prompt_template: raw
             .global_prompt_template
@@ -319,6 +342,11 @@ fn save_native_settings<R: Runtime>(
         subagent_budget_share_percent: Some(normalize_native_subagent_budget_share_percent(Some(
             settings.subagent_budget_share_percent,
         ))),
+        auto_checkpoint_after_tool_call: Some(settings.auto_checkpoint_after_tool_call),
+        checkpoint_retention_days: Some(normalize_native_checkpoint_retention_days(Some(
+            settings.checkpoint_retention_days,
+        ))),
+        desktop_notifications: Some(settings.desktop_notifications),
         hooks: Some(settings.hooks.clone()),
         global_prompt_template: Some(settings.global_prompt_template.clone()),
     };
@@ -388,6 +416,16 @@ async fn merge_native_settings<R: Runtime>(
         next.subagent_budget_share_percent =
             normalize_native_subagent_budget_share_percent(Some(subagent_budget_share_percent));
     }
+    if let Some(auto_checkpoint_after_tool_call) = updates.auto_checkpoint_after_tool_call {
+        next.auto_checkpoint_after_tool_call = auto_checkpoint_after_tool_call;
+    }
+    if let Some(checkpoint_retention_days) = updates.checkpoint_retention_days {
+        next.checkpoint_retention_days =
+            normalize_native_checkpoint_retention_days(Some(checkpoint_retention_days));
+    }
+    if let Some(desktop_notifications) = updates.desktop_notifications {
+        next.desktop_notifications = desktop_notifications;
+    }
     if let Some(hooks) = updates.hooks {
         next.hooks = normalize_native_hooks(hooks);
     }
@@ -400,7 +438,7 @@ async fn merge_native_settings<R: Runtime>(
 
 fn native_settings_activity_details(settings: &NativeSettings) -> String {
     format!(
-        "{}；{}；权限模式：{}；确认超时：{}；同轮子 Agent 上限：{}；子 Agent 策略：{}；子 Agent 预算占比：{}%；上下文窗口：{} token；自定义上下文：{}；会话预算：{}；单条工具结果：{} token；钩子：{} 条",
+        "{}；{}；权限模式：{}；确认超时：{}；同轮子 Agent 上限：{}；子 Agent 策略：{}；子 Agent 预算占比：{}%；上下文窗口：{} token；自定义上下文：{}；会话预算：{}；单条工具结果：{} token；工具后自动检查点：{}；检查点保留：{} 天；桌面通知：{}；钩子：{} 条",
         max_turns_activity_details(settings.max_turns),
         max_subagent_turns_activity_details(settings.max_subagent_turns),
         permission_mode_label_zh(&settings.permission_mode),
@@ -424,6 +462,17 @@ fn native_settings_activity_details(settings: &NativeSettings) -> String {
             format!("{} token", settings.rollout_token_budget)
         },
         settings.max_tool_output_tokens,
+        if settings.auto_checkpoint_after_tool_call {
+            "开"
+        } else {
+            "关"
+        },
+        settings.checkpoint_retention_days,
+        if settings.desktop_notifications {
+            "开"
+        } else {
+            "关"
+        },
         settings.hooks.len()
     )
 }
@@ -628,6 +677,9 @@ mod tests {
             max_tool_output_tokens: None,
             permission_timeout_secs: None,
             subagent_budget_share_percent: None,
+            auto_checkpoint_after_tool_call: None,
+            checkpoint_retention_days: None,
+            desktop_notifications: None,
             hooks: None,
             global_prompt_template: None,
         });
@@ -663,6 +715,12 @@ mod tests {
             settings.subagent_budget_share_percent,
             DEFAULT_NATIVE_SUBAGENT_BUDGET_SHARE_PERCENT
         );
+        assert!(settings.auto_checkpoint_after_tool_call);
+        assert_eq!(
+            settings.checkpoint_retention_days,
+            DEFAULT_NATIVE_CHECKPOINT_RETENTION_DAYS
+        );
+        assert!(settings.desktop_notifications);
         assert!(!settings.use_custom_context_window);
     }
 
@@ -871,6 +929,23 @@ mod tests {
             normalize_native_subagent_budget_share_percent(Some(100)),
             100
         );
+        assert_eq!(normalize_native_checkpoint_retention_days(Some(0)), 0);
+        assert_eq!(normalize_native_checkpoint_retention_days(Some(365)), 365);
+        assert_eq!(
+            normalize_native_checkpoint_retention_days(Some(366)),
+            DEFAULT_NATIVE_CHECKPOINT_RETENTION_DAYS
+        );
+    }
+
+    #[test]
+    fn missing_checkpoint_and_notification_settings_use_safe_defaults() {
+        let settings = normalize_settings(RawNativeSettings::default());
+        assert!(settings.auto_checkpoint_after_tool_call);
+        assert_eq!(
+            settings.checkpoint_retention_days,
+            DEFAULT_NATIVE_CHECKPOINT_RETENTION_DAYS
+        );
+        assert!(settings.desktop_notifications);
     }
 
     #[test]

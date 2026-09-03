@@ -4,9 +4,10 @@ import { useTranslation } from "react-i18next";
 
 import { changeAppLocale, getCurrentAppLocale } from "@/lib/i18n";
 import type { AppLocale } from "@/lib/i18n/locale";
-import { updateNetworkSettings, updateQuickPrompts } from "@/lib/backend";
+import { updateNativeSettings, updateNetworkSettings, updateQuickPrompts } from "@/lib/backend";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { Switch } from "@/components/ui/switch";
 import { Textarea } from "@/components/ui/textarea";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { SettingCard } from "./SettingCard";
@@ -14,6 +15,8 @@ import { SettingCard } from "./SettingCard";
 export function GeneralSection() {
   const { t } = useTranslation(["settings", "common"]);
   const locale = getCurrentAppLocale();
+  const native = useSettingsStore((state) => state.native);
+  const setNative = useSettingsStore((state) => state.setNative);
   const network = useSettingsStore((state) => state.network);
   const setNetwork = useSettingsStore((state) => state.setNetwork);
   const prompts = useSettingsStore((state) => state.quickPrompts);
@@ -50,6 +53,21 @@ export function GeneralSection() {
           <option value="en">English</option>
         </select>
       </SettingCard>
+      {native ? (
+        <SettingCard
+          title={t("settings:general.desktopNotifications")}
+          description={t("settings:general.desktopNotificationsHint")}
+        >
+          <Switch
+            checked={native.desktop_notifications}
+            onCheckedChange={(desktop_notifications) => {
+              void updateNativeSettings({ desktop_notifications })
+                .then(setNative)
+                .catch((err: unknown) => setError(String(err)));
+            }}
+          />
+        </SettingCard>
+      ) : null}
       <SettingCard
         title={t("settings:general.proxy")}
         description={t("settings:general.proxyHint")}

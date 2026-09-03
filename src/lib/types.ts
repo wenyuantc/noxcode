@@ -547,6 +547,9 @@ export interface NativeSettings {
   max_tool_output_tokens: number;
   permission_timeout_secs: number;
   subagent_budget_share_percent: number;
+  auto_checkpoint_after_tool_call: boolean;
+  checkpoint_retention_days: number;
+  desktop_notifications: boolean;
   hooks: NativeHook[];
   global_prompt_template: string;
 }
@@ -563,6 +566,9 @@ export interface UpdateNativeSettingsInput {
   max_tool_output_tokens?: number;
   permission_timeout_secs?: number;
   subagent_budget_share_percent?: number;
+  auto_checkpoint_after_tool_call?: boolean;
+  checkpoint_retention_days?: number;
+  desktop_notifications?: boolean;
   hooks?: NativeHook[];
   global_prompt_template?: string;
 }

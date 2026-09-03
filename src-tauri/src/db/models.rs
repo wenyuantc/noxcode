@@ -322,6 +322,9 @@ pub struct NativeSettings {
     pub max_tool_output_tokens: i32,
     pub permission_timeout_secs: i32,
     pub subagent_budget_share_percent: i32,
+    pub auto_checkpoint_after_tool_call: bool,
+    pub checkpoint_retention_days: i32,
+    pub desktop_notifications: bool,
     #[serde(default)]
     pub hooks: Vec<NativeHook>,
     #[serde(default)]
@@ -351,6 +354,9 @@ pub struct UpdateNativeSettings {
     pub max_tool_output_tokens: Option<i32>,
     pub permission_timeout_secs: Option<i32>,
     pub subagent_budget_share_percent: Option<i32>,
+    pub auto_checkpoint_after_tool_call: Option<bool>,
+    pub checkpoint_retention_days: Option<i32>,
+    pub desktop_notifications: Option<bool>,
     pub hooks: Option<Vec<NativeHook>>,
     pub global_prompt_template: Option<String>,
 }
