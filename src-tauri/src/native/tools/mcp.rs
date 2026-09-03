@@ -774,6 +774,8 @@ mod tests {
             }],
             enabled: true,
             notes: None,
+            scope: "all".to_string(),
+            workspace_ids: Vec::new(),
         }
     }
 

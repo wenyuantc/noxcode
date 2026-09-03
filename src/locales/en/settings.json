@@ -345,7 +345,13 @@
       "namePlaceholder": "Name",
       "commandPlaceholder": "Launch command (for example npx, uvx, or an absolute path)",
       "argsPlaceholder": "Arguments (space-separated)",
-      "notesPlaceholder": "Notes (optional)"
+      "notesPlaceholder": "Notes (optional)",
+      "scope": "Scope",
+      "scopeAll": "All workspaces",
+      "scopeWorkspaces": "Specific workspaces",
+      "scopeHint": "Connect this server in every workspace by default, or restrict it to selected workspaces.",
+      "scopeWorkspacesEmpty": "No workspaces yet. Open or create a workspace first.",
+      "scopePickWorkspaces": "Choose workspaces"
     },
     "preview": {
       "title": "Export snippet preview"

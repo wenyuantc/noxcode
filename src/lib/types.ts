@@ -656,6 +656,8 @@ export interface McpServerConfig {
   env: McpEnvVar[];
   enabled: boolean;
   notes: string | null;
+  scope: "all" | "workspaces";
+  workspace_ids: string[];
 }
 
 export interface McpServersDocument {

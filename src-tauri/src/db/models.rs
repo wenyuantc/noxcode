@@ -11,6 +11,10 @@ where
     Deserialize::deserialize(deserializer).map(Some)
 }
 
+fn default_scope_all() -> String {
+    "all".to_string()
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
 pub struct SshConfigRecord {
     pub id: String,
@@ -372,6 +376,10 @@ pub struct McpServerConfig {
     pub enabled: bool,
     #[serde(default)]
     pub notes: Option<String>,
+    #[serde(default = "default_scope_all")]
+    pub scope: String,
+    #[serde(default)]
+    pub workspace_ids: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

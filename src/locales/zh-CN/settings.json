@@ -345,7 +345,13 @@
       "namePlaceholder": "名称",
       "commandPlaceholder": "启动命令（如 npx、uvx 或绝对路径）",
       "argsPlaceholder": "参数（空格分隔）",
-      "notesPlaceholder": "备注（可选）"
+      "notesPlaceholder": "备注（可选）",
+      "scope": "作用域",
+      "scopeAll": "所有工作区",
+      "scopeWorkspaces": "指定工作区",
+      "scopeHint": "默认所有工作区都连接此服务器。指定后，仅所选工作区会连接。",
+      "scopeWorkspacesEmpty": "还没有工作区，请先打开或创建一个工作区。",
+      "scopePickWorkspaces": "选择工作区"
     },
     "preview": {
       "title": "导出片段预览"

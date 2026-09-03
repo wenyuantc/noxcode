@@ -11,7 +11,15 @@ import {
 import type { McpServerConfig } from "@/lib/types";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
+import { useWorkspaceStore } from "@/stores/workspaceStore";
 
 const EXAMPLE_FILESYSTEM_ID = "example-filesystem";
 
@@ -24,6 +32,8 @@ function createEmptyServer(): McpServerConfig {
     env: [],
     enabled: false,
     notes: null,
+    scope: "all",
+    workspace_ids: [],
   };
 }
 
@@ -45,6 +55,7 @@ function localizeExampleServers(
 
 export function McpSettingsTab() {
   const { t } = useTranslation("settings");
+  const workspaces = useWorkspaceStore((state) => state.workspaces);
   const [servers, setServers] = useState<McpServerConfig[]>([]);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -148,6 +159,8 @@ export function McpSettingsTab() {
         env: [],
         enabled: false,
         notes: t("mcp.playwright.notes"),
+        scope: "all",
+        workspace_ids: [],
       },
     ]);
     setMessage(t("mcp.messages.playwrightAdded"));
@@ -245,6 +258,73 @@ export function McpSettingsTab() {
                 })
               }
             />
+            <div>
+              <label className="text-xs font-medium text-muted-foreground">
+                {t("mcp.fields.scope")}
+              </label>
+              <Select
+                value={server.scope}
+                disabled={saving}
+                onValueChange={(value) => {
+                  if (value === "all" || value === "workspaces") {
+                    updateServer(server.id, {
+                      scope: value,
+                      workspace_ids: value === "all" ? [] : server.workspace_ids,
+                    });
+                  }
+                }}
+              >
+                <SelectTrigger className="mt-1 bg-background">
+                  <SelectValue>
+                    {(value) =>
+                      value === "workspaces"
+                        ? t("mcp.fields.scopeWorkspaces")
+                        : t("mcp.fields.scopeAll")
+                    }
+                  </SelectValue>
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="all">{t("mcp.fields.scopeAll")}</SelectItem>
+                  <SelectItem value="workspaces">{t("mcp.fields.scopeWorkspaces")}</SelectItem>
+                </SelectContent>
+              </Select>
+              <p className="mt-1 text-xs text-muted-foreground">{t("mcp.fields.scopeHint")}</p>
+            </div>
+            {server.scope === "workspaces" ? (
+              <div>
+                <label className="text-xs font-medium text-muted-foreground">
+                  {t("mcp.fields.scopePickWorkspaces")}
+                </label>
+                <div className="mt-1 max-h-48 space-y-2 overflow-y-auto rounded-md border border-border p-3">
+                  {workspaces.length === 0 ? (
+                    <p className="text-xs text-muted-foreground">
+                      {t("mcp.fields.scopeWorkspacesEmpty")}
+                    </p>
+                  ) : (
+                    workspaces.map((workspace) => (
+                      <label key={workspace.id} className="flex items-center gap-2 text-sm">
+                        <input
+                          type="checkbox"
+                          className="h-4 w-4 rounded border-input"
+                          checked={server.workspace_ids.includes(workspace.id)}
+                          disabled={saving}
+                          onChange={(event) => {
+                            const workspace_ids = event.target.checked
+                              ? [
+                                  ...server.workspace_ids.filter((id) => id !== workspace.id),
+                                  workspace.id,
+                                ]
+                              : server.workspace_ids.filter((id) => id !== workspace.id);
+                            updateServer(server.id, { workspace_ids });
+                          }}
+                        />
+                        {workspace.name}
+                      </label>
+                    ))
+                  )}
+                </div>
+              </div>
+            ) : null}
             <Textarea
               placeholder={t("mcp.fields.notesPlaceholder")}
               value={server.notes ?? ""}

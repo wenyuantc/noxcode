@@ -5,6 +5,7 @@ use tauri::{AppHandle, Manager, Runtime};
 
 use crate::app::shared::new_id;
 use crate::db::models::{McpEnvVar, McpServerConfig, McpServersDocument, UpdateMcpServersPayload};
+use crate::native::subagents::{SCOPE_ALL, SCOPE_WORKSPACES};
 
 const MCP_SERVERS_FILE_NAME: &str = "mcp-servers.json";
 
@@ -35,6 +36,8 @@ pub fn default_mcp_servers() -> McpServersDocument {
                 "这是占位示例。启用前请确认本机已安装 Node/npx，并按实际仓库路径修改 args。"
                     .to_string(),
             ),
+            scope: SCOPE_ALL.to_string(),
+            workspace_ids: Vec::new(),
         }],
     }
 }
@@ -80,6 +83,23 @@ fn normalize_server(mut server: McpServerConfig) -> Result<McpServerConfig, Stri
             *notes = trimmed.to_string();
         }
     }
+    server.scope = if server.scope.trim() == SCOPE_WORKSPACES {
+        SCOPE_WORKSPACES.to_string()
+    } else {
+        SCOPE_ALL.to_string()
+    };
+    let mut workspace_ids = Vec::new();
+    for workspace_id in server.workspace_ids {
+        let workspace_id = workspace_id.trim();
+        if !workspace_id.is_empty() && !workspace_ids.iter().any(|item| item == workspace_id) {
+            workspace_ids.push(workspace_id.to_string());
+        }
+    }
+    server.workspace_ids = if server.scope == SCOPE_WORKSPACES {
+        workspace_ids
+    } else {
+        Vec::new()
+    };
     Ok(server)
 }
 
@@ -111,13 +131,27 @@ pub fn load_mcp_document<R: Runtime>(app: &AppHandle<R>) -> Result<McpServersDoc
 
 pub fn resolve_effective_mcp_servers<R: Runtime>(
     app: &AppHandle<R>,
+    workspace_id: Option<&str>,
 ) -> Result<Vec<McpServerConfig>, String> {
     let document = load_mcp_document(app)?;
     Ok(document
         .servers
         .into_iter()
-        .filter(|server| server.enabled)
+        .filter(|server| server.enabled && server_matches_workspace(server, workspace_id))
         .collect())
+}
+
+fn server_matches_workspace(server: &McpServerConfig, workspace_id: Option<&str>) -> bool {
+    if server.scope != SCOPE_WORKSPACES {
+        return true;
+    }
+    let Some(workspace_id) = workspace_id
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    else {
+        return false;
+    };
+    server.workspace_ids.iter().any(|id| id == workspace_id)
 }
 
 #[tauri::command]
@@ -229,6 +263,8 @@ mod tests {
             env: vec![],
             enabled: false,
             notes: None,
+            scope: SCOPE_ALL.to_string(),
+            workspace_ids: Vec::new(),
         })
         .expect_err("empty name");
         assert!(err.contains("名称不能为空"));
@@ -243,12 +279,15 @@ mod tests {
             }],
             enabled: true,
             notes: Some("  ".to_string()),
+            scope: SCOPE_WORKSPACES.to_string(),
+            workspace_ids: vec![" ws-1 ".to_string(), "ws-1".to_string(), String::new()],
         })
         .expect("normalize");
         assert!(!ok.id.is_empty());
         assert_eq!(ok.args, vec!["-y".to_string()]);
         assert!(ok.env.is_empty());
         assert!(ok.notes.is_none());
+        assert_eq!(ok.workspace_ids, vec!["ws-1"]);
     }
 
     #[test]
@@ -266,6 +305,8 @@ mod tests {
                     }],
                     enabled: true,
                     notes: None,
+                    scope: SCOPE_ALL.to_string(),
+                    workspace_ids: Vec::new(),
                 },
                 McpServerConfig {
                     id: "b".to_string(),
@@ -275,6 +316,8 @@ mod tests {
                     env: vec![],
                     enabled: false,
                     notes: None,
+                    scope: SCOPE_ALL.to_string(),
+                    workspace_ids: Vec::new(),
                 },
             ],
         };
@@ -284,5 +327,26 @@ mod tests {
         assert!(snippet.contains("\"TOKEN\": \"secret\""));
         assert!(!snippet.contains("Beta"));
         assert!(!snippet.contains("uvx"));
+    }
+
+    #[test]
+    fn missing_scope_defaults_to_all_and_workspace_filter_matches() {
+        let legacy = r#"{
+            "id":"legacy","name":"Legacy","command":"npx","args":[],
+            "env":[],"enabled":true,"notes":null
+        }"#;
+        let legacy: McpServerConfig = serde_json::from_str(legacy).expect("legacy config");
+        assert_eq!(legacy.scope, SCOPE_ALL);
+        assert!(legacy.workspace_ids.is_empty());
+        assert!(server_matches_workspace(&legacy, None));
+
+        let scoped = McpServerConfig {
+            scope: SCOPE_WORKSPACES.to_string(),
+            workspace_ids: vec!["ws-1".to_string()],
+            ..legacy
+        };
+        assert!(server_matches_workspace(&scoped, Some("ws-1")));
+        assert!(!server_matches_workspace(&scoped, Some("ws-2")));
+        assert!(!server_matches_workspace(&scoped, None));
     }
 }

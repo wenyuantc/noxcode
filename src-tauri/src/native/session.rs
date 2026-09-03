@@ -1650,7 +1650,7 @@ async fn run_native_loop(
             .await;
         }
     }
-    match resolve_effective_mcp_servers(&app) {
+    match resolve_effective_mcp_servers(&app, Some(&workspace_id)) {
         Ok(servers) => {
             if announce_startup {
                 emit_native_line(
