@@ -141,12 +141,41 @@ impl ScratchIndex {
             },
         };
 
+        Self::create_file(target, Some(Path::new(&git_dir).join("index"))).await
+    }
+
+    #[allow(dead_code)]
+    pub(crate) async fn from_head(target: &GitTarget) -> Result<Self, GitError> {
+        let scratch = Self::create_file(target, None).await?;
+        let mode = IndexMode::Scratch(scratch.clone());
+        let seeded = async {
+            git(target, &["read-tree", "--empty"], &mode)
+                .await?
+                .require_success(&["read-tree", "--empty"])?;
+            if super::repo::head_oid(target).await?.is_some() {
+                git(target, &["read-tree", "HEAD"], &mode)
+                    .await?
+                    .require_success(&["read-tree", "HEAD"])?;
+            }
+            Ok::<(), GitError>(())
+        }
+        .await;
+        if let Err(error) = seeded {
+            let _ = scratch.cleanup().await;
+            return Err(error);
+        }
+        Ok(scratch)
+    }
+
+    async fn create_file(
+        target: &GitTarget,
+        source_index: Option<PathBuf>,
+    ) -> Result<Self, GitError> {
         match target {
             GitTarget::Local(_) => {
-                let src = Path::new(&git_dir).join("index");
                 let dest = std::env::temp_dir().join(format!("noxcode-index-{}", Uuid::new_v4()));
-                if src.is_file() {
-                    std::fs::copy(&src, &dest)?;
+                if let Some(src) = source_index.as_deref().filter(|path| path.is_file()) {
+                    std::fs::copy(src, &dest)?;
                 } else {
                     std::fs::write(&dest, [])?;
                 }
@@ -159,9 +188,15 @@ impl ScratchIndex {
             }
             GitTarget::Ssh { pool, params, .. } => {
                 let tmp_name = Uuid::new_v4().to_string();
+                let initialize = source_index
+                    .as_deref()
+                    .map(|source| {
+                        let source = shell_escape_single_quoted(&source.to_string_lossy());
+                        format!("if [ -f {source} ]; then cp -- {source} \"$TMP\"; else : > \"$TMP\"; fi")
+                    })
+                    .unwrap_or_else(|| ": > \"$TMP\"".to_string());
                 let script = format!(
-                    "DIR=\"$HOME/.noxcode/tmp-index\"; mkdir -p \"$DIR\"; find \"$DIR\" -type f -mmin +60 -delete 2>/dev/null || true; TMP=\"$DIR/{tmp_name}\"; if [ -f {git_dir}/index ]; then cp -- {git_dir}/index \"$TMP\"; else : > \"$TMP\"; fi; printf '%s' \"$TMP\"",
-                    git_dir = shell_escape_single_quoted(&git_dir),
+                    "DIR=\"$HOME/.noxcode/tmp-index\"; mkdir -p \"$DIR\"; find \"$DIR\" -type f -mmin +60 -delete 2>/dev/null || true; TMP=\"$DIR/{tmp_name}\"; {initialize}; printf '%s' \"$TMP\"",
                 );
                 let output = ssh_exec(pool, params, &script, GitRunOptions::default()).await?;
                 if !output.success() {

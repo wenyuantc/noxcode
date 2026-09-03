@@ -15,7 +15,7 @@ use super::checkpoint::{
 use super::commit::{checkout_branch, commit_changes, create_branch, list_branches, push_branch};
 use super::diff::{get_file_diff, get_numstat, GitFileDiffScope, GitNumstatScope};
 use super::repo::{list_repo_files, load_repo_info};
-use super::runner::{fixture_git, git, GitTarget, IndexMode};
+use super::runner::{fixture_git, git, GitTarget, IndexMode, ScratchIndex};
 use super::stage::{restore_paths, stage_paths, unstage_paths};
 use super::status::get_status;
 
@@ -24,6 +24,8 @@ struct RepoEnv {
     target: GitTarget,
     _server: Option<TestSshServer>,
 }
+
+static SSH_TARGET_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 fn temp_known_hosts() -> PathBuf {
     let dir = tempfile::tempdir().expect("known_hosts dir");
@@ -139,6 +141,7 @@ where
 {
     let local = local_env().await;
     test(local.target.clone(), local.dir.path().to_path_buf()).await;
+    let _ssh_guard = SSH_TARGET_TEST_LOCK.lock().await;
     let ssh = ssh_env().await;
     test(ssh.target.clone(), ssh.dir.path().to_path_buf()).await;
 }
@@ -518,6 +521,51 @@ async fn prune_removes_only_expired_after_tool_call_checkpoints() {
         .await
         .expect("verify expired ref");
         assert!(!expired_ref.success());
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn scratch_index_from_head_isolated_and_supports_unborn_head() {
+    run_on_targets(|target, dir| async move {
+        let dir = dir.as_path();
+        std::fs::write(dir.join("staged.txt"), "staged\n").expect("write staged");
+        fixture_git(&target, &["add", "staged.txt"])
+            .await
+            .expect("stage user file");
+        std::fs::write(dir.join("untracked.txt"), "untracked\n").expect("write untracked");
+        let before = index_bytes(dir);
+
+        let scratch = ScratchIndex::from_head(&target).await.expect("from HEAD");
+        let mode = IndexMode::Scratch(scratch.clone());
+        let files = git(&target, &["ls-files", "--stage"], &mode)
+            .await
+            .expect("list scratch index")
+            .require_success(&["ls-files", "--stage"])
+            .expect("ls-files success")
+            .stdout_lossy();
+        assert!(files.contains("README.md"));
+        assert!(!files.contains("staged.txt"));
+        assert!(!files.contains("untracked.txt"));
+        scratch.cleanup().await.expect("cleanup scratch");
+        assert_eq!(before, index_bytes(dir));
+
+        fixture_git(&target, &["symbolic-ref", "HEAD", "refs/heads/unborn-test"])
+            .await
+            .expect("set unborn HEAD");
+        let unborn = ScratchIndex::from_head(&target)
+            .await
+            .expect("unborn index");
+        let unborn_mode = IndexMode::Scratch(unborn.clone());
+        let unborn_files = git(&target, &["ls-files", "--stage"], &unborn_mode)
+            .await
+            .expect("list unborn index")
+            .require_success(&["ls-files", "--stage"])
+            .expect("unborn ls-files success")
+            .stdout_lossy();
+        assert!(unborn_files.is_empty(), "{unborn_files}");
+        unborn.cleanup().await.expect("cleanup unborn scratch");
+        assert_eq!(before, index_bytes(dir));
     })
     .await;
 }
