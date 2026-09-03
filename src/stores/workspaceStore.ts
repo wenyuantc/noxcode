@@ -6,6 +6,7 @@ import {
   deleteWorkspace,
   listAgentSessions,
   listWorkspaces,
+  updateWorkspace,
 } from "@/lib/backend";
 import type { AgentSession, CreateWorkspaceInput, Workspace, WorkspaceHealth } from "@/lib/types";
 
@@ -22,6 +23,7 @@ interface WorkspaceState {
   load: () => Promise<void>;
   setActive: (id: string | null) => Promise<void>;
   create: (payload: CreateWorkspaceInput) => Promise<Workspace>;
+  rename: (id: string, name: string) => Promise<void>;
   remove: (id: string) => Promise<void>;
   toggleExpand: (id: string) => void;
   showMore: (id: string) => void;
@@ -72,6 +74,10 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
     await get().load();
     await get().setActive(workspace.id);
     return workspace;
+  },
+  rename: async (id, name) => {
+    await updateWorkspace(id, { name });
+    await get().load();
   },
   remove: async (id) => {
     await deleteWorkspace(id);
