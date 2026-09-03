@@ -239,12 +239,54 @@
     "outputTokens": "输出 tokens"
   },
   "database": {
-    "title": "数据库维护",
-    "hint": "备份、恢复或打开数据库所在目录。",
-    "backup": "备份数据库",
-    "restore": "恢复数据库",
-    "openFolder": "打开数据库目录",
-    "health": "健康检查"
+    "maintenance": {
+      "title": "数据库维护",
+      "description": "数据库仍保留在本地；SSH 模式只切换执行上下文，不切换数据库位置。",
+      "pathLabel": "数据库路径",
+      "currentVersionLabel": "当前版本",
+      "latestVersionLabel": "最新版本",
+      "detecting": "检测中",
+      "unknown": "未知"
+    },
+    "backupScope": {
+      "title": "备份范围说明（不等于完整灾备）",
+      "included": "包含",
+      "excluded": "不包含",
+      "restoreWarning": "导入 SQL 只会覆盖数据库；不会还原 MCP、钩子、网络设置、快捷提示、技能与 SSH 密钥。导入前请确认已另行备份这些内容。",
+      "includesItems": [
+        "SQLite 全库数据（工作区、SSH 配置、AI 渠道与 API 密钥、会话与事件、Git checkpoint 元数据、API 调用日志等）",
+        "已应用的数据库迁移版本记录（_sqlx_migrations）"
+      ],
+      "excludesItems": [
+        "密钥环中的 SSH 密码 / 私钥口令（服务名 noxcode-ssh）",
+        "应用配置目录中的 ssh-secret-index.json",
+        "应用配置目录中的 mcp-servers.json、native-settings.json（含钩子）、network-settings.json、quick-prompts.json",
+        "全局技能目录 native-skills/",
+        "Git 仓库中的 checkpoint 对象",
+        "窗口尺寸等本地 UI 状态"
+      ]
+    },
+    "actions": {
+      "exportSql": "导出 SQL",
+      "importSql": "导入 SQL",
+      "openDirectory": "打开数据库目录",
+      "openDirectoryAvailable": "打开数据库所在的文件夹",
+      "pathUnavailable": "数据库路径不可用"
+    },
+    "dialogs": {
+      "fileFilterName": "SQL 备份",
+      "exportTitle": "导出 SQL 备份",
+      "importTitle": "导入 SQL 备份",
+      "importConfirmMessage": "导入 SQL 会先自动备份当前数据库，再清空现有数据库并执行导入 SQL。",
+      "selectBackupTitle": "选择 SQL 备份文件",
+      "importCompleteTitle": "SQL 导入完成",
+      "importCompleteMessage": "{{message}}\n\n导入前自动备份：{{backupPath}}"
+    },
+    "messages": {
+      "exportFailed": "导出 SQL 备份失败",
+      "openFolderFailed": "打开数据库文件夹失败",
+      "importFailed": "导入 SQL 备份失败"
+    }
   },
   "about": {
     "title": "关于",

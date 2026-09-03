@@ -155,11 +155,14 @@ Git plumbing 快照的数据库索引。真实对象在仓库 `refs/noxcode/chec
 | `list_ssh_configs` / `get_ssh_config` / `create_ssh_config` / `update_ssh_config` / `delete_ssh_config` | SSH 配置 CRUD，见 [`ssh.md`](ssh.md) |
 | `probe_ssh_password_auth` / `test_ssh_connection` | 写 `password_probe_*` / `last_check_*` |
 
-备份范围只覆盖 SQLite 本体。不包括：
+备份范围只覆盖 SQLite 本体，包括工作区、SSH 配置、`ai_channels`（**API 密钥在库内，会随 SQL 导出**）、会话与事件、Git checkpoint 元数据、API 调用日志，以及 `_sqlx_migrations`。不包括：
 
 - keyring 里的 SSH 密码 / 私钥口令（服务名 `noxcode-ssh`）
-- 应用配置目录里的 `ssh-secret-index.json` 以及后续 native-settings / MCP JSON
+- 应用配置目录里的 `ssh-secret-index.json`
+- 应用配置目录里的 `mcp-servers.json`、`native-settings.json`（含钩子）、`network-settings.json`、`quick-prompts.json`
+- 全局技能目录 `native-skills/`
 - Git 仓库里的 checkpoint 对象
+- 窗口尺寸等本地 UI 状态
 
 恢复时若备份版本高于应用支持的最新迁移，会拒绝导入。导入失败会尝试滚回导入前自动备份。
 

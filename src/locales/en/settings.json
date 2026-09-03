@@ -239,12 +239,54 @@
     "outputTokens": "Output tokens"
   },
   "database": {
-    "title": "Database",
-    "hint": "Backup, restore, or open the database folder.",
-    "backup": "Backup",
-    "restore": "Restore",
-    "openFolder": "Open folder",
-    "health": "Health check"
+    "maintenance": {
+      "title": "Database maintenance",
+      "description": "The database stays on this machine. SSH mode only switches the execution context, not the database location.",
+      "pathLabel": "Database path",
+      "currentVersionLabel": "Current version",
+      "latestVersionLabel": "Latest version",
+      "detecting": "Detecting",
+      "unknown": "Unknown"
+    },
+    "backupScope": {
+      "title": "Backup scope (not a full disaster-recovery backup)",
+      "included": "Included",
+      "excluded": "Not included",
+      "restoreWarning": "Importing SQL replaces the database only. It does not restore MCP, hooks, network settings, quick prompts, skills, or SSH secrets. Back those up separately before importing.",
+      "includesItems": [
+        "Full SQLite data (workspaces, SSH configs, AI channels and API keys, sessions and events, Git checkpoint metadata, API call logs, and more)",
+        "Applied database migration records (_sqlx_migrations)"
+      ],
+      "excludesItems": [
+        "SSH passwords / private-key passphrases in the keyring (service noxcode-ssh)",
+        "ssh-secret-index.json in the app config directory",
+        "mcp-servers.json, native-settings.json (including hooks), network-settings.json, and quick-prompts.json in the app config directory",
+        "The global skills directory native-skills/",
+        "Git checkpoint objects inside repositories",
+        "Local UI state such as window size"
+      ]
+    },
+    "actions": {
+      "exportSql": "Export SQL",
+      "importSql": "Import SQL",
+      "openDirectory": "Open database folder",
+      "openDirectoryAvailable": "Open the folder that contains the database",
+      "pathUnavailable": "Database path is unavailable"
+    },
+    "dialogs": {
+      "fileFilterName": "SQL backup",
+      "exportTitle": "Export SQL backup",
+      "importTitle": "Import SQL backup",
+      "importConfirmMessage": "Importing SQL will automatically back up the current database, then clear it and run the imported SQL.",
+      "selectBackupTitle": "Select an SQL backup file",
+      "importCompleteTitle": "SQL import complete",
+      "importCompleteMessage": "{{message}}\n\nAutomatic backup taken before import: {{backupPath}}"
+    },
+    "messages": {
+      "exportFailed": "Failed to export SQL backup",
+      "openFolderFailed": "Failed to open the database folder",
+      "importFailed": "Failed to import SQL backup"
+    }
   },
   "about": {
     "title": "About",
