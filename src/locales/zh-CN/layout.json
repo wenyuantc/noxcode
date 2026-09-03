@@ -14,6 +14,7 @@
   "pinnedSection": "已置顶",
   "pinSession": "置顶",
   "unpinSession": "取消置顶",
+  "sessionWorking": "进行中",
   "command": {
     "placeholder": "搜索操作、会话或文件",
     "all": "全部",

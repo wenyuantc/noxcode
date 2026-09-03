@@ -252,6 +252,7 @@ pub struct AgentSessionRecord {
     pub created_at: String,
     pub title: Option<String>,
     pub pinned: i32,
+    pub context_usage_json: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, FromRow)]

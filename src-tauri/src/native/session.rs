@@ -9,6 +9,7 @@ use tauri::{AppHandle, Emitter, Manager, State};
 use tokio::sync::{mpsc, Mutex};
 
 use crate::app::network_settings::load_network_settings;
+use crate::app::sessions::persist_context_usage_with;
 use crate::app::shared::{new_id, now_sqlite, sqlite_pool, EXECUTION_TARGET_SSH};
 use crate::app::ssh::configs::fetch_ssh_config_record_by_id;
 use crate::db::models::{
@@ -376,24 +377,27 @@ async fn forward_native_events(
                     }
                     NativeEvent::Delta(StreamDelta::Reset) => deltas.clear(),
                     NativeEvent::ContextUsage(snapshot) => {
-                        let _ = app.emit(
-                            "native-context-usage",
-                            NativeContextUsage {
-                                session_record_id: session_record_id.clone(),
-                                used_tokens: snapshot.used_tokens,
-                                limit_tokens: snapshot.limit_tokens,
-                                generation: snapshot.generation,
-                                compactions: snapshot.compactions,
-                                mcp_tokens: snapshot.mcp_tokens,
-                                system_tool_tokens: snapshot.system_tool_tokens,
-                                skill_tokens: snapshot.skill_tokens,
-                                system_prompt_tokens: snapshot.system_prompt_tokens,
-                                other_tokens: snapshot.other_tokens,
-                                message_tokens: snapshot.message_tokens,
-                                prompt_tokens: snapshot.prompt_tokens,
-                                cached_tokens: snapshot.cached_tokens,
-                            },
-                        );
+                        let usage = NativeContextUsage {
+                            session_record_id: session_record_id.clone(),
+                            used_tokens: snapshot.used_tokens,
+                            limit_tokens: snapshot.limit_tokens,
+                            generation: snapshot.generation,
+                            compactions: snapshot.compactions,
+                            mcp_tokens: snapshot.mcp_tokens,
+                            system_tool_tokens: snapshot.system_tool_tokens,
+                            skill_tokens: snapshot.skill_tokens,
+                            system_prompt_tokens: snapshot.system_prompt_tokens,
+                            other_tokens: snapshot.other_tokens,
+                            message_tokens: snapshot.message_tokens,
+                            prompt_tokens: snapshot.prompt_tokens,
+                            cached_tokens: snapshot.cached_tokens,
+                        };
+                        let _ = app.emit("native-context-usage", usage.clone());
+                        if let Ok(pool) = sqlite_pool(&app).await {
+                            if let Err(error) = persist_context_usage_with(&pool, &usage).await {
+                                eprintln!("[native] 保存上下文用量失败: {error}");
+                            }
+                        }
                     }
                 }
             }
@@ -541,6 +545,10 @@ fn should_announce_session_startup(resume_session_id: Option<&str>) -> bool {
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .is_none()
+}
+
+fn is_cancelled_run_error(error: &str) -> bool {
+    error == "已取消"
 }
 
 fn is_mcp_error_status(text: &str) -> bool {
@@ -1714,18 +1722,20 @@ async fn run_native_loop(
             Ok(text) => text,
             Err(error) => {
                 last_error = Some(error.clone());
-                if let Some(tx) = &runner.on_event {
-                    let _ = tx.send(NativeEvent::Line(format!("[ERROR] {error}")));
-                } else {
-                    emit_native_line(
-                        &app,
-                        &session_record_id,
-                        &profile_id,
-                        Some(&workspace_id),
-                        &kind,
-                        format!("[ERROR] {error}"),
-                    )
-                    .await;
+                if !is_cancelled_run_error(&error) {
+                    if let Some(tx) = &runner.on_event {
+                        let _ = tx.send(NativeEvent::Line(format!("[ERROR] {error}")));
+                    } else {
+                        emit_native_line(
+                            &app,
+                            &session_record_id,
+                            &profile_id,
+                            Some(&workspace_id),
+                            &kind,
+                            format!("[ERROR] {error}"),
+                        )
+                        .await;
+                    }
                 }
                 let _ = next_loop_step(await_followups, NativeLoopEvent::Error);
                 break;
@@ -1846,7 +1856,9 @@ async fn run_native_loop(
         .await;
     }
 
-    let failed = last_error.is_some() && last_error.as_deref() != Some("已取消");
+    let failed = last_error
+        .as_deref()
+        .is_some_and(|error| !is_cancelled_run_error(error));
     let status = if failed { "failed" } else { "exited" };
     let code = if failed { 1 } else { 0 };
     let ended_at = now_sqlite();
@@ -2098,12 +2110,19 @@ pub async fn resume_native_session(
 #[cfg(test)]
 mod tests {
     use super::{
-        format_native_diagnostics, is_mcp_error_status, native_startup_banner, next_loop_step,
+        format_native_diagnostics, is_cancelled_run_error, is_mcp_error_status,
+        native_startup_banner, next_loop_step,
         should_announce_session_startup, usable_native_plan_text, NativeLoopAction,
         NativeLoopEvent,
     };
     use crate::native::agent::compact::{BudgetSnapshot, ContextWindow};
     use crate::native::agent::r#loop::AgentDiagnosticsSnapshot;
+
+    #[test]
+    fn cancelled_run_error_is_not_a_failure() {
+        assert!(is_cancelled_run_error("已取消"));
+        assert!(!is_cancelled_run_error("模型超时"));
+    }
 
     #[test]
     fn native_one_shot_text_requires_non_empty_assistant() {

@@ -375,6 +375,7 @@ export interface AgentSession {
   reasoning_tokens: number | null;
   cached_tokens: number | null;
   created_at: string;
+  context_usage_json?: string | null;
 }
 
 export interface AgentSessionEvent {

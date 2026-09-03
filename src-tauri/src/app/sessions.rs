@@ -5,7 +5,9 @@ use tauri::{AppHandle, Runtime, State};
 use tokio::sync::Mutex;
 
 use crate::app::shared::sqlite_pool;
-use crate::db::models::{AgentSessionEvent, AgentSessionRecord, AgentSessionResumeInfo};
+use crate::db::models::{
+    AgentSessionEvent, AgentSessionRecord, AgentSessionResumeInfo, NativeContextUsage,
+};
 use crate::git::{delete_checkpoints_for_session, resolve_git_target};
 use crate::native::manager::NativeAgentManager;
 use crate::native::transcript::has_transcript;
@@ -125,6 +127,21 @@ pub(crate) async fn set_agent_session_pinned_with(
     if result.rows_affected() == 0 {
         return Err(format!("会话不存在: {session_id}"));
     }
+    Ok(())
+}
+
+pub(crate) async fn persist_context_usage_with(
+    pool: &SqlitePool,
+    usage: &NativeContextUsage,
+) -> Result<(), String> {
+    let json =
+        serde_json::to_string(usage).map_err(|error| format!("序列化上下文用量失败: {error}"))?;
+    sqlx::query("UPDATE agent_sessions SET context_usage_json = $1 WHERE id = $2")
+        .bind(&json)
+        .bind(&usage.session_record_id)
+        .execute(pool)
+        .await
+        .map_err(|error| format!("更新会话上下文用量失败: {error}"))?;
     Ok(())
 }
 
@@ -322,6 +339,57 @@ mod tests {
         assert!(missing
             .expect_err("missing session")
             .contains("会话不存在: missing"));
+    }
+
+    #[tokio::test]
+    async fn persists_context_usage_json_for_list() {
+        let pool = setup_migrated_pool().await;
+        sqlx::query(
+            "INSERT INTO workspaces (id, name, workspace_type) VALUES ('ws-1', 'ws', 'local')",
+        )
+        .execute(&pool)
+        .await
+        .expect("ws");
+        sqlx::query(
+            "INSERT INTO agent_sessions (id, workspace_id, status, started_at, created_at) VALUES ('sess-1', 'ws-1', 'exited', '2026-01-01 00:00:00', '2026-01-01 00:00:00')",
+        )
+        .execute(&pool)
+        .await
+        .expect("session");
+
+        persist_context_usage_with(
+            &pool,
+            &NativeContextUsage {
+                session_record_id: "sess-1".to_string(),
+                used_tokens: 28000,
+                limit_tokens: 500000,
+                generation: 1,
+                compactions: 0,
+                mcp_tokens: 10,
+                system_tool_tokens: 20,
+                skill_tokens: 30,
+                system_prompt_tokens: 40,
+                other_tokens: 50,
+                message_tokens: 27850,
+                prompt_tokens: 27000,
+                cached_tokens: 22410,
+            },
+        )
+        .await
+        .expect("persist");
+
+        let listed = list_agent_sessions_with(&pool, Some("ws-1"), Some(10))
+            .await
+            .expect("list");
+        let json = listed[0]
+            .context_usage_json
+            .as_deref()
+            .expect("context_usage_json");
+        let stored: NativeContextUsage = serde_json::from_str(json).expect("parse");
+        assert_eq!(stored.session_record_id, "sess-1");
+        assert_eq!(stored.used_tokens, 28000);
+        assert_eq!(stored.limit_tokens, 500000);
+        assert_eq!(stored.cached_tokens, 22410);
     }
 
     #[tokio::test]

@@ -1,4 +1,4 @@
-import { ChevronDown, Folder, Pin, Plus, Trash2 } from "lucide-react";
+import { ChevronDown, Folder, Pin, Plus, Sparkle, Trash2 } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
 import { deleteAgentSession, setAgentSessionPinned } from "@/lib/backend";
@@ -24,6 +24,7 @@ function SessionRow({
 }) {
   const { t } = useTranslation("layout");
   const loadHistory = useSessionStore((state) => state.loadHistory);
+  const working = useSessionStore((state) => state.turnState[session.id] === "working");
   const pinned = session.pinned !== 0;
 
   return (
@@ -61,6 +62,12 @@ function SessionRow({
         <Pin className={cn("size-3.5", pinned && "fill-current")} />
       </button>
       <span className="flex min-w-0 flex-1 items-center gap-2 text-sm">
+        {working ? (
+          <Sparkle
+            className="size-3.5 shrink-0 animate-spin text-muted-foreground"
+            aria-label={t("sessionWorking")}
+          />
+        ) : null}
         <span className="min-w-0 flex-1 truncate text-left">
           {displaySessionTitle(session.title) ||
             (session.session_kind === "plan" ? "Plan" : t("sessions"))}

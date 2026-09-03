@@ -81,13 +81,16 @@ describe("sessionLines", () => {
     );
     expect(isHiddenSessionCeremonyLine("内置 Agent 会话已恢复")).toBe(true);
     expect(isHiddenSessionCeremonyLine("内置 Agent 会话已创建")).toBe(true);
+    expect(isHiddenSessionCeremonyLine("[ERROR] 已取消")).toBe(true);
+    expect(isHiddenSessionCeremonyLine("[ERROR] boom")).toBe(false);
     expect(isHiddenSessionCeremonyLine("[MCP] 未启用服务器")).toBe(false);
     const grouped = groupSessionLines([
       line("1", "[USER_INPUT] 你好", "2026-01-01T00:00:00Z"),
       line("2", "[续聊] 已恢复上一会话 2 条上下文（图片附件不恢复）", "2026-09-03T07:00:00Z"),
       line("3", "内置 Agent 会话已恢复", "2026-09-03T07:00:01Z"),
       line("4", "内置 Agent 会话已创建", "2026-09-03T07:00:02Z"),
-      line("5", "先这样", "2026-01-01T00:00:10Z"),
+      line("5", "[ERROR] 已取消", "2026-09-03T07:00:03Z"),
+      line("6", "先这样", "2026-01-01T00:00:10Z"),
     ]);
     expect(grouped.map((item) => item.text)).toEqual(["你好", "先这样"]);
   });

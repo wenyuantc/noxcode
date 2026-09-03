@@ -383,7 +383,11 @@ export function displaySessionTitle(title: string | null | undefined): string {
 export function isHiddenSessionCeremonyLine(text: string): boolean {
   const line = text.trim();
   if (line.startsWith("[续聊]")) return true;
-  return line === "内置 Agent 会话已恢复" || line === "内置 Agent 会话已创建";
+  return (
+    line === "内置 Agent 会话已恢复" ||
+    line === "内置 Agent 会话已创建" ||
+    line === "[ERROR] 已取消"
+  );
 }
 
 export function groupSessionLines(lines: RawSessionLine[]): GroupedSessionItem[] {

@@ -32,7 +32,7 @@ export function Composer({ compact = false }: { compact?: boolean }) {
     selectedSessionId ? state.liveBySession[selectedSessionId] : undefined,
   );
   const usage = useSessionStore((state) =>
-    live ? state.usage[live.session_record_id] : undefined,
+    selectedSessionId ? state.usage[selectedSessionId] : undefined,
   );
   const turnState = useSessionStore((state) =>
     live ? state.turnState[live.session_record_id] : undefined,

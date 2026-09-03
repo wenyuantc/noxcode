@@ -31,7 +31,7 @@ P4 把进程内编程 Agent 接到渠道 + 工作区外壳。数据流仍是 `Re
 
 权限模式（`permission_mode`）三档：`confirm` 变更前确认；`auto_edit` 自动编辑（只放行 `Overwrite`，删除 / 推送 / 强制 Git / 不透明命令 / MCP 仍弹确认）；`full` 完全访问（`allow_all_high_risk=true`）。旧文件的 `confirm_high_risk: false` 读成 `full`。
 
-`send_native_input` / `finish_native_input` 按 `session_record_id` 寻址。`resume_native_session` 若源会话仍在跑，则向同一 live 投递输入；进程不在则原位静默恢复 transcript。同一会话继续发送不是单独的「续聊」产品流程。
+`send_native_input` / `finish_native_input` 按 `session_record_id` 寻址。`resume_native_session` 若源会话仍在跑，则向同一 live 投递输入；进程不在则原位静默恢复 transcript。同一会话继续发送不是单独的「续聊」产品流程。手动停止写「收到停止请求」，`已取消` 不算失败、不写 `[ERROR] 已取消`。
 
 ## 命令
 
@@ -50,7 +50,7 @@ P4 把进程内编程 Agent 接到渠道 + 工作区外壳。数据流仍是 `Re
 | `native-session` | `AgentSessionStarted` |
 | `native-stdout` | `AgentSessionOutput`（已写入 `agent_session_events`） |
 | `native-text-delta` | `NativeTextDelta`（仅展示，不落库） |
-| `native-context-usage` | `NativeContextUsage`（`used` = 工具 schema + 消息；分类字段 + 上次调用 `prompt_tokens` / `cached_tokens`；仅父 Agent） |
+| `native-context-usage` | `NativeContextUsage`（`used` = 工具 schema + 消息；分类字段 + 上次调用 `prompt_tokens` / `cached_tokens`；仅父 Agent；同时写入 `agent_sessions.context_usage_json`） |
 | `native-turn-state` | `NativeTurnState`（`waiting_input` / `working`，不落库） |
 | `native-permission-request` | 高风险工具确认 |
 | `native-plan-question` | 计划模式提问 |

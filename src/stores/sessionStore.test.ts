@@ -1,13 +1,15 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-import type { AgentSessionEvent, AgentSessionOutput } from "@/lib/types";
+import type { AgentSession, AgentSessionEvent, AgentSessionOutput } from "@/lib/types";
 
 vi.mock("@/lib/backend", () => ({
   getAgentSessionLogLines: vi.fn(),
 }));
 
 import { getAgentSessionLogLines } from "@/lib/backend";
+import { useChannelStore } from "./channelStore";
 import { useSessionStore } from "./sessionStore";
+import { useWorkspaceStore } from "./workspaceStore";
 
 const getLines = vi.mocked(getAgentSessionLogLines);
 
@@ -44,6 +46,12 @@ describe("sessionStore history", () => {
       stream: {},
       permission: null,
       planQuestion: null,
+    });
+    useWorkspaceStore.setState({ sessions: [] });
+    useChannelStore.setState({
+      channels: [],
+      activeChannelId: null,
+      activeModelId: null,
     });
   });
 
@@ -113,5 +121,120 @@ describe("sessionStore history", () => {
     resolveB?.([event("eb", "b")]);
     await pendingB;
     expect(useSessionStore.getState().lines.b?.map((line) => line.id)).toEqual(["eb"]);
+  });
+
+  it("hydrates usage from persisted context_usage_json", async () => {
+    getLines.mockResolvedValue([]);
+    useWorkspaceStore.setState({
+      sessions: [
+        {
+          id: "s1",
+          ai_channel_id: null,
+          workspace_id: null,
+          working_dir: null,
+          execution_target: "local",
+          ssh_config_id: null,
+          target_host_label: null,
+          session_kind: "execution",
+          status: "exited",
+          started_at: "t",
+          ended_at: null,
+          exit_code: null,
+          resume_session_id: null,
+          pinned: 0,
+          input_tokens: null,
+          output_tokens: null,
+          total_tokens: null,
+          reasoning_tokens: null,
+          cached_tokens: null,
+          created_at: "t",
+          context_usage_json: JSON.stringify({
+            session_record_id: "s1",
+            used_tokens: 28000,
+            limit_tokens: 500000,
+            generation: 1,
+            compactions: 0,
+            prompt_tokens: 27000,
+            cached_tokens: 22410,
+          }),
+        } satisfies AgentSession,
+      ],
+    });
+
+    await useSessionStore.getState().loadHistory("s1");
+    expect(useSessionStore.getState().usage.s1).toMatchObject({
+      used_tokens: 28000,
+      limit_tokens: 500000,
+      cached_tokens: 22410,
+    });
+  });
+
+  it("falls back to the last 用量 line when no snapshot exists", async () => {
+    getLines.mockResolvedValue([
+      event("e1"),
+      {
+        ...event("e2"),
+        message: "[用量] in=28000 out=120 cache=22410 total=28120",
+      },
+    ]);
+
+    await useSessionStore.getState().loadHistory("s1");
+    expect(useSessionStore.getState().usage.s1).toMatchObject({
+      used_tokens: 28000,
+      limit_tokens: 128000,
+      prompt_tokens: 28000,
+      cached_tokens: 22410,
+    });
+  });
+
+  it("does not overwrite live usage when loading history", async () => {
+    useSessionStore.setState({
+      usage: {
+        s1: {
+          session_record_id: "s1",
+          used_tokens: 9,
+          limit_tokens: 100,
+          generation: 2,
+          compactions: 0,
+        },
+      },
+    });
+    useWorkspaceStore.setState({
+      sessions: [
+        {
+          id: "s1",
+          ai_channel_id: null,
+          workspace_id: null,
+          working_dir: null,
+          execution_target: "local",
+          ssh_config_id: null,
+          target_host_label: null,
+          session_kind: "execution",
+          status: "running",
+          started_at: "t",
+          ended_at: null,
+          exit_code: null,
+          resume_session_id: null,
+          pinned: 0,
+          input_tokens: null,
+          output_tokens: null,
+          total_tokens: null,
+          reasoning_tokens: null,
+          cached_tokens: null,
+          created_at: "t",
+          context_usage_json: JSON.stringify({
+            session_record_id: "s1",
+            used_tokens: 1,
+            limit_tokens: 2,
+            generation: 0,
+            compactions: 0,
+          }),
+        } satisfies AgentSession,
+      ],
+    });
+    getLines.mockResolvedValue([event("e1")]);
+
+    await useSessionStore.getState().loadHistory("s1");
+    expect(useSessionStore.getState().usage.s1?.used_tokens).toBe(9);
   });
 });

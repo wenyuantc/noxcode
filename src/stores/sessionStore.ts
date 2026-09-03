@@ -1,6 +1,7 @@
 import { create } from "zustand";
 
 import { getAgentSessionLogLines } from "@/lib/backend";
+import { resolveHistoricalUsage, resolveHistoryLimitTokens } from "@/lib/contextUsage";
 import type { RawSessionLine } from "@/lib/sessionLines";
 import type {
   AgentSessionExit,
@@ -11,7 +12,31 @@ import type {
   NativePlanQuestionRequest,
   NativeTextDelta,
 } from "@/lib/types";
+import { useChannelStore } from "@/stores/channelStore";
 import { useWorkspaceStore } from "@/stores/workspaceStore";
+
+function hydrateUsage(sessionId: string) {
+  const current = useSessionStore.getState();
+  if (current.usage[sessionId]) return;
+  const workspace = useWorkspaceStore.getState();
+  const channels = useChannelStore.getState();
+  const session = workspace.sessions.find((item) => item.id === sessionId);
+  const usage = resolveHistoricalUsage({
+    sessionId,
+    contextUsageJson: session?.context_usage_json,
+    lines: current.lines[sessionId] ?? [],
+    limitTokens: resolveHistoryLimitTokens(
+      session,
+      channels.channels,
+      channels.activeChannelId,
+      channels.activeModelId,
+    ),
+  });
+  if (!usage) return;
+  useSessionStore.setState({
+    usage: { ...useSessionStore.getState().usage, [sessionId]: usage },
+  });
+}
 
 interface SessionState {
   selectedSessionId: string | null;
@@ -46,20 +71,23 @@ export const useSessionStore = create<SessionState>((set, get) => ({
   planQuestion: null,
   selectSession: (id) => set({ selectedSessionId: id }),
   ensureHistory: async (sessionId) => {
-    if (get().lines[sessionId]) return;
-    const events = await getAgentSessionLogLines(sessionId);
-    if (get().lines[sessionId]) return;
-    set({
-      lines: {
-        ...get().lines,
-        [sessionId]: events.map((event) => ({
-          id: event.id,
-          sessionId,
-          text: event.message ?? "",
-          createdAt: event.created_at,
-        })),
-      },
-    });
+    if (!get().lines[sessionId]) {
+      const events = await getAgentSessionLogLines(sessionId);
+      if (!get().lines[sessionId]) {
+        set({
+          lines: {
+            ...get().lines,
+            [sessionId]: events.map((event) => ({
+              id: event.id,
+              sessionId,
+              text: event.message ?? "",
+              createdAt: event.created_at,
+            })),
+          },
+        });
+      }
+    }
+    hydrateUsage(sessionId);
   },
   loadHistory: async (sessionId) => {
     set({ selectedSessionId: sessionId });
