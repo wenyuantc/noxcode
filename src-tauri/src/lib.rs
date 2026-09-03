@@ -4,6 +4,9 @@ mod engine;
 mod git;
 mod native;
 mod process_spawn;
+mod tray;
+mod window_event;
+mod window_state;
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -28,8 +31,14 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
         .setup(|app| {
+            tray::create_tray(app)?;
+            if let Err(error) = window_state::restore_main_window_size(app.handle()) {
+                eprintln!("恢复主窗口尺寸失败: {error}");
+            }
+
             let trust = Arc::new(HostTrustBroker::new(Duration::from_secs(120)));
             let handle = app.handle().clone();
             trust.set_emitter(move |event| match event {
@@ -131,12 +140,18 @@ pub fn run() {
             app::sessions::prepare_agent_session_resume,
             app::sessions::set_agent_session_pinned,
             app::sessions::delete_agent_session,
+            tray::show_main_window,
         ])
+        .on_window_event(window_event::handle_window_event)
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
         .run(|app, event| match event {
             tauri::RunEvent::Ready => {
                 git::preflight::show_fatal_dialog_if_needed(app);
+            }
+            #[cfg(target_os = "macos")]
+            tauri::RunEvent::Reopen { .. } => {
+                let _ = tray::show_main_window_handle(app);
             }
             tauri::RunEvent::Exit => {
                 if let Some(manager) = app.try_state::<Arc<Mutex<NativeAgentManager>>>() {

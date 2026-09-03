@@ -2,7 +2,7 @@
 
 桌面端 AI coding 工具：内置 Agent、AI 渠道、SSH 工作区、Git checkpoint。基于 Tauri 2 + React 19。
 
-架构见 [docs/architecture.md](docs/architecture.md)，数据层见 [docs/database.md](docs/database.md)，SSH 见 [docs/ssh.md](docs/ssh.md)，Git 见 [docs/git.md](docs/git.md)。完整构建计划见 [plan.md](plan.md)。
+架构见 [docs/architecture.md](docs/architecture.md)，数据层见 [docs/database.md](docs/database.md)，SSH 见 [docs/ssh.md](docs/ssh.md)，Git 见 [docs/git.md](docs/git.md)，打包发版见 [docs/release.md](docs/release.md)。完整构建计划见 [plan.md](plan.md)。
 
 ## 要求
 
@@ -20,4 +20,6 @@ npm run format:check
 npm run test:ci
 cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
 cargo test --manifest-path src-tauri/Cargo.toml
+npm run tauri:dmg:no-sign
+npm run bump-version -- 0.1.1
 ```

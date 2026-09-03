@@ -290,9 +290,34 @@
     }
   },
   "about": {
-    "title": "About",
+    "title": "About & updates",
     "version": "Version",
-    "description": "In-process native agent, AI channels, SSH workspaces, and Git checkpoints."
+    "description": "Show the current version and check GitHub Releases for updates to this desktop app.",
+    "currentVersion": "Current version",
+    "unknownVersion": "Unknown",
+    "check": "Check for updates",
+    "checking": "Checking…",
+    "upToDate": "You already have the latest version.",
+    "available": "Update available: {{version}}",
+    "publishedAt": "Published {{date}}",
+    "notes": "Release notes",
+    "update": "Update",
+    "downloading": "Downloading update…",
+    "progressPercent": "{{percent}}%",
+    "installed": "The update is installed. Restart the app to use the new version.",
+    "restart": "Restart now",
+    "restartFailed": "Failed to restart: {{detail}}",
+    "startupAvailable": "Version {{version}} is available (current {{current}}). It will not install automatically.",
+    "startupOpenSettings": "Update",
+    "startupDismiss": "Remind later",
+    "errors": {
+      "network": "Could not reach the update server. Check your network and try again.",
+      "alreadyLatest": "You already have the latest version.",
+      "signature": "The update signature is missing or invalid. Installation was aborted.",
+      "devMode": "Updates cannot be checked or installed in development mode. Use a release build.",
+      "cancelled": "The update was cancelled.",
+      "unknown": "Checking or installing the update failed: {{detail}}"
+    }
   },
   "mcp": {
     "title": "MCP server management",

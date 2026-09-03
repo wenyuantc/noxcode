@@ -9,4 +9,5 @@
 | [git.md](git.md) | P2.5：系统 git、临时索引、checkpoint 与回滚 |
 | [channels.md](channels.md) | P3：AI 渠道、扁平 catalog、网络设置 |
 | [native.md](native.md) | P4：native agent 运行时、会话生命周期、六条链路 |
+| [release.md](release.md) | P6：打包、updater 签名、tag 发版、托盘与图标 |
 | [plan.md](../plan.md) | 分阶段实施计划（仓库根目录） |

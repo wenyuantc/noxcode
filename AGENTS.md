@@ -1,7 +1,7 @@
 # 仓库指南
 
 ## 项目结构与模块组织
-该应用由 Vite/React 前端和 Tauri/Rust 桌面壳组成。前端源码位于 `src/`：页面级路由在 `src/pages`，可复用 UI 在 `src/components`，共享辅助函数在 `src/lib`，Zustand 状态在 `src/stores`。原生桌面端代码位于 `src-tauri/src`。架构见 `docs/architecture.md`，前端见 `docs/frontend.md`，数据层见 `docs/database.md`，SSH 见 `docs/ssh.md`，Git 见 `docs/git.md`，渠道见 `docs/channels.md`，Native Agent 见 `docs/native.md`，完整构建计划见 `plan.md`。
+该应用由 Vite/React 前端和 Tauri/Rust 桌面壳组成。前端源码位于 `src/`：页面级路由在 `src/pages`，可复用 UI 在 `src/components`，共享辅助函数在 `src/lib`，Zustand 状态在 `src/stores`。原生桌面端代码位于 `src-tauri/src`。架构见 `docs/architecture.md`，前端见 `docs/frontend.md`，数据层见 `docs/database.md`，SSH 见 `docs/ssh.md`，Git 见 `docs/git.md`，渠道见 `docs/channels.md`，Native Agent 见 `docs/native.md`，打包发版见 `docs/release.md`，完整构建计划见 `plan.md`。
 
 ## 数据流铁律
 ```

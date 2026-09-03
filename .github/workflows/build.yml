@@ -1,0 +1,278 @@
+name: build-desktop-installers
+
+# 仅在手动触发或推送新标签时构建桌面端安装包。
+# 推送 tag 时：三端构建完成后自动创建/更新 GitHub Release 并挂载安装包。
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+jobs:
+  build-installers:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            platform_name: Windows
+            build_script: npm run tauri:windows
+            artifact_name: windows-bundles
+            artifact_path: |
+              src-tauri/target/release/bundle/msi/*.msi
+              src-tauri/target/release/bundle/msi/*.msi.sig
+              src-tauri/target/release/bundle/nsis/*.exe
+              src-tauri/target/release/bundle/nsis/*.exe.sig
+              src-tauri/target/release/bundle/nsis/*.nsis.zip
+              src-tauri/target/release/bundle/nsis/*.nsis.zip.sig
+          - os: ubuntu-24.04
+            platform_name: Linux
+            build_script: npm run tauri:linux
+            artifact_name: linux-bundles
+            artifact_path: |
+              src-tauri/target/release/bundle/appimage/*.AppImage
+              src-tauri/target/release/bundle/appimage/*.AppImage.sig
+              src-tauri/target/release/bundle/deb/*.deb
+              src-tauri/target/release/bundle/rpm/*.rpm
+          - os: macos-latest
+            platform_name: macOS
+            build_script: npm run tauri:dmg:no-sign
+            artifact_name: macos-dmg
+            artifact_path: |
+              src-tauri/target/release/bundle/dmg/*.dmg
+              src-tauri/target/release/bundle/macos/*.app.tar.gz
+              src-tauri/target/release/bundle/macos/*.app.tar.gz.sig
+
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 校验更新签名密钥
+        shell: bash
+        env:
+          HAS_SIGNING_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY != '' }}
+        run: |
+          set -euo pipefail
+          if [ "${HAS_SIGNING_KEY}" != "true" ] && [ "${{ github.event_name }}" = "push" ]; then
+            echo "::error::Tag 发版必须配置 GitHub secret TAURI_SIGNING_PRIVATE_KEY"
+            echo "本机配对私钥存在时可执行："
+            echo "  gh secret set TAURI_SIGNING_PRIVATE_KEY < ~/.tauri/noxcode-updater.key"
+            exit 1
+          fi
+
+      - name: 安装 Linux 系统依赖
+        if: runner.os == 'Linux'
+        run: |
+          set -euo pipefail
+          sudo DEBIAN_FRONTEND=noninteractive apt-get \
+            -o Acquire::Retries=5 \
+            -o Dpkg::Use-Pty=0 \
+            update
+          sudo DEBIAN_FRONTEND=noninteractive apt-get \
+            -o Acquire::Retries=5 \
+            -o Dpkg::Use-Pty=0 \
+            install -y \
+            libwebkit2gtk-4.1-dev \
+            build-essential \
+            curl \
+            wget \
+            file \
+            libxdo-dev \
+            libssl-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev
+
+      - name: 安装 Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: 安装 Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: 缓存 Rust 构建产物
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: ./src-tauri -> target
+
+      - name: 安装前端与 Tauri 依赖
+        run: npm install
+
+      - name: 构建 ${{ matrix.platform_name }} 安装包
+        shell: bash
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          DISABLE_UPDATER_ARTIFACTS: ${{ github.event_name == 'workflow_dispatch' && secrets.TAURI_SIGNING_PRIVATE_KEY == '' }}
+        run: |
+          set -euo pipefail
+          # `npm run script -- --config ...` 追加到 tauri build。空 extra[@] 在 macOS bash 3.2 + set -u 下会炸。
+          if [ "${DISABLE_UPDATER_ARTIFACTS}" = "true" ]; then
+            ${{ matrix.build_script }} -- --config '{"bundle":{"createUpdaterArtifacts":false}}'
+          else
+            ${{ matrix.build_script }}
+          fi
+
+      # --no-sign 会跳过 updater 签名；有私钥时给 .app.tar.gz 补 .sig。
+      - name: 签名 macOS 更新包
+        if: runner.os == 'macOS'
+        shell: bash
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          if [ -z "${TAURI_SIGNING_PRIVATE_KEY}" ]; then
+            echo "未配置 TAURI_SIGNING_PRIVATE_KEY，跳过 updater 签名"
+            exit 0
+          fi
+          found=0
+          for artifact in src-tauri/target/release/bundle/macos/*.app.tar.gz; do
+            if [ -f "${artifact}" ]; then
+              found=1
+              npm run tauri -- signer sign "${artifact}"
+            fi
+          done
+          if [ "${found}" -eq 0 ]; then
+            echo "没有 .app.tar.gz，跳过 updater 签名"
+          fi
+
+      - name: 上传 ${{ matrix.platform_name }} 安装包
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact_name }}
+          path: ${{ matrix.artifact_path }}
+          if-no-files-found: error
+          retention-days: 14
+
+  # 仅在 push tag（v*）时发布；workflow_dispatch 只构建、不发版。
+  publish-release:
+    name: Publish GitHub Release
+    needs: build-installers
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 安装 Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: 下载全部构建产物
+        uses: actions/download-artifact@v4
+        with:
+          path: release-assets
+
+      - name: 生成 latest.json
+        env:
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          LATEST_JSON_INPUT: release-assets
+          LATEST_JSON_OUTPUT: latest.json
+          LATEST_JSON_VERSION: ${{ github.ref_name }}
+          LATEST_JSON_NOTES: ${{ github.ref_name }}
+        run: node scripts/build-latest-json.mjs
+
+      - name: 列出待发布文件
+        run: |
+          echo "Release assets:"
+          find release-assets -type f | sort
+          test -n "$(find release-assets -type f)" || {
+            echo "No release assets found"
+            exit 1
+          }
+
+      - name: 生成中文发版说明
+        env:
+          TAG_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+
+          list_assets() {
+            local pattern="$1"
+            find release-assets -type f -name "$pattern" 2>/dev/null | sort | while read -r f; do
+              printf -- '- `%s`\n' "$(basename "$f")"
+            done
+          }
+
+          WINDOWS_ASSETS="$(list_assets '*.msi')"
+          WINDOWS_NSIS="$(list_assets '*setup.exe')"
+          MACOS_ASSETS="$(list_assets '*.dmg')"
+          LINUX_APPIMAGE="$(list_assets '*.AppImage')"
+          LINUX_DEB="$(list_assets '*.deb')"
+          LINUX_RPM="$(list_assets '*.rpm')"
+
+          {
+            echo "## noxcode ${TAG_NAME}"
+            echo
+            echo "桌面端 AI coding 工具（Tauri）正式安装包。"
+            echo
+            echo "### 下载安装包"
+            echo
+            echo "#### Windows"
+            if [ -n "${WINDOWS_ASSETS}${WINDOWS_NSIS}" ]; then
+              [ -n "${WINDOWS_ASSETS}" ] && echo "${WINDOWS_ASSETS}"
+              [ -n "${WINDOWS_NSIS}" ] && echo "${WINDOWS_NSIS}"
+            else
+              echo "- （本次无 Windows 安装包）"
+            fi
+            echo
+            echo "#### macOS"
+            if [ -n "${MACOS_ASSETS}" ]; then
+              echo "${MACOS_ASSETS}"
+            else
+              echo "- （本次无 macOS 安装包）"
+            fi
+            echo
+            echo "#### Linux"
+            if [ -n "${LINUX_APPIMAGE}${LINUX_DEB}${LINUX_RPM}" ]; then
+              [ -n "${LINUX_APPIMAGE}" ] && echo "${LINUX_APPIMAGE}"
+              [ -n "${LINUX_DEB}" ] && echo "${LINUX_DEB}"
+              [ -n "${LINUX_RPM}" ] && echo "${LINUX_RPM}"
+            else
+              echo "- （本次无 Linux 安装包）"
+            fi
+            echo
+            echo "### 安装说明"
+            echo
+            echo "| 平台 | 说明 |"
+            echo "| --- | --- |"
+            echo "| **Windows** | 下载 \`.msi\`，双击安装。如遇 SmartScreen 提示，选择「仍要运行」。 |"
+            echo "| **macOS** | 下载 \`.dmg\`，拖入「应用程序」。未签名构建首次打开可能需在「系统设置 → 隐私与安全性」中允许。 |"
+            echo "| **Linux** | 推荐 \`.AppImage\`（\`chmod +x\` 后直接运行）；或按发行版安装 \`.deb\` / \`.rpm\`。 |"
+            echo
+            echo "### 更新内容"
+            echo
+            echo "以下为相对上一版本的提交与 PR 变更（由 GitHub 自动生成）："
+            echo
+          } > release-body.md
+
+          echo "----- release-body.md -----"
+          cat release-body.md
+
+      - name: 创建 / 更新 GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: noxcode ${{ github.ref_name }}
+          draft: false
+          prerelease: ${{ contains(github.ref_name, '-alpha') || contains(github.ref_name, '-beta') || contains(github.ref_name, '-rc') }}
+          body_path: release-body.md
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+          files: |
+            release-assets/**/*
+            latest.json
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

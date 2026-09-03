@@ -1,0 +1,107 @@
+name: lint
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+jobs:
+  frontend-lint:
+    name: Frontend lint
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: ESLint
+        run: npm run lint
+
+      - name: Prettier check
+        run: npm run format:check
+
+      - name: Unit tests
+        run: npm run test:ci
+
+      - name: Typecheck + production build
+        run: npm run build
+
+  rust-lint:
+    name: Rust clippy
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Linux system deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            build-essential \
+            curl \
+            wget \
+            file \
+            libxdo-dev \
+            libssl-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev
+
+      - name: Install Rust stable (clippy)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Cache Rust build
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: ./src-tauri -> target
+
+      - name: Clippy (warnings as errors)
+        run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
+
+      - name: Cargo tests
+        run: cargo test --manifest-path src-tauri/Cargo.toml
+
+      - name: Assert no aws-lc-rs
+        run: |
+          set +e
+          output=$(cargo tree --manifest-path src-tauri/Cargo.toml -i aws-lc-rs 2>&1)
+          status=$?
+          set -e
+          if echo "$output" | grep -q 'did not match any packages'; then
+            echo "aws-lc-rs assertion passed"
+            exit 0
+          fi
+          if [ "$status" -eq 0 ]; then
+            echo "::error::aws-lc-rs must not appear in the dependency tree"
+            echo "$output"
+            exit 1
+          fi
+          echo "$output"
+          exit "$status"
+
+      - name: Assert git is only spawned from runner.rs
+        run: |
+          set -euo pipefail
+          hits=$(grep -REn '(std_command|tokio_command|Command::new)\(\s*"git"' src-tauri/src --include='*.rs' \
+            | grep -v 'src-tauri/src/git/runner.rs' \
+            || true)
+          if [ -n "$hits" ]; then
+            echo "::error::git 只能从 src-tauri/src/git/runner.rs spawn"
+            echo "$hits"
+            exit 1
+          fi

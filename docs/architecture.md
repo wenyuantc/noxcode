@@ -2,7 +2,7 @@
 
 noxcode 是 Tauri 2 桌面应用：进程内 Native Agent、AI 渠道、SSH 工作区、Git checkpoint。业务外壳只保留工作区 + 渠道/模型选择 + 会话，不做项目 / 员工 / 看板 / 任务自动化。
 
-完整分阶段计划见 [`plan.md`](../plan.md)。表结构、迁移与备份见 [`database.md`](database.md)。SSH 实现见 [`ssh.md`](ssh.md)。Git 实现见 [`git.md`](git.md)。AI 渠道见 [`channels.md`](channels.md)。Native Agent 运行时见 [`native.md`](native.md)。前端结构见 [`frontend.md`](frontend.md)。
+完整分阶段计划见 [`plan.md`](../plan.md)。表结构、迁移与备份见 [`database.md`](database.md)。SSH 实现见 [`ssh.md`](ssh.md)。Git 实现见 [`git.md`](git.md)。AI 渠道见 [`channels.md`](channels.md)。Native Agent 运行时见 [`native.md`](native.md)。前端结构见 [`frontend.md`](frontend.md)。打包与发版见 [`release.md`](release.md)。
 
 ## 数据流
 
@@ -35,7 +35,7 @@ flowchart LR
 | 前端 | React 19 + TypeScript 5.8 + Vite 7（端口 1420）+ TailwindCSS 4 + zustand 5 |
 | 桌面壳 | Tauri 2.11.5，`identifier=com.wenyuan.noxcode` |
 | 后端 | Rust 2021 + Tokio + SQLx 0.8.6（sqlite）+ reqwest 0.12（rustls）+ keyring 3 |
-| 插件 | sql / shell / dialog / opener / notification / process；updater crate 已引入，P6 才注册 |
+| 插件 | sql / shell / dialog / opener / notification / process / updater |
 | SSH | `russh` 0.63，`default-features = false`，features `ring,flate2,rsa`；`ssh2-config` 0.8 |
 | Git | 无 git 库，直接 spawn 系统 `git` ≥ 2.23 |
 
@@ -64,9 +64,11 @@ flowchart LR
 ## 启动与 IPC
 
 1. `git::preflight::run_startup_check()`：解析 `git --version`，低于 2.23 或找不到则记失败原因。
-2. 注册 sql（preload `sqlite:noxcode.db` + 迁移）、shell、dialog、notification、opener、process。
-3. debug 下异步打印迁移状态。
-4. `RunEvent::Ready` 时若预检失败，弹中文错误对话框后 `exit(1)`。预检必须等事件循环就绪再弹窗，不能在 `setup` 里阻塞主线程。
+2. 注册 sql（preload `sqlite:noxcode.db` + 迁移）、shell、dialog、notification、opener、updater、process。
+3. `setup` 创建托盘、从 `$APPCONFIG/window-state.json` 恢复主窗口尺寸。
+4. debug 下异步打印迁移状态。
+5. `RunEvent::Ready` 时若预检失败，弹中文错误对话框后 `exit(1)`。预检必须等事件循环就绪再弹窗，不能在 `setup` 里阻塞主线程。
+6. 关闭主窗口写入窗口尺寸并隐藏到托盘。macOS `RunEvent::Reopen`（点 Dock）恢复主窗口。`RunEvent::Exit` 取消 Agent 并关闭 SshPool。
 
 全仓库只允许 [`src-tauri/src/git/runner.rs`](../src-tauri/src/git/runner.rs) spawn `git`。Windows 子进程走 [`process_spawn.rs`](../src-tauri/src/process_spawn.rs)（隐藏 CMD 窗口）。
 
@@ -97,6 +99,7 @@ flowchart LR
 | `list/create/update/delete_native_subagent` | `native::subagents` |
 | `list/get_native_api_call_log` | `native::api_logs` |
 | `get/update/reset_mcp_servers` / `export_mcp_servers_snippet` | `native::mcp_servers` |
+| `show_main_window` | `tray` |
 
 事件：`ssh-host-trust-request`、`ssh-host-key-changed`、`native-session`、`native-stdout`、`native-text-delta`、`native-context-usage`、`native-turn-state`、`native-permission-request`、`native-plan-question`、`native-exit`。Git 细节见 [`git.md`](git.md)。会话细节见 [`native.md`](native.md)。前端接线见 [`frontend.md`](frontend.md)。
 
@@ -153,6 +156,6 @@ P0 脚手架 → P1 数据层 → P2 SSH → P2.5 Git → P3 渠道
 P6 打包  ←  P5 前端  ←  P4.5 ← P4.4 ← P4.3 ← P4.2 ← P4.1
 ```
 
-P2 必须在 tools/ssh 之前；P3 必须在 model 客户端测通之前；P2.5 必须在 session 接线之前。当前仓库已完成 P0、P1、P2、P2.5、P3、P4、P5。
+P2 必须在 tools/ssh 之前；P3 必须在 model 客户端测通之前；P2.5 必须在 session 接线之前。当前仓库已完成 P0、P1、P2、P2.5、P3、P4、P5、P6。
 
 第一版不做：斜杠命令完整版、插件打包、PTY、内置 ripgrep、浏览器 / CUA、OpenTelemetry。见 `plan.md` §6。

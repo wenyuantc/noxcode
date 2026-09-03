@@ -1,7 +1,7 @@
 import { clsx, type ClassValue } from "clsx";
 import { twMerge } from "tailwind-merge";
 
-import { getDateLocale, getLocalePreference } from "@/lib/i18n/locale";
+import { getCurrentAppLocale, getDateLocale, getLocalePreference } from "@/lib/i18n/locale";
 
 export function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs));
