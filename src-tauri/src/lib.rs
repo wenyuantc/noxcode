@@ -63,6 +63,7 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            app::activity_logs::list_activity_logs,
             app::database::health_check,
             app::database::backup_database,
             app::database::restore_database,

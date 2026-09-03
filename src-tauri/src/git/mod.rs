@@ -17,6 +17,7 @@ use std::sync::Arc;
 use tauri::{AppHandle, Manager, Runtime, State};
 use tokio::sync::Mutex;
 
+use crate::app::activity_logs::insert_activity_log;
 use crate::app::shared::sqlite_pool;
 use crate::app::ssh::configs::fetch_ssh_config_record_by_id;
 use crate::app::ssh::{resolve_connect_params, SshPool};
@@ -45,6 +46,21 @@ pub(crate) use self::checkpoint::{
 };
 pub(crate) use self::repo::load_repo_info;
 pub(crate) use self::runner::{GitTarget, IndexMode};
+
+async fn record_git_activity(
+    pool: &sqlx::SqlitePool,
+    kind: &str,
+    workspace_id: &str,
+    session_id: Option<&str>,
+    summary: &str,
+    payload: serde_json::Value,
+) {
+    if let Err(error) =
+        insert_activity_log(pool, kind, Some(workspace_id), session_id, summary, payload).await
+    {
+        eprintln!("[git] 写入活动日志失败: {error}");
+    }
+}
 
 pub(crate) async fn resolve_git_target<R: Runtime>(
     app: &AppHandle<R>,
@@ -294,25 +310,100 @@ pub(crate) async fn restore_git_checkpoint<R: Runtime>(
     delete_new_paths: Option<Vec<String>>,
 ) -> Result<GitRestoreResult, String> {
     let pool = sqlite_pool(&app).await?;
+    let checkpoint = sqlx::query_as::<_, crate::db::models::GitCheckpoint>(
+        "SELECT * FROM git_checkpoints WHERE id = $1 LIMIT 1",
+    )
+    .bind(&checkpoint_id)
+    .fetch_optional(&pool)
+    .await
+    .ok()
+    .flatten();
+    let session_id = checkpoint.as_ref().map(|item| item.session_id.as_str());
+
     if state
         .lock()
         .await
         .has_working_workspace_processes(&workspace_id)
     {
         let error = "该工作区有正在执行的会话，请等待本轮结束或停止后再回滚".to_string();
+        record_git_activity(
+            &pool,
+            "git_checkpoint_restore_failed",
+            &workspace_id,
+            session_id,
+            "Git 检查点回滚失败",
+            serde_json::json!({"checkpoint_id": checkpoint_id, "error": error}),
+        )
+        .await;
         return Err(error);
     }
 
-    let target = resolve_git_target(&app, &workspace_id).await?;
-    restore_checkpoint(
+    let target = match resolve_git_target(&app, &workspace_id).await {
+        Ok(target) => target,
+        Err(error) => {
+            record_git_activity(
+                &pool,
+                "git_checkpoint_restore_failed",
+                &workspace_id,
+                session_id,
+                "Git 检查点回滚失败",
+                serde_json::json!({"checkpoint_id": checkpoint_id, "error": error}),
+            )
+            .await;
+            return Err(error);
+        }
+    };
+    let restored = restore_checkpoint(
         &pool,
         &target,
         &workspace_id,
         &checkpoint_id,
         delete_new_paths.as_deref().unwrap_or(&[]),
     )
-    .await
-    .map_err(Into::into)
+    .await;
+    match restored {
+        Ok(result) => {
+            let summary = format!(
+                "Git 检查点回滚完成：恢复 {} 个，删除 {} 个，失败 {} 个",
+                result.restored.len(),
+                result.deleted.len(),
+                result.failed.len()
+            );
+            record_git_activity(
+                &pool,
+                "git_checkpoint_restore",
+                &workspace_id,
+                session_id,
+                &summary,
+                serde_json::json!({
+                    "checkpoint_id": checkpoint_id,
+                    "checkpoint_seq": checkpoint.as_ref().map(|item| item.seq),
+                    "checkpoint_label": checkpoint.as_ref().and_then(|item| item.label.as_deref()),
+                    "pre_restore_checkpoint_id": result.pre_restore_checkpoint.id,
+                    "restored_count": result.restored.len(),
+                    "deleted_count": result.deleted.len(),
+                    "skipped_ignored_count": result.skipped_ignored.len(),
+                    "failed_count": result.failed.len(),
+                    "failed": result.failed,
+                }),
+            )
+            .await;
+            Ok(result)
+        }
+        Err(error) => {
+            let error = error.to_string();
+            record_git_activity(
+                &pool,
+                "git_checkpoint_restore_failed",
+                &workspace_id,
+                session_id,
+                "Git 检查点回滚失败",
+                serde_json::json!({"checkpoint_id": checkpoint_id, "error": error}),
+            )
+            .await;
+            Err(error)
+        }
+    }
 }
 
 #[tauri::command]
@@ -335,7 +426,17 @@ pub(crate) async fn clear_git_checkpoints<R: Runtime>(
 ) -> Result<u64, String> {
     let target = resolve_git_target(&app, &workspace_id).await?;
     let pool = sqlite_pool(&app).await?;
-    clear_workspace_checkpoints(&pool, &target, &workspace_id)
+    let count = clear_workspace_checkpoints(&pool, &target, &workspace_id)
         .await
-        .map_err(Into::into)
+        .map_err(String::from)?;
+    record_git_activity(
+        &pool,
+        "git_checkpoints_cleared",
+        &workspace_id,
+        None,
+        &format!("已清除本仓库 {count} 个 Git 检查点"),
+        serde_json::json!({"count": count}),
+    )
+    .await;
+    Ok(count)
 }
