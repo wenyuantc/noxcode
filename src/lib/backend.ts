@@ -54,6 +54,7 @@ import type {
   SshHostKeyChanged,
   SshHostTrustPrompt,
   SshPasswordProbeResult,
+  SshSupportedAlgorithms,
   StartNativeSessionInput,
   TestAiChannelInput,
   TestAiChannelResult,
@@ -112,6 +113,10 @@ export function testSshConnection(sshConfigId: string): Promise<SshConnectionTes
 
 export function listSshConfigFileHosts(): Promise<SshConfigFileHost[]> {
   return invoke("list_ssh_config_file_hosts");
+}
+
+export function listSshSupportedAlgorithms(): Promise<SshSupportedAlgorithms> {
+  return invoke("list_ssh_supported_algorithms");
 }
 
 export function importSshConfigFileHost(alias: string): Promise<SshConfigFileImport> {

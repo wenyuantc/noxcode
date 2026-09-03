@@ -4,6 +4,19 @@ export type SshKnownHostsMode = "accept-new" | "strict" | "ask" | "off";
 
 export type SshPasswordProbeStatus = "passed" | "failed" | "available";
 
+export interface SshAlgorithms {
+  kex: string[];
+  host_key: string[];
+  cipher: string[];
+  mac: string[];
+}
+
+export interface SshSupportedAlgorithms {
+  supported: SshAlgorithms;
+  defaults: SshAlgorithms;
+  legacy_preset: SshAlgorithms;
+}
+
 export interface SshConfig {
   id: string;
   name: string;
@@ -13,6 +26,7 @@ export interface SshConfig {
   auth_type: SshAuthType;
   private_key_path: string | null;
   known_hosts_mode: SshKnownHostsMode;
+  algorithms: SshAlgorithms | null;
   last_checked_at: string | null;
   last_check_status: string | null;
   last_check_message: string | null;
@@ -36,6 +50,7 @@ export interface CreateSshConfigInput {
   password?: string | null;
   passphrase?: string | null;
   known_hosts_mode?: SshKnownHostsMode;
+  algorithms?: SshAlgorithms | null;
 }
 
 export interface UpdateSshConfigInput {
@@ -48,6 +63,7 @@ export interface UpdateSshConfigInput {
   password?: string | null;
   passphrase?: string | null;
   known_hosts_mode?: SshKnownHostsMode;
+  algorithms?: SshAlgorithms | null;
 }
 
 export interface SshPasswordProbeResult {

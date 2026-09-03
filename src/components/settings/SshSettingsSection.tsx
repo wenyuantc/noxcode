@@ -9,19 +9,23 @@ import {
   importSshConfigFileHost,
   listSshConfigFileHosts,
   listSshConfigs,
+  listSshSupportedAlgorithms,
   probeSshPasswordAuth,
   testSshConnection,
   updateSshConfig,
 } from "@/lib/backend";
 import { formatDate } from "@/lib/utils";
 import type {
+  SshAlgorithms,
   SshAuthType,
   SshConfig,
   SshConfigFileHost,
   SshKnownHostsMode,
+  SshSupportedAlgorithms,
   UpdateSshConfigInput,
 } from "@/lib/types";
 import { Button } from "@/components/ui/button";
+import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
 import {
   Dialog,
   DialogContent,
@@ -49,6 +53,11 @@ interface SshConfigFormState {
   password: string;
   passphrase: string;
   knownHostsMode: SshKnownHostsMode;
+  algorithms: SshAlgorithms;
+}
+
+function emptyAlgorithms(): SshAlgorithms {
+  return { kex: [], host_key: [], cipher: [], mac: [] };
 }
 
 const EMPTY_FORM: SshConfigFormState = {
@@ -61,6 +70,7 @@ const EMPTY_FORM: SshConfigFormState = {
   password: "",
   passphrase: "",
   knownHostsMode: "accept-new",
+  algorithms: emptyAlgorithms(),
 };
 
 const KNOWN_HOSTS_MODES: SshKnownHostsMode[] = ["accept-new", "strict", "ask", "off"];
@@ -76,6 +86,14 @@ function configToForm(config: SshConfig): SshConfigFormState {
     password: "",
     passphrase: "",
     knownHostsMode: config.known_hosts_mode,
+    algorithms: config.algorithms
+      ? {
+          kex: [...config.algorithms.kex],
+          host_key: [...config.algorithms.host_key],
+          cipher: [...config.algorithms.cipher],
+          mac: [...config.algorithms.mac],
+        }
+      : emptyAlgorithms(),
   };
 }
 
@@ -83,6 +101,7 @@ export function SshSettingsSection() {
   const { t } = useTranslation("settings");
   const [configs, setConfigs] = useState<SshConfig[]>([]);
   const [hosts, setHosts] = useState<SshConfigFileHost[]>([]);
+  const [algorithmCatalog, setAlgorithmCatalog] = useState<SshSupportedAlgorithms | null>(null);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState<"save" | "delete" | "test" | "probe" | null>(null);
   const [deleteConfirming, setDeleteConfirming] = useState(false);
@@ -113,12 +132,14 @@ export function SshSettingsSection() {
     setLoading(true);
     setError(null);
     try {
-      const [items, fileHosts] = await Promise.all([
+      const [items, fileHosts, algorithms] = await Promise.all([
         listSshConfigs(),
         listSshConfigFileHosts().catch(() => [] as SshConfigFileHost[]),
+        listSshSupportedAlgorithms(),
       ]);
       setConfigs(items);
       setHosts(fileHosts);
+      setAlgorithmCatalog(algorithms);
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
@@ -134,9 +155,21 @@ export function SshSettingsSection() {
     setForm((current) => ({ ...current, ...updates }));
   };
 
+  const toggleAlgorithm = (kind: keyof SshAlgorithms, name: string, checked: boolean) => {
+    setForm((current) => ({
+      ...current,
+      algorithms: {
+        ...current.algorithms,
+        [kind]: checked
+          ? [...current.algorithms[kind].filter((item) => item !== name), name]
+          : current.algorithms[kind].filter((item) => item !== name),
+      },
+    }));
+  };
+
   const openCreate = () => {
     setSelectedId(null);
-    setForm(EMPTY_FORM);
+    setForm({ ...EMPTY_FORM, algorithms: emptyAlgorithms() });
     setMessage(null);
     setError(null);
     setDialogOpen(true);
@@ -175,6 +208,7 @@ export function SshSettingsSection() {
         password: "",
         passphrase: "",
         knownHostsMode: "accept-new",
+        algorithms: emptyAlgorithms(),
       });
       setDialogOpen(true);
       if (imported.proxy_jump_unsupported) {
@@ -199,6 +233,9 @@ export function SshSettingsSection() {
 
     setSaving("save");
     const privateKeyPath = form.authType === "key" ? form.privateKeyPath.trim() || null : null;
+    const algorithms = Object.values(form.algorithms).some((names) => names.length > 0)
+      ? form.algorithms
+      : null;
     try {
       if (selectedId) {
         const updates: UpdateSshConfigInput = {
@@ -209,6 +246,7 @@ export function SshSettingsSection() {
           auth_type: form.authType,
           private_key_path: privateKeyPath,
           known_hosts_mode: form.knownHostsMode,
+          algorithms,
         };
         if (form.authType === "password" && form.password) {
           updates.password = form.password;
@@ -233,6 +271,7 @@ export function SshSettingsSection() {
           password: form.authType === "password" && form.password ? form.password : null,
           passphrase: form.passphrase || null,
           known_hosts_mode: form.knownHostsMode,
+          algorithms,
         });
         setConfigs((current) => [created, ...current.filter((config) => config.id !== created.id)]);
         setSelectedId(created.id);
@@ -263,7 +302,7 @@ export function SshSettingsSection() {
       await deleteSshConfig(targetId);
       setConfigs((current) => current.filter((config) => config.id !== targetId));
       setSelectedId(null);
-      setForm(EMPTY_FORM);
+      setForm({ ...EMPTY_FORM, algorithms: emptyAlgorithms() });
       setDialogOpen(false);
       setMessage(t("ssh.messages.deleted"));
     } catch (err) {
@@ -648,6 +687,84 @@ export function SshSettingsSection() {
                   </div>
                 </div>
               )}
+
+              <Collapsible className="rounded-md border border-border">
+                <CollapsibleTrigger className="flex w-full items-center justify-between px-3 py-2 text-left text-sm font-medium">
+                  {t("ssh.form.algorithmsTitle")}
+                </CollapsibleTrigger>
+                <CollapsibleContent className="space-y-3 border-t border-border p-3">
+                  <p className="text-xs text-muted-foreground">{t("ssh.form.algorithmsHint")}</p>
+                  <div className="flex flex-wrap gap-2">
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant="outline"
+                      disabled={formLocked || !algorithmCatalog}
+                      onClick={() => {
+                        if (!algorithmCatalog) return;
+                        patchForm({
+                          algorithms: {
+                            kex: [...algorithmCatalog.legacy_preset.kex],
+                            host_key: [...algorithmCatalog.legacy_preset.host_key],
+                            cipher: [...algorithmCatalog.legacy_preset.cipher],
+                            mac: [...algorithmCatalog.legacy_preset.mac],
+                          },
+                        });
+                      }}
+                    >
+                      {t("ssh.form.algorithmsLegacyPreset")}
+                    </Button>
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant="ghost"
+                      disabled={formLocked}
+                      onClick={() => patchForm({ algorithms: emptyAlgorithms() })}
+                    >
+                      {t("ssh.form.algorithmsRestoreDefault")}
+                    </Button>
+                  </div>
+                  {algorithmCatalog ? (
+                    <div className="grid gap-3 md:grid-cols-2">
+                      {(
+                        [
+                          ["kex", t("ssh.form.algorithmsKex")],
+                          ["host_key", t("ssh.form.algorithmsHostKey")],
+                          ["cipher", t("ssh.form.algorithmsCipher")],
+                          ["mac", t("ssh.form.algorithmsMac")],
+                        ] as const
+                      ).map(([kind, label]) => (
+                        <fieldset key={kind} className="rounded-md border border-border p-2">
+                          <legend className="px-1 text-xs font-medium">{label}</legend>
+                          <div className="max-h-40 space-y-1 overflow-y-auto">
+                            {algorithmCatalog.supported[kind].map((name) => (
+                              <label
+                                key={name}
+                                className="flex items-start gap-2 font-mono text-[11px]"
+                              >
+                                <input
+                                  type="checkbox"
+                                  className="mt-0.5 h-3.5 w-3.5"
+                                  checked={form.algorithms[kind].includes(name)}
+                                  disabled={formLocked}
+                                  onChange={(event) =>
+                                    toggleAlgorithm(kind, name, event.target.checked)
+                                  }
+                                />
+                                <span className="break-all">{name}</span>
+                              </label>
+                            ))}
+                          </div>
+                        </fieldset>
+                      ))}
+                    </div>
+                  ) : (
+                    <p className="text-xs text-muted-foreground">
+                      {t("ssh.form.algorithmsUnavailable")}
+                    </p>
+                  )}
+                </CollapsibleContent>
+              </Collapsible>
 
               {selected ? (
                 <div className="rounded-md border border-border bg-muted/30 px-3 py-3 text-xs text-muted-foreground">
