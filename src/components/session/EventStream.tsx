@@ -22,6 +22,8 @@ import { FileChangeRow } from "./FileChangeRow";
 import { GoalRow } from "./GoalRow";
 import { RetryRow } from "./RetryRow";
 import { AgentStatusRow, McpStatusRow, PermissionStatusRow } from "./SessionStatusRows";
+import { PlanAskCard } from "./PlanAskCard";
+import { PlanRow } from "./PlanRow";
 import { TerminalRow } from "./TerminalRow";
 import { ThinkingRow } from "./ThinkingRow";
 import { ToolSummaryRow } from "./ToolSummaryRow";
@@ -63,10 +65,18 @@ function attachLiveStream(
   };
 }
 
-function renderSegment(segment: TurnSegment, running: boolean, nowMs?: number, live?: boolean) {
+function renderSegment(
+  segment: TurnSegment,
+  running: boolean,
+  nowMs?: number,
+  live?: boolean,
+  sessionId?: string,
+) {
   switch (segment.kind) {
     case "thinking":
       return <ThinkingRow items={segment.items} nowMs={nowMs} />;
+    case "plan":
+      return sessionId ? <PlanRow item={segment.items[0]!} sessionId={sessionId} /> : null;
     case "retry":
       return <RetryRow items={segment.items} live={live && running} />;
     case "compact":
@@ -154,6 +164,8 @@ export const EventStream = memo(function EventStream({
   const lines = useSessionStore((state) => state.lines[sessionId]) ?? EMPTY_LINES;
   const stream = useSessionStore((state) => state.stream[sessionId]);
   const turnState = useSessionStore((state) => state.turnState[sessionId]);
+  const planQuestion = useSessionStore((state) => state.planQuestion);
+  const hasAsk = planQuestion?.session_record_id === sessionId;
   const items = useMemo(() => groupSessionLines(lines), [lines]);
   const blocks = useMemo(() => buildTurnBlocks(items), [items]);
   const lastUserBlockId = useMemo(() => {
@@ -164,9 +176,9 @@ export const EventStream = memo(function EventStream({
   }, [blocks]);
   const working = turnState === "working";
   const virtualize = blocks.length > VIRTUALIZE_AFTER;
-  const layoutSignature = blocks
+  const layoutSignature = `${blocks
     .map((block) => `${block.id}:${block.segments.length}:${block.endedAt}`)
-    .join("|");
+    .join("|")}${hasAsk ? ":ask" : ""}`;
   const [nowMs, setNowMs] = useState(() => Date.now());
   const [showLatest, setShowLatest] = useState(false);
   const pinnedRef = useRef(true);
@@ -240,7 +252,7 @@ export const EventStream = memo(function EventStream({
       return;
     }
     virtualizer.scrollToIndex(blocks.length - 1, { align: "end" });
-  }, [blocks.length, stream?.text, virtualize, virtualizer]);
+  }, [blocks.length, hasAsk, stream?.text, virtualize, virtualizer]);
 
   const totalSize = virtualizer.getTotalSize();
   useEffect(() => {
@@ -258,6 +270,7 @@ export const EventStream = memo(function EventStream({
         working={isLast && working}
         nowMs={isLast && working ? nowMs : undefined}
         editableUser={view.id === lastUserBlockId}
+        showAsk={isLast && hasAsk}
       />
     );
   };
@@ -291,6 +304,7 @@ export const EventStream = memo(function EventStream({
             {blocks.map((block, index) => (
               <div key={block.id}>{renderBlock(block, index)}</div>
             ))}
+            {blocks.length === 0 && hasAsk ? <PlanAskCard sessionId={sessionId} /> : null}
           </div>
         )}
       </div>
@@ -315,12 +329,14 @@ const TurnBlockView = memo(function TurnBlockView({
   working,
   nowMs,
   editableUser,
+  showAsk,
 }: {
   block: SessionTurnBlock;
   sessionId: string;
   working: boolean;
   nowMs?: number;
   editableUser: boolean;
+  showAsk?: boolean;
 }) {
   const showWork =
     (Boolean(block.user) || working) &&
@@ -348,9 +364,11 @@ const TurnBlockView = memo(function TurnBlockView({
             working,
             working ? nowMs : undefined,
             index === block.segments.length - 1,
+            sessionId,
           )}
         </div>
       ))}
+      {showAsk ? <PlanAskCard sessionId={sessionId} /> : null}
       {!working && assistantText ? (
         <TurnActionBar
           sessionId={sessionId}
@@ -360,7 +378,9 @@ const TurnBlockView = memo(function TurnBlockView({
         />
       ) : null}
       {!working && changedPaths.length > 0 ? <TurnFilesChanged paths={changedPaths} /> : null}
-      {working ? <Loader2 className="size-4 animate-spin text-muted-foreground" /> : null}
+      {working && !showAsk ? (
+        <Loader2 className="size-4 animate-spin text-muted-foreground" />
+      ) : null}
     </div>
   );
 });

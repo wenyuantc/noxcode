@@ -12,7 +12,8 @@ export type TurnSegmentKind =
   | "usage"
   | "retry"
   | "compact"
-  | "goal";
+  | "goal"
+  | "plan";
 
 export type CompactTrigger = "auto" | "manual" | "reactive" | "downshift";
 
@@ -102,6 +103,67 @@ export function parseGoalLine(text: string): ParsedGoalLine | null {
 
 export function isGoalLine(text: string): boolean {
   return text.trimStart().startsWith(GOAL_LINE_PREFIX);
+}
+
+export type PlanLineStatus =
+  "entered" | "waiting_approval" | "waiting_question" | "execute" | "other";
+
+export interface ParsedPlanLine {
+  kind: "document" | "status";
+  status: PlanLineStatus | null;
+  title: string | null;
+  body: string;
+  questionSummary: string | null;
+}
+
+const PLAN_PREFIX_RE = /^\[(?:PLAN|计划)\]/;
+
+export function isPlanLine(text: string): boolean {
+  return PLAN_PREFIX_RE.test(text.trimStart());
+}
+
+export function planTitleFromBody(body: string): string | null {
+  const heading = body.match(/^#{1,6}\s+(.+)$/m);
+  if (heading?.[1]?.trim()) return heading[1].trim();
+  const first = body.split("\n").find((line) => line.trim().length > 0);
+  return first?.trim() || null;
+}
+
+/** `[PLAN]` / `[计划]` → 计划文档或短状态；不是该格式返回 null。 */
+export function parsePlanLine(text: string): ParsedPlanLine | null {
+  const trimmed = text.trim();
+  if (!isPlanLine(trimmed)) return null;
+  const rest = trimmed.replace(PLAN_PREFIX_RE, "");
+  const newline = rest.indexOf("\n");
+  if (newline >= 0) {
+    const body = rest.slice(newline + 1).trim();
+    if (body.length > 0) {
+      return {
+        kind: "document",
+        status: null,
+        title: planTitleFromBody(body),
+        body,
+        questionSummary: null,
+      };
+    }
+  }
+  const statusText = rest.trim();
+  let status: PlanLineStatus = "other";
+  if (statusText.startsWith("已进入计划模式")) status = "entered";
+  else if (statusText.startsWith("等待用户批准")) status = "waiting_approval";
+  else if (statusText.startsWith("等待用户回答")) status = "waiting_question";
+  else if (statusText.startsWith("开始执行")) status = "execute";
+  const questionSummary =
+    status === "waiting_question"
+      ? statusText.replace(/^等待用户回答[：:]\s*/, "").trim() || null
+      : null;
+  return {
+    kind: "status",
+    status,
+    title: null,
+    body: statusText,
+    questionSummary,
+  };
 }
 
 export interface ParsedUsage {
@@ -625,6 +687,7 @@ function segmentKey(item: GroupedSessionItem): TurnSegmentKind | "skip" | "file_
   if (item.kind === "user") return "skip";
   if (isCompactBoundaryLine(item.text)) return "compact";
   if (isGoalLine(item.text)) return "goal";
+  if (isPlanLine(item.text)) return "plan";
   if (isRetryLine(item.text)) return "retry";
   if (isThinkingItem(item)) return "thinking";
   if (isUsageItem(item)) return "usage";
@@ -661,7 +724,8 @@ export function buildTurnSegments(items: GroupedSessionItem[]): TurnSegment[] {
       currentKey === "todo" ||
       currentKey === "usage" ||
       currentKey === "compact" ||
-      currentKey === "goal"
+      currentKey === "goal" ||
+      currentKey === "plan"
     ) {
       for (const item of currentItems) {
         segments.push({ kind: currentKey, items: [item] });
@@ -677,7 +741,8 @@ export function buildTurnSegments(items: GroupedSessionItem[]): TurnSegment[] {
     let key = segmentKey(item);
     if (currentKey === "retry" && isRetryFailureLine(item.text)) key = "retry";
     if (key === "skip") continue;
-    const mergeable = key !== "terminal" && key !== "todo" && key !== "compact" && key !== "goal";
+    const mergeable =
+      key !== "terminal" && key !== "todo" && key !== "compact" && key !== "goal" && key !== "plan";
     if (currentKey !== key || !mergeable) {
       flush();
       currentKey = key;
@@ -694,7 +759,9 @@ export function isSessionStartLine(text: string): boolean {
     return true;
   }
   if (line.startsWith("[续聊]")) return true;
-  if (line.startsWith("[PLAN] 已进入计划模式")) return true;
+  if (line.startsWith("[PLAN] 已进入计划模式") || line.startsWith("[计划] 已进入计划模式")) {
+    return true;
+  }
   if (parseAgentBanner(line)) return true;
   if (
     line.startsWith("[PERMISSION] 已在设置中关闭高风险确认") ||

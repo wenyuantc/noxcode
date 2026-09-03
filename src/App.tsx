@@ -1,8 +1,6 @@
 import { BrowserRouter, Navigate, Route, Routes } from "react-router-dom";
 
 import { NativePermissionDialog } from "@/components/session/NativePermissionDialog";
-import { NativePlanApprovalDialog } from "@/components/session/NativePlanApprovalDialog";
-import { NativePlanQuestionDialog } from "@/components/session/NativePlanQuestionDialog";
 import { SshHostTrustDialog } from "@/components/ssh/SshHostTrustDialog";
 import { useNativeEvents } from "@/hooks/useNativeEvents";
 import ApiCallLogsPage from "@/pages/ApiCallLogsPage";
@@ -14,8 +12,6 @@ function AppEffects() {
   return (
     <>
       <NativePermissionDialog />
-      <NativePlanQuestionDialog />
-      <NativePlanApprovalDialog />
       <SshHostTrustDialog />
     </>
   );

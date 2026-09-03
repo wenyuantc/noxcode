@@ -17,7 +17,7 @@ P5 落地单主界面 + 全屏设置。布局学 ZCode：左侧两级树、输�
 
 ```
 src/main.tsx             i18n init → applyTheme → App
-src/App.tsx              四条路由 + 权限 / 计划提问 / SSH 信任对话框
+src/App.tsx              四条路由 + 权限 / SSH 信任对话框
 src/lib/backend.ts       唯一 IPC 出口
 src/lib/appUpdate.ts     检查 / 下载 / 重启桌面更新
 src/lib/apiLogs.ts       API 调用记录格式化 / 分页
@@ -28,7 +28,7 @@ src/stores/              ui / workspace / channel / session / settings
 src/hooks/               useNativeEvents · useSshTrustEvents · useAppHotkeys
 src/components/ui/       17 个 shadcn 底座
 src/components/layout/   AppShell · Sidebar* · StartupUpdateBanner
-src/components/session/  Composer · EventStream · 回合行 / 待办面板 · pickers · 权限对话框
+src/components/session/  Composer · EventStream · 回合行 / 计划卡 / Ask 卡 · 待办面板 · pickers · 权限对话框
 src/components/settings/ SettingsLayout + 分节
 src/components/apiLogs/  调用详情弹层
 src/components/git/      GitPanel · DiffView · CheckpointTimeline
@@ -48,7 +48,7 @@ src/components/git/      GitPanel · DiffView · CheckpointTimeline
 
 `useNativeEvents` 在 `App` 挂一次，把 native 事件写入 `sessionStore`：
 
-`native-session` / `native-stdout` / `native-text-delta` / `native-context-usage` / `native-turn-state` / `native-exit` / `native-permission-request` / `native-plan-question`。
+`native-session` / `native-stdout` / `native-text-delta` / `native-context-usage` / `native-turn-state` / `native-exit` / `native-permission-request` / `native-plan-question` / `native-plan-approval-request`。
 
 打开历史会话立即改 `selectedSessionId`（侧栏高亮）；`lines` 已缓存则不重拉，无缓存拉最近 200 条。事件流只在当前选中会话的 `lines` 就绪后切换；加载期间隐藏旧会话流并显示加载态，避免侧栏、标题和输入框指向 A、内容仍显示 B。已打开的流保活最近 3 个（`hidden` 不卸 DOM）。live 行只走 `onStdout`，历史结果不得覆盖已有缓存。
 
@@ -56,7 +56,7 @@ Composer / 编辑重发 / 重试走 `submitSessionPrompt`：有选中会话则 `
 
 `@` 调 `list_git_files` 插入 `@path`。`/` 列出全局技能，插入「使用技能：name」。
 
-事件流按时序渲染 `TurnSegment`（思考 / 查阅汇总 / 终端 / 写入或更改 / 待办摘要 / 用量芯片 / 助手 markdown / 其它系统行），不再把工具、思考、正文拆成三个乱序数组。用户气泡悬停复制（成功打钩约 2 秒）；助手回合底栏复制同样打钩后约 2 秒恢复。仅最后一条用户消息可原位编辑并重发（同样走 `submitSessionPrompt`，复用当前会话 ID），不改历史行。会话开头的 `[PERMISSION]` / `[内置 Agent]` / `[MCP]` 并入第一条用户回合，不单独占一轮「已工作 0 秒」。启动行收成带图标的状态提示，不改后端原文。查阅展开后直接出 cyan 路径 + 行号卡片，不再二次折叠。`[用量]` 解析成输入/输出/缓存芯片。工作头显示「已工作 / 工作中 N 秒」。可解析的 `[待办]` 只在流里一行摘要，完整清单叠在会话列右上角 `TodoProcessPanel`（宽卡 / 窄窗胶囊）。已结束回合若本回合有 Write/Edit/ApplyPatch 路径，底部「N 个文件已更改」卡片只列这些路径；点文件或「审查」打开 Git 抽屉，用现有 `DiffView` 预览。会话标题来自 `agent_sessions.title`（侧栏 / 命令面板 / SessionHeader），空则仍显示「会话」或 `Plan`。侧栏对 `turnState === "working"` 的会话在标题左侧显示旋转星标，未选中的后台会话同样显示。侧栏顶部「已置顶」列出 `pinned != 0` 的会话；悬停未置顶行显示图钉，点击 `set_agent_session_pinned` 后从工作区分组抽到顶部，再点取消回原工作区。每个工作区默认 5 条未置顶会话，「显示更多」每次 +10。`@tanstack/react-virtual` + `measureElement` 动态高度。
+事件流按时序渲染 `TurnSegment`（思考 / 查阅汇总 / 终端 / 写入或更改 / 待办摘要 / 计划卡 / 用量芯片 / 助手 markdown / 其它系统行），不再把工具、思考、正文拆成三个乱序数组。`[PLAN]` / `[计划]` 收成计划状态行或 Markdown 计划卡；`AskUserQuestion` 与 `ExitPlanMode` 批准都内嵌在时间线（`PlanAskCard` / 计划卡胶囊按钮），不再走全局 Dialog。用户气泡悬停复制（成功打钩约 2 秒）；助手回合底栏复制同样打钩后约 2 秒恢复。仅最后一条用户消息可原位编辑并重发（同样走 `submitSessionPrompt`，复用当前会话 ID），不改历史行。会话开头的 `[PERMISSION]` / `[内置 Agent]` / `[MCP]` 并入第一条用户回合，不单独占一轮「已工作 0 秒」。启动行收成带图标的状态提示，不改后端原文。查阅展开后直接出 cyan 路径 + 行号卡片，不再二次折叠。`[用量]` 解析成输入/输出/缓存芯片。工作头显示「已工作 / 工作中 N 秒」。可解析的 `[待办]` 只在流里一行摘要，完整清单叠在会话列右上角 `TodoProcessPanel`（宽卡 / 窄窗胶囊）。已结束回合若本回合有 Write/Edit/ApplyPatch 路径，底部「N 个文件已更改」卡片只列这些路径；点文件或「审查」打开 Git 抽屉，用现有 `DiffView` 预览。会话标题来自 `agent_sessions.title`（侧栏 / 命令面板 / SessionHeader），空则仍显示「会话」或 `Plan`。侧栏对 `turnState === "working"` 的会话在标题左侧显示旋转星标，未选中的后台会话同样显示。侧栏顶部「已置顶」列出 `pinned != 0` 的会话；悬停未置顶行显示图钉，点击 `set_agent_session_pinned` 后从工作区分组抽到顶部，再点取消回原工作区。每个工作区默认 5 条未置顶会话，「显示更多」每次 +10。`@tanstack/react-virtual` + `measureElement` 动态高度。
 
 ## 工作区 / 分支 / 命令面板
 
