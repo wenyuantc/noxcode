@@ -156,9 +156,7 @@ function McpOAuthPanel({
       <Input
         placeholder={t("mcp.oauth.scopes")}
         value={oauth.scopes.join(" ")}
-        onChange={(event) =>
-          patch({ scopes: event.target.value.split(/[\s,]+/).filter(Boolean) })
-        }
+        onChange={(event) => patch({ scopes: event.target.value.split(/[\s,]+/).filter(Boolean) })}
       />
       <div className="flex flex-wrap items-center gap-2 text-xs">
         <Button
@@ -451,9 +449,7 @@ export function McpSettingsTab() {
                 <Input
                   placeholder={t("mcp.fields.urlPlaceholder")}
                   value={server.url ?? ""}
-                  onChange={(event) =>
-                    updateServer(server.id, { url: event.target.value || null })
-                  }
+                  onChange={(event) => updateServer(server.id, { url: event.target.value || null })}
                 />
                 <Textarea
                   placeholder={t("mcp.fields.headersPlaceholder")}

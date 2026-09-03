@@ -14,6 +14,9 @@ use tokio::io::AsyncReadExt;
 use crate::process_spawn::tokio_command;
 
 const SNAPSHOT_DIR_NAME: &str = "shell-snapshots";
+#[cfg(test)]
+const CAPTURE_TIMEOUT: Duration = Duration::from_secs(60);
+#[cfg(not(test))]
 const CAPTURE_TIMEOUT: Duration = Duration::from_secs(20);
 /// 只保留最近的几份快照，避免目录无限增长。
 const KEEP_SNAPSHOTS: usize = 5;
@@ -122,7 +125,7 @@ fn prune_old_snapshots(dir: &Path) {
             Some((modified, path))
         })
         .collect();
-    files.sort_by(|a, b| b.0.cmp(&a.0));
+    files.sort_by_key(|a| std::cmp::Reverse(a.0));
     for (_, path) in files.into_iter().skip(KEEP_SNAPSHOTS) {
         let _ = std::fs::remove_file(path);
     }
@@ -142,8 +145,8 @@ mod tests {
         dir
     }
 
-    #[tokio::test]
-    async fn capture_writes_path_export_and_prunes_old_files() {
+    #[test]
+    fn prune_old_snapshots_keeps_latest_files() {
         let root = temp_dir();
         let dir = snapshot_dir(&root);
         std::fs::create_dir_all(&dir).expect("mkdir");
@@ -151,12 +154,26 @@ mod tests {
             let stale = dir.join(format!("snapshot-bash-{index}-old.sh"));
             std::fs::write(&stale, "# old").expect("write");
         }
+        prune_old_snapshots(&dir);
+        let remaining = std::fs::read_dir(&dir).expect("dir").flatten().count();
+        assert_eq!(remaining, KEEP_SNAPSHOTS);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn capture_writes_path_export() {
+        let root = temp_dir();
+        let home = root.join("home");
+        std::fs::create_dir_all(&home).expect("mkdir");
+        std::fs::write(home.join(".bashrc"), "").expect("write");
+        std::fs::write(home.join(".bash_profile"), "").expect("write");
+        // 避免 CI 上 login shell 加载真实 $HOME 配置导致超时。
+        std::env::set_var("HOME", &home);
+
         let path = capture_shell_snapshot(&root).await.expect("capture");
         let text = std::fs::read_to_string(&path).expect("read");
         assert!(text.contains("export PATH="));
         assert!(text.contains("shopt -s expand_aliases"));
-        let remaining = std::fs::read_dir(&dir).expect("dir").flatten().count();
-        assert!(remaining <= KEEP_SNAPSHOTS);
         let _ = std::fs::remove_dir_all(root);
     }
 }

@@ -1580,7 +1580,7 @@ impl AgentRunner {
         if self.ctx.cancel.is_cancelled() {
             return Err("已取消".to_string());
         }
-        for (call, output) in calls.iter().zip(slot.into_iter()) {
+        for (call, output) in calls.iter().zip(slot) {
             let output = output.unwrap_or_else(|| ToolOutput::text("工具未返回结果"));
             self.emit(tool_result_line(&call.name, &output.text));
             self.append_tool_message(call, output);

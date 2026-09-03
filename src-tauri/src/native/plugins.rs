@@ -190,10 +190,7 @@ pub fn substitute_plugin_vars(text: &str, vars: &PluginVars<'_>) -> String {
         .replace("${NOXCODE_PROJECT_DIR}", &project)
         .replace("${CLAUDE_PROJECT_DIR}", &project);
     // ${user_config.key}
-    loop {
-        let Some(start) = out.find("${user_config.") else {
-            break;
-        };
+    while let Some(start) = out.find("${user_config.") {
         let Some(end_rel) = out[start..].find('}') else {
             break;
         };

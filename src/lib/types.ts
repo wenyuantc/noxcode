@@ -797,11 +797,7 @@ export interface UpdateNativeSettingsInput {
 }
 
 export type NativeSkillSource =
-  | "workspace_noxcode"
-  | "workspace_agents"
-  | "workspace_claude"
-  | "plugin"
-  | "global";
+  "workspace_noxcode" | "workspace_agents" | "workspace_claude" | "plugin" | "global";
 
 export interface NativeSkill {
   name: string;
@@ -818,10 +814,7 @@ export interface NativeSkill {
 }
 
 export type NativeSlashCommandSource =
-  | "workspace_noxcode"
-  | "workspace_claude"
-  | "plugin"
-  | "global";
+  "workspace_noxcode" | "workspace_claude" | "plugin" | "global";
 
 /** 自定义斜杠命令（Markdown 文件）。 */
 export interface NativeSlashCommand {
