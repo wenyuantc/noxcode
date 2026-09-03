@@ -79,4 +79,22 @@ describe("build-latest-json", () => {
       "https://github.com/wenyuantc/codex-ai/releases/download/v0.5.9/Codex.AI.System.app.tar.gz",
     );
   });
+
+  it("maps Apple Silicon and Intel updater archives to separate platforms", () => {
+    const inputDir = makeInputDir();
+    writeArtifact(inputDir, "noxcode_aarch64.app.tar.gz");
+    writeArtifact(inputDir, "noxcode_aarch64.app.tar.gz.sig", "darwin-arm-sig\n");
+    writeArtifact(inputDir, "noxcode_x64.app.tar.gz");
+    writeArtifact(inputDir, "noxcode_x64.app.tar.gz.sig", "darwin-intel-sig\n");
+
+    const outputPath = path.join(inputDir, "latest.json");
+    runScript(inputDir, outputPath);
+
+    const manifest = JSON.parse(fs.readFileSync(outputPath, "utf8")) as {
+      platforms: Record<string, { url: string }>;
+    };
+    const base = "https://github.com/wenyuantc/codex-ai/releases/download/v0.5.9";
+    expect(manifest.platforms["darwin-aarch64"].url).toBe(`${base}/noxcode_aarch64.app.tar.gz`);
+    expect(manifest.platforms["darwin-x86_64"].url).toBe(`${base}/noxcode_x64.app.tar.gz`);
+  });
 });

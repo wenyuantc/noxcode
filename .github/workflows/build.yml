@@ -38,13 +38,25 @@ jobs:
               src-tauri/target/release/bundle/deb/*.deb
               src-tauri/target/release/bundle/rpm/*.rpm
           - os: macos-latest
-            platform_name: macOS
+            platform_name: macOS Apple Silicon
             build_script: npm run tauri:dmg:no-sign
-            artifact_name: macos-dmg
+            rust_target: aarch64-apple-darwin
+            updater_arch: aarch64
+            artifact_name: macos-dmg-aarch64
             artifact_path: |
-              src-tauri/target/release/bundle/dmg/*.dmg
-              src-tauri/target/release/bundle/macos/*.app.tar.gz
-              src-tauri/target/release/bundle/macos/*.app.tar.gz.sig
+              src-tauri/target/aarch64-apple-darwin/release/bundle/dmg/*.dmg
+              src-tauri/target/aarch64-apple-darwin/release/bundle/macos/*.app.tar.gz
+              src-tauri/target/aarch64-apple-darwin/release/bundle/macos/*.app.tar.gz.sig
+          - os: macos-latest
+            platform_name: macOS Intel
+            build_script: npm run tauri:dmg:no-sign
+            rust_target: x86_64-apple-darwin
+            updater_arch: x64
+            artifact_name: macos-dmg-x64
+            artifact_path: |
+              src-tauri/target/x86_64-apple-darwin/release/bundle/dmg/*.dmg
+              src-tauri/target/x86_64-apple-darwin/release/bundle/macos/*.app.tar.gz
+              src-tauri/target/x86_64-apple-darwin/release/bundle/macos/*.app.tar.gz.sig
 
     runs-on: ${{ matrix.os }}
     timeout-minutes: 60
@@ -95,11 +107,14 @@ jobs:
 
       - name: 安装 Rust stable
         uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.rust_target }}
 
       - name: 缓存 Rust 构建产物
         uses: swatinem/rust-cache@v2
         with:
           workspaces: ./src-tauri -> target
+          key: ${{ matrix.os }}-${{ matrix.rust_target || 'default' }}
 
       - name: 安装前端与 Tauri 依赖
         run: npm install
@@ -113,13 +128,24 @@ jobs:
         run: |
           set -euo pipefail
           # `npm run script -- --config ...` 追加到 tauri build。空 extra[@] 在 macOS bash 3.2 + set -u 下会炸。
+          extra=""
+          if [ -n "${{ matrix.rust_target }}" ]; then
+            extra="--target ${{ matrix.rust_target }}"
+          fi
           if [ "${DISABLE_UPDATER_ARTIFACTS}" = "true" ]; then
-            ${{ matrix.build_script }} -- --config '{"bundle":{"createUpdaterArtifacts":false}}'
+            if [ -n "${extra}" ]; then
+              ${{ matrix.build_script }} -- ${extra} --config '{"bundle":{"createUpdaterArtifacts":false}}'
+            else
+              ${{ matrix.build_script }} -- --config '{"bundle":{"createUpdaterArtifacts":false}}'
+            fi
+          elif [ -n "${extra}" ]; then
+            ${{ matrix.build_script }} -- ${extra}
           else
             ${{ matrix.build_script }}
           fi
 
       # --no-sign 会跳过 updater 签名；有私钥时给 .app.tar.gz 补 .sig。
+      # 签完后按架构改名，避免 Apple Silicon / Intel 的同名产物在 Release 里互相覆盖。
       - name: 签名 macOS 更新包
         if: runner.os == 'macOS'
         shell: bash
@@ -128,20 +154,37 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: |
           set -euo pipefail
+          bundle_macos="src-tauri/target/${{ matrix.rust_target }}/release/bundle/macos"
+          updater_arch="${{ matrix.updater_arch }}"
           if [ -z "${TAURI_SIGNING_PRIVATE_KEY}" ]; then
             echo "未配置 TAURI_SIGNING_PRIVATE_KEY，跳过 updater 签名"
+          else
+            found=0
+            for artifact in "${bundle_macos}"/*.app.tar.gz; do
+              if [ -f "${artifact}" ]; then
+                found=1
+                npm run tauri -- signer sign "${artifact}"
+              fi
+            done
+            if [ "${found}" -eq 0 ]; then
+              echo "没有 .app.tar.gz，跳过 updater 签名"
+            fi
+          fi
+          if [ -z "${updater_arch}" ]; then
             exit 0
           fi
-          found=0
-          for artifact in src-tauri/target/release/bundle/macos/*.app.tar.gz; do
-            if [ -f "${artifact}" ]; then
-              found=1
-              npm run tauri -- signer sign "${artifact}"
+          for artifact in "${bundle_macos}"/*.app.tar.gz; do
+            [ -f "${artifact}" ] || continue
+            base="$(basename "${artifact}" .app.tar.gz)"
+            case "${base}" in
+              *_${updater_arch}) continue ;;
+            esac
+            dest="${bundle_macos}/${base}_${updater_arch}.app.tar.gz"
+            mv "${artifact}" "${dest}"
+            if [ -f "${artifact}.sig" ]; then
+              mv "${artifact}.sig" "${dest}.sig"
             fi
           done
-          if [ "${found}" -eq 0 ]; then
-            echo "没有 .app.tar.gz，跳过 updater 签名"
-          fi
 
       - name: 上传 ${{ matrix.platform_name }} 安装包
         uses: actions/upload-artifact@v4
@@ -249,7 +292,7 @@ jobs:
             echo "| 平台 | 说明 |"
             echo "| --- | --- |"
             echo "| **Windows** | 下载 \`.msi\`，双击安装。如遇 SmartScreen 提示，选择「仍要运行」。 |"
-            echo "| **macOS** | 下载 \`.dmg\`，拖入「应用程序」。未签名构建首次打开可能需在「系统设置 → 隐私与安全性」中允许。 |"
+            echo "| **macOS** | Apple Silicon 下载 \`*_aarch64.dmg\`，Intel 下载 \`*_x64.dmg\`，拖入「应用程序」。未签名构建首次打开可能需在「系统设置 → 隐私与安全性」中允许。 |"
             echo "| **Linux** | 推荐 \`.AppImage\`（\`chmod +x\` 后直接运行）；或按发行版安装 \`.deb\` / \`.rpm\`。 |"
             echo
             echo "### 更新内容"

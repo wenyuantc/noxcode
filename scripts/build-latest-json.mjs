@@ -29,7 +29,18 @@ if (!fs.existsSync(inputDir) || !fs.statSync(inputDir).isDirectory()) {
 
 const files = listFiles(inputDir).sort((left, right) => left.localeCompare(right));
 const platforms = {};
-const darwin = pickPlatform(files, (filePath) => hasSuffix(filePath, ".app.tar.gz"));
+const darwinAarch64 = pickPlatform(files, (filePath) =>
+  isDarwinUpdater(filePath, /(?:^|[._-])aarch64(?=[._-]|$)/i),
+);
+const darwinX64 = pickPlatform(files, (filePath) =>
+  isDarwinUpdater(filePath, /(?:^|[._-])(?:x64|x86_64)(?=[._-]|$)/i),
+);
+const darwinFallback = pickPlatform(
+  files,
+  (filePath) =>
+    hasSuffix(filePath, ".app.tar.gz") &&
+    !/(?:^|[._-])(?:aarch64|x64|x86_64)(?=[._-]|$)/i.test(path.basename(filePath)),
+);
 const linux = pickPlatform(files, (filePath) => hasSuffix(filePath, ".AppImage"));
 const windows = pickPlatform(
   files,
@@ -37,8 +48,13 @@ const windows = pickPlatform(
   (filePath) => hasSuffix(filePath, "-setup.exe") || hasSuffix(filePath, ".exe"),
 );
 
-if (darwin) {
-  platforms["darwin-aarch64"] = darwin;
+if (darwinAarch64) {
+  platforms["darwin-aarch64"] = darwinAarch64;
+} else if (darwinFallback) {
+  platforms["darwin-aarch64"] = darwinFallback;
+}
+if (darwinX64) {
+  platforms["darwin-x86_64"] = darwinX64;
 }
 if (linux) {
   platforms["linux-x86_64"] = linux;
@@ -124,6 +140,13 @@ function listFiles(dir) {
 
 function hasSuffix(filePath, suffix) {
   return path.basename(filePath).toLowerCase().endsWith(suffix.toLowerCase());
+}
+
+function isDarwinUpdater(filePath, archPattern) {
+  const name = path.basename(filePath);
+  return (
+    hasSuffix(filePath, ".app.tar.gz") && archPattern.test(name.replace(/\.app\.tar\.gz$/i, ""))
+  );
 }
 
 function githubReleaseAssetName(filename) {

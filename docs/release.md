@@ -49,10 +49,10 @@ gh secret set TAURI_SIGNING_PRIVATE_KEY < ~/.tauri/noxcode-updater.key
 
 1. `npm run bump-version -- <x.y.z>` 同步 `package.json` / `package-lock.json` / `src-tauri/Cargo.toml` / `src-tauri/Cargo.lock` / `src-tauri/tauri.conf.json`
 2. 提交并打 tag：`git tag v0.1.0 && git push origin v0.1.0`
-3. [`.github/workflows/build.yml`](../.github/workflows/build.yml) 在 Windows / Linux / macOS 打安装包
-4. 三端完成后创建 GitHub Release，挂载安装包，并用 [`scripts/build-latest-json.mjs`](../scripts/build-latest-json.mjs) 生成 `latest.json`
+3. [`.github/workflows/build.yml`](../.github/workflows/build.yml) 在 Windows / Linux / macOS Apple Silicon（`aarch64-apple-darwin`）/ macOS Intel（`x86_64-apple-darwin`）打安装包
+4. 构建完成后创建 GitHub Release，挂载安装包，并用 [`scripts/build-latest-json.mjs`](../scripts/build-latest-json.mjs) 生成 `latest.json`（`darwin-aarch64` 与 `darwin-x86_64` 分开）
 
-客户端启动后从 `releases/latest/download/latest.json` 检查更新。开发模式（`tauri dev` / 浏览器）不能检查或安装更新。
+客户端启动后从 `releases/latest/download/latest.json` 检查更新；Apple Silicon 与 Intel 各走对应产物。开发模式（`tauri dev` / 浏览器）不能检查或安装更新。
 
 ## 托盘与窗口
 
