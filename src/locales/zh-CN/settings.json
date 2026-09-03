@@ -252,10 +252,45 @@
     "description": "进程内 Native Agent、AI 渠道、SSH 工作区与 Git checkpoint。"
   },
   "mcp": {
-    "title": "MCP 服务器",
-    "hint": "全局 stdio MCP。仅连接已启用的服务器。",
-    "add": "添加服务器",
-    "reset": "重置为默认"
+    "title": "MCP 服务器管理",
+    "description": "在此维护全局 stdio MCP Server 清单。会话只连接已启用的服务器（本地本机 spawn，SSH 工作区在远端 spawn）。配置保存在应用配置目录的 mcp-servers.json，不在 SQL 备份范围内。",
+    "states": {
+      "loading": "加载 MCP 配置...",
+      "empty": "暂无 MCP 服务器，请点击添加服务器。"
+    },
+    "actions": {
+      "addServer": "添加服务器",
+      "addPlaywright": "添加 Playwright 预设",
+      "save": "保存",
+      "exportSnippet": "导出片段",
+      "resetExample": "重置示例",
+      "delete": "删除"
+    },
+    "fields": {
+      "enabled": "启用",
+      "namePlaceholder": "名称",
+      "commandPlaceholder": "启动命令（如 npx、uvx 或绝对路径）",
+      "argsPlaceholder": "参数（空格分隔）",
+      "notesPlaceholder": "备注（可选）"
+    },
+    "preview": {
+      "title": "导出片段预览"
+    },
+    "messages": {
+      "saved": "MCP 配置已保存到应用配置目录的 mcp-servers.json。",
+      "reset": "已重置为默认示例配置。",
+      "exported": "已生成导出片段，并尝试复制到剪贴板。",
+      "playwrightAdded": "已加入 Playwright 预设，保存后生效。默认未启用。",
+      "playwrightExists": "列表里已有 Playwright MCP，未重复添加。"
+    },
+    "browserCapability": "浏览器自动化经 Playwright MCP 提供。本地需已安装 Node；SSH 工作区需远端具备 node 与浏览器依赖。",
+    "playwright": {
+      "notes": "Playwright MCP 预设。本地需 Node/npx；SSH 远端需 node 与浏览器依赖。启用后保存才会注入会话。"
+    },
+    "exampleFilesystem": {
+      "name": "示例：Filesystem（请按需启用）",
+      "notes": "这是占位示例。启用前请确认本机已安装 Node/npx，并按实际仓库路径修改 args。"
+    }
   },
   "skills": {
     "title": "技能",

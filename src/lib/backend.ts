@@ -458,6 +458,10 @@ export function resetMcpServers(): Promise<McpServersDocument> {
   return invoke("reset_mcp_servers");
 }
 
+export function exportMcpServersSnippet(): Promise<string> {
+  return invoke("export_mcp_servers_snippet");
+}
+
 export function onNativeStdout(
   callback: (output: AgentSessionOutput) => void,
 ): Promise<UnlistenFn> {

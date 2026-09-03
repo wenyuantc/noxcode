@@ -148,6 +148,66 @@ pub async fn reset_mcp_servers<R: Runtime>(
     Ok(document)
 }
 
+fn json_quoted(value: &str) -> String {
+    value.replace('\\', "\\\\").replace('"', "\\\"")
+}
+
+pub fn render_mcp_export_snippet(document: &McpServersDocument) -> String {
+    let mut lines = vec![
+        "# 可将以下 JSON 片段合并到 Claude Desktop / Cursor 等 MCP 配置中".to_string(),
+        "# 仅导出 enabled = true 的服务器".to_string(),
+        "{".to_string(),
+        "  \"mcpServers\": {".to_string(),
+    ];
+
+    let enabled: Vec<_> = document
+        .servers
+        .iter()
+        .filter(|server| server.enabled)
+        .collect();
+    for (index, server) in enabled.iter().enumerate() {
+        let args = server
+            .args
+            .iter()
+            .map(|arg| format!("\"{}\"", json_quoted(arg)))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let env_pairs = server
+            .env
+            .iter()
+            .map(|env| {
+                format!(
+                    "\"{}\": \"{}\"",
+                    json_quoted(&env.key),
+                    json_quoted(&env.value)
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        lines.push(format!(
+            "    \"{}\": {{\n      \"command\": \"{}\",\n      \"args\": [{}],\n      \"env\": {{{}}}\n    }}{}",
+            json_quoted(&server.name),
+            json_quoted(&server.command),
+            args,
+            env_pairs,
+            if index + 1 == enabled.len() {
+                ""
+            } else {
+                ","
+            }
+        ));
+    }
+    lines.push("  }".to_string());
+    lines.push("}".to_string());
+    lines.join("\n")
+}
+
+#[tauri::command]
+pub async fn export_mcp_servers_snippet<R: Runtime>(app: AppHandle<R>) -> Result<String, String> {
+    let document = load_mcp_document(&app)?;
+    Ok(render_mcp_export_snippet(&document))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -189,5 +249,40 @@ mod tests {
         assert_eq!(ok.args, vec!["-y".to_string()]);
         assert!(ok.env.is_empty());
         assert!(ok.notes.is_none());
+    }
+
+    #[test]
+    fn export_snippet_includes_only_enabled_servers() {
+        let document = McpServersDocument {
+            servers: vec![
+                McpServerConfig {
+                    id: "a".to_string(),
+                    name: "Alpha".to_string(),
+                    command: "npx".to_string(),
+                    args: vec!["-y".to_string(), "pkg-a".to_string()],
+                    env: vec![McpEnvVar {
+                        key: "TOKEN".to_string(),
+                        value: "secret".to_string(),
+                    }],
+                    enabled: true,
+                    notes: None,
+                },
+                McpServerConfig {
+                    id: "b".to_string(),
+                    name: "Beta".to_string(),
+                    command: "uvx".to_string(),
+                    args: vec![],
+                    env: vec![],
+                    enabled: false,
+                    notes: None,
+                },
+            ],
+        };
+        let snippet = render_mcp_export_snippet(&document);
+        assert!(snippet.contains("\"Alpha\""));
+        assert!(snippet.contains("\"pkg-a\""));
+        assert!(snippet.contains("\"TOKEN\": \"secret\""));
+        assert!(!snippet.contains("Beta"));
+        assert!(!snippet.contains("uvx"));
     }
 }

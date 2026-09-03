@@ -118,6 +118,7 @@ pub fn run() {
             native::mcp_servers::get_mcp_servers,
             native::mcp_servers::update_mcp_servers,
             native::mcp_servers::reset_mcp_servers,
+            native::mcp_servers::export_mcp_servers_snippet,
             app::workspaces::list_workspaces,
             app::workspaces::create_workspace,
             app::workspaces::update_workspace,

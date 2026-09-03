@@ -252,10 +252,45 @@
     "description": "In-process native agent, AI channels, SSH workspaces, and Git checkpoints."
   },
   "mcp": {
-    "title": "MCP servers",
-    "hint": "Global stdio MCP. Only enabled servers are connected.",
-    "add": "Add server",
-    "reset": "Reset defaults"
+    "title": "MCP server management",
+    "description": "Maintain the global stdio MCP server list here. Sessions connect only enabled servers (local spawn on this machine, remote spawn on SSH workspaces). The configuration is stored as mcp-servers.json in the app config directory and is not part of SQL backups.",
+    "states": {
+      "loading": "Loading MCP configuration...",
+      "empty": "No MCP servers yet. Click Add Server."
+    },
+    "actions": {
+      "addServer": "Add server",
+      "addPlaywright": "Add Playwright preset",
+      "save": "Save",
+      "exportSnippet": "Export snippet",
+      "resetExample": "Reset example",
+      "delete": "Delete"
+    },
+    "fields": {
+      "enabled": "Enabled",
+      "namePlaceholder": "Name",
+      "commandPlaceholder": "Launch command (for example npx, uvx, or an absolute path)",
+      "argsPlaceholder": "Arguments (space-separated)",
+      "notesPlaceholder": "Notes (optional)"
+    },
+    "preview": {
+      "title": "Export snippet preview"
+    },
+    "messages": {
+      "saved": "MCP configuration saved to mcp-servers.json in the app config directory.",
+      "reset": "Reset to the default example configuration.",
+      "exported": "Generated the export snippet and tried to copy it to the clipboard.",
+      "playwrightAdded": "Added the Playwright preset. Save to apply. It is disabled by default.",
+      "playwrightExists": "A Playwright MCP server is already in the list."
+    },
+    "browserCapability": "Browser automation is provided by Playwright MCP. Local runs need Node; SSH workspaces need node and browser dependencies on the remote host.",
+    "playwright": {
+      "notes": "Playwright MCP preset. Local needs Node/npx; SSH remotes need node and browser dependencies. Enable and save to inject it into sessions."
+    },
+    "exampleFilesystem": {
+      "name": "Example: Filesystem (enable if needed)",
+      "notes": "This is a placeholder sample. Before enabling, confirm Node/npx is installed locally and update args to your real repo path."
+    }
   },
   "skills": {
     "title": "Skills",
@@ -264,7 +299,24 @@
   },
   "hooks": {
     "title": "Hooks",
-    "hint": "Pre-hook exit 2 blocks; post-hook failures are warnings."
+    "hint": "A pre-hook exit code 2 blocks the tool call; post-hook failures are warnings only.",
+    "fields": {
+      "event": "Hook type",
+      "matcher": "Match tools",
+      "command": "Command"
+    },
+    "events": {
+      "preToolUse": "Before tool use (can block)",
+      "postToolUse": "After tool use (warn only)"
+    },
+    "placeholders": {
+      "matcher": "* or Bash, Write",
+      "command": "Command to run"
+    },
+    "fieldHints": {
+      "matcher": "Use * for every tool, or a comma-separated list.",
+      "command": "Shell command in the workspace. Empty commands are dropped on save."
+    }
   },
   "subagents": {
     "title": "Subagents",
