@@ -23,6 +23,7 @@ import {
   summarizeTools,
   parseThinkingDurationSeconds,
   parseRetryLine,
+  parsePlanLine,
   summarizeRetry,
   thinkingDurationSeconds,
   thinkingText,
@@ -557,6 +558,60 @@ describe("sessionLines", () => {
       count: 2,
       failed: true,
     });
+  });
+
+  it("parses plan documents and status lines into their own segments", () => {
+    expect(parsePlanLine("[PLAN]\n## 目标\n- 改 Composer")).toEqual({
+      kind: "document",
+      status: null,
+      title: "目标",
+      body: "## 目标\n- 改 Composer",
+      questionSummary: null,
+    });
+    expect(parsePlanLine("[计划]\n先摸底再改")).toMatchObject({
+      kind: "document",
+      title: "先摸底再改",
+      body: "先摸底再改",
+    });
+    expect(parsePlanLine("[PLAN] 开始执行")).toEqual({
+      kind: "status",
+      status: "execute",
+      title: null,
+      body: "开始执行",
+      questionSummary: null,
+    });
+    expect(parsePlanLine("[PLAN] 等待用户回答：用哪个入口")).toEqual({
+      kind: "status",
+      status: "waiting_question",
+      title: null,
+      body: "等待用户回答：用哪个入口",
+      questionSummary: "用哪个入口",
+    });
+    expect(parsePlanLine("[思考] 不是计划")).toBeNull();
+
+    const blocks = buildTurnBlocks(
+      groupSessionLines([
+        line(
+          "1",
+          "[PLAN] 已进入计划模式：只读摸底，本轮结束后自动开始执行",
+          "2026-01-01T00:00:00Z",
+        ),
+        line("2", "[USER_INPUT] 做个方案", "2026-01-01T00:00:01Z"),
+        line("3", "[PLAN]\n## 目标\n分两步改", "2026-01-01T00:00:02Z"),
+        line("4", "[PLAN] 开始执行", "2026-01-01T00:00:03Z"),
+        line("5", "开始改文件", "2026-01-01T00:00:04Z"),
+      ]),
+    );
+    expect(blocks).toHaveLength(1);
+    expect(blocks[0]?.segments.map((segment) => segment.kind)).toEqual([
+      "plan",
+      "plan",
+      "plan",
+      "assistant",
+    ]);
+    expect(blocks[0]?.segments[0]?.items).toHaveLength(1);
+    expect(blocks[0]?.segments[1]?.items[0]?.text).toContain("## 目标");
+    expect(parsePlanLine(blocks[0]!.segments[2]!.items[0]!.text)?.status).toBe("execute");
   });
 
   it("keeps unrelated errors out of the retry segment", () => {
