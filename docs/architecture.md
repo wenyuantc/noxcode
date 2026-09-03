@@ -1,8 +1,8 @@
 # 架构
 
-noxcode 是 Tauri 2 桌面应用：进程内 Native Agent、AI 渠道、SSH 工作区、Git checkpoint。业务外壳只保留工作区 + Agent 档案 + 会话，不做项目 / 员工 / 看板 / 任务自动化。
+noxcode 是 Tauri 2 桌面应用：进程内 Native Agent、AI 渠道、SSH 工作区、Git checkpoint。业务外壳只保留工作区 + 渠道/模型选择 + 会话，不做项目 / 员工 / 看板 / 任务自动化。
 
-完整分阶段计划见 [`plan.md`](../plan.md)。表结构、迁移与备份见 [`database.md`](database.md)。SSH 实现见 [`ssh.md`](ssh.md)。Git 实现见 [`git.md`](git.md)。AI 渠道见 [`channels.md`](channels.md)。Native Agent 运行时见 [`native.md`](native.md)。
+完整分阶段计划见 [`plan.md`](../plan.md)。表结构、迁移与备份见 [`database.md`](database.md)。SSH 实现见 [`ssh.md`](ssh.md)。Git 实现见 [`git.md`](git.md)。AI 渠道见 [`channels.md`](channels.md)。Native Agent 运行时见 [`native.md`](native.md)。前端结构见 [`frontend.md`](frontend.md)。
 
 ## 数据流
 
@@ -49,17 +49,17 @@ flowchart LR
 
 | 层 | 现状 | 目标 |
 | --- | --- | --- |
-| 前端 `src/` | 空白页 + `database.ts` stub + `backend.ts` / `types.ts` / `modelCatalog.ts` | 单主界面 + 全屏设置页，见下方路由 |
-| `db/` | version 1 baseline，9 张表 | 只追加连续迁移 `2..N` |
+| 前端 `src/` | P5 单主界面 + 全屏设置 + Git 抽屉 + API 日志，见 [`frontend.md`](frontend.md) | 保持；斜杠命令完整版 / Markdown 富渲染留 backlog |
+| `db/` | version 2（8 张表，已去掉 `agent_profiles`） | 只追加连续迁移 `3..N` |
 | `app/database` + `app/shared` | 健康检查 / 备份 / 恢复 | 保持 |
-| `app/ssh/` + `app/secret_store` | P2 已落地，见 [`ssh.md`](ssh.md) | P5 补设置页 / 信任横幅 |
-| `app/workspaces` | P4.4 CRUD + 健康检查 | P5 工作区选择器 |
-| `app/{profiles,sessions}` | P4.4 CRUD；删会话清 checkpoint | P5 档案 / 历史 UI |
-| `git/` | P2.5 + P4.4 自动打点 | P5 GitPanel / CheckpointTimeline |
-| `engine/` | `ExecutionContext`（local \| ssh） | 会话接线后继续用 |
-| `native/` | P4 已落地完整 model / tools / agent / session | P5 会话流与设置页 |
+| `app/ssh/` + `app/secret_store` | P2 + P5 设置页 / 信任对话框，见 [`ssh.md`](ssh.md) | 保持 |
+| `app/workspaces` | CRUD + 健康检查 + scratch 工作区 | 保持 |
+| `app/sessions` | 历史列表 / 续聊判定 / 删会话清 checkpoint | 保持 |
+| `git/` | P2.5 + P4.4 自动打点 + P5 Git 抽屉 | 分支切换留 backlog |
+| `engine/` | `ExecutionContext`（local \| ssh） | 继续用 |
+| `native/` | P4 运行时 + P5 会话流 / 设置页 | 保持 |
 
-策略是「保留内核 + 替换外壳」：`native/model`、`native/tools`、`native/agent` 从参考实现近乎原样搬运；`native/session.rs` / `manager.rs` 重写（`employee` → `agent_profile`，去掉 task / run_queue / 任务自动化）；SSH 与 Git 按本仓库决策新写，不搬系统 `ssh` 子进程和 Node git bridge。
+策略是「保留内核 + 替换外壳」：`native/model`、`native/tools`、`native/agent` 从参考实现近乎原样搬运；`native/session.rs` / `manager.rs` 重写（按渠道 + 模型启动，去掉档案 / task / run_queue / 任务自动化）；SSH 与 Git 按本仓库决策新写，不搬系统 `ssh` 子进程和 Node git bridge。
 
 ## 启动与 IPC
 
@@ -81,14 +81,14 @@ flowchart LR
 | `resolve_ssh_host_trust` | `app::ssh`（`ask` 模式确认回传） |
 | `get_git_repo_info` / `get_git_status` / `get_git_file_diff` / `get_git_numstat` | `git` |
 | `stage_git_paths` / `unstage_git_paths` / `restore_git_paths` | `git` |
-| `commit_git_changes` / `push_git_branch` / `list_git_branches` / `create_git_branch` | `git` |
+| `commit_git_changes` / `push_git_branch` / `list_git_branches` / `create_git_branch` / `list_git_files` | `git` |
 | `create_git_checkpoint` / `list_git_checkpoints` / `preview_git_checkpoint_restore` / `restore_git_checkpoint` / `clear_git_checkpoints` | `git` |
+| `get_quick_prompts` / `update_quick_prompts` | `app::quick_prompts` |
 | `list_ai_channels` / `create_ai_channel` / `update_ai_channel` / `delete_ai_channel` | `native::channels` |
 | `test_ai_channel` / `list_ai_channel_models` | `native::channels` |
 | `list_model_catalog` | `native::model_catalog` |
 | `get_network_settings` / `update_network_settings` | `app::network_settings` |
-| `list/create/update/delete_agent_profile` | `app::profiles` |
-| `list/create/update/delete_workspace` / `check_workspace_health` | `app::workspaces` |
+| `list/create/update/delete_workspace` / `check_workspace_health` / `ensure_scratch_workspace` | `app::workspaces` |
 | `list_agent_sessions` / `get_agent_session_log_lines` / `prepare_agent_session_resume` / `delete_agent_session` | `app::sessions` |
 | `start/stop/restart/resume_native_session` / `stop_native` / `send/finish_native_input` | `native::session` |
 | `resolve_native_tool_permission` / `answer_native_plan_question` | `native::session` |
@@ -98,7 +98,7 @@ flowchart LR
 | `list/get_native_api_call_log` | `native::api_logs` |
 | `get/update/reset_mcp_servers` | `native::mcp_servers` |
 
-事件：`ssh-host-trust-request`、`ssh-host-key-changed`、`native-session`、`native-stdout`、`native-text-delta`、`native-context-usage`、`native-permission-request`、`native-plan-question`、`native-exit`。Git 细节见 [`git.md`](git.md)。会话细节见 [`native.md`](native.md)。
+事件：`ssh-host-trust-request`、`ssh-host-key-changed`、`native-session`、`native-stdout`、`native-text-delta`、`native-context-usage`、`native-turn-state`、`native-permission-request`、`native-plan-question`、`native-exit`。Git 细节见 [`git.md`](git.md)。会话细节见 [`native.md`](native.md)。前端接线见 [`frontend.md`](frontend.md)。
 
 ## SSH
 
@@ -153,6 +153,6 @@ P0 脚手架 → P1 数据层 → P2 SSH → P2.5 Git → P3 渠道
 P6 打包  ←  P5 前端  ←  P4.5 ← P4.4 ← P4.3 ← P4.2 ← P4.1
 ```
 
-P2 必须在 tools/ssh 之前；P3 必须在 model 客户端测通之前；P2.5 必须在 session 接线之前。当前仓库已完成 P0、P1、P2、P2.5、P3、P4。
+P2 必须在 tools/ssh 之前；P3 必须在 model 客户端测通之前；P2.5 必须在 session 接线之前。当前仓库已完成 P0、P1、P2、P2.5、P3、P4、P5。
 
 第一版不做：斜杠命令完整版、插件打包、PTY、内置 ripgrep、浏览器 / CUA、OpenTelemetry。见 `plan.md` §6。

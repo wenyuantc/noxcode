@@ -1,6 +1,6 @@
 # 数据层
 
-noxcode 用一份 SQLite 库保存渠道、档案、工作区、会话与 Git checkpoint。前端不碰 SQL。
+noxcode 用一份 SQLite 库保存渠道、工作区、会话与 Git checkpoint。前端不碰 SQL。
 
 ```
 React (UI) → Tauri IPC commands → Rust service layer → SQLite
@@ -10,7 +10,7 @@ React (UI) → Tauri IPC commands → Rust service layer → SQLite
 
 | 路径 | 职责 |
 | --- | --- |
-| [`src-tauri/src/db/migrations.rs`](../src-tauri/src/db/migrations.rs) | 迁移清单（当前只有 version 1 baseline） |
+| [`src-tauri/src/db/migrations.rs`](../src-tauri/src/db/migrations.rs) | 迁移清单（version 1 baseline + version 2 去掉档案） |
 | [`src-tauri/src/db/models.rs`](../src-tauri/src/db/models.rs) | 行模型与 IPC DTO |
 | [`src-tauri/src/app/shared.rs`](../src-tauri/src/app/shared.rs) | `sqlite_pool` / `database_path` / `now_sqlite` / `new_id` |
 | [`src-tauri/src/app/database.rs`](../src-tauri/src/app/database.rs) | 健康检查、备份、恢复 |
@@ -31,9 +31,9 @@ React (UI) → Tauri IPC commands → Rust service layer → SQLite
 
 ## 迁移
 
-`tauri-plugin-sql` 在启动时按 `get_all_migrations()` 升级。版本号必须连续 `1..N`，由 `migration_versions_are_contiguous` 强制。当前最新版本是 **1**（`noxcode baseline schema`），一次建齐 9 张业务表。
+`tauri-plugin-sql` 在启动时按 `get_all_migrations()` 升级。版本号必须连续 `1..N`，由 `migration_versions_are_contiguous` 强制。当前最新版本是 **2**（去掉 `agent_profiles`，会话改存 `ai_channel_id`），跑完后共 8 张业务表。
 
-后续只能追加 `version: 2`、`3`……，禁止改已发布的 SQL，禁止插队。
+后续只能追加 `version: 3`……，禁止改已发布的 SQL，禁止插队。
 
 应用的 `_sqlx_migrations` 表记录已应用版本。debug 启动会打印：
 
@@ -44,7 +44,7 @@ React (UI) → Tauri IPC commands → Rust service layer → SQLite
 ## 表关系
 
 ```
-ai_channels ──RESTRICT──► agent_profiles ──SET NULL──► agent_sessions
+ai_channels ──SET NULL──► agent_sessions
 ssh_configs ──RESTRICT──► workspaces     ──SET NULL──► agent_sessions
 ssh_configs ──SET NULL──► agent_sessions
 agent_sessions ──CASCADE──► agent_session_events
@@ -55,11 +55,12 @@ native_api_call_logs        无外键（日志需在会话删除后仍可查）
 native_session_transcripts  无外键（主键 session_record_id 对应 agent_sessions.id）
 ```
 
-RESTRICT：仍被档案或工作区引用的渠道 / SSH 配置不能删。  
+RESTRICT：仍被工作区引用的 SSH 配置不能删。  
+渠道删除会把会话上的 `ai_channel_id` 置空；有该渠道的 live session 时命令层拒绝删除。  
 CASCADE：删会话会清事件和 checkpoint 行；删工作区会清该工作区的 checkpoint 行。  
 `git update-ref -d` 清仓库 ref 属于 Git 层，不在本模块。
 
-## 九张表
+## 八张表
 
 ### `ssh_configs`
 
@@ -92,17 +93,6 @@ SSH 连接配置。密码与密钥口令只存 keyring 引用（`password_ref` /
 | `models_json` | 模型列表 JSON，默认 `[]` |
 | `enabled` | `1` / `0` |
 
-### `agent_profiles`
-
-Agent 档案，替代员工表。只保留跑会话需要的字段。
-
-| 列 | 说明 |
-| --- | --- |
-| `ai_channel_id` | 可空，引用 `ai_channels`，删除受 RESTRICT |
-| `model` | 模型 ID |
-| `reasoning_effort` | 默认 `high` |
-| `system_prompt` | 档案设定 |
-
 ### `workspaces`
 
 本地或 SSH 工作目录。
@@ -120,7 +110,7 @@ Agent 档案，替代员工表。只保留跑会话需要的字段。
 
 | 列 | 说明 |
 | --- | --- |
-| `profile_id` / `workspace_id` | 删除档案或工作区时置空 |
+| `ai_channel_id` / `workspace_id` | 删除渠道或工作区时置空 |
 | `working_dir` | 实际工作目录 |
 | `execution_target` | `local` 或 `ssh` |
 | `ssh_config_id` / `target_host_label` | SSH 会话元数据，配置删除时 `ssh_config_id` 置空 |
@@ -136,7 +126,7 @@ Agent 档案，替代员工表。只保留跑会话需要的字段。
 
 ### `native_api_call_logs`
 
-模型调用日志，便于排渠道问题。范围列用 `profile_id` / `workspace_id`，没有 `task_id`。不建外键，删会话后日志仍在。
+模型调用日志，便于排渠道问题。范围列用 `channel_id` / `workspace_id`，没有 `task_id`。不建外键，删会话后日志仍在。`profile_id` 列仍在，新写入为 NULL。
 
 ### `native_session_transcripts`
 
@@ -173,7 +163,7 @@ Git plumbing 快照的数据库索引。真实对象在仓库 `refs/noxcode/chec
 
 恢复时若备份版本高于应用支持的最新迁移，会拒绝导入。导入失败会尝试滚回导入前自动备份。
 
-SSH 配置 CRUD 与探测命令已注册。渠道 / 档案 / 工作区的 CRUD 尚未注册，表结构已就绪。
+SSH、渠道、工作区 CRUD 已注册。会话按渠道 + 模型启动，不再有档案表。
 
 ## 本地查看
 

@@ -14,7 +14,7 @@ use super::checkpoint::{
 };
 use super::commit::{commit_changes, create_branch, list_branches, push_branch};
 use super::diff::{get_file_diff, get_numstat, GitFileDiffScope, GitNumstatScope};
-use super::repo::load_repo_info;
+use super::repo::{list_repo_files, load_repo_info};
 use super::runner::{fixture_git, git, GitTarget, IndexMode};
 use super::stage::{restore_paths, stage_paths, unstage_paths};
 use super::status::get_status;
@@ -141,6 +141,24 @@ where
     test(local.target.clone(), local.dir.path().to_path_buf()).await;
     let ssh = ssh_env().await;
     test(ssh.target.clone(), ssh.dir.path().to_path_buf()).await;
+}
+
+#[tokio::test]
+async fn list_repo_files_filters_and_includes_untracked() {
+    let env = local_env().await;
+    std::fs::write(env.dir.path().join("notes.md"), "n\n").unwrap();
+    std::fs::create_dir_all(env.dir.path().join("src")).unwrap();
+    std::fs::write(env.dir.path().join("src/main.rs"), "fn main() {}\n").unwrap();
+    let all = list_repo_files(&env.target, None, None)
+        .await
+        .expect("list");
+    assert!(all.contains(&"README.md".to_string()));
+    assert!(all.contains(&"notes.md".to_string()));
+    assert!(all.contains(&"src/main.rs".to_string()));
+    let filtered = list_repo_files(&env.target, Some("main"), Some(10))
+        .await
+        .expect("filter");
+    assert_eq!(filtered, vec!["src/main.rs".to_string()]);
 }
 
 #[tokio::test]

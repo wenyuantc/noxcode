@@ -1,0 +1,4 @@
+{
+  "generic": "操作失败",
+  "invokeFailed": "调用后端失败：{{message}}"
+}

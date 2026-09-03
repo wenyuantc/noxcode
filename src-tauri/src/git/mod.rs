@@ -28,7 +28,7 @@ use self::commit::{
 use self::diff::{
     get_file_diff, get_numstat, GitFileDiff, GitFileDiffScope, GitNumstatEntry, GitNumstatScope,
 };
-use self::repo::GitRepoInfo;
+use self::repo::{list_repo_files, GitRepoInfo};
 use self::stage::{restore_paths, stage_paths, unstage_paths};
 use self::status::{get_status, GitStatus};
 
@@ -261,6 +261,19 @@ pub(crate) async fn restore_git_checkpoint<R: Runtime>(
     )
     .await
     .map_err(Into::into)
+}
+
+#[tauri::command]
+pub(crate) async fn list_git_files<R: Runtime>(
+    app: AppHandle<R>,
+    workspace_id: String,
+    query: Option<String>,
+    limit: Option<u32>,
+) -> Result<Vec<String>, String> {
+    let target = resolve_git_target(&app, &workspace_id).await?;
+    list_repo_files(&target, query.as_deref(), limit.map(|value| value as usize))
+        .await
+        .map_err(Into::into)
 }
 
 #[tauri::command]

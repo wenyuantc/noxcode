@@ -1,0 +1,185 @@
+{
+  "title": "设置",
+  "groups": {
+    "basic": "基础设置",
+    "agent": "Agent 能力",
+    "data": "数据与统计"
+  },
+  "sections": {
+    "general": "常规",
+    "appearance": "外观",
+    "channels": "AI 渠道",
+    "ssh": "SSH 连接",
+    "runtime": "内置 Agent 运行时",
+    "subagents": "子智能体",
+    "mcp": "MCP 服务器",
+    "skills": "技能",
+    "hooks": "钩子",
+    "usage": "使用统计",
+    "database": "数据库维护",
+    "about": "关于"
+  },
+  "general": {
+    "language": "界面语言",
+    "languageHint": "选择应用 UI 的显示语言。",
+    "proxy": "HTTP 代理",
+    "proxyHint": "仅支持 http/https。留空则沿用系统环境变量。",
+    "noProxy": "不使用代理的地址",
+    "noProxyHint": "逗号分隔的主机名或 IP。",
+    "caCert": "自定义证书",
+    "caCertHint": "PEM 文件路径，追加到系统根证书。",
+    "quickPrompts": "快捷提示",
+    "quickPromptsHint": "首页胶囊的预填内容，可自行修改。"
+  },
+  "appearance": {
+    "theme": "主题",
+    "themeHint": "浅色、深色或跟随系统。",
+    "light": "浅色",
+    "dark": "深色",
+    "system": "跟随系统"
+  },
+  "channels": {
+    "title": "AI 渠道",
+    "description": "配置内置 Agent 使用的模型网关。API 密钥保存在本机渠道配置中，可点眼睛图标查看明文。",
+    "list": {
+      "loading": "加载渠道…",
+      "empty": "还没有渠道，请点击新建。"
+    },
+    "actions": {
+      "new": "新建渠道",
+      "save": "保存",
+      "cancel": "取消",
+      "test": "测通",
+      "fetchModels": "获取模型",
+      "addModel": "添加模型",
+      "fillFromCatalog": "从本地元数据填充",
+      "delete": "删除"
+    },
+    "fields": {
+      "name": "名称",
+      "protocol": "API 请求方式",
+      "enabled": "开启",
+      "baseUrl": "Base URL，例如 https://api.deepseek.com",
+      "apiKey": "API 密钥",
+      "apiKeyConfigured": "已配置密钥，留空则不修改",
+      "showApiKey": "显示 API 密钥",
+      "hideApiKey": "隐藏 API 密钥",
+      "models": "模型",
+      "modelId": "模型 ID",
+      "modelsEmpty": "还没有模型。可获取网关列表，或手动添加。",
+      "modelsHint": "可用密钥拉取网关模型；若本地目录有该模型，会自动填入上下文、输出上限和思考设置，仍可手动改。",
+      "contextTokens": "上下文（tokens）",
+      "maxOutputTokens": "输出上限（tokens）",
+      "thinking": "思考",
+      "thinkingLevel": "思考等级",
+      "thinkingLevels": "允许的思考等级",
+      "thinkingLevelsHint": "显示全部思考等级，可按需勾选。默认勾选该模型在目录中存在的等级；运行时优先使用中等级，否则使用第一个已选等级。",
+      "thinkingLevelsEmpty": "开启思考时请至少勾选一个等级。",
+      "extraHeaders": "额外请求头（JSON 对象，可选）"
+    },
+    "protocols": {
+      "openai": "OpenAI Chat Completions",
+      "anthropic": "Claude Messages",
+      "codex": "Codex Responses"
+    },
+    "status": {
+      "enabled": "启用",
+      "disabled": "停用",
+      "thinkingOn": "开启思考",
+      "thinkingOff": "关闭思考"
+    },
+    "thinkingLevels": {
+      "none": "无",
+      "no_think": "不思考",
+      "minimal": "最低",
+      "low": "低",
+      "medium": "中",
+      "high": "高",
+      "xhigh": "最高",
+      "max": "极高"
+    },
+    "updatedAt": "更新于 {{date}}",
+    "dialogs": {
+      "createTitle": "新建渠道",
+      "editTitle": "编辑渠道",
+      "deleteTitle": "删除渠道",
+      "deleteConfirm": "确定删除渠道「{{name}}」？运行中的会话正在使用该渠道时会阻止删除。"
+    },
+    "messages": {
+      "created": "渠道已创建",
+      "updated": "渠道已更新",
+      "deleted": "渠道已删除",
+      "modelsFetched": "已获取 {{count}} 个模型，保存后生效",
+      "modelsFetchedTruncated": "已获取 {{count}} 个模型（列表已截断，可能不完整），保存后生效"
+    }
+  },
+  "ssh": {
+    "title": "SSH 连接",
+    "hint": "管理远端工作区使用的 SSH 配置。",
+    "new": "新建配置",
+    "import": "从 ~/.ssh/config 导入",
+    "importHint": "选择 Host 别名后填充表单。ProxyJump 暂不支持。",
+    "proxyJumpUnsupported": "该 Host 带有 ProxyJump，第一版不支持跳板，请手动配置直连参数。",
+    "test": "测试连接",
+    "probe": "探测密码认证",
+    "deleteConfirm": "确定删除该 SSH 配置？"
+  },
+  "runtime": {
+    "title": "内置 Agent 运行时",
+    "maxTurns": "最大轮次",
+    "maxTurnsHint": "0 表示不限，上限 500。",
+    "maxSubagentTurns": "子 Agent 最大轮次",
+    "contextWindow": "上下文窗口（K tokens）",
+    "rolloutBudget": "Rollout 预算（K tokens）",
+    "maxToolOutput": "工具输出上限（K tokens）",
+    "maxConcurrent": "同时运行的子 Agent",
+    "policy": "子 Agent 策略",
+    "budgetShare": "子 Agent 预算占比",
+    "confirmHighRisk": "高风险操作需确认",
+    "permissionTimeout": "确认超时（秒）",
+    "globalPrompt": "全局提示词模板"
+  },
+  "usage": {
+    "title": "使用统计",
+    "hint": "来自模型调用日志的聚合。",
+    "openLogs": "打开调用日志",
+    "total": "总调用",
+    "success": "成功",
+    "failed": "失败",
+    "cancelled": "取消",
+    "inputTokens": "输入 tokens",
+    "outputTokens": "输出 tokens"
+  },
+  "database": {
+    "title": "数据库维护",
+    "hint": "备份、恢复或打开数据库所在目录。",
+    "backup": "备份数据库",
+    "restore": "恢复数据库",
+    "openFolder": "打开数据库目录",
+    "health": "健康检查"
+  },
+  "about": {
+    "title": "关于",
+    "version": "版本",
+    "description": "进程内 Native Agent、AI 渠道、SSH 工作区与 Git checkpoint。"
+  },
+  "mcp": {
+    "title": "MCP 服务器",
+    "hint": "全局 stdio MCP。仅连接已启用的服务器。",
+    "add": "添加服务器",
+    "reset": "重置为默认"
+  },
+  "skills": {
+    "title": "技能",
+    "hint": "发现全局 $APPCONFIG/native-skills 下的 SKILL.md。",
+    "openDir": "打开技能目录"
+  },
+  "hooks": {
+    "title": "钩子",
+    "hint": "Pre 钩子退出码 2 阻断；Post 失败仅警告。"
+  },
+  "subagents": {
+    "title": "子智能体",
+    "hint": "自定义子 Agent 的模型、工具与作用域。"
+  }
+}

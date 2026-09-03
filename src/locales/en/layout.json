@@ -1,0 +1,24 @@
+{
+  "greeting": {
+    "morning": "Good morning — what should we do next?",
+    "afternoon": "Good afternoon — I'll take it from here",
+    "evening": "Good evening — what should we do next?"
+  },
+  "composerPlaceholder": "Ask noxcode, use @ to add context, / to pick a skill",
+  "noWorkspace": "No workspace selected",
+  "scratchWorkspace": "Scratch workspace",
+  "sessions": "Sessions",
+  "workspaces": "Workspaces",
+  "moreSessions": "Show more",
+  "command": {
+    "placeholder": "Search actions, sessions, or files",
+    "all": "All",
+    "actions": "Actions",
+    "sessions": "Sessions",
+    "files": "Files",
+    "recentSessions": "Recent sessions",
+    "suggested": "Suggested",
+    "panels": "Panels",
+    "theme": "Toggle theme"
+  }
+}

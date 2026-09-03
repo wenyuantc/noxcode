@@ -1,0 +1,19 @@
+{
+  "trustTitle": "Unknown host key",
+  "trustBody": "First connection to {{host}}:{{port}}. Fingerprint:",
+  "trustAccept": "Trust and continue",
+  "trustReject": "Reject",
+  "keyChangedTitle": "Host key changed",
+  "keyChangedBody": "The key for {{host}}:{{port}} does not match known_hosts line {{line}}. This may be a MITM attack. The connection was refused.",
+  "name": "Name",
+  "host": "Host",
+  "port": "Port",
+  "username": "Username",
+  "authType": "Auth",
+  "key": "Private key",
+  "password": "Password",
+  "privateKey": "Private key path",
+  "passphrase": "Passphrase",
+  "knownHosts": "known_hosts policy",
+  "remotePath": "Remote repo path"
+}

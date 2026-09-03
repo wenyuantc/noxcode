@@ -1,0 +1,185 @@
+{
+  "title": "Settings",
+  "groups": {
+    "basic": "Basics",
+    "agent": "Agent",
+    "data": "Data & stats"
+  },
+  "sections": {
+    "general": "General",
+    "appearance": "Appearance",
+    "channels": "AI channels",
+    "ssh": "SSH connections",
+    "runtime": "Native runtime",
+    "subagents": "Subagents",
+    "mcp": "MCP servers",
+    "skills": "Skills",
+    "hooks": "Hooks",
+    "usage": "Usage",
+    "database": "Database",
+    "about": "About"
+  },
+  "general": {
+    "language": "Language",
+    "languageHint": "Language used by the app UI.",
+    "proxy": "HTTP proxy",
+    "proxyHint": "http/https only. Leave empty to use system env vars.",
+    "noProxy": "No-proxy hosts",
+    "noProxyHint": "Comma-separated hostnames or IPs.",
+    "caCert": "Custom CA certificate",
+    "caCertHint": "PEM file path, appended to system roots.",
+    "quickPrompts": "Quick prompts",
+    "quickPromptsHint": "Home-page chips. You can edit the text."
+  },
+  "appearance": {
+    "theme": "Theme",
+    "themeHint": "Light, dark, or follow the system.",
+    "light": "Light",
+    "dark": "Dark",
+    "system": "System"
+  },
+  "channels": {
+    "title": "AI channels",
+    "description": "Configure model gateways for the built-in agent. API keys are stored with the channel config; click the eye icon to reveal them.",
+    "list": {
+      "loading": "Loading channels…",
+      "empty": "No channels yet. Create one to get started."
+    },
+    "actions": {
+      "new": "New channel",
+      "save": "Save",
+      "cancel": "Cancel",
+      "test": "Test",
+      "fetchModels": "Fetch models",
+      "addModel": "Add model",
+      "fillFromCatalog": "Fill from local metadata",
+      "delete": "Delete"
+    },
+    "fields": {
+      "name": "Name",
+      "protocol": "API request method",
+      "enabled": "Enabled",
+      "baseUrl": "Base URL, e.g. https://api.deepseek.com",
+      "apiKey": "API key",
+      "apiKeyConfigured": "Key configured. Leave blank to keep it.",
+      "showApiKey": "Show API key",
+      "hideApiKey": "Hide API key",
+      "models": "Models",
+      "modelId": "Model ID",
+      "modelsEmpty": "No models yet. Fetch from the gateway or add one manually.",
+      "modelsHint": "Fetch gateway models with the API key. Matching local metadata fills context, max output, and thinking; you can still edit them.",
+      "contextTokens": "Context (tokens)",
+      "maxOutputTokens": "Max output (tokens)",
+      "thinking": "Thinking",
+      "thinkingLevel": "Thinking level",
+      "thinkingLevels": "Allowed thinking levels",
+      "thinkingLevelsHint": "All thinking levels are listed. Defaults to the levels this model has in the catalog. Runtime uses medium when selected, otherwise the first selected level.",
+      "thinkingLevelsEmpty": "Select at least one thinking level when thinking is on.",
+      "extraHeaders": "Extra headers (JSON object, optional)"
+    },
+    "protocols": {
+      "openai": "OpenAI Chat Completions",
+      "anthropic": "Claude Messages",
+      "codex": "Codex Responses"
+    },
+    "status": {
+      "enabled": "Enabled",
+      "disabled": "Disabled",
+      "thinkingOn": "Thinking on",
+      "thinkingOff": "Thinking off"
+    },
+    "thinkingLevels": {
+      "none": "None",
+      "no_think": "No think",
+      "minimal": "Minimal",
+      "low": "Low",
+      "medium": "Medium",
+      "high": "High",
+      "xhigh": "Very high",
+      "max": "Max"
+    },
+    "updatedAt": "Updated {{date}}",
+    "dialogs": {
+      "createTitle": "New channel",
+      "editTitle": "Edit channel",
+      "deleteTitle": "Delete channel",
+      "deleteConfirm": "Delete channel \"{{name}}\"? A running session using this channel will block deletion."
+    },
+    "messages": {
+      "created": "Channel created",
+      "updated": "Channel updated",
+      "deleted": "Channel deleted",
+      "modelsFetched": "Fetched {{count}} models. Save to keep them.",
+      "modelsFetchedTruncated": "Fetched {{count}} models (list truncated, may be incomplete). Save to keep them."
+    }
+  },
+  "ssh": {
+    "title": "SSH connections",
+    "hint": "SSH configs used by remote workspaces.",
+    "new": "New config",
+    "import": "Import from ~/.ssh/config",
+    "importHint": "Pick a Host alias to fill the form. ProxyJump is not supported.",
+    "proxyJumpUnsupported": "This Host has ProxyJump. v1 does not support jump hosts — configure a direct connection.",
+    "test": "Test connection",
+    "probe": "Probe password auth",
+    "deleteConfirm": "Delete this SSH config?"
+  },
+  "runtime": {
+    "title": "Native agent runtime",
+    "maxTurns": "Max turns",
+    "maxTurnsHint": "0 means unlimited, max 500.",
+    "maxSubagentTurns": "Max subagent turns",
+    "contextWindow": "Context window (K tokens)",
+    "rolloutBudget": "Rollout budget (K tokens)",
+    "maxToolOutput": "Tool output cap (K tokens)",
+    "maxConcurrent": "Concurrent subagents",
+    "policy": "Subagent policy",
+    "budgetShare": "Subagent budget share",
+    "confirmHighRisk": "Confirm high-risk tools",
+    "permissionTimeout": "Permission timeout (seconds)",
+    "globalPrompt": "Global prompt template"
+  },
+  "usage": {
+    "title": "Usage",
+    "hint": "Aggregated from model call logs.",
+    "openLogs": "Open call logs",
+    "total": "Total",
+    "success": "Success",
+    "failed": "Failed",
+    "cancelled": "Cancelled",
+    "inputTokens": "Input tokens",
+    "outputTokens": "Output tokens"
+  },
+  "database": {
+    "title": "Database",
+    "hint": "Backup, restore, or open the database folder.",
+    "backup": "Backup",
+    "restore": "Restore",
+    "openFolder": "Open folder",
+    "health": "Health check"
+  },
+  "about": {
+    "title": "About",
+    "version": "Version",
+    "description": "In-process native agent, AI channels, SSH workspaces, and Git checkpoints."
+  },
+  "mcp": {
+    "title": "MCP servers",
+    "hint": "Global stdio MCP. Only enabled servers are connected.",
+    "add": "Add server",
+    "reset": "Reset defaults"
+  },
+  "skills": {
+    "title": "Skills",
+    "hint": "SKILL.md files under $APPCONFIG/native-skills.",
+    "openDir": "Open skills folder"
+  },
+  "hooks": {
+    "title": "Hooks",
+    "hint": "Pre-hook exit 2 blocks; post-hook failures are warnings."
+  },
+  "subagents": {
+    "title": "Subagents",
+    "hint": "Custom child agents: model, tools, and scope."
+  }
+}

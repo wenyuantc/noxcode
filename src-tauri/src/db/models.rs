@@ -218,18 +218,6 @@ pub struct ListAiChannelModelsResult {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
-pub struct AgentProfile {
-    pub id: String,
-    pub name: String,
-    pub ai_channel_id: Option<String>,
-    pub model: String,
-    pub reasoning_effort: String,
-    pub system_prompt: Option<String>,
-    pub created_at: String,
-    pub updated_at: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
 pub struct Workspace {
     pub id: String,
     pub name: String,
@@ -244,7 +232,7 @@ pub struct Workspace {
 #[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
 pub struct AgentSessionRecord {
     pub id: String,
-    pub profile_id: Option<String>,
+    pub ai_channel_id: Option<String>,
     pub workspace_id: Option<String>,
     pub working_dir: Option<String>,
     pub execution_target: String,
@@ -391,25 +379,6 @@ pub struct UpdateMcpServersPayload {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CreateAgentProfile {
-    pub name: String,
-    pub ai_channel_id: String,
-    pub model: String,
-    pub reasoning_effort: Option<String>,
-    pub system_prompt: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct UpdateAgentProfile {
-    pub name: Option<String>,
-    pub ai_channel_id: Option<String>,
-    pub model: Option<String>,
-    pub reasoning_effort: Option<String>,
-    #[serde(default, deserialize_with = "deserialize_explicit_nullable")]
-    pub system_prompt: Option<Option<String>>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CreateWorkspace {
     pub name: String,
     pub workspace_type: String,
@@ -450,7 +419,7 @@ pub struct AgentSessionResumeInfo {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StartNativeSessionInput {
-    pub profile_id: String,
+    pub ai_channel_id: String,
     pub workspace_id: String,
     pub prompt: String,
     pub model: Option<String>,
@@ -504,6 +473,12 @@ pub struct NativeContextUsage {
     pub limit_tokens: usize,
     pub generation: u32,
     pub compactions: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NativeTurnState {
+    pub session_record_id: String,
+    pub state: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, FromRow)]

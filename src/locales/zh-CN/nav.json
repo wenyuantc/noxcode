@@ -1,0 +1,14 @@
+{
+  "newSession": "新建会话",
+  "search": "搜索",
+  "settings": "设置",
+  "apiLogs": "模型调用日志",
+  "backToWorkspace": "返回工作区",
+  "shortcuts": {
+    "newSession": "新建会话",
+    "commandPalette": "命令面板",
+    "openWorkspace": "打开工作区",
+    "toggleSidebar": "切换侧边栏",
+    "toggleGit": "切换 Git 面板"
+  }
+}

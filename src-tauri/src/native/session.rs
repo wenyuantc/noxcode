@@ -9,12 +9,11 @@ use tauri::{AppHandle, Emitter, Manager, State};
 use tokio::sync::{mpsc, Mutex};
 
 use crate::app::network_settings::load_network_settings;
-use crate::app::profiles::fetch_agent_profile_by_id;
 use crate::app::shared::{new_id, now_sqlite, sqlite_pool, EXECUTION_TARGET_SSH};
 use crate::app::ssh::configs::fetch_ssh_config_record_by_id;
 use crate::db::models::{
-    AgentProfile, AgentSessionExit, AgentSessionOutput, AgentSessionStarted, NativeContextUsage,
-    NativeTextDelta, StartNativeSessionInput,
+    AgentSessionExit, AgentSessionOutput, AgentSessionStarted, NativeContextUsage, NativeTextDelta,
+    NativeTurnState, StartNativeSessionInput,
 };
 use crate::engine::context::resolve_workspace_execution_context_with_pool;
 use crate::engine::UsageDelta;
@@ -259,6 +258,16 @@ fn attach_subagent_runtime(
             crate::native::subagents::resolve_child_model(&app, &channel_id, &model).await
         })
     }));
+}
+
+fn emit_turn_state(app: &AppHandle, session_record_id: &str, state: &str) {
+    let _ = app.emit(
+        "native-turn-state",
+        NativeTurnState {
+            session_record_id: session_record_id.to_string(),
+            state: state.to_string(),
+        },
+    );
 }
 
 fn extra_headers_map(raw: Option<&str>) -> HashMap<String, String> {
@@ -607,20 +616,11 @@ async fn load_native_client_from_channel(
 async fn load_native_client(
     app: &AppHandle,
     pool: &sqlx::SqlitePool,
-    profile: &AgentProfile,
+    channel_id: &str,
+    model: &str,
+    reasoning_effort: Option<&str>,
 ) -> Result<NativeRunSettings, String> {
-    let channel_id = profile
-        .ai_channel_id
-        .as_deref()
-        .ok_or_else(|| "请先为档案配置渠道".to_string())?;
-    load_native_client_from_channel(
-        app,
-        pool,
-        channel_id,
-        &profile.model,
-        Some(&profile.reasoning_effort),
-    )
-    .await
+    load_native_client_from_channel(app, pool, channel_id, model, reasoning_effort).await
 }
 
 fn native_one_shot_text(message: &crate::native::model::types::Message) -> Result<String, String> {
@@ -711,14 +711,13 @@ async fn run_native_one_shot_with_run(
 #[allow(dead_code)]
 pub(crate) async fn run_native_one_shot(
     app: &AppHandle,
-    profile_id: &str,
+    channel_id: &str,
     workspace_id: Option<&str>,
     prompt: String,
     image_paths: Option<Vec<String>>,
 ) -> Result<NativeOneShotResult, String> {
     let pool = sqlite_pool(app).await?;
-    let profile = fetch_agent_profile_by_id(&pool, profile_id).await?;
-    let mut run = load_native_client(app, &pool, &profile).await?;
+    let mut run = load_native_client(app, &pool, channel_id, "", None).await?;
     let execution_target = if let Some(workspace_id) = workspace_id {
         resolve_workspace_execution_context_with_pool(&pool, workspace_id)
             .await?
@@ -732,7 +731,7 @@ pub(crate) async fn run_native_one_shot(
             Some(run.channel_id.clone()),
             Some(run.channel_name.clone()),
             None,
-            Some(profile_id.to_string()),
+            None,
             workspace_id.map(ToOwned::to_owned),
             CALL_KIND_ONE_SHOT,
             Some(execution_target),
@@ -743,7 +742,7 @@ pub(crate) async fn run_native_one_shot(
 #[allow(clippy::too_many_arguments)]
 async fn insert_agent_session(
     pool: &sqlx::SqlitePool,
-    profile_id: &str,
+    ai_channel_id: &str,
     workspace_id: &str,
     working_dir: &str,
     execution_target: &str,
@@ -757,14 +756,14 @@ async fn insert_agent_session(
     sqlx::query(
         r#"
         INSERT INTO agent_sessions (
-            id, profile_id, workspace_id, working_dir, execution_target,
+            id, ai_channel_id, workspace_id, working_dir, execution_target,
             ssh_config_id, target_host_label, session_kind, status,
             started_at, resume_session_id, created_at
         ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'running', $9, $10, $9)
         "#,
     )
     .bind(&id)
-    .bind(profile_id)
+    .bind(ai_channel_id)
     .bind(workspace_id)
     .bind(working_dir)
     .bind(execution_target)
@@ -907,28 +906,25 @@ async fn start_native_with_manager(
         .clone()
         .ok_or_else(|| format!("{ENGINE_LABEL} 工作区缺少工作目录"))?;
 
-    let mut profile = fetch_agent_profile_by_id(&pool, payload.profile_id.trim()).await?;
-    if let Some(model) = payload
+    let channel_id = payload.ai_channel_id.trim().to_string();
+    if channel_id.is_empty() {
+        return Err("必须选择 AI 渠道".to_string());
+    }
+    let model = payload
         .model
         .as_deref()
         .map(str::trim)
         .filter(|item| !item.is_empty())
-    {
-        profile.model = model.to_string();
-    }
-    if let Some(effort) = payload
+        .unwrap_or("");
+    let effort = payload
         .reasoning_effort
         .as_deref()
         .map(str::trim)
-        .filter(|item| !item.is_empty())
-    {
-        profile.reasoning_effort = effort.to_string();
-    }
-    let mut run = load_native_client(&app, &pool, &profile).await?;
+        .filter(|item| !item.is_empty());
+    let mut run = load_native_client(&app, &pool, &channel_id, model, effort).await?;
     run.profile_system_prompt = payload
         .system_prompt
         .as_deref()
-        .or(profile.system_prompt.as_deref())
         .map(str::trim)
         .filter(|item| !item.is_empty())
         .map(ToOwned::to_owned);
@@ -943,7 +939,7 @@ async fn start_native_with_manager(
 
     let session_record_id = insert_agent_session(
         &pool,
-        &profile.id,
+        &channel_id,
         &workspace_id,
         &run_cwd,
         &execution_context.execution_target,
@@ -968,7 +964,7 @@ async fn start_native_with_manager(
             Some(run.channel_id.clone()),
             Some(run.channel_name.clone()),
             Some(session_record_id.clone()),
-            Some(profile.id.clone()),
+            None,
             Some(workspace_id.clone()),
             if plan_mode {
                 CALL_KIND_PLAN
@@ -1009,7 +1005,7 @@ async fn start_native_with_manager(
     }
 
     let started = AgentSessionStarted {
-        profile_id: profile.id.clone(),
+        profile_id: String::new(),
         workspace_id: workspace_id.clone(),
         session_kind: kind.clone(),
         session_record_id: session_record_id.clone(),
@@ -1026,7 +1022,7 @@ async fn start_native_with_manager(
     let cancel_run = cancel.clone();
     let allow_all_run = allow_all_high_risk.clone();
     let session_spawn = session_record_id.clone();
-    let profile_spawn = profile.id.clone();
+    let profile_spawn = String::new();
     let workspace_spawn = workspace_id.clone();
     let kind_spawn = kind.clone();
     let image_paths = payload.image_paths.clone();
@@ -1056,7 +1052,8 @@ async fn start_native_with_manager(
 
     manager_state.lock().await.add_session(NativeLiveSession {
         info: NativeSessionInfo {
-            profile_id: profile.id.clone(),
+            profile_id: String::new(),
+            channel_id: channel_id.clone(),
             workspace_id: Some(workspace_id.clone()),
             session_kind: kind,
             session_record_id: session_record_id.clone(),
@@ -1531,6 +1528,7 @@ async fn run_native_loop(
     let mut last_transcript_fingerprint: Option<u64> = None;
     let await_followups = true;
     while let Some(prompt) = next.take() {
+        emit_turn_state(&app, &session_record_id, "working");
         emit_native_line(
             &app,
             &session_record_id,
@@ -1636,10 +1634,14 @@ async fn run_native_loop(
                     let _ = next_loop_step(await_followups, NativeLoopEvent::FollowupFinish);
                     break;
                 }
+                emit_turn_state(&app, &session_record_id, "waiting_input");
                 match followup_rx.lock().await.recv().await {
                     Some(NativeFollowup::Input(input)) => {
                         match next_loop_step(await_followups, NativeLoopEvent::FollowupInput) {
-                            NativeLoopAction::RunFollowup => next = Some(input),
+                            NativeLoopAction::RunFollowup => {
+                                emit_turn_state(&app, &session_record_id, "working");
+                                next = Some(input);
+                            }
                             _ => break,
                         }
                     }
@@ -1903,15 +1905,9 @@ pub async fn restart_native_session(
             .has_workspace_processes(&workspace_id)
             .then(|| {
                 manager
-                    .get_profile_processes(&payload.profile_id)
+                    .get_workspace_processes(&workspace_id)
                     .into_iter()
-                    .find(|item| item.workspace_id.as_deref() == Some(workspace_id.as_str()))
-                    .or_else(|| {
-                        manager
-                            .get_profile_processes(&payload.profile_id)
-                            .into_iter()
-                            .next()
-                    })
+                    .next()
             })
             .flatten()
     };
@@ -1928,9 +1924,8 @@ pub async fn restart_native_session(
         let ids: Vec<String> = {
             let manager = state.lock().await;
             manager
-                .get_profile_processes(&payload.profile_id)
+                .get_workspace_processes(&workspace_id)
                 .into_iter()
-                .filter(|item| item.workspace_id.as_deref() == Some(workspace_id.as_str()))
                 .map(|item| item.session_record_id)
                 .collect()
         };

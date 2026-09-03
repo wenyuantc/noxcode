@@ -2,15 +2,16 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 
 import type {
-  AgentProfile,
   AgentSession,
+  AppHealthCheck,
+  DatabaseBackupResult,
+  DatabaseRestoreResult,
   AgentSessionEvent,
   AgentSessionExit,
   AgentSessionOutput,
   AgentSessionResumeInfo,
   AgentSessionStarted,
   AiChannel,
-  CreateAgentProfileInput,
   CreateAiChannelInput,
   CreateNativeSubagentInput,
   CreateSshConfigInput,
@@ -42,7 +43,9 @@ import type {
   NativeSettings,
   NativeSubagent,
   NativeTextDelta,
+  NativeTurnState,
   NetworkSettings,
+  QuickPrompt,
   SshConfig,
   SshConfigFileHost,
   SshConfigFileImport,
@@ -53,7 +56,6 @@ import type {
   StartNativeSessionInput,
   TestAiChannelInput,
   TestAiChannelResult,
-  UpdateAgentProfileInput,
   UpdateAiChannelInput,
   UpdateNativeSettingsInput,
   UpdateNativeSubagentInput,
@@ -62,6 +64,22 @@ import type {
   Workspace,
   WorkspaceHealth,
 } from "./types";
+
+export function healthCheck(): Promise<AppHealthCheck> {
+  return invoke("health_check");
+}
+
+export function backupDatabase(destinationPath: string): Promise<DatabaseBackupResult> {
+  return invoke("backup_database", { destinationPath });
+}
+
+export function restoreDatabase(sourcePath: string): Promise<DatabaseRestoreResult> {
+  return invoke("restore_database", { sourcePath });
+}
+
+export function openDatabaseFolder(): Promise<void> {
+  return invoke("open_database_folder");
+}
 
 export function listSshConfigs(): Promise<SshConfig[]> {
   return invoke("list_ssh_configs");
@@ -184,6 +202,14 @@ export function createGitBranch(
   return invoke("create_git_branch", { workspaceId, name, checkout });
 }
 
+export function listGitFiles(
+  workspaceId: string,
+  query?: string,
+  limit?: number,
+): Promise<string[]> {
+  return invoke("list_git_files", { workspaceId, query, limit });
+}
+
 export function createGitCheckpoint(
   workspaceId: string,
   sessionId: string,
@@ -257,23 +283,12 @@ export function updateNetworkSettings(payload: NetworkSettings): Promise<Network
   return invoke("update_network_settings", { payload });
 }
 
-export function listAgentProfiles(): Promise<AgentProfile[]> {
-  return invoke("list_agent_profiles");
+export function getQuickPrompts(): Promise<QuickPrompt[]> {
+  return invoke("get_quick_prompts");
 }
 
-export function createAgentProfile(payload: CreateAgentProfileInput): Promise<AgentProfile> {
-  return invoke("create_agent_profile", { payload });
-}
-
-export function updateAgentProfile(
-  id: string,
-  updates: UpdateAgentProfileInput,
-): Promise<AgentProfile> {
-  return invoke("update_agent_profile", { id, updates });
-}
-
-export function deleteAgentProfile(id: string): Promise<void> {
-  return invoke("delete_agent_profile", { id });
+export function updateQuickPrompts(payload: QuickPrompt[]): Promise<QuickPrompt[]> {
+  return invoke("update_quick_prompts", { payload });
 }
 
 export function listWorkspaces(): Promise<Workspace[]> {
@@ -296,12 +311,12 @@ export function checkWorkspaceHealth(workspaceId: string): Promise<WorkspaceHeal
   return invoke("check_workspace_health", { workspaceId });
 }
 
-export function listAgentSessions(
-  workspaceId?: string,
-  profileId?: string,
-  limit?: number,
-): Promise<AgentSession[]> {
-  return invoke("list_agent_sessions", { workspaceId, profileId, limit });
+export function ensureScratchWorkspace(): Promise<Workspace> {
+  return invoke("ensure_scratch_workspace");
+}
+
+export function listAgentSessions(workspaceId?: string, limit?: number): Promise<AgentSession[]> {
+  return invoke("list_agent_sessions", { workspaceId, limit });
 }
 
 export function getAgentSessionLogLines(
@@ -475,6 +490,12 @@ export function onNativeContextUsage(
   callback: (usage: NativeContextUsage) => void,
 ): Promise<UnlistenFn> {
   return listen<NativeContextUsage>("native-context-usage", (event) => {
+    callback(event.payload);
+  });
+}
+
+export function onNativeTurnState(callback: (state: NativeTurnState) => void): Promise<UnlistenFn> {
+  return listen<NativeTurnState>("native-turn-state", (event) => {
     callback(event.payload);
   });
 }

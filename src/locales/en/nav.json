@@ -1,0 +1,14 @@
+{
+  "newSession": "New session",
+  "search": "Search",
+  "settings": "Settings",
+  "apiLogs": "API call logs",
+  "backToWorkspace": "Back to workspace",
+  "shortcuts": {
+    "newSession": "New session",
+    "commandPalette": "Command palette",
+    "openWorkspace": "Open workspace",
+    "toggleSidebar": "Toggle sidebar",
+    "toggleGit": "Toggle Git panel"
+  }
+}

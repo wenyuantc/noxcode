@@ -316,33 +316,6 @@ export const NATIVE_THINKING_LEVELS = [
 
 export type ReasoningEffort = "low" | "medium" | "high" | "xhigh" | "max";
 
-export interface AgentProfile {
-  id: string;
-  name: string;
-  ai_channel_id: string | null;
-  model: string;
-  reasoning_effort: string;
-  system_prompt: string | null;
-  created_at: string;
-  updated_at: string;
-}
-
-export interface CreateAgentProfileInput {
-  name: string;
-  ai_channel_id: string;
-  model: string;
-  reasoning_effort?: string | null;
-  system_prompt?: string | null;
-}
-
-export interface UpdateAgentProfileInput {
-  name?: string;
-  ai_channel_id?: string;
-  model?: string;
-  reasoning_effort?: string;
-  system_prompt?: string | null;
-}
-
 export type WorkspaceType = "local" | "ssh";
 
 export interface Workspace {
@@ -382,7 +355,7 @@ export interface WorkspaceHealth {
 
 export interface AgentSession {
   id: string;
-  profile_id: string | null;
+  ai_channel_id: string | null;
   workspace_id: string | null;
   working_dir: string | null;
   execution_target: string;
@@ -419,7 +392,7 @@ export interface AgentSessionResumeInfo {
 }
 
 export interface StartNativeSessionInput {
-  profile_id: string;
+  ai_channel_id: string;
   workspace_id: string;
   prompt: string;
   model?: string | null;
@@ -498,6 +471,46 @@ export interface NativeContextUsage {
   limit_tokens: number;
   generation: number;
   compactions: number;
+}
+
+export type NativeTurnStateKind = "waiting_input" | "working";
+
+export interface NativeTurnState {
+  session_record_id: string;
+  state: NativeTurnStateKind | string;
+}
+
+export interface QuickPrompt {
+  id: string;
+  label: string;
+  prompt: string;
+}
+
+export interface AppHealthCheck {
+  database_loaded: boolean;
+  database_path: string | null;
+  database_current_version: number | null;
+  database_current_description: string | null;
+  database_latest_version: number;
+  git_available: boolean;
+  git_version: string | null;
+  checked_at: string;
+}
+
+export interface DatabaseBackupResult {
+  source_path: string;
+  destination_path: string;
+  database_version: number | null;
+  created_at: string;
+  message: string;
+}
+
+export interface DatabaseRestoreResult {
+  source_path: string;
+  backup_path: string;
+  database_version: number | null;
+  restored_at: string;
+  message: string;
 }
 
 export interface NativeHook {

@@ -1,0 +1,15 @@
+{
+  "title": "模型调用日志",
+  "refresh": "刷新",
+  "empty": "暂无调用记录",
+  "detail": "调用详情",
+  "request": "请求",
+  "response": "响应",
+  "error": "错误",
+  "status": "状态",
+  "model": "模型",
+  "channel": "渠道",
+  "duration": "耗时",
+  "tokens": "Tokens",
+  "workspace": "工作区"
+}

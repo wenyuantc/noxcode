@@ -1,3 +1,4 @@
+use std::fs;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -230,6 +231,54 @@ pub async fn delete_workspace<R: Runtime>(
     delete_workspace_row(&pool, &id).await
 }
 
+const SCRATCH_DIR_NAME: &str = "scratch";
+const SCRATCH_WORKSPACE_NAME: &str = "临时工作区";
+
+pub(crate) async fn ensure_scratch_workspace_with(
+    pool: &SqlitePool,
+    scratch_dir: &Path,
+) -> Result<Workspace, String> {
+    fs::create_dir_all(scratch_dir).map_err(|error| format!("创建临时工作区目录失败: {error}"))?;
+    let repo_path = scratch_dir
+        .canonicalize()
+        .map_err(|error| format!("解析临时工作区路径失败: {error}"))?
+        .to_string_lossy()
+        .into_owned();
+    if let Some(existing) = sqlx::query_as::<_, Workspace>(
+        "SELECT * FROM workspaces WHERE workspace_type = $1 AND repo_path = $2 LIMIT 1",
+    )
+    .bind(WORKSPACE_TYPE_LOCAL)
+    .bind(&repo_path)
+    .fetch_optional(pool)
+    .await
+    .map_err(|error| format!("查询临时工作区失败: {error}"))?
+    {
+        return Ok(existing);
+    }
+    create_workspace_with(
+        pool,
+        CreateWorkspace {
+            name: SCRATCH_WORKSPACE_NAME.to_string(),
+            workspace_type: WORKSPACE_TYPE_LOCAL.to_string(),
+            repo_path: Some(repo_path),
+            ssh_config_id: None,
+            remote_repo_path: None,
+        },
+    )
+    .await
+}
+
+#[tauri::command]
+pub async fn ensure_scratch_workspace<R: Runtime>(app: AppHandle<R>) -> Result<Workspace, String> {
+    let pool = sqlite_pool(&app).await?;
+    let scratch_dir = app
+        .path()
+        .app_config_dir()
+        .map_err(|error| format!("无法读取应用配置目录: {error}"))?
+        .join(SCRATCH_DIR_NAME);
+    ensure_scratch_workspace_with(&pool, &scratch_dir).await
+}
+
 #[tauri::command]
 pub async fn check_workspace_health<R: Runtime>(
     app: AppHandle<R>,
@@ -371,5 +420,21 @@ mod tests {
         .await
         .expect_err("missing dir");
         assert!(err.contains("不是目录") || err.contains("不存在"));
+    }
+
+    #[tokio::test]
+    async fn scratch_workspace_is_idempotent() {
+        let pool = setup_migrated_pool().await;
+        let dir = tempfile::tempdir().expect("dir");
+        let first = ensure_scratch_workspace_with(&pool, dir.path())
+            .await
+            .expect("first");
+        let second = ensure_scratch_workspace_with(&pool, dir.path())
+            .await
+            .expect("second");
+        assert_eq!(first.id, second.id);
+        assert_eq!(first.name, SCRATCH_WORKSPACE_NAME);
+        assert_eq!(first.workspace_type, WORKSPACE_TYPE_LOCAL);
+        assert_eq!(list_workspaces_with(&pool).await.expect("list").len(), 1);
     }
 }

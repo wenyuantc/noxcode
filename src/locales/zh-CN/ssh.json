@@ -1,0 +1,19 @@
+{
+  "trustTitle": "未知主机密钥",
+  "trustBody": "首次连接 {{host}}:{{port}}，指纹：",
+  "trustAccept": "信任并继续",
+  "trustReject": "拒绝",
+  "keyChangedTitle": "主机密钥已变更",
+  "keyChangedBody": "{{host}}:{{port}} 的密钥与 known_hosts 第 {{line}} 行不一致，可能是中间人攻击。连接已被拒绝。",
+  "name": "名称",
+  "host": "主机",
+  "port": "端口",
+  "username": "用户名",
+  "authType": "认证方式",
+  "key": "私钥",
+  "password": "密码",
+  "privateKey": "私钥路径",
+  "passphrase": "私钥口令",
+  "knownHosts": "known_hosts 策略",
+  "remotePath": "远端仓库路径"
+}

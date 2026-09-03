@@ -14,6 +14,7 @@ use crate::native::tools::CancelFlag;
 #[derive(Debug, Clone)]
 pub struct NativeSessionInfo {
     pub profile_id: String,
+    pub channel_id: String,
     pub workspace_id: Option<String>,
     pub session_kind: String,
     pub session_record_id: String,
@@ -219,6 +220,20 @@ impl NativeAgentManager {
             .collect()
     }
 
+    pub fn has_channel_processes(&self, channel_id: &str) -> bool {
+        self.sessions
+            .values()
+            .any(|session| session.info.channel_id == channel_id)
+    }
+
+    pub fn get_workspace_processes(&self, workspace_id: &str) -> Vec<NativeSessionInfo> {
+        self.sessions
+            .values()
+            .filter(|session| session.info.workspace_id.as_deref() == Some(workspace_id))
+            .map(|session| session.info.clone())
+            .collect()
+    }
+
     pub fn has_workspace_processes(&self, workspace_id: &str) -> bool {
         self.sessions
             .values()
@@ -242,7 +257,8 @@ mod tests {
         let (tx, _rx) = mpsc::channel(1);
         manager.add_session(NativeLiveSession {
             info: NativeSessionInfo {
-                profile_id: "prof-1".to_string(),
+                profile_id: String::new(),
+                channel_id: "ch-1".to_string(),
                 workspace_id: Some("ws-1".to_string()),
                 session_kind: "execution".to_string(),
                 session_record_id: "sess-1".to_string(),
@@ -254,7 +270,7 @@ mod tests {
             pending_permission: VecDeque::new(),
             pending_question: VecDeque::new(),
         });
-        assert!(manager.has_profile_processes("prof-1"));
+        assert!(manager.has_channel_processes("ch-1"));
         assert!(manager.has_workspace_processes("ws-1"));
         assert!(!manager.has_workspace_processes("ws-other"));
         assert_eq!(manager.len(), 1);
@@ -267,7 +283,8 @@ mod tests {
         let (tx, _rx) = mpsc::channel(1);
         NativeLiveSession {
             info: NativeSessionInfo {
-                profile_id: "prof-1".to_string(),
+                profile_id: String::new(),
+                channel_id: "ch-1".to_string(),
                 workspace_id: Some("ws-1".to_string()),
                 session_kind: "execution".to_string(),
                 session_record_id: id.to_string(),

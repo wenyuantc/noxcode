@@ -1,0 +1,24 @@
+{
+  "greeting": {
+    "morning": "早上好，接下来交给我吧",
+    "afternoon": "下午好呀，接下来交给我吧",
+    "evening": "晚上好，接下来交给我吧"
+  },
+  "composerPlaceholder": "向 noxcode 提问，使用 @ 添加上下文，使用 / 选择技能",
+  "noWorkspace": "未选择工作区",
+  "scratchWorkspace": "临时工作区",
+  "sessions": "会话",
+  "workspaces": "工作区",
+  "moreSessions": "显示更多",
+  "command": {
+    "placeholder": "搜索操作、会话或文件",
+    "all": "全部",
+    "actions": "操作",
+    "sessions": "会话",
+    "files": "文件",
+    "recentSessions": "最近会话",
+    "suggested": "建议",
+    "panels": "面板",
+    "theme": "切换主题"
+  }
+}

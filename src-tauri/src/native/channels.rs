@@ -3,7 +3,10 @@ use std::time::Duration;
 
 use serde_json::Value;
 use sqlx::SqlitePool;
-use tauri::{AppHandle, Runtime};
+use std::sync::Arc;
+
+use tauri::{AppHandle, Runtime, State};
+use tokio::sync::Mutex;
 
 use crate::app::network_settings::{load_network_settings, NetworkSettings};
 use crate::app::shared::{new_id, normalize_optional_text, now_sqlite, sqlite_pool};
@@ -11,6 +14,7 @@ use crate::db::models::{
     AiChannel, AiChannelRecord, CreateAiChannel, ListAiChannelModelsResult, TestAiChannelPayload,
     TestAiChannelResult, UpdateAiChannel,
 };
+use crate::native::manager::NativeAgentManager;
 use crate::native::model::{ModelClient, ModelClientConfig, RetryConfig};
 use crate::native::model_catalog::normalize_channel_model_config;
 use crate::native::protocol::{
@@ -294,20 +298,7 @@ pub(crate) async fn update_ai_channel_with(
 }
 
 pub(crate) async fn delete_ai_channel_with(pool: &SqlitePool, id: &str) -> Result<(), String> {
-    let current = fetch_channel_record(pool, id).await?;
-    let referenced: i64 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM agent_profiles WHERE ai_channel_id = $1")
-            .bind(id)
-            .fetch_one(pool)
-            .await
-            .map_err(|error| format!("检查渠道引用失败: {error}"))?;
-    if referenced > 0 {
-        return Err(format!(
-            "渠道「{}」仍被 {} 个 Agent 档案使用，无法删除",
-            current.name, referenced
-        ));
-    }
-
+    fetch_channel_record(pool, id).await?;
     sqlx::query("DELETE FROM ai_channels WHERE id = $1")
         .bind(id)
         .execute(pool)
@@ -342,7 +333,14 @@ pub async fn update_ai_channel<R: Runtime>(
 }
 
 #[tauri::command]
-pub async fn delete_ai_channel<R: Runtime>(app: AppHandle<R>, id: String) -> Result<(), String> {
+pub async fn delete_ai_channel<R: Runtime>(
+    app: AppHandle<R>,
+    state: State<'_, Arc<Mutex<NativeAgentManager>>>,
+    id: String,
+) -> Result<(), String> {
+    if state.lock().await.has_channel_processes(&id) {
+        return Err("该渠道正在被运行中的会话使用，无法删除".to_string());
+    }
     let pool = sqlite_pool(&app).await?;
     delete_ai_channel_with(&pool, &id).await
 }
@@ -479,44 +477,15 @@ mod tests {
     }
 
     #[test]
-    fn delete_is_rejected_when_profile_references_channel() {
+    fn delete_succeeds_when_unused() {
         tauri::async_runtime::block_on(async {
             let pool = setup_migrated_pool().await;
             let created = create_ai_channel_with(&pool, sample_create())
                 .await
                 .expect("create");
-            let now = now_sqlite();
-            sqlx::query(
-                "INSERT INTO agent_profiles (id, name, ai_channel_id, model, reasoning_effort, created_at, updated_at) VALUES ($1, $2, $3, $4, $5, $6, $7)",
-            )
-            .bind("profile-1")
-            .bind("档案")
-            .bind(&created.id)
-            .bind("gpt-4o")
-            .bind("high")
-            .bind(&now)
-            .bind(&now)
-            .execute(&pool)
-            .await
-            .expect("insert profile");
-
-            let err = delete_ai_channel_with(&pool, &created.id)
-                .await
-                .expect_err("should reject");
-            assert!(err.contains("Agent 档案"), "unexpected error: {err}");
-
             delete_ai_channel_with(&pool, &created.id)
                 .await
-                .expect_err("still referenced");
-
-            sqlx::query("DELETE FROM agent_profiles WHERE id = $1")
-                .bind("profile-1")
-                .execute(&pool)
-                .await
-                .expect("delete profile");
-            delete_ai_channel_with(&pool, &created.id)
-                .await
-                .expect("delete after unlink");
+                .expect("delete unused channel");
             assert!(list_ai_channels_with(&pool).await.expect("list").is_empty());
         });
     }

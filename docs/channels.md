@@ -65,7 +65,7 @@ Base URL 必须是 `http://` 或 `https://`，末尾 `/` 会去掉后再拼路�
 - 开启思考时拒绝空集合；关闭思考时清空 `thinking_level`。
 - 运行时 `thinking_level` 必须属于已选集合，越界回退默认等级（`resolve_runtime_reasoning_effort`）。
 
-删除渠道时若 `agent_profiles.ai_channel_id` 仍引用，拒绝并提示「仍被 N 个 Agent 档案使用」。
+删除渠道时若有该渠道的 live session，拒绝删除。历史会话上的 `ai_channel_id` 置空。
 
 ## 网络设置
 

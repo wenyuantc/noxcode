@@ -13,7 +13,6 @@ use crate::native::transcript::has_transcript;
 pub(crate) async fn list_agent_sessions_with(
     pool: &SqlitePool,
     workspace_id: Option<&str>,
-    profile_id: Option<&str>,
     limit: Option<i64>,
 ) -> Result<Vec<AgentSessionRecord>, String> {
     let limit = limit.unwrap_or(50).clamp(1, 200);
@@ -21,13 +20,11 @@ pub(crate) async fn list_agent_sessions_with(
         r#"
         SELECT * FROM agent_sessions
         WHERE ($1 IS NULL OR workspace_id = $1)
-          AND ($2 IS NULL OR profile_id = $2)
         ORDER BY started_at DESC
-        LIMIT $3
+        LIMIT $2
         "#,
     )
     .bind(workspace_id)
-    .bind(profile_id)
     .bind(limit)
     .fetch_all(pool)
     .await
@@ -130,11 +127,10 @@ pub(crate) async fn delete_agent_session_row(
 pub async fn list_agent_sessions<R: Runtime>(
     app: AppHandle<R>,
     workspace_id: Option<String>,
-    profile_id: Option<String>,
     limit: Option<i64>,
 ) -> Result<Vec<AgentSessionRecord>, String> {
     let pool = sqlite_pool(&app).await?;
-    list_agent_sessions_with(&pool, workspace_id.as_deref(), profile_id.as_deref(), limit).await
+    list_agent_sessions_with(&pool, workspace_id.as_deref(), limit).await
 }
 
 #[tauri::command]
@@ -208,7 +204,7 @@ mod tests {
         .execute(&pool)
         .await
         .expect("session");
-        let listed = list_agent_sessions_with(&pool, Some("ws-1"), None, Some(10))
+        let listed = list_agent_sessions_with(&pool, Some("ws-1"), Some(10))
             .await
             .expect("list");
         assert_eq!(listed.len(), 1);
@@ -219,7 +215,7 @@ mod tests {
         delete_agent_session_row(&pool, "sess-1")
             .await
             .expect("delete");
-        assert!(list_agent_sessions_with(&pool, Some("ws-1"), None, None)
+        assert!(list_agent_sessions_with(&pool, Some("ws-1"), None)
             .await
             .expect("empty")
             .is_empty());

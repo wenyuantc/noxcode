@@ -1,6 +1,6 @@
 # Git
 
-P2.5 用系统 `git` ≥ 2.23 实现仓库探测、status / diff、用户暂存、提交 / 推送、以及 plumbing checkpoint。不引入 simple-git / Node bridge。前端只封装 `src/lib/backend.ts` / `src/lib/types.ts`。GitPanel / CheckpointTimeline 留给 P5。
+P2.5 用系统 `git` ≥ 2.23 实现仓库探测、status / diff、用户暂存、提交 / 推送、以及 plumbing checkpoint。不引入 simple-git / Node bridge。前端只封装 `src/lib/backend.ts` / `src/lib/types.ts`。Git 抽屉见 [`frontend.md`](frontend.md)。
 
 全仓库只允许 [`src-tauri/src/git/runner.rs`](../src-tauri/src/git/runner.rs) spawn `git`。
 
@@ -32,7 +32,7 @@ flowchart LR
 
 | 路径 | 职责 |
 | --- | --- |
-| [`src-tauri/src/git/mod.rs`](../src-tauri/src/git/mod.rs) | 16 个 Tauri 命令、`workspace_id` → `GitTarget` |
+| [`src-tauri/src/git/mod.rs`](../src-tauri/src/git/mod.rs) | 17 个 Tauri 命令、`workspace_id` → `GitTarget` |
 | [`runner.rs`](../src-tauri/src/git/runner.rs) | `GitTarget` / `IndexMode` / `ScratchIndex` / 守卫 / per-repo 锁 |
 | [`repo.rs`](../src-tauri/src/git/repo.rs) | rev-parse 四参数、版本、中间态 |
 | [`status.rs`](../src-tauri/src/git/status.rs) | `status --porcelain=v2 --branch -z` |
@@ -84,11 +84,12 @@ ref：`refs/noxcode/checkpoints/<session_id>/<seq>`。author / committer 固定 
 | `commit_git_changes` | `commit -m [-- paths]` |
 | `push_git_branch` | 含 `--set-upstream`，超时 300s |
 | `list_git_branches` / `create_git_branch` | `for-each-ref` / `check-ref-format` + `switch -c` |
+| `list_git_files` | `ls-files --cached --others --exclude-standard -z`，供 ⌘K / `@` |
 | `create_git_checkpoint` / `list_git_checkpoints` | 打点；列表带 `ref_valid` |
 | `preview_git_checkpoint_restore` / `restore_git_checkpoint` | 预览 / 回滚 |
 | `clear_git_checkpoints` | 清本仓库全部检查点 |
 
-前端对应函数在 `backend.ts`：`getGitRepoInfo`、`getGitStatus`、`getGitFileDiff`、`getGitNumstat`、`stageGitPaths`、`unstageGitPaths`、`restoreGitPaths`、`commitGitChanges`、`pushGitBranch`、`listGitBranches`、`createGitBranch`、`createGitCheckpoint`、`listGitCheckpoints`、`previewGitCheckpointRestore`、`restoreGitCheckpoint`、`clearGitCheckpoints`。
+前端对应函数在 `backend.ts`：`getGitRepoInfo`、`getGitStatus`、`getGitFileDiff`、`getGitNumstat`、`stageGitPaths`、`unstageGitPaths`、`restoreGitPaths`、`commitGitChanges`、`pushGitBranch`、`listGitBranches`、`createGitBranch`、`listGitFiles`、`createGitCheckpoint`、`listGitCheckpoints`、`previewGitCheckpointRestore`、`restoreGitCheckpoint`、`clearGitCheckpoints`。
 
 ## 测试
 
@@ -103,4 +104,4 @@ ref：`refs/noxcode/checkpoints/<session_id>/<seq>`。author / committer 固定 
 ## 暂不做
 
 - `ScratchIndex::from_head`（本阶段无 AI 触发的选中路径提交）
-- GitPanel / CheckpointTimeline UI（P5）
+- 切换已有分支（后端无 `switch` 命令；第一版只能创建并检出）

@@ -19,9 +19,8 @@ SELECT
     l.model, l.thinking_enabled, l.thinking_level, l.request_format, l.input_tokens,
     l.output_tokens, l.cached_tokens, l.total_tokens, l.first_token_ms, l.duration_ms,
     l.status, l.http_status, l.session_id, l.profile_id, l.workspace_id,
-    p.name AS profile_name, w.name AS workspace_name, l.execution_target, l.call_kind, l.created_at
+    NULL AS profile_name, w.name AS workspace_name, l.execution_target, l.call_kind, l.created_at
 FROM native_api_call_logs l
-LEFT JOIN agent_profiles p ON p.id = l.profile_id
 LEFT JOIN workspaces w ON w.id = l.workspace_id
 "#;
 
@@ -32,10 +31,9 @@ SELECT
     l.request_truncated, l.response_body, l.response_truncated, l.input_tokens,
     l.output_tokens, l.cached_tokens, l.total_tokens, l.first_token_ms, l.duration_ms,
     l.status, l.http_status, l.error_message, l.session_id, l.profile_id, l.workspace_id,
-    p.name AS profile_name, w.name AS workspace_name, l.subagent_id, l.call_kind,
+    NULL AS profile_name, w.name AS workspace_name, l.subagent_id, l.call_kind,
     l.execution_target, l.created_at
 FROM native_api_call_logs l
-LEFT JOIN agent_profiles p ON p.id = l.profile_id
 LEFT JOIN workspaces w ON w.id = l.workspace_id
 "#;
 
@@ -48,7 +46,6 @@ SELECT
     COALESCE(SUM(l.input_tokens), 0) AS input_tokens,
     COALESCE(SUM(l.output_tokens), 0) AS output_tokens
 FROM native_api_call_logs l
-LEFT JOIN agent_profiles p ON p.id = l.profile_id
 LEFT JOIN workspaces w ON w.id = l.workspace_id
 "#;
 

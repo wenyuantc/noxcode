@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 use super::preflight::{evaluate_git_version_output, GitVersion, MIN_GIT_VERSION};
-use super::runner::{git, GitError, GitTarget, IndexMode};
+use super::runner::{git, split_nul_strings, GitError, GitTarget, IndexMode};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GitRepoInfo {
@@ -153,4 +153,41 @@ pub(crate) async fn rev_parse_verify(
     } else {
         Ok(None)
     }
+}
+
+const DEFAULT_FILE_LIST_LIMIT: usize = 200;
+const MAX_FILE_LIST_LIMIT: usize = 1000;
+
+pub(crate) async fn list_repo_files(
+    target: &GitTarget,
+    query: Option<&str>,
+    limit: Option<usize>,
+) -> Result<Vec<String>, GitError> {
+    let output = git(
+        target,
+        &[
+            "ls-files",
+            "--cached",
+            "--others",
+            "--exclude-standard",
+            "-z",
+        ],
+        &IndexMode::ReadOnly,
+    )
+    .await?;
+    output.require_success(&["ls-files"])?;
+    let mut paths = split_nul_strings(&output.stdout);
+    if let Some(needle) = query
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_lowercase)
+    {
+        paths.retain(|path| path.to_lowercase().contains(&needle));
+    }
+    paths.sort();
+    let limit = limit
+        .unwrap_or(DEFAULT_FILE_LIST_LIMIT)
+        .clamp(1, MAX_FILE_LIST_LIMIT);
+    paths.truncate(limit);
+    Ok(paths)
 }

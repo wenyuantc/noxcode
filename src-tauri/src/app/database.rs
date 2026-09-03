@@ -710,17 +710,17 @@ mod tests {
     }
 
     #[test]
-    fn migrator_reports_version_one() {
+    fn migrator_reports_latest_version() {
         tauri::async_runtime::block_on(async {
             let pool = setup_migrated_pool().await;
             let status = fetch_database_migration_status(&pool)
                 .await
                 .expect("fetch migration status");
-            assert_eq!(status.current_version, Some(1));
-            assert_eq!(status.applied_count, 1);
+            assert_eq!(status.current_version, Some(2));
+            assert_eq!(status.applied_count, 2);
             assert_eq!(
                 status.current_description.as_deref(),
-                Some("noxcode baseline schema")
+                Some("drop agent_profiles; sessions use ai_channel_id")
             );
         });
     }
@@ -742,10 +742,10 @@ mod tests {
             assert!(script.contains("-- noxcode SQL backup"));
             assert!(script.contains("INSERT INTO \"ai_channels\""));
 
-            let (_, status) = validate_sql_backup_script(script, 1)
+            let (_, status) = validate_sql_backup_script(script, 2)
                 .await
                 .expect("validate backup script");
-            assert_eq!(status.current_version, Some(1));
+            assert_eq!(status.current_version, Some(2));
         });
     }
 }

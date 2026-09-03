@@ -1,10 +1,11 @@
 use tauri_plugin_sql::Migration;
 
 pub fn get_all_migrations() -> Vec<Migration> {
-    vec![Migration {
-        version: 1,
-        description: "noxcode baseline schema",
-        sql: r#"
+    vec![
+        Migration {
+            version: 1,
+            description: "noxcode baseline schema",
+            sql: r#"
                 CREATE TABLE ssh_configs (
                     id TEXT PRIMARY KEY,
                     name TEXT NOT NULL,
@@ -196,8 +197,86 @@ pub fn get_all_migrations() -> Vec<Migration> {
                 );
                 CREATE UNIQUE INDEX idx_git_checkpoints_session ON git_checkpoints(session_id, seq);
             "#,
-        kind: tauri_plugin_sql::MigrationKind::Up,
-    }]
+            kind: tauri_plugin_sql::MigrationKind::Up,
+        },
+        Migration {
+            version: 2,
+            description: "drop agent_profiles; sessions use ai_channel_id",
+            sql: r#"
+                PRAGMA foreign_keys = OFF;
+
+                CREATE TABLE agent_sessions_new (
+                    id TEXT PRIMARY KEY,
+                    ai_channel_id TEXT REFERENCES ai_channels(id) ON DELETE SET NULL,
+                    workspace_id TEXT REFERENCES workspaces(id) ON DELETE SET NULL,
+                    working_dir TEXT,
+                    execution_target TEXT NOT NULL DEFAULT 'local'
+                        CHECK (execution_target IN ('local', 'ssh')),
+                    ssh_config_id TEXT REFERENCES ssh_configs(id) ON DELETE SET NULL,
+                    target_host_label TEXT,
+                    session_kind TEXT NOT NULL DEFAULT 'execution',
+                    status TEXT NOT NULL DEFAULT 'pending',
+                    started_at TEXT NOT NULL DEFAULT (datetime('now')),
+                    ended_at TEXT,
+                    exit_code INTEGER,
+                    resume_session_id TEXT,
+                    input_tokens INTEGER,
+                    output_tokens INTEGER,
+                    total_tokens INTEGER,
+                    reasoning_tokens INTEGER,
+                    cached_tokens INTEGER,
+                    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+                );
+
+                INSERT INTO agent_sessions_new (
+                    id, ai_channel_id, workspace_id, working_dir, execution_target,
+                    ssh_config_id, target_host_label, session_kind, status,
+                    started_at, ended_at, exit_code, resume_session_id,
+                    input_tokens, output_tokens, total_tokens, reasoning_tokens,
+                    cached_tokens, created_at
+                )
+                SELECT
+                    s.id,
+                    p.ai_channel_id,
+                    s.workspace_id,
+                    s.working_dir,
+                    s.execution_target,
+                    s.ssh_config_id,
+                    s.target_host_label,
+                    s.session_kind,
+                    s.status,
+                    s.started_at,
+                    s.ended_at,
+                    s.exit_code,
+                    s.resume_session_id,
+                    s.input_tokens,
+                    s.output_tokens,
+                    s.total_tokens,
+                    s.reasoning_tokens,
+                    s.cached_tokens,
+                    s.created_at
+                FROM agent_sessions s
+                LEFT JOIN agent_profiles p ON p.id = s.profile_id;
+
+                DROP TABLE agent_sessions;
+                ALTER TABLE agent_sessions_new RENAME TO agent_sessions;
+
+                CREATE INDEX idx_agent_sessions_channel_started
+                    ON agent_sessions(ai_channel_id, started_at DESC);
+                CREATE INDEX idx_agent_sessions_workspace_started
+                    ON agent_sessions(workspace_id, started_at DESC);
+                CREATE INDEX idx_agent_sessions_status
+                    ON agent_sessions(status, started_at DESC);
+                CREATE INDEX idx_agent_sessions_ssh_config_id
+                    ON agent_sessions(ssh_config_id, started_at DESC);
+
+                DROP TABLE agent_profiles;
+
+                PRAGMA foreign_keys = ON;
+            "#,
+            kind: tauri_plugin_sql::MigrationKind::Up,
+        },
+    ]
 }
 
 pub fn latest_migration_version() -> i64 {
@@ -242,7 +321,7 @@ mod tests {
         for (index, migration) in get_all_migrations().iter().enumerate() {
             assert_eq!(migration.version, index as i64 + 1);
         }
-        assert_eq!(latest_migration_version(), 1);
+        assert_eq!(latest_migration_version(), 2);
         assert_eq!(
             get_all_migrations()
                 .last()
@@ -252,7 +331,7 @@ mod tests {
     }
 
     #[test]
-    fn baseline_creates_all_nine_tables() {
+    fn latest_schema_has_eight_tables_without_profiles() {
         tauri::async_runtime::block_on(async {
             let pool = setup_test_pool().await;
             let tables: Vec<String> = sqlx::query(table_names_query())
@@ -266,7 +345,6 @@ mod tests {
             assert_eq!(
                 tables,
                 vec![
-                    "agent_profiles",
                     "agent_session_events",
                     "agent_sessions",
                     "ai_channels",
@@ -360,25 +438,6 @@ mod tests {
             .expect("insert ai channel");
 
             sqlx::query(
-                "INSERT INTO agent_profiles (id, name, ai_channel_id, model) VALUES ('pf-1', 'coder', 'ch-1', 'gpt-4')",
-            )
-            .execute(&pool)
-            .await
-            .expect("insert agent profile");
-
-            let restrict_error = sqlx::query("DELETE FROM ai_channels WHERE id = 'ch-1'")
-                .execute(&pool)
-                .await
-                .expect_err("deleting referenced channel must fail");
-            assert!(
-                restrict_error
-                    .to_string()
-                    .to_ascii_lowercase()
-                    .contains("foreign key"),
-                "expected foreign key error, got {restrict_error}"
-            );
-
-            sqlx::query(
                 "INSERT INTO workspaces (id, name, workspace_type) VALUES ('ws-1', 'local', 'local')",
             )
             .execute(&pool)
@@ -386,7 +445,7 @@ mod tests {
             .expect("insert workspace");
 
             sqlx::query(
-                "INSERT INTO agent_sessions (id, profile_id, workspace_id, status) VALUES ('sess-1', 'pf-1', 'ws-1', 'pending')",
+                "INSERT INTO agent_sessions (id, ai_channel_id, workspace_id, status) VALUES ('sess-1', 'ch-1', 'ws-1', 'pending')",
             )
             .execute(&pool)
             .await
@@ -411,6 +470,17 @@ mod tests {
             .execute(&pool)
             .await
             .expect("insert checkpoint");
+
+            sqlx::query("DELETE FROM ai_channels WHERE id = 'ch-1'")
+                .execute(&pool)
+                .await
+                .expect("deleting channel should set session channel to null");
+            let session_channel: Option<String> =
+                sqlx::query_scalar("SELECT ai_channel_id FROM agent_sessions WHERE id = 'sess-1'")
+                    .fetch_one(&pool)
+                    .await
+                    .expect("read session channel");
+            assert!(session_channel.is_none());
 
             sqlx::query("DELETE FROM agent_sessions WHERE id = 'sess-1'")
                 .execute(&pool)

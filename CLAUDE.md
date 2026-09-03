@@ -33,7 +33,7 @@ Lint gate: ESLint + Prettier + `npm run test:ci` + `cargo clippy --all-targets -
 
 ## Architecture
 
-**noxcode** is a Tauri v2 desktop app: an in-process native Agent with AI channels, SSH workspaces, and Git checkpoints. Architecture: `docs/architecture.md`. Database schema: `docs/database.md`. SSH: `docs/ssh.md`. Git: `docs/git.md`. Channels: `docs/channels.md`. Native runtime: `docs/native.md`. Full build plan: `plan.md`.
+**noxcode** is a Tauri v2 desktop app: an in-process native Agent with AI channels, SSH workspaces, and Git checkpoints. Architecture: `docs/architecture.md`. Frontend: `docs/frontend.md`. Database schema: `docs/database.md`. SSH: `docs/ssh.md`. Git: `docs/git.md`. Channels: `docs/channels.md`. Native runtime: `docs/native.md`. Full build plan: `plan.md`.
 
 The data flow is strictly:
 
@@ -47,7 +47,7 @@ React (UI) → Tauri IPC commands → Rust service layer → SQLite
 
 ### Constraints
 
-- SQLite lives at `$APPCONFIG/noxcode.db`. The baseline schema has 9 tables (including `git_checkpoints`). Migration versions in `db/migrations.rs` must stay contiguous `1..N`; this is enforced by `migration_versions_are_contiguous`.
+- SQLite lives at `$APPCONFIG/noxcode.db`. The current schema has 8 tables (including `git_checkpoints`; `agent_profiles` was dropped in migration 2). Migration versions in `db/migrations.rs` must stay contiguous `1..N`; this is enforced by `migration_versions_are_contiguous`.
 - The only runtime external dependency is system `git` ≥ 2.23. Startup preflight fails hard below that.
 - The entire repo may spawn `git` only from `src-tauri/src/git/runner.rs`. Other modules must go through that runner.
 - `russh` must keep the `ring` backend (`default-features = false`, features `ring,flate2,rsa`). `cargo tree -i aws-lc-rs` must report no matches.

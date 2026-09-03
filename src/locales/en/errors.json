@@ -1,0 +1,4 @@
+{
+  "generic": "The action failed",
+  "invokeFailed": "Backend call failed: {{message}}"
+}

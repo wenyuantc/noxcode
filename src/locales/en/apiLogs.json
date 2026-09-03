@@ -1,0 +1,15 @@
+{
+  "title": "API call logs",
+  "refresh": "Refresh",
+  "empty": "No calls yet",
+  "detail": "Call detail",
+  "request": "Request",
+  "response": "Response",
+  "error": "Error",
+  "status": "Status",
+  "model": "Model",
+  "channel": "Channel",
+  "duration": "Duration",
+  "tokens": "Tokens",
+  "workspace": "Workspace"
+}
