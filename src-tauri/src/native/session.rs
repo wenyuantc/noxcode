@@ -1028,6 +1028,14 @@ fn attach_mutation_checkpoint(
     workspace_id: String,
     session_record_id: String,
 ) {
+    let enabled = crate::native::settings::load_native_settings(app)
+        .map(|settings| settings.auto_checkpoint_after_tool_call)
+        .unwrap_or(true);
+    if !enabled {
+        runner.ctx.on_mutation = None;
+        return;
+    }
+
     let inflight = Arc::new(AtomicBool::new(false));
     let app = app.clone();
     runner.ctx.on_mutation = Some(Arc::new(move |tool_name: &str| {
