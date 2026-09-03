@@ -4,6 +4,7 @@ import { CommandPalette } from "@/components/command/CommandPalette";
 import { HomeEmptyState } from "@/components/home/HomeEmptyState";
 import { SessionView } from "@/components/session/SessionView";
 import { useAppHotkeys } from "@/hooks/useAppHotkeys";
+import { openLocalWorkspace } from "@/lib/openLocalWorkspace";
 import { useChannelStore } from "@/stores/channelStore";
 import { useSessionStore } from "@/stores/sessionStore";
 import { useSettingsStore } from "@/stores/settingsStore";
@@ -35,7 +36,7 @@ export function AppShell() {
   };
 
   const openWorkspace = () => {
-    document.dispatchEvent(new CustomEvent("noxcode:open-workspace"));
+    void openLocalWorkspace();
   };
 
   useAppHotkeys(newSession, openWorkspace);

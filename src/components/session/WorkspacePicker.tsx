@@ -1,9 +1,9 @@
-import { open } from "@tauri-apps/plugin-dialog";
 import { Check, Cloud, FolderOpen, Search, X } from "lucide-react";
 import { useCallback, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 
 import { ensureScratchWorkspace } from "@/lib/backend";
+import { openLocalWorkspace } from "@/lib/openLocalWorkspace";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { RemoteConnectDialog } from "@/components/workspace/RemoteConnectDialog";
@@ -15,7 +15,6 @@ export function WorkspacePicker({ onRequestOpen }: { onRequestOpen?: () => void 
   const workspaces = useWorkspaceStore((state) => state.workspaces);
   const activeId = useWorkspaceStore((state) => state.activeWorkspaceId);
   const setActive = useWorkspaceStore((state) => state.setActive);
-  const create = useWorkspaceStore((state) => state.create);
   const active = workspaces.find((item) => item.id === activeId);
   const [openMenu, setOpenMenu] = useState(false);
   const [query, setQuery] = useState("");
@@ -30,11 +29,7 @@ export function WorkspacePicker({ onRequestOpen }: { onRequestOpen?: () => void 
   );
 
   const openFolder = async () => {
-    const selected = await open({ directory: true, multiple: false });
-    if (typeof selected !== "string") return;
-    const name = selected.split("/").filter(Boolean).pop() ?? selected;
-    await create({ name, workspace_type: "local", repo_path: selected });
-    setOpenMenu(false);
+    if (await openLocalWorkspace()) setOpenMenu(false);
   };
 
   return (
