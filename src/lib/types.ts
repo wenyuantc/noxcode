@@ -208,6 +208,16 @@ export interface GitRestoreResult {
   failed: string[];
 }
 
+export interface ActivityLog {
+  id: string;
+  kind: string;
+  workspace_id: string | null;
+  session_id: string | null;
+  summary: string;
+  payload_json: string | null;
+  created_at: string;
+}
+
 export interface GitCommitResult {
   oid: string;
   message: string;

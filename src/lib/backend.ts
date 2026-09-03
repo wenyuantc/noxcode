@@ -2,6 +2,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 
 import type {
+  ActivityLog,
   AgentSession,
   AppHealthCheck,
   DatabaseBackupResult,
@@ -247,6 +248,10 @@ export function restoreGitCheckpoint(
 
 export function clearGitCheckpoints(workspaceId: string): Promise<number> {
   return invoke("clear_git_checkpoints", { workspaceId });
+}
+
+export function listActivityLogs(workspaceId?: string, limit?: number): Promise<ActivityLog[]> {
+  return invoke("list_activity_logs", { workspaceId, limit });
 }
 
 export function listAiChannels(): Promise<AiChannel[]> {

@@ -1,10 +1,13 @@
+import { confirm } from "@tauri-apps/plugin-dialog";
 import { useCallback, useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 
 import {
+  clearGitCheckpoints,
   commitGitChanges,
   getGitFileDiff,
   getGitStatus,
+  listActivityLogs,
   listGitCheckpoints,
   previewGitCheckpointRestore,
   pushGitBranch,
@@ -14,7 +17,9 @@ import {
   unstageGitPaths,
 } from "@/lib/backend";
 import { groupGitStatus } from "@/lib/gitHelpers";
+import { formatRelativeTime } from "@/lib/utils";
 import type {
+  ActivityLog,
   GitCheckpoint,
   GitFileDiff,
   GitRestorePreview,
@@ -22,6 +27,7 @@ import type {
   GitStatusEntry,
 } from "@/lib/types";
 import { Button } from "@/components/ui/button";
+import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
 import { Input } from "@/components/ui/input";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { useSessionStore } from "@/stores/sessionStore";
@@ -32,18 +38,21 @@ import { DiffView } from "./DiffView";
 import { RestoreCheckpointDialog } from "./RestoreCheckpointDialog";
 
 export function GitPanel() {
-  const { t } = useTranslation("git");
+  const { t, i18n } = useTranslation("git");
   const workspaceId = useWorkspaceStore((state) => state.activeWorkspaceId);
   const sessionId = useSessionStore((state) => state.selectedSessionId);
   const gitFocusPath = useUiStore((state) => state.gitFocusPath);
   const [status, setStatus] = useState<GitStatus | null>(null);
   const [checkpoints, setCheckpoints] = useState<GitCheckpoint[]>([]);
+  const [activityLogs, setActivityLogs] = useState<ActivityLog[]>([]);
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [diff, setDiff] = useState<GitFileDiff | null>(null);
   const [message, setMessage] = useState("");
   const [restoreTarget, setRestoreTarget] = useState<GitCheckpoint | null>(null);
   const [preview, setPreview] = useState<GitRestorePreview | null>(null);
   const [busy, setBusy] = useState(false);
+  const [checkpointNotice, setCheckpointNotice] = useState<string | null>(null);
+  const [checkpointError, setCheckpointError] = useState<string | null>(null);
 
   const reloadStatus = useCallback(async () => {
     if (!workspaceId) return;
@@ -58,9 +67,17 @@ export function GitPanel() {
     setCheckpoints(await listGitCheckpoints(workspaceId, sessionId));
   }, [sessionId, workspaceId]);
 
+  const reloadActivityLogs = useCallback(async () => {
+    if (!workspaceId) {
+      setActivityLogs([]);
+      return;
+    }
+    setActivityLogs(await listActivityLogs(workspaceId, 20));
+  }, [workspaceId]);
+
   const reload = useCallback(async () => {
-    await Promise.all([reloadStatus(), reloadCheckpoints()]);
-  }, [reloadCheckpoints, reloadStatus]);
+    await Promise.all([reloadStatus(), reloadCheckpoints(), reloadActivityLogs()]);
+  }, [reloadActivityLogs, reloadCheckpoints, reloadStatus]);
 
   useEffect(() => {
     void reloadStatus();
@@ -69,6 +86,10 @@ export function GitPanel() {
   useEffect(() => {
     void reloadCheckpoints();
   }, [reloadCheckpoints]);
+
+  useEffect(() => {
+    void reloadActivityLogs();
+  }, [reloadActivityLogs]);
 
   useEffect(() => {
     if (!workspaceId || !gitFocusPath) return;
@@ -92,6 +113,28 @@ export function GitPanel() {
 
   const selectedOf = (entries: GitStatusEntry[]) =>
     entries.filter((entry) => selected.has(entry.path)).map((entry) => entry.path);
+
+  const clearAllCheckpoints = async () => {
+    if (!workspaceId) return;
+    const accepted = await confirm(t("clearAllConfirm"), {
+      title: t("clearAllTitle"),
+      kind: "warning",
+    });
+    if (!accepted) return;
+    setBusy(true);
+    setCheckpointNotice(null);
+    setCheckpointError(null);
+    try {
+      const count = await clearGitCheckpoints(workspaceId);
+      setCheckpointNotice(t("clearAllDone", { count }));
+      await reload();
+    } catch (error) {
+      setCheckpointError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setBusy(false);
+    }
+  };
+  const restoreLogs = activityLogs.filter((log) => log.kind.startsWith("git_checkpoint_restore"));
 
   return (
     <div className="flex h-full min-h-0 flex-col">
@@ -212,6 +255,23 @@ export function GitPanel() {
           </div>
         </TabsContent>
         <TabsContent value="checkpoints" className="min-h-0 overflow-auto px-3 pb-3">
+          <div className="my-3 flex justify-end">
+            <Button
+              size="sm"
+              variant="outline"
+              className="text-destructive hover:text-destructive"
+              disabled={!workspaceId || busy}
+              onClick={() => void clearAllCheckpoints()}
+            >
+              {t("clearAll")}
+            </Button>
+          </div>
+          {checkpointNotice ? (
+            <p className="mb-3 text-xs text-muted-foreground">{checkpointNotice}</p>
+          ) : null}
+          {checkpointError ? (
+            <p className="mb-3 text-xs text-destructive">{checkpointError}</p>
+          ) : null}
           <CheckpointTimeline
             checkpoints={checkpoints}
             onRestore={(checkpoint) => {
@@ -220,6 +280,27 @@ export function GitPanel() {
               void previewGitCheckpointRestore(workspaceId, checkpoint.id).then(setPreview);
             }}
           />
+          <Collapsible className="mt-4 rounded-md border">
+            <CollapsibleTrigger className="flex w-full items-center px-3 py-2 text-left text-sm font-medium">
+              {t("restoreHistory")}
+            </CollapsibleTrigger>
+            <CollapsibleContent className="border-t px-3 py-2">
+              {restoreLogs.length === 0 ? (
+                <p className="text-xs text-muted-foreground">{t("restoreHistoryEmpty")}</p>
+              ) : (
+                <ol className="space-y-2">
+                  {restoreLogs.map((log) => (
+                    <li key={log.id}>
+                      <p className="text-xs">{log.summary}</p>
+                      <p className="text-[11px] text-muted-foreground">
+                        {formatRelativeTime(log.created_at, i18n.language)}
+                      </p>
+                    </li>
+                  ))}
+                </ol>
+              )}
+            </CollapsibleContent>
+          </Collapsible>
         </TabsContent>
       </Tabs>
       <RestoreCheckpointDialog
