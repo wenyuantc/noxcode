@@ -14,12 +14,19 @@ export function TerminalRow({ item, running }: { item: GroupedSessionItem; runni
     <div>
       <button
         type="button"
-        className="flex w-full items-center gap-2 text-sm"
+        className="flex w-full items-center gap-2 text-left text-sm"
         onClick={() => setOpen((value) => !value)}
       >
         <SquareTerminal className="size-3.5 shrink-0 text-muted-foreground" />
-        <span className="shrink-0 text-muted-foreground">{t("terminal")}</span>
-        <span className="min-w-0 flex-1 truncate font-mono text-xs">{command}</span>
+        <span className="min-w-0 flex-1 truncate text-muted-foreground">
+          {t("terminal")}
+          {command ? (
+            <>
+              {" · "}
+              <span className="font-mono text-xs text-foreground">{command}</span>
+            </>
+          ) : null}
+        </span>
         {running ? (
           <span className="shrink-0 text-xs text-muted-foreground">{t("running")}</span>
         ) : null}
