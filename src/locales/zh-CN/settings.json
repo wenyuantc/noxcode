@@ -310,11 +310,13 @@
       "postToolUse": "工具调用后（仅警告）"
     },
     "placeholders": {
-      "matcher": "* 或 Bash, Write",
       "command": "要执行的命令"
     },
+    "matchers": {
+      "all": "全部工具"
+    },
     "fieldHints": {
-      "matcher": "* 匹配全部工具；多个工具用英文逗号分隔。",
+      "matcher": "可多选。选全部工具即匹配每一次调用。",
       "command": "在工作区执行的 shell 命令。留空保存时会被丢弃。"
     }
   },

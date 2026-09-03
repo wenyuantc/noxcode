@@ -17,6 +17,23 @@ import { SettingCard } from "./SettingCard";
 
 const HOOK_EVENT_PRE = "pre_tool_use";
 const HOOK_EVENT_POST = "post_tool_use";
+const HOOK_MATCHER_ALL = "*";
+const HOOK_MATCHER_TOOLS = [
+  "Read",
+  "Write",
+  "Edit",
+  "Bash",
+  "Glob",
+  "Grep",
+  "TodoRead",
+  "TodoWrite",
+  "WebFetch",
+  "WebSearch",
+  "ApplyPatch",
+  "Skill",
+  "Agent",
+  "AskQuestion",
+] as const;
 
 function normalizeHookEvent(event: string): typeof HOOK_EVENT_PRE | typeof HOOK_EVENT_POST {
   const value = event.trim();
@@ -24,6 +41,43 @@ function normalizeHookEvent(event: string): typeof HOOK_EVENT_PRE | typeof HOOK_
     return HOOK_EVENT_POST;
   }
   return HOOK_EVENT_PRE;
+}
+
+function parseMatcher(matcher: string): string[] {
+  const items = matcher
+    .split(",")
+    .map((item) => item.trim())
+    .filter((item) => item.length > 0);
+  if (items.length === 0 || items.includes(HOOK_MATCHER_ALL)) {
+    return [HOOK_MATCHER_ALL];
+  }
+  return items;
+}
+
+function matcherChoices(matcher: string): string[] {
+  const known = new Set<string>([HOOK_MATCHER_ALL, ...HOOK_MATCHER_TOOLS]);
+  const extra = parseMatcher(matcher).filter((item) => !known.has(item));
+  return [HOOK_MATCHER_ALL, ...HOOK_MATCHER_TOOLS, ...extra];
+}
+
+function nextMatcher(previous: string[], selected: string[]): string {
+  const previousAll = previous.includes(HOOK_MATCHER_ALL);
+  const selectedAll = selected.includes(HOOK_MATCHER_ALL);
+  const tools = selected.filter((item) => item !== HOOK_MATCHER_ALL);
+  if (selectedAll && !previousAll) {
+    return HOOK_MATCHER_ALL;
+  }
+  if (tools.length === 0) {
+    return HOOK_MATCHER_ALL;
+  }
+  return tools.join(", ");
+}
+
+function formatMatcherValue(selected: string[], allLabel: string): string {
+  if (selected.length === 0 || selected.includes(HOOK_MATCHER_ALL)) {
+    return allLabel;
+  }
+  return selected.join(", ");
 }
 
 export function NativeHooksSettingsCard() {
@@ -86,20 +140,41 @@ export function NativeHooksSettingsCard() {
                     </SelectContent>
                   </Select>
                 </div>
-                <div>
+                <div className="min-w-0">
                   <label
                     className="text-xs font-medium text-muted-foreground"
                     htmlFor={`hook-matcher-${hook.id}`}
                   >
                     {t("settings:hooks.fields.matcher")}
                   </label>
-                  <Input
-                    id={`hook-matcher-${hook.id}`}
-                    className="mt-1"
-                    value={hook.matcher}
-                    placeholder={t("settings:hooks.placeholders.matcher")}
-                    onChange={(e) => patchHook(index, { matcher: e.target.value })}
-                  />
+                  <Select
+                    multiple
+                    value={parseMatcher(hook.matcher)}
+                    onValueChange={(value) => {
+                      if (!Array.isArray(value)) return;
+                      patchHook(index, {
+                        matcher: nextMatcher(parseMatcher(hook.matcher), value),
+                      });
+                    }}
+                  >
+                    <SelectTrigger id={`hook-matcher-${hook.id}`} className="mt-1 bg-background">
+                      <SelectValue>
+                        {(value) =>
+                          formatMatcherValue(
+                            Array.isArray(value) ? value : parseMatcher(hook.matcher),
+                            t("settings:hooks.matchers.all"),
+                          )
+                        }
+                      </SelectValue>
+                    </SelectTrigger>
+                    <SelectContent>
+                      {matcherChoices(hook.matcher).map((tool) => (
+                        <SelectItem key={tool} value={tool}>
+                          {tool === HOOK_MATCHER_ALL ? t("settings:hooks.matchers.all") : tool}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
                   <p className="mt-1 text-xs text-muted-foreground">
                     {t("settings:hooks.fieldHints.matcher")}
                   </p>

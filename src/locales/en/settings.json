@@ -310,11 +310,13 @@
       "postToolUse": "After tool use (warn only)"
     },
     "placeholders": {
-      "matcher": "* or Bash, Write",
       "command": "Command to run"
     },
+    "matchers": {
+      "all": "All tools"
+    },
     "fieldHints": {
-      "matcher": "Use * for every tool, or a comma-separated list.",
+      "matcher": "Select one or more tools. All tools matches every call.",
       "command": "Shell command in the workspace. Empty commands are dropped on save."
     }
   },
