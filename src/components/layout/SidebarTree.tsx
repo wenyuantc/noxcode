@@ -1,4 +1,4 @@
-import { ChevronDown, Folder, Pin, Trash2 } from "lucide-react";
+import { ChevronDown, Folder, Pin, Plus, Trash2 } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
 import { deleteAgentSession, setAgentSessionPinned } from "@/lib/backend";
@@ -6,6 +6,7 @@ import { displaySessionTitle } from "@/lib/sessionLines";
 import { formatRelativeTime } from "@/lib/utils";
 import { getCurrentAppLocale, getDateLocale } from "@/lib/i18n/locale";
 import { useSessionStore } from "@/stores/sessionStore";
+import { useUiStore } from "@/stores/uiStore";
 import { useWorkspaceStore } from "@/stores/workspaceStore";
 import { cn } from "@/lib/utils";
 import type { AgentSession } from "@/lib/types";
@@ -126,21 +127,39 @@ export function SidebarTree() {
         const open = expanded[workspace.id] !== false;
         return (
           <div key={workspace.id} className="mb-2">
-            <button
-              type="button"
+            <div
               className={cn(
-                "flex w-full items-center gap-1 rounded-md px-2 py-1.5 text-sm hover:bg-sidebar-accent",
+                "group flex items-center rounded-md hover:bg-sidebar-accent",
                 activeWorkspaceId === workspace.id && "bg-sidebar-accent",
               )}
-              onClick={() => {
-                void setActive(workspace.id);
-                toggleExpand(workspace.id);
-              }}
             >
-              <ChevronDown className={cn("size-3.5 transition", !open && "-rotate-90")} />
-              <Folder className="size-3.5 text-muted-foreground" />
-              <span className="flex-1 truncate text-left">{workspace.name}</span>
-            </button>
+              <button
+                type="button"
+                className="flex min-w-0 flex-1 items-center gap-1 rounded-md px-2 py-1.5 text-sm"
+                onClick={() => {
+                  void setActive(workspace.id);
+                  toggleExpand(workspace.id);
+                }}
+              >
+                <ChevronDown className={cn("size-3.5 transition", !open && "-rotate-90")} />
+                <Folder className="size-3.5 text-muted-foreground" />
+                <span className="flex-1 truncate text-left">{workspace.name}</span>
+              </button>
+              <button
+                type="button"
+                className="mr-1 rounded p-1 text-muted-foreground hover:text-foreground"
+                aria-label={t("newSession")}
+                onClick={(event) => {
+                  event.stopPropagation();
+                  void setActive(workspace.id);
+                  if (!open) toggleExpand(workspace.id);
+                  useSessionStore.getState().selectSession(null);
+                  useUiStore.getState().setComposerDraft("");
+                }}
+              >
+                <Plus className="size-3.5" />
+              </button>
+            </div>
             {open ? (
               <div className="mt-1 space-y-1">
                 {visible.map((session) => (

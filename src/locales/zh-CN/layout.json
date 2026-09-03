@@ -10,6 +10,7 @@
   "sessions": "会话",
   "workspaces": "工作区",
   "moreSessions": "显示更多",
+  "newSession": "新建会话",
   "pinnedSection": "已置顶",
   "pinSession": "置顶",
   "unpinSession": "取消置顶",
