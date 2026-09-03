@@ -1437,6 +1437,11 @@ async fn run_native_loop(
                         "native-permission-request",
                         permission_event(&session_record_id, &request),
                     );
+                    crate::app::notifications::notify_if_unfocused(
+                        &app,
+                        "等待权限确认",
+                        &prompt.summary,
+                    );
                 }
             });
         }));
@@ -1533,6 +1538,11 @@ async fn run_native_loop(
                     let _ = app.emit(
                         "native-plan-question",
                         question_event(&session_record_id, &request),
+                    );
+                    crate::app::notifications::notify_if_unfocused(
+                        &app,
+                        "等待回答计划问题",
+                        &summary,
                     );
                 }
             });
@@ -1941,6 +1951,7 @@ async fn run_native_loop(
     let status = if failed { "failed" } else { "exited" };
     let code = if failed { 1 } else { 0 };
     let ended_at = now_sqlite();
+    let mut notification_body = session_record_id.chars().take(8).collect::<String>();
     if let Ok(pool) = sqlite_pool(&app).await {
         let _ = update_agent_session_status(
             &pool,
@@ -1950,7 +1961,27 @@ async fn run_native_loop(
             Some(ended_at.as_str()),
         )
         .await;
+        if let Ok(Some(title)) = sqlx::query_scalar::<_, String>(
+            "SELECT COALESCE(NULLIF(TRIM(title), ''), '') FROM agent_sessions WHERE id = $1",
+        )
+        .bind(&session_record_id)
+        .fetch_optional(&pool)
+        .await
+        {
+            if !title.is_empty() {
+                notification_body = title;
+            }
+        }
     }
+    crate::app::notifications::notify_if_unfocused(
+        &app,
+        if failed {
+            "会话失败"
+        } else {
+            "会话已结束"
+        },
+        &notification_body,
+    );
     let _ = app.emit(
         "native-exit",
         AgentSessionExit {
