@@ -4,11 +4,13 @@ import {
   applyCatalogToModel,
   canSaveChannelModels,
   catalogThinkingLevels,
+  composerThinkingLevels,
   defaultThinkingLevel,
   displayedThinkingLevels,
   emptyChannelModel,
   lookupModelCatalog,
   materializeThinkingLevels,
+  resolveComposerThinkingLevel,
   selectedThinkingLevels,
   withThinkingLevels,
 } from "@/lib/modelCatalog";
@@ -351,5 +353,23 @@ describe("thinking level selection", () => {
     expect(defaultThinkingLevel(["low", "high"], "medium")).toBe("low");
     expect(defaultThinkingLevel(["low", "high"], "high")).toBe("high");
     expect(defaultThinkingLevel([], "medium")).toBeNull();
+  });
+
+  it("keeps the user-selected composer thinking level across Home → session remount", () => {
+    const deepseekLevels = composerThinkingLevels(
+      model({
+        id: "deepseek-v4-flash",
+        thinking_enabled: true,
+        thinking_level: "high",
+        thinking_levels: ["low", "high", "max"],
+      }),
+    );
+    expect(deepseekLevels).toEqual(["low", "high", "max"]);
+    expect(resolveComposerThinkingLevel(deepseekLevels, "max", "high")).toBe("max");
+    expect(resolveComposerThinkingLevel(deepseekLevels, "medium", "high")).toBe("high");
+    expect(resolveComposerThinkingLevel(deepseekLevels, "medium", null)).toBe("low");
+    expect(resolveComposerThinkingLevel(deepseekLevels, null, "max")).toBe("max");
+    expect(composerThinkingLevels(null)).toEqual(["low", "medium", "high"]);
+    expect(resolveComposerThinkingLevel(["low", "medium", "high"], null, null)).toBe("medium");
   });
 });

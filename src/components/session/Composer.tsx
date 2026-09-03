@@ -11,7 +11,7 @@ import {
   stopNativeSession,
 } from "@/lib/backend";
 import { submitSessionPrompt } from "@/lib/sessionSubmission";
-import { FALLBACK_THINKING_LEVELS } from "@/lib/modelCatalog";
+import { composerThinkingLevels, resolveComposerThinkingLevel } from "@/lib/modelCatalog";
 import type { NativeSkill } from "@/lib/types";
 import { useChannelStore } from "@/stores/channelStore";
 import { useSessionStore } from "@/stores/sessionStore";
@@ -45,6 +45,8 @@ export function Composer({ compact = false }: { compact?: boolean }) {
   const channelId = useChannelStore((state) => state.activeChannelId);
   const activeModelId = useChannelStore((state) => state.activeModelId);
   const composerPlanMode = useUiStore((state) => state.composerPlanMode);
+  const effort = useUiStore((state) => state.composerThinkingLevel);
+  const setEffort = useUiStore((state) => state.setComposerThinkingLevel);
   const selectedSessionId = useSessionStore((state) => state.selectedSessionId);
   const live = useSessionStore((state) =>
     selectedSessionId ? state.liveBySession[selectedSessionId] : undefined,
@@ -57,7 +59,6 @@ export function Composer({ compact = false }: { compact?: boolean }) {
   );
   const channel = channels.find((item) => item.id === channelId);
   const [model, setModel] = useState(activeModelId ?? "");
-  const [effort, setEffort] = useState("medium");
   const [error, setError] = useState<string | null>(null);
   const [files, setFiles] = useState<string[]>([]);
   const [skills, setSkills] = useState<NativeSkill[]>([]);
@@ -66,12 +67,12 @@ export function Composer({ compact = false }: { compact?: boolean }) {
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
   const selectedModel = channel?.models.find((item) => item.id === model);
-  const efforts = selectedModel?.thinking_levels?.length
-    ? selectedModel.thinking_levels
-    : FALLBACK_THINKING_LEVELS;
-  const resolvedEffort = efforts.includes(effort)
-    ? effort
-    : (efforts.find((level) => level === "medium") ?? efforts[0] ?? "medium");
+  const efforts = composerThinkingLevels(selectedModel);
+  const resolvedEffort = resolveComposerThinkingLevel(
+    efforts,
+    effort,
+    selectedModel?.thinking_level,
+  );
 
   useEffect(() => {
     setModel(activeModelId ?? "");
@@ -167,6 +168,7 @@ export function Composer({ compact = false }: { compact?: boolean }) {
     if (sendBusy) return;
     setError(null);
     setSending(true);
+    setEffort(resolvedEffort);
     try {
       await submitSessionPrompt({
         sessionId: selectedSessionId,

@@ -39,6 +39,32 @@ export function defaultThinkingLevel(levels: string[], preferred?: string | null
   return levels.find((level) => level === "medium") ?? levels[0] ?? null;
 }
 
+/** Composer 可选思考等级：渠道已保存集合，否则回退目录兜底。 */
+export function composerThinkingLevels(
+  model?: Pick<AiChannelModel, "thinking_levels"> | null,
+): string[] {
+  return model?.thinking_levels?.length
+    ? uniqueThinkingLevels(model.thinking_levels)
+    : [...FALLBACK_THINKING_LEVELS];
+}
+
+/**
+ * 解析 Composer 当前应显示/提交的思考等级。
+ * 用户上次选择优先；越界或不存在时再用模型默认，最后才回退 medium / 第一项。
+ * 首页与会话页各挂一份 Composer，选择必须放进共享状态，否则切到进行中会丢失。
+ */
+export function resolveComposerThinkingLevel(
+  levels: string[],
+  preferred?: string | null,
+  modelDefault?: string | null,
+): string {
+  const current = preferred?.trim();
+  if (current && levels.includes(current)) return current;
+  const fromModel = modelDefault?.trim();
+  if (fromModel && levels.includes(fromModel)) return fromModel;
+  return defaultThinkingLevel(levels, null) ?? "medium";
+}
+
 export function withThinkingLevels(
   model: AiChannelModel,
   levels: string[] | null,

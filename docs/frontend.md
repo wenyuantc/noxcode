@@ -38,7 +38,7 @@ src/components/git/      GitPanel · DiffView · CheckpointTimeline
 
 | Store | 持久化键 | 职责 |
 | --- | --- | --- |
-| `uiStore` | `noxcode:sidebar-width`（200–480）、`noxcode:sidebar-collapsed`、`noxcode:composer-plan-mode`、`theme` / `theme-mode` | 侧栏、命令面板、Git 抽屉、Composer 草稿、计划模式、主题 |
+| `uiStore` | `noxcode:sidebar-width`（200–480）、`noxcode:sidebar-collapsed`、`noxcode:composer-plan-mode`、`noxcode:composer-thinking-level`、`theme` / `theme-mode` | 侧栏、命令面板、Git 抽屉、Composer 草稿、计划模式、思考等级、主题 |
 | `workspaceStore` | `noxcode:active-workspace` | 工作区列表、会话树、健康检查 |
 | `channelStore` | `noxcode:active-model` | 渠道列表、当前渠道/模型 |
 | `sessionStore` | — | live 会话、事件行、turn-state、权限/提问 |
@@ -52,7 +52,7 @@ src/components/git/      GitPanel · DiffView · CheckpointTimeline
 
 打开历史会话立即改 `selectedSessionId`（侧栏高亮）；`lines` 已缓存则不重拉，无缓存拉最近 200 条。事件流只在当前选中会话的 `lines` 就绪后切换；加载期间隐藏旧会话流并显示加载态，避免侧栏、标题和输入框指向 A、内容仍显示 B。已打开的流保活最近 3 个（`hidden` 不卸 DOM）。live 行只走 `onStdout`，历史结果不得覆盖已有缓存。
 
-Composer / 编辑重发 / 重试走 `submitSessionPrompt`：有选中会话则 `resumeNativeSession`（同一 `session_record_id`），首页无选中才 `startNativeSession`。Rust 判断该 ID 是 live 投递还是原位静默恢复 transcript，不把恢复过程写进聊天；前端不以 `liveBySession` 是否过期决定是否新建。历史里已落下的 `[续聊]` / 「会话已恢复|已创建」/ `[ERROR] 已取消` 行不渲染。手动停止只保留「收到停止请求」，不把取消标成错误。`sessionStore.liveBySession` 按 `session_record_id` 索引；停止按钮仍只看当前会话是否 live。权限菜单四项：变更前确认 / 自动编辑 / 计划模式 / 完全访问。前两项与完全访问写入 `permission_mode`；计划模式存在 `uiStore.composerPlanMode`，新会话传 `plan_mode`。模型控件是渠道→模型级联菜单，底部「管理模型」进 `/settings/channels`。思考等级右侧是 `ContextCapacity`：按 `selectedSessionId` 读 `sessionStore.usage`，不要求会话 live。`used/limit` 含工具 schema，弹层展示分类占比与上次调用缓存率（`cached/prompt`）。打开历史会话时 `ensureHistory` 从 `agent_sessions.context_usage_json` 灌入；没有快照则用最后一条 `[用量]` 加当前模型窗口兜底。`native-turn-state` 的 `waiting_input` / `working` 驱动发送按钮（发送中与工作中显示转圈并禁用）和停止按钮（仅 `working` 显示），不靠猜前缀。思考结束后事件行写入完整 `reasoning`，不再只记「已生成 N 字」。
+Composer / 编辑重发 / 重试走 `submitSessionPrompt`：有选中会话则 `resumeNativeSession`（同一 `session_record_id`），首页无选中才 `startNativeSession`。Rust 判断该 ID 是 live 投递还是原位静默恢复 transcript，不把恢复过程写进聊天；前端不以 `liveBySession` 是否过期决定是否新建。历史里已落下的 `[续聊]` / 「会话已恢复|已创建」/ `[ERROR] 已取消` 行不渲染。手动停止只保留「收到停止请求」，不把取消标成错误。`sessionStore.liveBySession` 按 `session_record_id` 索引；停止按钮仍只看当前会话是否 live。权限菜单四项：变更前确认 / 自动编辑 / 计划模式 / 完全访问。前两项与完全访问写入 `permission_mode`；计划模式存在 `uiStore.composerPlanMode`，新会话传 `plan_mode`。模型控件是渠道→模型级联菜单，底部「管理模型」进 `/settings/channels`。思考等级存在 `uiStore.composerThinkingLevel`（首页 Composer 与会话页 Composer 共享），解析顺序为用户选择 → 模型默认 → `medium` / 第一项，避免 DeepSeek 这类无 `medium` 的模型在切到进行中时掉回 `low`。思考等级右侧是 `ContextCapacity`：按 `selectedSessionId` 读 `sessionStore.usage`，不要求会话 live。`used/limit` 含工具 schema，弹层展示分类占比与上次调用缓存率（`cached/prompt`）。打开历史会话时 `ensureHistory` 从 `agent_sessions.context_usage_json` 灌入；没有快照则用最后一条 `[用量]` 加当前模型窗口兜底。`native-turn-state` 的 `waiting_input` / `working` 驱动发送按钮（发送中与工作中显示转圈并禁用）和停止按钮（仅 `working` 显示），不靠猜前缀。思考结束后事件行写入完整 `reasoning`，不再只记「已生成 N 字」。
 
 `@` 调 `list_git_files` 插入 `@path`。`/` 列出全局技能，插入「使用技能：name」。
 
