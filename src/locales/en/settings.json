@@ -126,23 +126,37 @@
   },
   "runtime": {
     "title": "Native agent runtime",
-    "maxTurns": "Max turns",
-    "maxTurnsHint": "0 means unlimited, max 500.",
-    "maxSubagentTurns": "Max subagent turns",
-    "contextWindow": "Context window (K tokens)",
-    "rolloutBudget": "Rollout budget (K tokens)",
-    "maxToolOutput": "Tool output cap (K tokens)",
-    "maxConcurrent": "Concurrent subagents",
-    "policy": "Subagent policy",
-    "budgetShare": "Subagent budget share",
-    "confirmHighRisk": "Confirm high-risk tools",
-    "permissionTimeout": "Permission timeout (seconds)",
-    "globalPrompt": "Global prompt template"
+    "hint": "Cap how many model-and-tool rounds run for one user message. 0 means unlimited. Local and SSH workspaces share these caps because the loop always runs on this machine. Applies to sessions started after you change them.",
+    "maxTurns": "Max tool turns",
+    "maxTurnsHint": "0 = unlimited, default 40, max 500.",
+    "maxSubagentTurns": "Sub-agent max tool turns",
+    "maxSubagentTurnsHint": "0 = unlimited, default 20, max 500. Independent from the parent agent turn cap. Shared by local and SSH workspaces. Applies to sessions started after you change it.",
+    "contextWindow": "Context window limit (K tokens)",
+    "contextWindowHint": "Enter K tokens (1K = 1,000 tokens). Older history is compacted before this window fills. Default 128K; range 8K–1,000K.",
+    "rolloutBudget": "Per-session budget (K tokens)",
+    "rolloutBudgetHint": "Enter K tokens (1K = 1,000 tokens). Shared by the parent and child agents. New tool turns stop when it is reached. 0 = unlimited; default 10,000K; max 100,000K.",
+    "maxToolOutput": "Per-tool result limit (K tokens)",
+    "maxToolOutputHint": "Enter K tokens (1K = 1,000 tokens). Large results keep their head and tail and include a path/offset continuation hint. Default 4.096K; range 0.256K–65.536K.",
+    "maxConcurrent": "Sub-agents per turn",
+    "maxConcurrentHint": "How many child agents may run in parallel in one model turn. Default 1, range 1–16. Shared by local and SSH workspaces. Applies to sessions started after you change it.",
+    "policy": "Sub-agent policy",
+    "policyHint": "How eagerly the parent delegates. Types come from the Agent tool: built-in explore / general plus custom types from the Sub-agents page. Applies to sessions started after you change it.",
+    "policyConservative": "Conservative",
+    "policyBalanced": "Balanced",
+    "policyAggressive": "Aggressive",
+    "budgetShare": "Sub-agent budget share (%)",
+    "budgetShareHint": "Each batch of sub-agents may use at most this percent of the parent session's remaining budget in total. Default 40, range 5–100. The parent can continue after the batch hits its cap.",
+    "permissionMode": "Permission mode",
+    "permissionModeHint": "Confirm before change: ask before editing files. Automatic editing: overwrite files immediately; delete / push / force Git / opaque commands / MCP still prompt. Full access: fewer confirmations. Plan mode is chosen in the Composer and is not stored here. Applies to sessions started after you change it.",
+    "permissionTimeout": "High-risk confirmation timeout (seconds)",
+    "permissionTimeoutHint": "How long to wait for confirmation. Timeout is treated as deny and the session continues. 0 = no timeout, default 300.",
+    "globalPrompt": "Global prompt template",
+    "globalPromptHint": "Inserted as the Global prompt block after environment context and before AGENTS.md / profile settings. Leave empty to skip. Applies to sessions started after you change it."
   },
   "usage": {
     "title": "Usage",
     "hint": "Aggregated from model call logs.",
-    "openLogs": "Open call logs",
+    "openLogs": "Open API call logs",
     "total": "Total",
     "success": "Success",
     "failed": "Failed",
@@ -180,6 +194,58 @@
   },
   "subagents": {
     "title": "Subagents",
-    "hint": "Custom child agents: model, tools, and scope."
+    "description": "Configure custom child agents for the built-in Agent.",
+    "howToCall": "How to call: the parent uses the Agent tool and sets subagent_type to the name. You can also write “use <name> to review/explore”. Built-in types general (can edit) and explore (read-only) stay available.",
+    "actions": {
+      "new": "New",
+      "edit": "Edit",
+      "create": "Create",
+      "cancel": "Cancel",
+      "save": "Save",
+      "delete": "Delete"
+    },
+    "list": {
+      "loading": "Loading…",
+      "empty": "No custom sub-agents yet"
+    },
+    "builtin": {
+      "general": "Built-in · full tools including MCP, can edit",
+      "explore": "Built-in · read-only research, cannot edit"
+    },
+    "fields": {
+      "name": "Name (used as subagent_type)",
+      "description": "Description (the parent uses this to decide when to delegate)",
+      "modelMode": "Model",
+      "modelInherit": "Inherit default (this session’s channel and model)",
+      "modelChannel": "Specific channel model",
+      "modelHint": "Inherit uses the channel and model of this session. A specific channel only changes local HTTP; SSH file tools still use the remote workspace.",
+      "channel": "Channel",
+      "model": "Model",
+      "toolMode": "Tools",
+      "toolAll": "All permissions",
+      "toolCustom": "Custom tools",
+      "systemPrompt": "System prompt",
+      "systemPromptPlaceholder": "Describe this sub-agent’s role, constraints, and output format",
+      "injectAgentsMd": "Inject AGENTS.md",
+      "injectAgentsMdHint": "When on, workspace AGENTS.md / CLAUDE.md is added to the child system prompt. On by default.",
+      "scope": "Scope",
+      "scopeAll": "All workspaces",
+      "scopeWorkspaces": "Specific workspaces",
+      "scopeHint": "Available in every workspace by default. Limit to selected workspaces to show it only there.",
+      "scopeWorkspacesEmpty": "No workspaces yet. Open or create a workspace first.",
+      "scopeWorkspacesCount": "{{count}} workspace(s)",
+      "scopePickWorkspaces": "Choose workspaces"
+    },
+    "dialogs": {
+      "createTitle": "New sub-agent",
+      "editTitle": "Edit sub-agent",
+      "deleteTitle": "Delete sub-agent",
+      "deleteConfirm": "Delete sub-agent \"{{name}}\"?"
+    },
+    "messages": {
+      "created": "Sub-agent created",
+      "updated": "Sub-agent updated",
+      "deleted": "Sub-agent deleted"
+    }
   }
 }

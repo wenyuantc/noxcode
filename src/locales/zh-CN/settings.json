@@ -126,23 +126,37 @@
   },
   "runtime": {
     "title": "内置 Agent 运行时",
-    "maxTurns": "最大轮次",
-    "maxTurnsHint": "0 表示不限，上限 500。",
-    "maxSubagentTurns": "子 Agent 最大轮次",
-    "contextWindow": "上下文窗口（K tokens）",
-    "rolloutBudget": "Rollout 预算（K tokens）",
-    "maxToolOutput": "工具输出上限（K tokens）",
-    "maxConcurrent": "同时运行的子 Agent",
+    "hint": "限制一次用户消息里模型最多调用多少轮工具。0 表示不限制。本地与 SSH 工作区都在本机循环中执行，共用这些上限。改完对之后新开的会话生效。",
+    "maxTurns": "最大工具轮次",
+    "maxTurnsHint": "0 = 不限制，默认 40，最大 500。",
+    "maxSubagentTurns": "子 Agent 最大工具轮次",
+    "maxSubagentTurnsHint": "0 = 不限制，默认 20，最大 500。与父 Agent 轮次独立。本地与 SSH 工作区共用。改完对之后新开的会话生效。",
+    "contextWindow": "上下文窗口上限（K token）",
+    "contextWindowHint": "输入单位为 K token（1K = 1000 token）。达到此窗口大小后优先压缩旧对话再继续。默认 128K，范围 8K–1000K。",
+    "rolloutBudget": "单次会话预算（K token）",
+    "rolloutBudgetHint": "输入单位为 K token（1K = 1000 token）。父 Agent 与子 Agent 共用此预算。达到后停止新的工具轮次。0 = 不限制，默认 10000K，最大 100000K。",
+    "maxToolOutput": "单条工具结果上限（K token）",
+    "maxToolOutputHint": "输入单位为 K token（1K = 1000 token）。超出的工具输出只保留头尾，并提示模型按路径或偏移继续读取。默认 4.096K，范围 0.256K–65.536K。",
+    "maxConcurrent": "同轮子 Agent 上限",
+    "maxConcurrentHint": "一次回复里最多并行多少个子 Agent。默认 1，范围 1–16。本地与 SSH 工作区共用。改完对之后新开的会话生效。",
     "policy": "子 Agent 策略",
-    "budgetShare": "子 Agent 预算占比",
-    "confirmHighRisk": "高风险操作需确认",
-    "permissionTimeout": "确认超时（秒）",
-    "globalPrompt": "全局提示词模板"
+    "policyHint": "控制父循环何时委派。类型仍由 Agent 工具列出：内置 explore / general，以及「子智能体」页里的自定义类型。改完对之后新开的会话生效。",
+    "policyConservative": "保守",
+    "policyBalanced": "均衡",
+    "policyAggressive": "积极",
+    "budgetShare": "子 Agent 预算占比（%）",
+    "budgetShareHint": "同一批子 Agent 合计最多占用父会话剩余预算的百分比。默认 40，范围 5–100。触顶后父会话仍可继续。",
+    "permissionMode": "权限模式",
+    "permissionModeHint": "变更前确认：改文件前先问。自动编辑：覆盖文件直接执行，删除 / 推送 / 强制 Git / 不透明命令 / MCP 仍需确认。完全访问：减少确认次数。计划模式在 Composer 选择，不写入此项。改完对之后新开的会话生效。",
+    "permissionTimeout": "高风险确认超时（秒）",
+    "permissionTimeoutHint": "等待确认的秒数。超时按拒绝处理并继续会话。0 = 不超时，默认 300。",
+    "globalPrompt": "全局提示词模板",
+    "globalPromptHint": "会插入系统提示的「全局提示词」段，位于环境信息之后、AGENTS.md / 档案设定之前。留空则不注入。改完对之后新开的会话生效。"
   },
   "usage": {
     "title": "使用统计",
     "hint": "来自模型调用日志的聚合。",
-    "openLogs": "打开调用日志",
+    "openLogs": "打开 API 调用记录",
     "total": "总调用",
     "success": "成功",
     "failed": "失败",
@@ -180,6 +194,58 @@
   },
   "subagents": {
     "title": "子智能体",
-    "hint": "自定义子 Agent 的模型、工具与作用域。"
+    "description": "为内置 Agent 配置自定义子智能体。",
+    "howToCall": "调用方式：父模型使用 Agent 工具，把名称填进 subagent_type。也可在对话里写「用 <名称> 审查/摸底」。内置类型 general（可写）与 explore（只读）始终可用。",
+    "actions": {
+      "new": "新建",
+      "edit": "编辑",
+      "create": "创建",
+      "cancel": "取消",
+      "save": "保存",
+      "delete": "删除"
+    },
+    "list": {
+      "loading": "加载中…",
+      "empty": "还没有自定义子智能体"
+    },
+    "builtin": {
+      "general": "内置 · 全部工具（含 MCP），可改文件",
+      "explore": "内置 · 只读摸底，不能改文件"
+    },
+    "fields": {
+      "name": "名称（即 subagent_type）",
+      "description": "描述（父模型据此决定何时委派）",
+      "modelMode": "模型",
+      "modelInherit": "继承默认（当前会话的渠道和模型）",
+      "modelChannel": "指定渠道模型",
+      "modelHint": "继承默认使用这次会话的渠道和模型。指定渠道只换本机 HTTP，SSH 工作区的文件工具仍走远程工作区。",
+      "channel": "渠道",
+      "model": "模型",
+      "toolMode": "可用工具",
+      "toolAll": "默认所有权限",
+      "toolCustom": "自定义可用工具",
+      "systemPrompt": "系统提示词",
+      "systemPromptPlaceholder": "描述这个子智能体的角色、约束和输出格式",
+      "injectAgentsMd": "注入 AGENTS.md",
+      "injectAgentsMdHint": "开启后把工作区 AGENTS.md / CLAUDE.md 写入子智能体系统提示。默认开启。",
+      "scope": "作用域",
+      "scopeAll": "所有工作区",
+      "scopeWorkspaces": "指定工作区",
+      "scopeHint": "默认所有工作区都可委派该子智能体。指定工作区后，仅这些工作区会出现该选项。",
+      "scopeWorkspacesEmpty": "还没有工作区，请先打开或创建一个工作区。",
+      "scopeWorkspacesCount": "指定 {{count}} 个工作区",
+      "scopePickWorkspaces": "选择工作区"
+    },
+    "dialogs": {
+      "createTitle": "新建子智能体",
+      "editTitle": "编辑子智能体",
+      "deleteTitle": "删除子智能体",
+      "deleteConfirm": "确定删除子智能体「{{name}}」？"
+    },
+    "messages": {
+      "created": "子智能体已创建",
+      "updated": "子智能体已更新",
+      "deleted": "子智能体已删除"
+    }
   }
 }
