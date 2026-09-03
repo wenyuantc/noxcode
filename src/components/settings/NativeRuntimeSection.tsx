@@ -2,7 +2,11 @@ import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 
 import { updateNativeSettings } from "@/lib/backend";
-import type { NativePermissionMode } from "@/lib/types";
+import {
+  isNativePermissionMode,
+  NATIVE_PERMISSION_MODES,
+  type NativePermissionMode,
+} from "@/lib/types";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import {
@@ -123,15 +127,19 @@ export function NativeRuntimeSection() {
           className="h-8 max-w-xs rounded-md border bg-background px-2 text-sm"
           value={draft.permission_mode}
           onChange={(event) => {
-            const permission_mode = event.target.value as NativePermissionMode;
+            const value = event.target.value;
+            if (!isNativePermissionMode(value)) return;
+            const permission_mode: NativePermissionMode = value;
             const next = { ...draft, permission_mode };
             setDraft(next);
             void updateNativeSettings({ permission_mode }).then(setNative);
           }}
         >
-          <option value="confirm">{t("sessions:permission.confirm.title")}</option>
-          <option value="auto_edit">{t("sessions:permission.auto_edit.title")}</option>
-          <option value="full">{t("sessions:permission.full.title")}</option>
+          {NATIVE_PERMISSION_MODES.map((mode) => (
+            <option key={mode} value={mode}>
+              {t(`sessions:permission.${mode}.title`)}
+            </option>
+          ))}
         </select>
       </SettingCard>
       <SettingCard
@@ -191,6 +199,138 @@ export function NativeRuntimeSection() {
         </div>
       </SettingCard>
       <SettingCard
+        title={t("settings:runtime.toolRuntime")}
+        description={t("settings:runtime.toolRuntimeHint")}
+      >
+        <div className="space-y-3">
+          <label htmlFor="native-bash-timeout" className="block max-w-xs text-sm">
+            <span>{t("settings:runtime.bashDefaultTimeout")}</span>
+            <Input
+              id="native-bash-timeout"
+              className="mt-1"
+              type="number"
+              min={1}
+              max={600}
+              step={1}
+              value={draft.bash_default_timeout_secs}
+              onChange={(event) =>
+                setDraft({ ...draft, bash_default_timeout_secs: Number(event.target.value) })
+              }
+            />
+          </label>
+          <label htmlFor="native-artifact-retention" className="block max-w-xs text-sm">
+            <span>{t("settings:runtime.artifactRetention")}</span>
+            <Input
+              id="native-artifact-retention"
+              className="mt-1"
+              type="number"
+              min={0}
+              max={365}
+              step={1}
+              value={draft.artifact_retention_days}
+              onChange={(event) =>
+                setDraft({ ...draft, artifact_retention_days: Number(event.target.value) })
+              }
+            />
+          </label>
+          <label
+            htmlFor="native-shell-snapshot"
+            className="flex max-w-xs cursor-pointer items-center justify-between gap-3 text-sm"
+          >
+            <span>{t("settings:runtime.shellSnapshot")}</span>
+            <Switch
+              id="native-shell-snapshot"
+              checked={draft.shell_snapshot_enabled}
+              onCheckedChange={(checked) => {
+                setDraft({ ...draft, shell_snapshot_enabled: checked });
+                void updateNativeSettings({ shell_snapshot_enabled: checked }).then(setNative);
+              }}
+            />
+          </label>
+          <label
+            htmlFor="native-rg-sidecar"
+            className="flex max-w-xs cursor-pointer items-center justify-between gap-3 text-sm"
+          >
+            <span>{t("settings:runtime.rgSidecar")}</span>
+            <Switch
+              id="native-rg-sidecar"
+              checked={draft.rg_sidecar_enabled}
+              onCheckedChange={(checked) => {
+                setDraft({ ...draft, rg_sidecar_enabled: checked });
+                void updateNativeSettings({ rg_sidecar_enabled: checked }).then(setNative);
+              }}
+            />
+          </label>
+        </div>
+      </SettingCard>
+      <SettingCard
+        title={t("settings:runtime.modelRetry")}
+        description={t("settings:runtime.modelRetryHint")}
+      >
+        <div className="grid max-w-xl gap-3 sm:grid-cols-2">
+          <label htmlFor="native-retry-max" className="block text-sm">
+            <span>{t("settings:runtime.modelRetryMax")}</span>
+            <Input
+              id="native-retry-max"
+              className="mt-1"
+              type="number"
+              min={0}
+              max={20}
+              step={1}
+              value={draft.model_retry_max_retries}
+              onChange={(event) =>
+                setDraft({ ...draft, model_retry_max_retries: Number(event.target.value) })
+              }
+            />
+          </label>
+          <label htmlFor="native-retry-base" className="block text-sm">
+            <span>{t("settings:runtime.modelRetryBaseDelay")}</span>
+            <Input
+              id="native-retry-base"
+              className="mt-1"
+              type="number"
+              min={100}
+              max={60000}
+              step={100}
+              value={draft.model_retry_base_delay_ms}
+              onChange={(event) =>
+                setDraft({ ...draft, model_retry_base_delay_ms: Number(event.target.value) })
+              }
+            />
+          </label>
+          <label htmlFor="native-retry-max-delay" className="block text-sm">
+            <span>{t("settings:runtime.modelRetryMaxDelay")}</span>
+            <Input
+              id="native-retry-max-delay"
+              className="mt-1"
+              type="number"
+              min={100}
+              max={300000}
+              step={100}
+              value={draft.model_retry_max_delay_ms}
+              onChange={(event) =>
+                setDraft({ ...draft, model_retry_max_delay_ms: Number(event.target.value) })
+              }
+            />
+          </label>
+          <label htmlFor="native-retry-factor" className="block text-sm">
+            <span>{t("settings:runtime.modelRetryBackoff")}</span>
+            <Input
+              id="native-retry-factor"
+              className="mt-1"
+              type="number"
+              min={1}
+              max={4}
+              step={0.1}
+              value={draft.model_retry_backoff_factor}
+              onChange={(event) =>
+                setDraft({ ...draft, model_retry_backoff_factor: Number(event.target.value) })
+              }
+            />
+          </label>
+        </div>
+      </SettingCard>
+      <SettingCard
         title={t("settings:runtime.contextWindow")}
         description={t("settings:runtime.contextWindowHint")}
       >
@@ -214,6 +354,35 @@ export function NativeRuntimeSection() {
                 const next = { ...draft, use_custom_context_window: checked };
                 setDraft(next);
                 void updateNativeSettings({ use_custom_context_window: checked }).then(setNative);
+              }}
+            />
+          </label>
+          <label htmlFor="native-compact-threshold" className="block max-w-xs text-sm">
+            <span>{t("settings:runtime.compactThreshold")}</span>
+            <Input
+              id="native-compact-threshold"
+              className="mt-1"
+              type="number"
+              min={30}
+              max={99}
+              step={1}
+              value={draft.auto_compact_threshold_percent}
+              onChange={(event) =>
+                setDraft({ ...draft, auto_compact_threshold_percent: Number(event.target.value) })
+              }
+            />
+          </label>
+          <label
+            htmlFor="native-microcompact"
+            className="flex max-w-xs cursor-pointer items-center justify-between gap-3 text-sm"
+          >
+            <span>{t("settings:runtime.microcompact")}</span>
+            <Switch
+              id="native-microcompact"
+              checked={draft.microcompact_enabled}
+              onCheckedChange={(checked) => {
+                setDraft({ ...draft, microcompact_enabled: checked });
+                void updateNativeSettings({ microcompact_enabled: checked }).then(setNative);
               }}
             />
           </label>

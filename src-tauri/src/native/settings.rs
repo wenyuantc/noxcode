@@ -38,18 +38,120 @@ pub const SUBAGENT_POLICY_CONSERVATIVE: &str = "conservative";
 pub const SUBAGENT_POLICY_BALANCED: &str = "balanced";
 pub const SUBAGENT_POLICY_AGGRESSIVE: &str = "aggressive";
 pub const DEFAULT_NATIVE_SUBAGENT_POLICY: &str = SUBAGENT_POLICY_CONSERVATIVE;
-pub const PERMISSION_MODE_CONFIRM: &str = "confirm";
-pub const PERMISSION_MODE_AUTO_EDIT: &str = "auto_edit";
-pub const PERMISSION_MODE_FULL: &str = "full";
-pub const DEFAULT_NATIVE_PERMISSION_MODE: &str = PERMISSION_MODE_CONFIRM;
+/// 权限模式（对齐 ZCode 的 default / edit / build / yolo；plan 是会话态不落盘）。
+pub const PERMISSION_MODE_DEFAULT: &str = "default";
+pub const PERMISSION_MODE_EDIT: &str = "edit";
+pub const PERMISSION_MODE_BUILD: &str = "build";
+pub const PERMISSION_MODE_YOLO: &str = "yolo";
+pub const PERMISSION_MODE_PLAN: &str = "plan";
+/// 旧文件里的名字，读入时映射到新模式。
+pub const LEGACY_PERMISSION_MODE_CONFIRM: &str = "confirm";
+pub const LEGACY_PERMISSION_MODE_AUTO_EDIT: &str = "auto_edit";
+pub const LEGACY_PERMISSION_MODE_FULL: &str = "full";
+pub const DEFAULT_NATIVE_PERMISSION_MODE: &str = PERMISSION_MODE_DEFAULT;
 const MAX_NATIVE_HOOKS: usize = 32;
 const DEFAULT_NATIVE_HOOK_TIMEOUT_SECS: i32 = 30;
 const MAX_NATIVE_HOOK_TIMEOUT_SECS: i32 = 120;
+pub const HOOK_EVENT_SESSION_START: &str = "session_start";
+pub const HOOK_EVENT_USER_PROMPT_SUBMIT: &str = "user_prompt_submit";
 pub const HOOK_EVENT_PRE_TOOL_USE: &str = "pre_tool_use";
 pub const HOOK_EVENT_POST_TOOL_USE: &str = "post_tool_use";
+pub const HOOK_EVENT_POST_TOOL_USE_FAILURE: &str = "post_tool_use_failure";
+pub const HOOK_EVENT_PERMISSION_REQUEST: &str = "permission_request";
+pub const HOOK_EVENT_STOP: &str = "stop";
+pub const HOOK_EVENTS: &[&str] = &[
+    HOOK_EVENT_SESSION_START,
+    HOOK_EVENT_USER_PROMPT_SUBMIT,
+    HOOK_EVENT_PRE_TOOL_USE,
+    HOOK_EVENT_POST_TOOL_USE,
+    HOOK_EVENT_POST_TOOL_USE_FAILURE,
+    HOOK_EVENT_PERMISSION_REQUEST,
+    HOOK_EVENT_STOP,
+];
+pub const HOOK_HANDLER_COMMAND: &str = "command";
+pub const HOOK_HANDLER_HTTP: &str = "http";
+pub const HOOK_HANDLER_AGENT: &str = "agent";
+pub const HOOK_SOURCE_GLOBAL: &str = "global";
+pub const HOOK_SOURCE_WORKSPACE: &str = "workspace";
+pub const HOOK_SOURCE_PLUGIN: &str = "plugin";
+
+/// 接受本项目的 snake_case 与 Claude Code 的 PascalCase 事件名。
+pub fn normalize_hook_event(event: &str) -> Option<&'static str> {
+    match event.trim() {
+        HOOK_EVENT_SESSION_START | "SessionStart" => Some(HOOK_EVENT_SESSION_START),
+        HOOK_EVENT_USER_PROMPT_SUBMIT | "UserPromptSubmit" => Some(HOOK_EVENT_USER_PROMPT_SUBMIT),
+        HOOK_EVENT_PRE_TOOL_USE | "PreToolUse" => Some(HOOK_EVENT_PRE_TOOL_USE),
+        HOOK_EVENT_POST_TOOL_USE | "PostToolUse" => Some(HOOK_EVENT_POST_TOOL_USE),
+        HOOK_EVENT_POST_TOOL_USE_FAILURE | "PostToolUseFailure" => {
+            Some(HOOK_EVENT_POST_TOOL_USE_FAILURE)
+        }
+        HOOK_EVENT_PERMISSION_REQUEST | "PermissionRequest" => Some(HOOK_EVENT_PERMISSION_REQUEST),
+        HOOK_EVENT_STOP | "Stop" => Some(HOOK_EVENT_STOP),
+        _ => None,
+    }
+}
+
+pub fn normalize_hook_handler_type(value: &str) -> &'static str {
+    match value.trim() {
+        HOOK_HANDLER_HTTP => HOOK_HANDLER_HTTP,
+        HOOK_HANDLER_AGENT => HOOK_HANDLER_AGENT,
+        _ => HOOK_HANDLER_COMMAND,
+    }
+}
+
+pub fn normalize_hook_source(value: &str) -> &'static str {
+    match value.trim() {
+        HOOK_SOURCE_WORKSPACE => HOOK_SOURCE_WORKSPACE,
+        HOOK_SOURCE_PLUGIN => HOOK_SOURCE_PLUGIN,
+        _ => HOOK_SOURCE_GLOBAL,
+    }
+}
+pub const DEFAULT_NATIVE_ARTIFACT_RETENTION_DAYS: i32 = 7;
+const MAX_NATIVE_ARTIFACT_RETENTION_DAYS: i32 = 365;
+pub const DEFAULT_NATIVE_MODEL_RETRY_MAX_RETRIES: i32 = 6;
+const MAX_NATIVE_MODEL_RETRY_MAX_RETRIES: i32 = 20;
+pub const DEFAULT_NATIVE_MODEL_RETRY_BASE_DELAY_MS: i32 = 1_000;
+const MIN_NATIVE_MODEL_RETRY_BASE_DELAY_MS: i32 = 100;
+const MAX_NATIVE_MODEL_RETRY_BASE_DELAY_MS: i32 = 60_000;
+pub const DEFAULT_NATIVE_MODEL_RETRY_MAX_DELAY_MS: i32 = 30_000;
+const MAX_NATIVE_MODEL_RETRY_MAX_DELAY_MS: i32 = 300_000;
+pub const DEFAULT_NATIVE_MODEL_RETRY_BACKOFF_FACTOR: f64 = 2.0;
+const MIN_NATIVE_MODEL_RETRY_BACKOFF_FACTOR: f64 = 1.0;
+const MAX_NATIVE_MODEL_RETRY_BACKOFF_FACTOR: f64 = 4.0;
+pub const DEFAULT_NATIVE_BASH_DEFAULT_TIMEOUT_SECS: i32 = 120;
+const MAX_NATIVE_BASH_DEFAULT_TIMEOUT_SECS: i32 = 600;
+pub const DEFAULT_NATIVE_AUTO_COMPACT_THRESHOLD_PERCENT: i32 = 85;
+pub const DEFAULT_NATIVE_MEMORY_DREAM_INTERVAL: i32 = 10;
+const MAX_NATIVE_MEMORY_DREAM_INTERVAL: i32 = 1000;
+const MIN_NATIVE_AUTO_COMPACT_THRESHOLD_PERCENT: i32 = 30;
+const MAX_NATIVE_AUTO_COMPACT_THRESHOLD_PERCENT: i32 = 99;
 
 #[derive(Debug, Default, Deserialize, Serialize)]
 struct RawNativeSettings {
+    #[serde(default)]
+    artifact_retention_days: Option<i32>,
+    #[serde(default)]
+    model_retry_max_retries: Option<i32>,
+    #[serde(default)]
+    model_retry_base_delay_ms: Option<i32>,
+    #[serde(default)]
+    model_retry_max_delay_ms: Option<i32>,
+    #[serde(default)]
+    model_retry_backoff_factor: Option<f64>,
+    #[serde(default)]
+    bash_default_timeout_secs: Option<i32>,
+    #[serde(default)]
+    shell_snapshot_enabled: Option<bool>,
+    #[serde(default)]
+    rg_sidecar_enabled: Option<bool>,
+    #[serde(default)]
+    auto_compact_threshold_percent: Option<i32>,
+    #[serde(default)]
+    microcompact_enabled: Option<bool>,
+    #[serde(default)]
+    memory_enabled: Option<bool>,
+    #[serde(default)]
+    memory_dream_interval: Option<i32>,
     #[serde(default)]
     max_turns: Option<i32>,
     #[serde(default)]
@@ -140,6 +242,82 @@ pub fn normalize_native_checkpoint_retention_days(value: Option<i32>) -> i32 {
     }
 }
 
+pub fn normalize_native_artifact_retention_days(value: Option<i32>) -> i32 {
+    match value {
+        Some(value) if (0..=MAX_NATIVE_ARTIFACT_RETENTION_DAYS).contains(&value) => value,
+        _ => DEFAULT_NATIVE_ARTIFACT_RETENTION_DAYS,
+    }
+}
+
+pub fn normalize_native_model_retry_max_retries(value: Option<i32>) -> i32 {
+    match value {
+        Some(value) if (0..=MAX_NATIVE_MODEL_RETRY_MAX_RETRIES).contains(&value) => value,
+        _ => DEFAULT_NATIVE_MODEL_RETRY_MAX_RETRIES,
+    }
+}
+
+pub fn normalize_native_model_retry_base_delay_ms(value: Option<i32>) -> i32 {
+    match value {
+        Some(value)
+            if (MIN_NATIVE_MODEL_RETRY_BASE_DELAY_MS..=MAX_NATIVE_MODEL_RETRY_BASE_DELAY_MS)
+                .contains(&value) =>
+        {
+            value
+        }
+        _ => DEFAULT_NATIVE_MODEL_RETRY_BASE_DELAY_MS,
+    }
+}
+
+pub fn normalize_native_model_retry_max_delay_ms(value: Option<i32>, base_delay_ms: i32) -> i32 {
+    match value {
+        Some(value) if (base_delay_ms..=MAX_NATIVE_MODEL_RETRY_MAX_DELAY_MS).contains(&value) => {
+            value
+        }
+        _ => DEFAULT_NATIVE_MODEL_RETRY_MAX_DELAY_MS.max(base_delay_ms),
+    }
+}
+
+pub fn normalize_native_model_retry_backoff_factor(value: Option<f64>) -> f64 {
+    match value {
+        Some(value)
+            if value.is_finite()
+                && (MIN_NATIVE_MODEL_RETRY_BACKOFF_FACTOR
+                    ..=MAX_NATIVE_MODEL_RETRY_BACKOFF_FACTOR)
+                    .contains(&value) =>
+        {
+            value
+        }
+        _ => DEFAULT_NATIVE_MODEL_RETRY_BACKOFF_FACTOR,
+    }
+}
+
+pub fn normalize_native_auto_compact_threshold_percent(value: Option<i32>) -> i32 {
+    match value {
+        Some(value)
+            if (MIN_NATIVE_AUTO_COMPACT_THRESHOLD_PERCENT
+                ..=MAX_NATIVE_AUTO_COMPACT_THRESHOLD_PERCENT)
+                .contains(&value) =>
+        {
+            value
+        }
+        _ => DEFAULT_NATIVE_AUTO_COMPACT_THRESHOLD_PERCENT,
+    }
+}
+
+pub fn normalize_native_memory_dream_interval(value: Option<i32>) -> i32 {
+    match value {
+        Some(value) if (0..=MAX_NATIVE_MEMORY_DREAM_INTERVAL).contains(&value) => value,
+        _ => DEFAULT_NATIVE_MEMORY_DREAM_INTERVAL,
+    }
+}
+
+pub fn normalize_native_bash_default_timeout_secs(value: Option<i32>) -> i32 {
+    match value {
+        Some(value) if (1..=MAX_NATIVE_BASH_DEFAULT_TIMEOUT_SECS).contains(&value) => value,
+        _ => DEFAULT_NATIVE_BASH_DEFAULT_TIMEOUT_SECS,
+    }
+}
+
 pub fn normalize_native_subagent_budget_share_percent(value: Option<i32>) -> i32 {
     match value {
         Some(value)
@@ -182,21 +360,53 @@ pub fn subagent_policy_label_zh(policy: &str) -> &'static str {
     }
 }
 
+/// 归一化模式名：接受本项目旧名（confirm / auto_edit / full）与 Claude Code 名
+/// （acceptEdits / auto / bypassPermissions / dontAsk），输出 default / edit / build / yolo。
 pub fn normalize_permission_mode(value: Option<&str>) -> String {
     match value.map(str::trim).unwrap_or("") {
-        PERMISSION_MODE_AUTO_EDIT => PERMISSION_MODE_AUTO_EDIT.to_string(),
-        PERMISSION_MODE_FULL => PERMISSION_MODE_FULL.to_string(),
-        PERMISSION_MODE_CONFIRM => PERMISSION_MODE_CONFIRM.to_string(),
+        PERMISSION_MODE_EDIT
+        | LEGACY_PERMISSION_MODE_AUTO_EDIT
+        | "acceptEdits"
+        | "accept_edits"
+        | "autoEdit" => PERMISSION_MODE_EDIT.to_string(),
+        PERMISSION_MODE_BUILD | "auto" => PERMISSION_MODE_BUILD.to_string(),
+        PERMISSION_MODE_YOLO
+        | LEGACY_PERMISSION_MODE_FULL
+        | "bypassPermissions"
+        | "bypass_permissions"
+        | "dontAsk"
+        | "dont_ask" => PERMISSION_MODE_YOLO.to_string(),
         _ => DEFAULT_NATIVE_PERMISSION_MODE.to_string(),
     }
 }
 
 pub fn permission_mode_label_zh(mode: &str) -> &'static str {
-    match mode {
-        PERMISSION_MODE_AUTO_EDIT => "自动编辑",
-        PERMISSION_MODE_FULL => "完全访问",
+    match normalize_permission_mode(Some(mode)).as_str() {
+        PERMISSION_MODE_EDIT => "自动编辑",
+        PERMISSION_MODE_BUILD => "自动构建",
+        PERMISSION_MODE_YOLO => "完全访问",
         _ => "变更前确认",
     }
+}
+
+/// edit / build / yolo 都自动放行覆盖文件。
+pub fn permission_mode_auto_approves_edits(mode: &str) -> bool {
+    matches!(
+        normalize_permission_mode(Some(mode)).as_str(),
+        PERMISSION_MODE_EDIT | PERMISSION_MODE_BUILD | PERMISSION_MODE_YOLO
+    )
+}
+
+/// build 与 yolo 放行不透明 shell 与只读 MCP。
+pub fn permission_mode_auto_approves_build(mode: &str) -> bool {
+    matches!(
+        normalize_permission_mode(Some(mode)).as_str(),
+        PERMISSION_MODE_BUILD | PERMISSION_MODE_YOLO
+    )
+}
+
+pub fn permission_mode_is_yolo(mode: &str) -> bool {
+    normalize_permission_mode(Some(mode)) == PERMISSION_MODE_YOLO
 }
 
 fn resolve_permission_mode(
@@ -210,7 +420,7 @@ fn resolve_permission_mode(
         }
     }
     match confirm_high_risk {
-        Some(false) => PERMISSION_MODE_FULL.to_string(),
+        Some(false) => PERMISSION_MODE_YOLO.to_string(),
         _ => DEFAULT_NATIVE_PERMISSION_MODE.to_string(),
     }
 }
@@ -241,13 +451,52 @@ fn default_settings() -> NativeSettings {
         auto_checkpoint_after_tool_call: true,
         checkpoint_retention_days: DEFAULT_NATIVE_CHECKPOINT_RETENTION_DAYS,
         desktop_notifications: true,
+        artifact_retention_days: DEFAULT_NATIVE_ARTIFACT_RETENTION_DAYS,
+        model_retry_max_retries: DEFAULT_NATIVE_MODEL_RETRY_MAX_RETRIES,
+        model_retry_base_delay_ms: DEFAULT_NATIVE_MODEL_RETRY_BASE_DELAY_MS,
+        model_retry_max_delay_ms: DEFAULT_NATIVE_MODEL_RETRY_MAX_DELAY_MS,
+        model_retry_backoff_factor: DEFAULT_NATIVE_MODEL_RETRY_BACKOFF_FACTOR,
+        bash_default_timeout_secs: DEFAULT_NATIVE_BASH_DEFAULT_TIMEOUT_SECS,
+        shell_snapshot_enabled: true,
+        rg_sidecar_enabled: true,
+        auto_compact_threshold_percent: DEFAULT_NATIVE_AUTO_COMPACT_THRESHOLD_PERCENT,
+        microcompact_enabled: true,
+        memory_enabled: true,
+        memory_dream_interval: DEFAULT_NATIVE_MEMORY_DREAM_INTERVAL,
         hooks: Vec::new(),
         global_prompt_template: String::new(),
     }
 }
 
 fn normalize_settings(raw: RawNativeSettings) -> NativeSettings {
+    let model_retry_base_delay_ms =
+        normalize_native_model_retry_base_delay_ms(raw.model_retry_base_delay_ms);
     NativeSettings {
+        artifact_retention_days: normalize_native_artifact_retention_days(
+            raw.artifact_retention_days,
+        ),
+        model_retry_max_retries: normalize_native_model_retry_max_retries(
+            raw.model_retry_max_retries,
+        ),
+        model_retry_base_delay_ms,
+        model_retry_max_delay_ms: normalize_native_model_retry_max_delay_ms(
+            raw.model_retry_max_delay_ms,
+            model_retry_base_delay_ms,
+        ),
+        model_retry_backoff_factor: normalize_native_model_retry_backoff_factor(
+            raw.model_retry_backoff_factor,
+        ),
+        bash_default_timeout_secs: normalize_native_bash_default_timeout_secs(
+            raw.bash_default_timeout_secs,
+        ),
+        shell_snapshot_enabled: raw.shell_snapshot_enabled.unwrap_or(true),
+        rg_sidecar_enabled: raw.rg_sidecar_enabled.unwrap_or(true),
+        auto_compact_threshold_percent: normalize_native_auto_compact_threshold_percent(
+            raw.auto_compact_threshold_percent,
+        ),
+        microcompact_enabled: raw.microcompact_enabled.unwrap_or(true),
+        memory_enabled: raw.memory_enabled.unwrap_or(true),
+        memory_dream_interval: normalize_native_memory_dream_interval(raw.memory_dream_interval),
         max_turns: normalize_native_max_turns(raw.max_turns),
         max_subagent_turns: normalize_native_max_subagent_turns(raw.max_subagent_turns),
         permission_mode: resolve_permission_mode(raw.permission_mode, raw.confirm_high_risk),
@@ -311,7 +560,36 @@ fn save_native_settings<R: Runtime>(
         fs::create_dir_all(parent)
             .map_err(|error| format!("创建内置 Agent 设置目录失败: {error}"))?;
     }
+    let base_delay =
+        normalize_native_model_retry_base_delay_ms(Some(settings.model_retry_base_delay_ms));
     let raw = RawNativeSettings {
+        artifact_retention_days: Some(normalize_native_artifact_retention_days(Some(
+            settings.artifact_retention_days,
+        ))),
+        model_retry_max_retries: Some(normalize_native_model_retry_max_retries(Some(
+            settings.model_retry_max_retries,
+        ))),
+        model_retry_base_delay_ms: Some(base_delay),
+        model_retry_max_delay_ms: Some(normalize_native_model_retry_max_delay_ms(
+            Some(settings.model_retry_max_delay_ms),
+            base_delay,
+        )),
+        model_retry_backoff_factor: Some(normalize_native_model_retry_backoff_factor(Some(
+            settings.model_retry_backoff_factor,
+        ))),
+        bash_default_timeout_secs: Some(normalize_native_bash_default_timeout_secs(Some(
+            settings.bash_default_timeout_secs,
+        ))),
+        shell_snapshot_enabled: Some(settings.shell_snapshot_enabled),
+        rg_sidecar_enabled: Some(settings.rg_sidecar_enabled),
+        auto_compact_threshold_percent: Some(normalize_native_auto_compact_threshold_percent(
+            Some(settings.auto_compact_threshold_percent),
+        )),
+        microcompact_enabled: Some(settings.microcompact_enabled),
+        memory_enabled: Some(settings.memory_enabled),
+        memory_dream_interval: Some(normalize_native_memory_dream_interval(Some(
+            settings.memory_dream_interval,
+        ))),
         max_turns: Some(normalize_native_max_turns(Some(settings.max_turns))),
         max_subagent_turns: Some(normalize_native_max_subagent_turns(Some(
             settings.max_subagent_turns,
@@ -426,6 +704,56 @@ async fn merge_native_settings<R: Runtime>(
     if let Some(desktop_notifications) = updates.desktop_notifications {
         next.desktop_notifications = desktop_notifications;
     }
+    if let Some(artifact_retention_days) = updates.artifact_retention_days {
+        next.artifact_retention_days =
+            normalize_native_artifact_retention_days(Some(artifact_retention_days));
+    }
+    if let Some(model_retry_max_retries) = updates.model_retry_max_retries {
+        next.model_retry_max_retries =
+            normalize_native_model_retry_max_retries(Some(model_retry_max_retries));
+    }
+    if let Some(model_retry_base_delay_ms) = updates.model_retry_base_delay_ms {
+        next.model_retry_base_delay_ms =
+            normalize_native_model_retry_base_delay_ms(Some(model_retry_base_delay_ms));
+    }
+    if let Some(model_retry_max_delay_ms) = updates.model_retry_max_delay_ms {
+        next.model_retry_max_delay_ms = normalize_native_model_retry_max_delay_ms(
+            Some(model_retry_max_delay_ms),
+            next.model_retry_base_delay_ms,
+        );
+    }
+    next.model_retry_max_delay_ms = normalize_native_model_retry_max_delay_ms(
+        Some(next.model_retry_max_delay_ms),
+        next.model_retry_base_delay_ms,
+    );
+    if let Some(model_retry_backoff_factor) = updates.model_retry_backoff_factor {
+        next.model_retry_backoff_factor =
+            normalize_native_model_retry_backoff_factor(Some(model_retry_backoff_factor));
+    }
+    if let Some(bash_default_timeout_secs) = updates.bash_default_timeout_secs {
+        next.bash_default_timeout_secs =
+            normalize_native_bash_default_timeout_secs(Some(bash_default_timeout_secs));
+    }
+    if let Some(shell_snapshot_enabled) = updates.shell_snapshot_enabled {
+        next.shell_snapshot_enabled = shell_snapshot_enabled;
+    }
+    if let Some(rg_sidecar_enabled) = updates.rg_sidecar_enabled {
+        next.rg_sidecar_enabled = rg_sidecar_enabled;
+    }
+    if let Some(auto_compact_threshold_percent) = updates.auto_compact_threshold_percent {
+        next.auto_compact_threshold_percent =
+            normalize_native_auto_compact_threshold_percent(Some(auto_compact_threshold_percent));
+    }
+    if let Some(microcompact_enabled) = updates.microcompact_enabled {
+        next.microcompact_enabled = microcompact_enabled;
+    }
+    if let Some(memory_enabled) = updates.memory_enabled {
+        next.memory_enabled = memory_enabled;
+    }
+    if let Some(memory_dream_interval) = updates.memory_dream_interval {
+        next.memory_dream_interval =
+            normalize_native_memory_dream_interval(Some(memory_dream_interval));
+    }
     if let Some(hooks) = updates.hooks {
         next.hooks = normalize_native_hooks(hooks);
     }
@@ -475,6 +803,28 @@ fn native_settings_activity_details(settings: &NativeSettings) -> String {
         },
         settings.hooks.len()
     )
+}
+
+/// 由设置得到模型层重试配置（指数退避 + 抖动）。
+pub fn model_retry_config(settings: &NativeSettings) -> crate::native::model::RetryConfig {
+    crate::native::model::RetryConfig {
+        max_retries: settings.model_retry_max_retries.max(0) as u32,
+        base_delay_ms: settings.model_retry_base_delay_ms.max(1) as u64,
+        max_delay_ms: settings
+            .model_retry_max_delay_ms
+            .max(settings.model_retry_base_delay_ms)
+            .max(1) as u64,
+        backoff_factor: settings.model_retry_backoff_factor,
+        jitter: true,
+    }
+}
+
+pub fn effective_model_retry_config<R: Runtime>(
+    app: &AppHandle<R>,
+) -> crate::native::model::RetryConfig {
+    load_native_settings(app)
+        .map(|settings| model_retry_config(&settings))
+        .unwrap_or_default()
 }
 
 pub fn effective_subagent_policy<R: Runtime>(app: &AppHandle<R>) -> String {
@@ -592,13 +942,33 @@ pub fn hook_matches(matcher: &str, tool_name: &str) -> bool {
 pub fn normalize_native_hooks(hooks: Vec<NativeHook>) -> Vec<NativeHook> {
     let mut out = Vec::new();
     for (index, hook) in hooks.into_iter().take(MAX_NATIVE_HOOKS).enumerate() {
+        let handler_type = normalize_hook_handler_type(&hook.handler_type).to_string();
         let command = hook.command.trim().to_string();
-        if command.is_empty() {
+        let url = hook
+            .url
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(ToOwned::to_owned);
+        let agent_prompt = hook
+            .agent_prompt
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(ToOwned::to_owned);
+        // 每种处理器都要有自己的执行目标，否则视为无效条目。
+        let valid = match handler_type.as_str() {
+            HOOK_HANDLER_HTTP => url
+                .as_deref()
+                .is_some_and(|value| value.starts_with("http://") || value.starts_with("https://")),
+            HOOK_HANDLER_AGENT => agent_prompt.is_some(),
+            _ => !command.is_empty(),
+        };
+        if !valid {
             continue;
         }
-        let event = match hook.event.trim() {
-            HOOK_EVENT_POST_TOOL_USE => HOOK_EVENT_POST_TOOL_USE.to_string(),
-            _ => HOOK_EVENT_PRE_TOOL_USE.to_string(),
+        let Some(event) = normalize_hook_event(&hook.event) else {
+            continue;
         };
         let matcher = {
             let matcher = hook.matcher.trim();
@@ -620,11 +990,15 @@ pub fn normalize_native_hooks(hooks: Vec<NativeHook>) -> Vec<NativeHook> {
         };
         out.push(NativeHook {
             id,
-            event,
+            event: event.to_string(),
             matcher,
             command,
             timeout_secs,
             enabled: hook.enabled,
+            handler_type,
+            url,
+            agent_prompt,
+            source: normalize_hook_source(&hook.source).to_string(),
         });
     }
     out
@@ -666,24 +1040,31 @@ mod tests {
     fn missing_confirm_flag_defaults_on() {
         let settings = normalize_settings(RawNativeSettings {
             max_turns: Some(40),
-            max_subagent_turns: None,
-            permission_mode: None,
-            confirm_high_risk: None,
-            max_concurrent_subagents: None,
-            subagent_policy: None,
-            context_window_tokens: None,
-            use_custom_context_window: None,
-            rollout_token_budget: None,
-            max_tool_output_tokens: None,
-            permission_timeout_secs: None,
-            subagent_budget_share_percent: None,
-            auto_checkpoint_after_tool_call: None,
-            checkpoint_retention_days: None,
-            desktop_notifications: None,
-            hooks: None,
-            global_prompt_template: None,
+            ..RawNativeSettings::default()
         });
         assert_eq!(settings.permission_mode, DEFAULT_NATIVE_PERMISSION_MODE);
+        assert_eq!(
+            settings.artifact_retention_days,
+            DEFAULT_NATIVE_ARTIFACT_RETENTION_DAYS
+        );
+        assert_eq!(
+            settings.model_retry_max_retries,
+            DEFAULT_NATIVE_MODEL_RETRY_MAX_RETRIES
+        );
+        assert_eq!(
+            settings.model_retry_base_delay_ms,
+            DEFAULT_NATIVE_MODEL_RETRY_BASE_DELAY_MS
+        );
+        assert_eq!(
+            settings.model_retry_max_delay_ms,
+            DEFAULT_NATIVE_MODEL_RETRY_MAX_DELAY_MS
+        );
+        assert_eq!(
+            settings.bash_default_timeout_secs,
+            DEFAULT_NATIVE_BASH_DEFAULT_TIMEOUT_SECS
+        );
+        assert!(settings.shell_snapshot_enabled);
+        assert!(settings.rg_sidecar_enabled);
         assert!(settings.hooks.is_empty());
         assert!(settings.global_prompt_template.is_empty());
         assert_eq!(
@@ -725,28 +1106,65 @@ mod tests {
     }
 
     #[test]
+    fn retry_settings_clamp_and_keep_max_above_base() {
+        let settings = normalize_settings(RawNativeSettings {
+            model_retry_max_retries: Some(99),
+            model_retry_base_delay_ms: Some(5_000),
+            model_retry_max_delay_ms: Some(1_000),
+            model_retry_backoff_factor: Some(9.0),
+            bash_default_timeout_secs: Some(0),
+            artifact_retention_days: Some(-1),
+            ..RawNativeSettings::default()
+        });
+        assert_eq!(
+            settings.model_retry_max_retries,
+            DEFAULT_NATIVE_MODEL_RETRY_MAX_RETRIES
+        );
+        assert_eq!(settings.model_retry_base_delay_ms, 5_000);
+        assert!(settings.model_retry_max_delay_ms >= settings.model_retry_base_delay_ms);
+        assert_eq!(
+            settings.model_retry_backoff_factor,
+            DEFAULT_NATIVE_MODEL_RETRY_BACKOFF_FACTOR
+        );
+        assert_eq!(
+            settings.bash_default_timeout_secs,
+            DEFAULT_NATIVE_BASH_DEFAULT_TIMEOUT_SECS
+        );
+        assert_eq!(
+            settings.artifact_retention_days,
+            DEFAULT_NATIVE_ARTIFACT_RETENTION_DAYS
+        );
+        let retry = model_retry_config(&settings);
+        assert_eq!(
+            retry.max_retries,
+            DEFAULT_NATIVE_MODEL_RETRY_MAX_RETRIES as u32
+        );
+        assert_eq!(retry.base_delay_ms, 5_000);
+    }
+
+    #[test]
     fn legacy_confirm_flag_maps_to_permission_mode() {
         let from_false = normalize_settings(RawNativeSettings {
             confirm_high_risk: Some(false),
             ..RawNativeSettings::default()
         });
-        assert_eq!(from_false.permission_mode, PERMISSION_MODE_FULL);
+        assert_eq!(from_false.permission_mode, PERMISSION_MODE_YOLO);
 
         let from_true = normalize_settings(RawNativeSettings {
             confirm_high_risk: Some(true),
             ..RawNativeSettings::default()
         });
-        assert_eq!(from_true.permission_mode, PERMISSION_MODE_CONFIRM);
+        assert_eq!(from_true.permission_mode, PERMISSION_MODE_DEFAULT);
 
         let from_none = normalize_settings(RawNativeSettings::default());
-        assert_eq!(from_none.permission_mode, PERMISSION_MODE_CONFIRM);
+        assert_eq!(from_none.permission_mode, PERMISSION_MODE_DEFAULT);
 
         let explicit = normalize_settings(RawNativeSettings {
-            permission_mode: Some(PERMISSION_MODE_AUTO_EDIT.to_string()),
+            permission_mode: Some(LEGACY_PERMISSION_MODE_AUTO_EDIT.to_string()),
             confirm_high_risk: Some(false),
             ..RawNativeSettings::default()
         });
-        assert_eq!(explicit.permission_mode, PERMISSION_MODE_AUTO_EDIT);
+        assert_eq!(explicit.permission_mode, PERMISSION_MODE_EDIT);
     }
 
     #[test]
@@ -755,31 +1173,60 @@ mod tests {
             normalize_permission_mode(None),
             DEFAULT_NATIVE_PERMISSION_MODE
         );
+        // 本项目旧名。
         assert_eq!(
             normalize_permission_mode(Some("confirm")),
-            PERMISSION_MODE_CONFIRM
+            PERMISSION_MODE_DEFAULT
         );
         assert_eq!(
             normalize_permission_mode(Some("auto_edit")),
-            PERMISSION_MODE_AUTO_EDIT
+            PERMISSION_MODE_EDIT
         );
         assert_eq!(
             normalize_permission_mode(Some("full")),
-            PERMISSION_MODE_FULL
+            PERMISSION_MODE_YOLO
         );
+        // 新名与 Claude Code 别名。
         assert_eq!(
             normalize_permission_mode(Some("yolo")),
-            DEFAULT_NATIVE_PERMISSION_MODE
+            PERMISSION_MODE_YOLO
         );
         assert_eq!(
-            permission_mode_label_zh(PERMISSION_MODE_CONFIRM),
-            "变更前确认"
+            normalize_permission_mode(Some("build")),
+            PERMISSION_MODE_BUILD
         );
         assert_eq!(
-            permission_mode_label_zh(PERMISSION_MODE_AUTO_EDIT),
-            "自动编辑"
+            normalize_permission_mode(Some("auto")),
+            PERMISSION_MODE_BUILD
         );
-        assert_eq!(permission_mode_label_zh(PERMISSION_MODE_FULL), "完全访问");
+        assert_eq!(
+            normalize_permission_mode(Some("acceptEdits")),
+            PERMISSION_MODE_EDIT
+        );
+        assert_eq!(
+            normalize_permission_mode(Some("bypassPermissions")),
+            PERMISSION_MODE_YOLO
+        );
+        assert_eq!(
+            normalize_permission_mode(Some("dontAsk")),
+            PERMISSION_MODE_YOLO
+        );
+        assert_eq!(
+            normalize_permission_mode(Some("plan")),
+            PERMISSION_MODE_DEFAULT
+        );
+        assert_eq!(permission_mode_label_zh("confirm"), "变更前确认");
+        assert_eq!(permission_mode_label_zh(PERMISSION_MODE_EDIT), "自动编辑");
+        assert_eq!(permission_mode_label_zh(PERMISSION_MODE_BUILD), "自动构建");
+        assert_eq!(permission_mode_label_zh(PERMISSION_MODE_YOLO), "完全访问");
+        assert!(permission_mode_auto_approves_edits(PERMISSION_MODE_EDIT));
+        assert!(permission_mode_auto_approves_edits(PERMISSION_MODE_BUILD));
+        assert!(!permission_mode_auto_approves_edits(
+            PERMISSION_MODE_DEFAULT
+        ));
+        assert!(permission_mode_auto_approves_build(PERMISSION_MODE_BUILD));
+        assert!(!permission_mode_auto_approves_build(PERMISSION_MODE_EDIT));
+        assert!(permission_mode_is_yolo("full"));
     }
 
     #[test]
@@ -1001,29 +1448,52 @@ mod tests {
         assert!(hook_matches("*", "Bash"));
         assert!(hook_matches("Bash, Write", "write"));
         assert!(!hook_matches("Read", "Bash"));
+        let mut http = NativeHook::shell("h", "PermissionRequest", "Bash", "", 20, true);
+        http.handler_type = "http".to_string();
+        http.url = Some(" https://hooks.example.com/permission ".to_string());
+        let mut bad_http = NativeHook::shell("bad", "Stop", "*", "", 20, true);
+        bad_http.handler_type = "http".to_string();
+        bad_http.url = Some("ftp://nope".to_string());
+        let mut agent = NativeHook::shell("a", "stop", "*", "", 20, true);
+        agent.handler_type = "agent".to_string();
+        agent.agent_prompt = Some("判断是否完成".to_string());
         let hooks = normalize_native_hooks(vec![
-            NativeHook {
-                id: String::new(),
-                event: "nope".to_string(),
-                matcher: String::new(),
-                command: " echo hi ".to_string(),
-                timeout_secs: 0,
-                enabled: true,
-            },
-            NativeHook {
-                id: "x".to_string(),
-                event: HOOK_EVENT_POST_TOOL_USE.to_string(),
-                matcher: "ApplyPatch".to_string(),
-                command: String::new(),
-                timeout_secs: 15,
-                enabled: false,
-            },
+            NativeHook::shell("", "pre_tool_use", "", " echo hi ", 0, true),
+            // 未知事件直接丢弃。
+            NativeHook::shell("nope", "nope", "", "echo x", 10, true),
+            // command 处理器缺命令也丢弃。
+            NativeHook::shell("x", HOOK_EVENT_POST_TOOL_USE, "ApplyPatch", "", 15, false),
+            http,
+            bad_http,
+            agent,
         ]);
-        assert_eq!(hooks.len(), 1);
+        assert_eq!(hooks.len(), 3);
         assert_eq!(hooks[0].id, "hook-1");
         assert_eq!(hooks[0].event, HOOK_EVENT_PRE_TOOL_USE);
         assert_eq!(hooks[0].matcher, "*");
         assert_eq!(hooks[0].timeout_secs, DEFAULT_NATIVE_HOOK_TIMEOUT_SECS);
         assert_eq!(hooks[0].command, "echo hi");
+        assert_eq!(hooks[0].handler_type, HOOK_HANDLER_COMMAND);
+        assert_eq!(hooks[1].event, HOOK_EVENT_PERMISSION_REQUEST);
+        assert_eq!(hooks[1].handler_type, HOOK_HANDLER_HTTP);
+        assert_eq!(
+            hooks[1].url.as_deref(),
+            Some("https://hooks.example.com/permission")
+        );
+        assert_eq!(hooks[2].event, HOOK_EVENT_STOP);
+        assert_eq!(hooks[2].handler_type, HOOK_HANDLER_AGENT);
+        assert_eq!(
+            normalize_hook_event("SessionStart"),
+            Some(HOOK_EVENT_SESSION_START)
+        );
+        assert_eq!(
+            normalize_hook_event("PostToolUseFailure"),
+            Some(HOOK_EVENT_POST_TOOL_USE_FAILURE)
+        );
+        assert_eq!(
+            normalize_hook_event("UserPromptSubmit"),
+            Some(HOOK_EVENT_USER_PROMPT_SUBMIT)
+        );
+        assert_eq!(normalize_hook_event("unknown"), None);
     }
 }

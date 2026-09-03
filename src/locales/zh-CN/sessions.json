@@ -57,30 +57,41 @@
   "collapseTools": "收起工具调用",
   "toolResult": "工具结果",
   "permissionTitle": "需要确认高风险操作",
+  "permissionRuleTitle": "权限规则要求确认",
   "permissionAllowOnce": "允许一次",
   "permissionAllowSession": "本会话允许",
   "permissionAllowServer": "允许该服务器",
+  "permissionAllowAlways": "总是允许 {{pattern}}（保存规则）",
   "permissionDeny": "拒绝",
   "planQuestionTitle": "计划模式提问",
   "planSkip": "跳过",
   "planSubmit": "提交回答",
+  "planApprovalTitle": "Agent 提交了计划",
+  "planApprovalHint": "批准后 Agent 开始实施；退回时可以写下要修改的地方。",
+  "planApprovalFeedbackPlaceholder": "可选：给 Agent 的反馈或补充要求",
+  "planApprovalApprove": "批准并开始实施",
+  "planApprovalReject": "退回修改",
   "model": "模型",
   "effort": "思考等级",
   "permissionMode": "权限",
   "permission": {
-    "confirm": {
+    "default": {
       "title": "变更前确认",
       "description": "改文件前先问我。"
     },
-    "auto_edit": {
+    "edit": {
       "title": "自动编辑",
       "description": "自动编辑文件。"
+    },
+    "build": {
+      "title": "自动构建",
+      "description": "编辑、不透明命令与只读 MCP 直接执行。"
     },
     "plan": {
       "title": "计划模式",
       "description": "编辑前先出计划。"
     },
-    "full": {
+    "yolo": {
       "title": "完全访问",
       "description": "减少确认次数。"
     }
@@ -141,5 +152,25 @@
   "needWorkspace": "请先选择工作区",
   "needChannel": "请先选择 AI 渠道和模型",
   "manageModels": "管理模型",
-  "emptyPrompt": "请输入内容"
+  "emptyPrompt": "请输入内容",
+  "compactNeedsLiveSession": "/compact 需要一个运行中的会话。",
+  "compactBoundary": "上下文已压缩 · {{trigger}} · {{source}}",
+  "compactTrigger": {
+    "auto": "自动",
+    "manual": "手动",
+    "reactive": "溢出后被动",
+    "downshift": "模型窗口变小"
+  },
+  "compactSource": {
+    "microcompact": "微压缩",
+    "model": "模型摘要",
+    "local": "本地摘要",
+    "reset": "重置"
+  },
+  "forkNeedsSession": "/fork 需要先选中一个会话。",
+  "goalCleared": "目标已清除",
+  "goalStatus": {
+    "active": "进行中",
+    "completed": "已完成"
+  }
 }

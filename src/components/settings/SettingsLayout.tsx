@@ -7,13 +7,16 @@ import { useChannelStore } from "@/stores/channelStore";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { AboutSection } from "./AboutSection";
 import { AppearanceSection } from "./AppearanceSection";
+import { AutomationsSection } from "./AutomationsSection";
 import { DatabaseSection } from "./DatabaseSection";
 import { GeneralSection } from "./GeneralSection";
 import { AiChannelsSettingsTab } from "./AiChannelsSettingsTab";
 import { McpSettingsTab } from "./McpSettingsTab";
+import { MemorySection } from "./MemorySection";
 import { NativeHooksSettingsCard } from "./NativeHooksSettingsCard";
 import { NativeRuntimeSection } from "./NativeRuntimeSection";
 import { NativeSkillsSettingsCard } from "./NativeSkillsSettingsCard";
+import { PermissionRulesSection } from "./PermissionRulesSection";
 import { SshSettingsSection } from "./SshSettingsSection";
 import { SubagentsSettingsTab } from "./SubagentsSettingsTab";
 import { UsageSection } from "./UsageSection";
@@ -25,7 +28,16 @@ const GROUPS = [
   },
   {
     id: "agent",
-    items: ["runtime", "subagents", "mcp", "skills", "hooks"],
+    items: [
+      "runtime",
+      "permissions",
+      "memory",
+      "automations",
+      "subagents",
+      "mcp",
+      "skills",
+      "hooks",
+    ],
   },
   {
     id: "data",
@@ -87,6 +99,9 @@ export function SettingsLayout() {
           {current === "channels" ? <AiChannelsSettingsTab /> : null}
           {current === "ssh" ? <SshSettingsSection /> : null}
           {current === "runtime" ? <NativeRuntimeSection /> : null}
+          {current === "permissions" ? <PermissionRulesSection /> : null}
+          {current === "memory" ? <MemorySection /> : null}
+          {current === "automations" ? <AutomationsSection /> : null}
           {current === "subagents" ? <SubagentsSettingsTab /> : null}
           {current === "mcp" ? <McpSettingsTab /> : null}
           {current === "skills" ? <NativeSkillsSettingsCard /> : null}

@@ -11,8 +11,8 @@ use tokio::sync::Mutex;
 use crate::app::network_settings::{load_network_settings, NetworkSettings};
 use crate::app::shared::{new_id, normalize_optional_text, now_sqlite, sqlite_pool};
 use crate::db::models::{
-    AiChannel, AiChannelRecord, CreateAiChannel, ListAiChannelModelsResult, TestAiChannelPayload,
-    TestAiChannelResult, UpdateAiChannel,
+    AiChannel, AiChannelRecord, ChannelModelConfig, CreateAiChannel, ListAiChannelModelsResult,
+    TestAiChannelPayload, TestAiChannelResult, UpdateAiChannel,
 };
 use crate::native::manager::NativeAgentManager;
 use crate::native::model::{ModelClient, ModelClientConfig, RetryConfig};
@@ -199,6 +199,15 @@ pub(crate) async fn list_ai_channels_with(pool: &SqlitePool) -> Result<Vec<AiCha
     Ok(channels)
 }
 
+/// 轻量模型必须是该渠道模型列表里的一个；空或不在列表里则不设置。
+fn normalize_lite_model(value: Option<&str>, models: &[ChannelModelConfig]) -> Option<String> {
+    let trimmed = value.map(str::trim).filter(|item| !item.is_empty())?;
+    models
+        .iter()
+        .any(|model| model.id == trimmed)
+        .then(|| trimmed.to_string())
+}
+
 pub(crate) async fn create_ai_channel_with(
     pool: &SqlitePool,
     payload: CreateAiChannel,
@@ -216,9 +225,10 @@ pub(crate) async fn create_ai_channel_with(
     let id = new_id();
     let now = now_sqlite();
     let api_key = normalize_optional_text(payload.api_key.as_deref());
+    let lite_model = normalize_lite_model(payload.lite_model.as_deref(), &models);
 
     sqlx::query(
-        "INSERT INTO ai_channels (id, name, protocol, base_url, api_key, extra_headers_json, models_json, enabled, created_at, updated_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
+        "INSERT INTO ai_channels (id, name, protocol, base_url, api_key, extra_headers_json, models_json, enabled, created_at, updated_at, lite_model) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)",
     )
     .bind(&id)
     .bind(&name)
@@ -230,6 +240,7 @@ pub(crate) async fn create_ai_channel_with(
     .bind(enabled)
     .bind(&now)
     .bind(&now)
+    .bind(&lite_model)
     .execute(pool)
     .await
     .map_err(|error| format!("创建渠道失败: {error}"))?;
@@ -269,6 +280,12 @@ pub(crate) async fn update_ai_channel_with(
         }
         None => current.models_json.clone(),
     };
+    let effective_models = parse_channel_models_json(&models_json).unwrap_or_default();
+    let lite_model = match updates.lite_model {
+        Some(Some(value)) => normalize_lite_model(Some(&value), &effective_models),
+        Some(None) => None,
+        None => normalize_lite_model(current.lite_model.as_deref(), &effective_models),
+    };
     let enabled = updates.enabled.map(i64::from).unwrap_or(current.enabled);
     let now = now_sqlite();
     let incoming_key = normalize_optional_text(updates.api_key.as_deref());
@@ -279,7 +296,7 @@ pub(crate) async fn update_ai_channel_with(
     };
 
     sqlx::query(
-        "UPDATE ai_channels SET name = $1, protocol = $2, base_url = $3, api_key = $4, extra_headers_json = $5, models_json = $6, enabled = $7, updated_at = $8 WHERE id = $9",
+        "UPDATE ai_channels SET name = $1, protocol = $2, base_url = $3, api_key = $4, extra_headers_json = $5, models_json = $6, enabled = $7, updated_at = $8, lite_model = $10 WHERE id = $9",
     )
     .bind(&name)
     .bind(&protocol)
@@ -290,6 +307,7 @@ pub(crate) async fn update_ai_channel_with(
     .bind(enabled)
     .bind(&now)
     .bind(id)
+    .bind(&lite_model)
     .execute(pool)
     .await
     .map_err(|error| format!("更新渠道失败: {error}"))?;
@@ -404,7 +422,7 @@ pub async fn list_ai_channel_models<R: Runtime>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::db::models::{ChannelModelConfig, UpdateAiChannel};
+    use crate::db::models::UpdateAiChannel;
     use crate::db::test_support::setup_migrated_pool;
 
     fn sample_create() -> CreateAiChannel {
@@ -422,6 +440,7 @@ mod tests {
                 thinking_level: None,
                 thinking_levels: None,
             }]),
+            lite_model: Some("gpt-4o".to_string()),
             enabled: Some(true),
         }
     }
@@ -465,6 +484,7 @@ mod tests {
                     api_key: None,
                     extra_headers_json: None,
                     models: None,
+                    lite_model: None,
                     enabled: None,
                 },
             )
@@ -473,6 +493,42 @@ mod tests {
             assert_eq!(updated.name, "renamed");
             assert_eq!(updated.api_key.as_deref(), Some("sk-live"));
             assert!(updated.api_key_configured);
+            // 轻量模型保持不变；显式清空后为 None；不在模型列表里的值被忽略。
+            assert_eq!(updated.lite_model.as_deref(), Some("gpt-4o"));
+            let cleared = update_ai_channel_with(
+                &pool,
+                &created.id,
+                UpdateAiChannel {
+                    name: None,
+                    protocol: None,
+                    base_url: None,
+                    api_key: None,
+                    extra_headers_json: None,
+                    models: None,
+                    lite_model: Some(None),
+                    enabled: None,
+                },
+            )
+            .await
+            .expect("clear lite");
+            assert!(cleared.lite_model.is_none());
+            let bogus = update_ai_channel_with(
+                &pool,
+                &created.id,
+                UpdateAiChannel {
+                    name: None,
+                    protocol: None,
+                    base_url: None,
+                    api_key: None,
+                    extra_headers_json: None,
+                    models: None,
+                    lite_model: Some(Some("not-a-model".to_string())),
+                    enabled: None,
+                },
+            )
+            .await
+            .expect("bogus lite");
+            assert!(bogus.lite_model.is_none());
         });
     }
 
@@ -503,6 +559,7 @@ mod tests {
             enabled: 1,
             created_at: "2026-08-20 00:00:00".to_string(),
             updated_at: "2026-08-20 00:00:00".to_string(),
+            lite_model: None,
         };
         assert!(require_channel_api_key(&record).is_err());
         record.api_key = Some(" sk-live ".to_string());

@@ -10,7 +10,99 @@ export type TurnSegmentKind =
   | "assistant"
   | "system"
   | "usage"
-  | "retry";
+  | "retry"
+  | "compact"
+  | "goal";
+
+export type CompactTrigger = "auto" | "manual" | "reactive" | "downshift";
+
+export interface CompactBoundary {
+  trigger: CompactTrigger | string;
+  source: "microcompact" | "model" | "local" | "reset" | string;
+  pre_tokens: number;
+  post_tokens: number;
+  pre_messages: number;
+  post_messages: number;
+  instructions?: string | null;
+}
+
+export const COMPACT_BOUNDARY_PREFIX = "[COMPACT_BOUNDARY]";
+
+/** `[COMPACT_BOUNDARY] {json}` → 结构化压缩边界；不是该格式返回 null。 */
+export function parseCompactBoundary(text: string): CompactBoundary | null {
+  const line = text.trim();
+  if (!line.startsWith(COMPACT_BOUNDARY_PREFIX)) return null;
+  const json = line.slice(COMPACT_BOUNDARY_PREFIX.length).trim();
+  try {
+    const value: unknown = JSON.parse(json);
+    if (!value || typeof value !== "object") return null;
+    const record = value as Record<string, unknown>;
+    const num = (key: string) => (typeof record[key] === "number" ? (record[key] as number) : 0);
+    return {
+      trigger: typeof record.trigger === "string" ? record.trigger : "auto",
+      source: typeof record.source === "string" ? record.source : "local",
+      pre_tokens: num("pre_tokens"),
+      post_tokens: num("post_tokens"),
+      pre_messages: num("pre_messages"),
+      post_messages: num("post_messages"),
+      instructions: typeof record.instructions === "string" ? record.instructions : null,
+    };
+  } catch {
+    return null;
+  }
+}
+
+export function isCompactBoundaryLine(text: string): boolean {
+  return text.trimStart().startsWith(COMPACT_BOUNDARY_PREFIX);
+}
+
+export const GOAL_LINE_PREFIX = "[GOAL]";
+
+export interface ParsedGoalLine {
+  cleared: boolean;
+  title: string;
+  status: string;
+  checklist: { item: string; done: boolean }[];
+  note: string | null;
+}
+
+/** `[GOAL] {json}` → 当前目标；`{"cleared":true}` 表示已清除。 */
+export function parseGoalLine(text: string): ParsedGoalLine | null {
+  const line = text.trim();
+  if (!line.startsWith(GOAL_LINE_PREFIX)) return null;
+  try {
+    const value: unknown = JSON.parse(line.slice(GOAL_LINE_PREFIX.length).trim());
+    if (!value || typeof value !== "object") return null;
+    const record = value as Record<string, unknown>;
+    if (record.cleared === true) {
+      return { cleared: true, title: "", status: "cleared", checklist: [], note: null };
+    }
+    const checklist = Array.isArray(record.checklist)
+      ? record.checklist
+          .map((entry) => {
+            if (!entry || typeof entry !== "object") return null;
+            const item = entry as Record<string, unknown>;
+            return typeof item.item === "string"
+              ? { item: item.item, done: item.done === true }
+              : null;
+          })
+          .filter((entry): entry is { item: string; done: boolean } => entry != null)
+      : [];
+    return {
+      cleared: false,
+      title: typeof record.title === "string" ? record.title : "",
+      status: typeof record.status === "string" ? record.status : "active",
+      checklist,
+      note: typeof record.note === "string" ? record.note : null,
+    };
+  } catch {
+    return null;
+  }
+}
+
+export function isGoalLine(text: string): boolean {
+  return text.trimStart().startsWith(GOAL_LINE_PREFIX);
+}
 
 export interface ParsedUsage {
   input?: number;
@@ -531,6 +623,8 @@ export function groupSessionLines(lines: RawSessionLine[]): GroupedSessionItem[]
 
 function segmentKey(item: GroupedSessionItem): TurnSegmentKind | "skip" | "file_change" {
   if (item.kind === "user") return "skip";
+  if (isCompactBoundaryLine(item.text)) return "compact";
+  if (isGoalLine(item.text)) return "goal";
   if (isRetryLine(item.text)) return "retry";
   if (isThinkingItem(item)) return "thinking";
   if (isUsageItem(item)) return "usage";
@@ -562,7 +656,13 @@ export function buildTurnSegments(items: GroupedSessionItem[]): TurnSegment[] {
     }
     if (currentKey === "file_change") {
       segments.push(flushFileChanges(currentItems));
-    } else if (currentKey === "terminal" || currentKey === "todo" || currentKey === "usage") {
+    } else if (
+      currentKey === "terminal" ||
+      currentKey === "todo" ||
+      currentKey === "usage" ||
+      currentKey === "compact" ||
+      currentKey === "goal"
+    ) {
       for (const item of currentItems) {
         segments.push({ kind: currentKey, items: [item] });
       }
@@ -577,7 +677,7 @@ export function buildTurnSegments(items: GroupedSessionItem[]): TurnSegment[] {
     let key = segmentKey(item);
     if (currentKey === "retry" && isRetryFailureLine(item.text)) key = "retry";
     if (key === "skip") continue;
-    const mergeable = key !== "terminal" && key !== "todo";
+    const mergeable = key !== "terminal" && key !== "todo" && key !== "compact" && key !== "goal";
     if (currentKey !== key || !mergeable) {
       flush();
       currentKey = key;

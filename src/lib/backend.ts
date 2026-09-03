@@ -14,6 +14,7 @@ import type {
   AgentSessionStarted,
   AiChannel,
   CreateAiChannelInput,
+  CreateNativeAutomationInput,
   CreateNativeSubagentInput,
   CreateSshConfigInput,
   CreateWorkspaceInput,
@@ -33,15 +34,31 @@ import type {
   ListAiChannelModelsResult,
   ListNativeApiCallLogsInput,
   McpServersDocument,
+  McpOAuthEvent,
+  McpOAuthStart,
+  McpOAuthStatus,
+  ExpandedSlashCommand,
+  NativePlugin,
+  NativePluginsView,
+  NativeSlashCommand,
   ModelCatalogEntry,
   NativeApiCallLogDetail,
   NativeApiCallLogPage,
+  NativeAutomation,
   NativeContextUsage,
   NativeGlobalSkills,
+  NativeMemoryEntry,
+  NativeMemoryView,
   NativePermissionDecision,
   NativePermissionRequest,
+  NativePermissionRulesView,
+  NativePlanApprovalRequest,
   NativePlanQuestionRequest,
   NativeSettings,
+  PermissionRule,
+  PermissionRuleEffect,
+  PermissionRuleScope,
+  PermissionRules,
   NativeSubagent,
   NativeTextDelta,
   NativeTurnState,
@@ -59,6 +76,7 @@ import type {
   TestAiChannelInput,
   TestAiChannelResult,
   UpdateAiChannelInput,
+  UpdateNativeAutomationInput,
   UpdateNativeSettingsInput,
   UpdateNativeSubagentInput,
   UpdateSshConfigInput,
@@ -403,6 +421,125 @@ export function answerNativePlanQuestion(
   return invoke("answer_native_plan_question", { sessionRecordId, requestId, skipped, answers });
 }
 
+export function listNativeAutomations(workspaceId?: string | null): Promise<NativeAutomation[]> {
+  return invoke("list_native_automations", { workspaceId: workspaceId ?? null });
+}
+
+export function createNativeAutomation(
+  payload: CreateNativeAutomationInput,
+): Promise<NativeAutomation> {
+  return invoke("create_native_automation", { payload });
+}
+
+export function updateNativeAutomation(
+  id: string,
+  updates: UpdateNativeAutomationInput,
+): Promise<NativeAutomation> {
+  return invoke("update_native_automation", { id, updates });
+}
+
+export function deleteNativeAutomation(id: string): Promise<boolean> {
+  return invoke("delete_native_automation", { id });
+}
+
+export function runNativeAutomationNow(id: string): Promise<string> {
+  return invoke("run_native_automation_now", { id });
+}
+
+export function forkNativeSession(
+  sessionRecordId: string,
+  checkpointId?: string | null,
+): Promise<string> {
+  return invoke("fork_native_session", {
+    sessionRecordId,
+    checkpointId: checkpointId?.trim() ? checkpointId.trim() : null,
+  });
+}
+
+export function listNativeMemories(workspaceId: string): Promise<NativeMemoryView> {
+  return invoke("list_native_memories", { workspaceId });
+}
+
+export function saveNativeMemory(
+  workspaceId: string,
+  entry: { name: string; kind: string; description: string; body: string },
+): Promise<NativeMemoryEntry> {
+  return invoke("save_native_memory", { workspaceId, ...entry });
+}
+
+export function deleteNativeMemory(workspaceId: string, fileName: string): Promise<boolean> {
+  return invoke("delete_native_memory", { workspaceId, fileName });
+}
+
+export function openNativeMemoryDir(workspaceId: string): Promise<string> {
+  return invoke("open_native_memory_dir", { workspaceId });
+}
+
+export function dreamNativeMemory(
+  workspaceId: string,
+  channelId: string,
+  model?: string | null,
+): Promise<string> {
+  return invoke("dream_native_memory", { workspaceId, channelId, model: model ?? null });
+}
+
+export function compactNativeSession(
+  sessionRecordId: string,
+  instructions?: string,
+): Promise<boolean> {
+  return invoke("compact_native_session", {
+    sessionRecordId,
+    instructions: instructions?.trim() ? instructions.trim() : null,
+  });
+}
+
+export function resolveNativePlanApproval(
+  sessionRecordId: string,
+  requestId: string,
+  approved: boolean,
+  feedback?: string,
+): Promise<void> {
+  return invoke("resolve_native_plan_approval", {
+    sessionRecordId,
+    requestId,
+    approved,
+    feedback: feedback ?? null,
+  });
+}
+
+export function getNativePermissionRules(
+  workspaceId?: string | null,
+): Promise<NativePermissionRulesView> {
+  return invoke("get_native_permission_rules", { workspaceId: workspaceId ?? null });
+}
+
+export function updateNativePermissionRules(
+  scope: PermissionRuleScope,
+  rules: PermissionRules,
+  workspaceId?: string | null,
+): Promise<NativePermissionRulesView> {
+  return invoke("update_native_permission_rules", {
+    workspaceId: workspaceId ?? null,
+    scope,
+    rules,
+  });
+}
+
+export function addNativePermissionRule(
+  effect: PermissionRuleEffect,
+  rule: PermissionRule,
+  workspaceId?: string | null,
+): Promise<PermissionRule> {
+  return invoke("add_native_permission_rule", { workspaceId: workspaceId ?? null, effect, rule });
+}
+
+export function deleteNativePermissionRule(
+  id: string,
+  workspaceId?: string | null,
+): Promise<boolean> {
+  return invoke("delete_native_permission_rule", { workspaceId: workspaceId ?? null, id });
+}
+
 export function getNativeSettings(): Promise<NativeSettings> {
   return invoke("get_native_settings");
 }
@@ -435,8 +572,8 @@ export const NATIVE_SUBAGENT_CUSTOM_TOOLS = [
 
 export type NativeSubagentCustomTool = (typeof NATIVE_SUBAGENT_CUSTOM_TOOLS)[number];
 
-export function listNativeSubagents(): Promise<NativeSubagent[]> {
-  return invoke("list_native_subagents");
+export function listNativeSubagents(workspaceId?: string | null): Promise<NativeSubagent[]> {
+  return invoke("list_native_subagents", { workspaceId: workspaceId ?? null });
 }
 
 export function createNativeSubagent(payload: CreateNativeSubagentInput): Promise<NativeSubagent> {
@@ -480,6 +617,69 @@ export function exportMcpServersSnippet(): Promise<string> {
   return invoke("export_mcp_servers_snippet");
 }
 
+export function startMcpOAuth(serverId: string): Promise<McpOAuthStart> {
+  return invoke("start_mcp_oauth", { serverId });
+}
+
+export function getMcpOAuthStatus(serverId: string): Promise<McpOAuthStatus> {
+  return invoke("get_mcp_oauth_status", { serverId });
+}
+
+export function clearMcpOAuth(serverId: string): Promise<void> {
+  return invoke("clear_mcp_oauth", { serverId });
+}
+
+export function onNativeMcpOAuth(callback: (event: McpOAuthEvent) => void): Promise<UnlistenFn> {
+  return listen<McpOAuthEvent>("native-mcp-oauth", (event) => {
+    callback(event.payload);
+  });
+}
+
+export function listNativeSlashCommands(
+  workspaceId?: string | null,
+): Promise<NativeSlashCommand[]> {
+  return invoke("list_native_slash_commands", { workspaceId: workspaceId ?? null });
+}
+
+export function expandNativeSlashCommand(
+  workspaceId: string | null,
+  name: string,
+  args?: string,
+): Promise<ExpandedSlashCommand> {
+  return invoke("expand_native_slash_command", { workspaceId, name, args: args ?? null });
+}
+
+export function openNativeCommandsDir(): Promise<string> {
+  return invoke("open_native_commands_dir");
+}
+
+export function listNativePlugins(workspaceId?: string | null): Promise<NativePluginsView> {
+  return invoke("list_native_plugins", { workspaceId: workspaceId ?? null });
+}
+
+export function installNativePlugin(source: string): Promise<NativePlugin> {
+  return invoke("install_native_plugin", { source });
+}
+
+export function setNativePluginEnabled(name: string, enabled: boolean): Promise<void> {
+  return invoke("set_native_plugin_enabled", { name, enabled });
+}
+
+export function setNativePluginUserConfig(
+  name: string,
+  values: Record<string, string>,
+): Promise<void> {
+  return invoke("set_native_plugin_user_config", { name, values });
+}
+
+export function uninstallNativePlugin(name: string): Promise<void> {
+  return invoke("uninstall_native_plugin", { name });
+}
+
+export function openNativePluginsDir(): Promise<string> {
+  return invoke("open_native_plugins_dir");
+}
+
 export function onNativeStdout(
   callback: (output: AgentSessionOutput) => void,
 ): Promise<UnlistenFn> {
@@ -520,6 +720,14 @@ export function onNativePlanQuestion(
   callback: (request: NativePlanQuestionRequest) => void,
 ): Promise<UnlistenFn> {
   return listen<NativePlanQuestionRequest>("native-plan-question", (event) => {
+    callback(event.payload);
+  });
+}
+
+export function onNativePlanApprovalRequest(
+  callback: (request: NativePlanApprovalRequest) => void,
+): Promise<UnlistenFn> {
+  return listen<NativePlanApprovalRequest>("native-plan-approval-request", (event) => {
     callback(event.payload);
   });
 }

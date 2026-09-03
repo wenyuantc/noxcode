@@ -346,6 +346,71 @@ pub fn get_all_migrations() -> Vec<Migration> {
             "#,
             kind: tauri_plugin_sql::MigrationKind::Up,
         },
+        Migration {
+            version: 8,
+            description: "tool result artifacts, call log operation/model role, channel lite model",
+            sql: r#"
+                CREATE TABLE native_tool_artifacts (
+                    id TEXT PRIMARY KEY,
+                    session_record_id TEXT NOT NULL,
+                    tool_call_id TEXT NOT NULL DEFAULT '',
+                    tool_name TEXT NOT NULL,
+                    bytes INTEGER NOT NULL DEFAULT 0,
+                    path TEXT NOT NULL,
+                    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+                );
+                CREATE INDEX idx_native_tool_artifacts_session
+                    ON native_tool_artifacts(session_record_id, created_at ASC);
+                CREATE INDEX idx_native_tool_artifacts_created
+                    ON native_tool_artifacts(created_at ASC);
+                ALTER TABLE native_api_call_logs ADD COLUMN operation TEXT NOT NULL DEFAULT 'agent_step';
+                ALTER TABLE native_api_call_logs ADD COLUMN model_role TEXT NOT NULL DEFAULT 'main';
+                ALTER TABLE ai_channels ADD COLUMN lite_model TEXT;
+            "#,
+            kind: tauri_plugin_sql::MigrationKind::Up,
+        },
+        Migration {
+            version: 9,
+            description: "cron automations and session goals",
+            sql: r#"
+                CREATE TABLE native_automations (
+                    id TEXT PRIMARY KEY,
+                    workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+                    name TEXT NOT NULL,
+                    prompt TEXT NOT NULL,
+                    cron TEXT NOT NULL,
+                    timezone TEXT,
+                    enabled INTEGER NOT NULL DEFAULT 1,
+                    channel_id TEXT REFERENCES ai_channels(id) ON DELETE SET NULL,
+                    model TEXT,
+                    last_run_at TEXT,
+                    next_run_at TEXT,
+                    last_session_id TEXT,
+                    last_error TEXT,
+                    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+                );
+                CREATE INDEX idx_native_automations_workspace
+                    ON native_automations(workspace_id, enabled);
+                CREATE INDEX idx_native_automations_next_run
+                    ON native_automations(enabled, next_run_at);
+
+                CREATE TABLE native_goals (
+                    id TEXT PRIMARY KEY,
+                    session_record_id TEXT NOT NULL REFERENCES agent_sessions(id) ON DELETE CASCADE,
+                    workspace_id TEXT,
+                    title TEXT NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'active',
+                    progress_json TEXT NOT NULL DEFAULT '[]',
+                    note TEXT,
+                    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+                );
+                CREATE INDEX idx_native_goals_session
+                    ON native_goals(session_record_id, updated_at DESC);
+            "#,
+            kind: tauri_plugin_sql::MigrationKind::Up,
+        },
     ]
 }
 
@@ -391,7 +456,7 @@ mod tests {
         for (index, migration) in get_all_migrations().iter().enumerate() {
             assert_eq!(migration.version, index as i64 + 1);
         }
-        assert_eq!(latest_migration_version(), 7);
+        assert_eq!(latest_migration_version(), 9);
         assert_eq!(
             get_all_migrations()
                 .last()
@@ -452,7 +517,7 @@ mod tests {
     }
 
     #[test]
-    fn latest_schema_has_nine_tables_without_profiles() {
+    fn latest_schema_has_twelve_tables_without_profiles() {
         tauri::async_runtime::block_on(async {
             let pool = setup_test_pool().await;
             let tables: Vec<String> = sqlx::query(table_names_query())
@@ -472,11 +537,34 @@ mod tests {
                     "ai_channels",
                     "git_checkpoints",
                     "native_api_call_logs",
+                    "native_automations",
+                    "native_goals",
                     "native_session_transcripts",
+                    "native_tool_artifacts",
                     "ssh_configs",
                     "workspaces",
                 ]
             );
+            let call_log_columns: Vec<String> = sqlx::query(
+                "SELECT name FROM pragma_table_info('native_api_call_logs') ORDER BY name",
+            )
+            .fetch_all(&pool)
+            .await
+            .expect("call log columns")
+            .into_iter()
+            .map(|row| row.get::<String, _>("name"))
+            .collect();
+            assert!(call_log_columns.iter().any(|name| name == "operation"));
+            assert!(call_log_columns.iter().any(|name| name == "model_role"));
+            let channel_columns: Vec<String> =
+                sqlx::query("SELECT name FROM pragma_table_info('ai_channels') ORDER BY name")
+                    .fetch_all(&pool)
+                    .await
+                    .expect("channel columns")
+                    .into_iter()
+                    .map(|row| row.get::<String, _>("name"))
+                    .collect();
+            assert!(channel_columns.iter().any(|name| name == "lite_model"));
         });
     }
 

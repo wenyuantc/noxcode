@@ -37,6 +37,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
+import { useWorkspaceStore } from "@/stores/workspaceStore";
 
 type NativeSubagentModelMode = "inherit" | "channel";
 type NativeSubagentToolMode = "all" | "custom";
@@ -403,7 +404,7 @@ export function SubagentsSettingsTab() {
     setError(null);
     try {
       const [subagents, channelItems, workspaceItems] = await Promise.all([
-        listNativeSubagents(),
+        listNativeSubagents(useWorkspaceStore.getState().activeWorkspaceId),
         listAiChannels(),
         listWorkspaces(),
       ]);
@@ -529,6 +530,7 @@ export function SubagentsSettingsTab() {
             <h3 className="text-sm font-medium">{t("subagents.title")}</h3>
             <p className="text-xs text-muted-foreground">{t("subagents.description")}</p>
             <p className="mt-2 text-xs text-muted-foreground">{t("subagents.howToCall")}</p>
+            <p className="mt-1 text-xs text-muted-foreground">{t("subagents.profilesHint")}</p>
           </div>
           <Button variant="outline" onClick={openCreate}>
             <Plus className="mr-1 h-4 w-4" />
@@ -574,16 +576,25 @@ export function SubagentsSettingsTab() {
                       : t("subagents.fields.scopeAll")}
                   </div>
                 </div>
-                <Button
-                  type="button"
-                  variant="outline"
-                  size="sm"
-                  className="shrink-0"
-                  onClick={() => openEdit(item)}
-                >
-                  <Pencil className="mr-1 h-3.5 w-3.5" />
-                  {t("subagents.actions.edit")}
-                </Button>
+                {item.source === "file" ? (
+                  <span
+                    className="shrink-0 rounded-md border px-2 py-1 text-xs text-muted-foreground"
+                    title={item.path ?? ""}
+                  >
+                    {t("subagents.fields.fileProfile")}
+                  </span>
+                ) : (
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    className="shrink-0"
+                    onClick={() => openEdit(item)}
+                  >
+                    <Pencil className="mr-1 h-3.5 w-3.5" />
+                    {t("subagents.actions.edit")}
+                  </Button>
+                )}
               </div>
             ))
           )}

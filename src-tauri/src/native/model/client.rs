@@ -15,7 +15,8 @@ use crate::native::protocol::{
 use crate::native::tools::CancelFlag;
 
 use super::anthropic::{
-    build_anthropic_body, parse_anthropic_json, parse_anthropic_sse, AnthropicStreamState,
+    apply_anthropic_prompt_cache, build_anthropic_body, parse_anthropic_json, parse_anthropic_sse,
+    AnthropicStreamState,
 };
 use super::call_log::{
     detect_response_encoding, extract_request_model, extract_thinking_level,
@@ -23,6 +24,7 @@ use super::call_log::{
     provider_reported_usage, redact_and_truncate_json, redact_and_truncate_text,
     request_thinking_enabled, sse_event_is_meaningful, sse_event_reports_usage, CallLogContext,
     NativeApiCallLogInsert, CALL_STATUS_CANCELLED, CALL_STATUS_FAILED, CALL_STATUS_SUCCESS,
+    MODEL_ROLE_MAIN, OPERATION_AGENT_STEP,
 };
 use super::openai::{
     build_openai_body, parse_max_output_token_limit, parse_openai_json, parse_openai_sse,
@@ -33,7 +35,8 @@ use super::responses::{
     parse_responses_sse_with_id, responses_input, ResponsesStreamState,
 };
 use super::retry::{
-    format_http_error, format_retry_line, is_retryable_error, redact_secrets, RetryConfig,
+    format_http_error, format_retry_line, is_retryable_error, parse_retry_after, redact_secrets,
+    RetryConfig,
 };
 use super::sse::{parse_sse, SseEvent, SseStreamParser};
 use super::types::{Message, StreamDelta, ToolSpec, Usage};
@@ -61,6 +64,8 @@ struct TimedHttpBody {
     duration_ms: i64,
     cancelled: bool,
     usage_reported: bool,
+    /// 服务端 `Retry-After`（限流 / 过载时给出），重试等待优先采用。
+    retry_after: Option<Duration>,
     /// `Some` when the body arrived as SSE and was consumed incrementally by
     /// the protocol state machine. `None` means the text fallback still owns
     /// parsing (complete JSON payloads, empty bodies, gateway errors).
@@ -115,6 +120,33 @@ pub struct ModelClientConfig {
     pub network: NetworkSettings,
 }
 
+/// Prompt cache 策略：`Auto` 只对官方端点开启（Anthropic 的 `cache_control`、
+/// OpenAI 的 `prompt_cache_key`），第三方兼容网关默认不改请求体。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PromptCacheMode {
+    #[default]
+    Auto,
+    On,
+    Off,
+}
+
+/// 官方端点才默认打开 prompt cache，避免兼容网关因未知字段报 400。
+pub fn host_supports_prompt_cache(base_url: &str, protocol: &str) -> bool {
+    let host = reqwest::Url::parse(base_url)
+        .ok()
+        .and_then(|url| url.host_str().map(|host| host.to_ascii_lowercase()))
+        .unwrap_or_default();
+    match protocol {
+        PROTOCOL_ANTHROPIC => host == "api.anthropic.com" || host.ends_with(".anthropic.com"),
+        PROTOCOL_OPENAI | PROTOCOL_CODEX => {
+            host == "api.openai.com"
+                || host.ends_with(".openai.com")
+                || host.ends_with(".openai.azure.com")
+        }
+        _ => false,
+    }
+}
+
 pub struct ChatRequest<'a> {
     pub messages: &'a [Message],
     pub tools: &'a [ToolSpec],
@@ -149,6 +181,9 @@ pub struct ModelClient {
     cancel: Option<CancelFlag>,
     call_log: Option<CallLogContext>,
     call_log_sink: Option<CallLogSink>,
+    prompt_cache: PromptCacheMode,
+    /// OpenAI / Responses 的 `prompt_cache_key`（按会话），Anthropic 忽略。
+    prompt_cache_key: Option<String>,
     /// Responses continuation ids are kept per conversation anchor. A client
     /// is cloned for child agents, so a map prevents a child request from
     /// accidentally continuing the parent's server-side conversation.
@@ -173,6 +208,8 @@ impl Clone for ModelClient {
             cancel: self.cancel.clone(),
             call_log: self.call_log.clone(),
             call_log_sink: self.call_log_sink.clone(),
+            prompt_cache: self.prompt_cache,
+            prompt_cache_key: self.prompt_cache_key.clone(),
             // A cloned client is used for child agents and must start its own
             // Responses conversation. Sharing this map would let a child with
             // a matching prompt accidentally attach to its parent's
@@ -196,6 +233,8 @@ impl ModelClient {
             cancel: self.cancel.clone(),
             call_log: self.call_log.clone(),
             call_log_sink: self.call_log_sink.clone(),
+            prompt_cache: self.prompt_cache,
+            prompt_cache_key: self.prompt_cache_key.clone(),
             continuations: self.continuations.clone(),
         }
     }
@@ -212,8 +251,52 @@ impl ModelClient {
             cancel: None,
             call_log: None,
             call_log_sink: None,
+            prompt_cache: PromptCacheMode::Auto,
+            prompt_cache_key: None,
             continuations: Arc::new(Mutex::new(HashMap::new())),
         })
+    }
+
+    pub fn with_prompt_cache(mut self, mode: PromptCacheMode) -> Self {
+        self.prompt_cache = mode;
+        self
+    }
+
+    /// 设置会话级 `prompt_cache_key`（OpenAI / Responses）。
+    pub fn with_prompt_cache_key(mut self, key: impl Into<String>) -> Self {
+        let key = key.into();
+        self.prompt_cache_key = if key.trim().is_empty() {
+            None
+        } else {
+            Some(key)
+        };
+        self
+    }
+
+    pub fn prompt_cache_enabled(&self) -> bool {
+        match self.prompt_cache {
+            PromptCacheMode::On => true,
+            PromptCacheMode::Off => false,
+            PromptCacheMode::Auto => {
+                host_supports_prompt_cache(&self.config.base_url, &self.config.protocol)
+            }
+        }
+    }
+
+    /// 在协议请求体上应用 prompt cache 标记。
+    fn apply_prompt_cache(&self, body: &mut Value) {
+        if !self.prompt_cache_enabled() {
+            return;
+        }
+        match self.config.protocol.as_str() {
+            PROTOCOL_ANTHROPIC => apply_anthropic_prompt_cache(body),
+            PROTOCOL_OPENAI | PROTOCOL_CODEX => {
+                if let Some(key) = &self.prompt_cache_key {
+                    body["prompt_cache_key"] = Value::String(key.clone());
+                }
+            }
+            _ => {}
+        }
     }
 
     pub fn with_retry_hook(mut self, hook: RetryHook) -> Self {
@@ -255,6 +338,17 @@ impl ModelClient {
     }
 
     fn build_body_with_continuation(
+        &self,
+        request: &ChatRequest<'_>,
+        stream: bool,
+        previous_response_id: Option<&str>,
+    ) -> Result<Value, String> {
+        let mut body = self.build_body_inner(request, stream, previous_response_id)?;
+        self.apply_prompt_cache(&mut body);
+        Ok(body)
+    }
+
+    fn build_body_inner(
         &self,
         request: &ChatRequest<'_>,
         stream: bool,
@@ -456,6 +550,7 @@ impl ModelClient {
         let call_id = new_id();
         let mut last_error = "模型请求失败".to_string();
         for attempt in 0..attempts {
+            let mut retry_after_hint: Option<Duration> = None;
             if self.is_cancelled() {
                 self.emit_call_log(
                     &call_id,
@@ -516,6 +611,7 @@ impl ModelClient {
                 }
                 Ok(timed) => {
                     last_error = format_http_error(timed.status, url, &timed.text);
+                    retry_after_hint = timed.retry_after;
                     self.emit_call_log(
                         &call_id,
                         i64::from(attempt.saturating_add(1)),
@@ -555,7 +651,10 @@ impl ModelClient {
                     }
                 }
             }
-            let delay = self.config.retry.delay_for_attempt(attempt);
+            let delay = self
+                .config
+                .retry
+                .delay_for_attempt_with_hint(attempt, retry_after_hint);
             // The next attempt regenerates the answer from scratch, so
             // anything already streamed into the live view is stale.
             self.emit_delta(StreamDelta::Reset);
@@ -676,6 +775,11 @@ impl ModelClient {
             .await
             .map_err(|error| format!("模型请求失败: {error}"))?;
         let status = response.status().as_u16();
+        let retry_after = response
+            .headers()
+            .get("retry-after")
+            .and_then(|value| value.to_str().ok())
+            .and_then(parse_retry_after);
         let mut state = (200..300)
             .contains(&status)
             .then(|| ProtocolStreamState::new(&self.config.protocol))
@@ -731,6 +835,7 @@ impl ModelClient {
             duration_ms: elapsed_ms(started),
             cancelled,
             usage_reported: scan.usage_reported,
+            retry_after,
             parsed,
         })
     }
@@ -831,6 +936,12 @@ impl ModelClient {
             subagent_id: context.subagent_id,
             call_kind: context.call_kind,
             execution_target: context.execution_target,
+            operation: context
+                .operation
+                .unwrap_or_else(|| OPERATION_AGENT_STEP.to_string()),
+            model_role: context
+                .model_role
+                .unwrap_or_else(|| MODEL_ROLE_MAIN.to_string()),
         });
     }
 
@@ -1194,12 +1305,7 @@ mod tests {
     }
 
     fn fast_retry() -> RetryConfig {
-        RetryConfig {
-            max_retries: 10,
-            base_delay_ms: 1,
-            max_delay_ms: 1,
-            jitter: false,
-        }
+        RetryConfig::fixed(10, 1)
     }
 
     fn client_with_retry(base_url: String, retry: RetryConfig) -> ModelClient {
@@ -1856,16 +1962,8 @@ mod tests {
     async fn chat_cancels_during_retry_wait() {
         let base = serve_once(503, "busy").await;
         let cancel = CancelFlag::new();
-        let client = client_with_retry(
-            base,
-            RetryConfig {
-                max_retries: 10,
-                base_delay_ms: 2_000,
-                max_delay_ms: 2_000,
-                jitter: false,
-            },
-        )
-        .with_cancel(cancel.clone());
+        let client =
+            client_with_retry(base, RetryConfig::fixed(10, 2_000)).with_cancel(cancel.clone());
         let task = tokio::spawn(async move { chat_hi_on(client).await });
         tokio::time::sleep(Duration::from_millis(80)).await;
         cancel.cancel();
@@ -1901,6 +1999,8 @@ mod tests {
                     subagent_id: None,
                     call_kind: Some("chat".to_string()),
                     execution_target: Some("local".to_string()),
+                    operation: None,
+                    model_role: None,
                 },
                 sink,
             )
@@ -1973,17 +2073,9 @@ mod tests {
         let base = serve_once(503, "busy").await;
         let cancel = CancelFlag::new();
         let (sink, records) = capturing_sink();
-        let client = client_with_retry(
-            base,
-            RetryConfig {
-                max_retries: 10,
-                base_delay_ms: 2_000,
-                max_delay_ms: 2_000,
-                jitter: false,
-            },
-        )
-        .with_cancel(cancel.clone())
-        .with_call_log(CallLogContext::default(), sink);
+        let client = client_with_retry(base, RetryConfig::fixed(10, 2_000))
+            .with_cancel(cancel.clone())
+            .with_call_log(CallLogContext::default(), sink);
         let task = tokio::spawn(async move { chat_hi_on(client).await });
         tokio::time::sleep(Duration::from_millis(250)).await;
         cancel.cancel();

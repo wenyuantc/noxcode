@@ -9,6 +9,7 @@ import type {
   AgentSessionStarted,
   NativeContextUsage,
   NativePermissionRequest,
+  NativePlanApprovalRequest,
   NativePlanQuestionRequest,
   NativeTextDelta,
 } from "@/lib/types";
@@ -47,6 +48,7 @@ interface SessionState {
   stream: Record<string, { kind: string; text: string }>;
   permission: NativePermissionRequest | null;
   planQuestion: NativePlanQuestionRequest | null;
+  planApproval: NativePlanApprovalRequest | null;
   selectSession: (id: string | null) => void;
   ensureHistory: (sessionId: string) => Promise<void>;
   loadHistory: (sessionId: string) => Promise<void>;
@@ -58,6 +60,7 @@ interface SessionState {
   onExit: (exit: AgentSessionExit) => void;
   setPermission: (request: NativePermissionRequest | null) => void;
   setPlanQuestion: (request: NativePlanQuestionRequest | null) => void;
+  setPlanApproval: (request: NativePlanApprovalRequest | null) => void;
 }
 
 export const useSessionStore = create<SessionState>((set, get) => ({
@@ -69,6 +72,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
   stream: {},
   permission: null,
   planQuestion: null,
+  planApproval: null,
   selectSession: (id) => set({ selectedSessionId: id }),
   ensureHistory: async (sessionId) => {
     if (!get().lines[sessionId]) {
@@ -160,4 +164,5 @@ export const useSessionStore = create<SessionState>((set, get) => ({
   },
   setPermission: (permission) => set({ permission }),
   setPlanQuestion: (planQuestion) => set({ planQuestion }),
+  setPlanApproval: (planApproval) => set({ planApproval }),
 }));

@@ -10,7 +10,7 @@ React (UI) → Tauri IPC commands → Rust service layer → SQLite
 
 | 路径 | 职责 |
 | --- | --- |
-| [`src-tauri/src/db/migrations.rs`](../src-tauri/src/db/migrations.rs) | 迁移清单（version 1 baseline + version 2 去掉档案 + version 3 `agent_sessions.title` + version 4 `agent_sessions.pinned` + version 5 `agent_sessions.context_usage_json` + version 6 `ssh_configs.algorithms_json` + version 7 `activity_logs`） |
+| [`src-tauri/src/db/migrations.rs`](../src-tauri/src/db/migrations.rs) | 迁移清单（version 1 baseline + version 2 去掉档案 + version 3 `agent_sessions.title` + version 4 `agent_sessions.pinned` + version 5 `agent_sessions.context_usage_json` + version 6 `ssh_configs.algorithms_json` + version 7 `activity_logs` + version 8 `native_tool_artifacts` / call log `operation`、`model_role` / `ai_channels.lite_model` + version 9 `native_automations`、`native_goals`） |
 | [`src-tauri/src/db/models.rs`](../src-tauri/src/db/models.rs) | 行模型与 IPC DTO |
 | [`src-tauri/src/app/shared.rs`](../src-tauri/src/app/shared.rs) | `sqlite_pool` / `database_path` / `now_sqlite` / `new_id` |
 | [`src-tauri/src/app/database.rs`](../src-tauri/src/app/database.rs) | 健康检查、备份、恢复 |
@@ -32,9 +32,9 @@ React (UI) → Tauri IPC commands → Rust service layer → SQLite
 
 ## 迁移
 
-`tauri-plugin-sql` 在启动时按 `get_all_migrations()` 升级。版本号必须连续 `1..N`，由 `migration_versions_are_contiguous` 强制。当前最新版本是 **7**：version 6 只为 `ssh_configs` 增加 `algorithms_json`，不增加表；version 7 新增 `activity_logs`，业务表由 8 张变为 9 张。
+`tauri-plugin-sql` 在启动时按 `get_all_migrations()` 升级。版本号必须连续 `1..N`，由 `migration_versions_are_contiguous` 强制。当前最新版本是 **9**：version 6 只为 `ssh_configs` 增加 `algorithms_json`，不增加表；version 7 新增 `activity_logs`；version 8 新增 `native_tool_artifacts`，并给 `native_api_call_logs` 加 `operation`（默认 `agent_step`）与 `model_role`（默认 `main`）、给 `ai_channels` 加 `lite_model`；version 9 新增 `native_automations`（Cron 自动化）与 `native_goals`（会话目标），业务表共 12 张。
 
-后续只能追加 `version: 8`……，禁止改已发布的 SQL，禁止插队。
+后续只能追加 `version: 10`……，禁止改已发布的 SQL，禁止插队。
 
 应用的 `_sqlx_migrations` 表记录已应用版本。debug 启动会打印：
 
@@ -62,7 +62,7 @@ RESTRICT：仍被工作区引用的 SSH 配置不能删。
 CASCADE：删会话会清事件和 checkpoint 行；删工作区会清该工作区的 checkpoint 行。  
 `git update-ref -d` 清仓库 ref 属于 Git 层，不在本模块。
 
-## 九张业务表
+## 十二张业务表
 
 ### `ssh_configs`
 
@@ -150,6 +150,27 @@ Git plumbing 快照的数据库索引。真实对象在仓库 `refs/noxcode/chec
 | `label` | 如「会话开始」 |
 | `kind` | `session_start` / `after_tool_call` / `manual` / `auto_pre_restore` |
 
+### `native_tool_artifacts`
+
+超过契约结果预算的工具输出（Bash / Glob / Grep / WebFetch / Agent / MCP）完整落盘到 `$APPCONFIG/artifacts/<session_record_id>/<id>.txt`，模型只收到头 / 尾预览；本表是索引。无外键：删除会话时由 `delete_agent_session` 显式删文件并删行；启动时按 `artifact_retention_days` 清理过期项。
+
+| 列 | 说明 |
+| --- | --- |
+| `id` | UUID 主键，也是文件名 |
+| `session_record_id` | 所属会话 |
+| `tool_call_id` / `tool_name` | 产生它的工具调用 |
+| `bytes` | 完整输出字节数 |
+| `path` | 落盘文件绝对路径 |
+| `created_at` | 创建时间 |
+
+### `native_automations`
+
+Cron 自动化：`workspace_id`（级联删除）、`name`、`prompt`、`cron`（五段或 `@daily` 等别名）、`enabled`、`channel_id` / `model`（为空用最近启用的渠道）、`last_run_at` / `next_run_at` / `last_session_id` / `last_error`。调度器每 30 秒扫描 `enabled = 1 AND next_run_at <= now`。
+
+### `native_goals`
+
+会话目标：`session_record_id`（级联删除）、`title`、`status`（`active` / `completed` / `cleared`）、`progress_json`（`[{item, done}]`）、`note`。每个会话同时只有一条非 `cleared` 目标。
+
 ### `activity_logs`
 
 独立活动审计日志，目前记录 Git checkpoint 回滚成功 / 失败与清除全部。无外键，删除工作区或会话后仍保留审计记录。
@@ -195,4 +216,4 @@ sqlite3 "$HOME/Library/Application Support/com.wenyuan.noxcode/noxcode.db" \
   "SELECT version, description, success FROM _sqlx_migrations;"
 ```
 
-应看到 9 张业务表加 `_sqlx_migrations`，且 version 7 成功。
+应看到 12 张业务表加 `_sqlx_migrations`，且 version 9 成功。

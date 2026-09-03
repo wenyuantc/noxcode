@@ -27,6 +27,8 @@ pub struct SubagentSpec {
     pub description: String,
     pub prompt: String,
     pub kind: SubagentKind,
+    /// 后台运行：Agent 工具立即返回 task_id，结果用 TaskOutput 读取。
+    pub run_in_background: bool,
 }
 
 pub fn parse_subagent_args(arguments: &str) -> Result<SubagentSpec, String> {
@@ -73,10 +75,15 @@ pub fn parse_subagent_args_with(
             }
         }
     };
+    let run_in_background = value
+        .get("run_in_background")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
     Ok(SubagentSpec {
         description: description.to_string(),
         prompt: prompt.to_string(),
         kind,
+        run_in_background,
     })
 }
 
@@ -212,6 +219,12 @@ mod tests {
             inject_agents_md: true,
             scope: "all".to_string(),
             workspace_ids: Vec::new(),
+            permission_mode: None,
+            disallowed_tools: Vec::new(),
+            source: "json".to_string(),
+            path: None,
+            max_turns: None,
+            skills: Vec::new(),
         };
         let spec = parse_subagent_args_with(
             r#"{"prompt":"go","subagent_type":"代码审查"}"#,

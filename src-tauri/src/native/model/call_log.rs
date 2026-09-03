@@ -30,6 +30,18 @@ const SENSITIVE_KEYS: &[&str] = &[
     "token",
 ];
 
+/// 调用用途（比 `call_kind` 更细）：写入 `native_api_call_logs.operation`。
+pub const OPERATION_AGENT_STEP: &str = "agent_step";
+pub const OPERATION_COMPACT: &str = "compact";
+pub const OPERATION_MEMORY_EXTRACT: &str = "memory_extract";
+pub const OPERATION_MEMORY_DREAM: &str = "memory_dream";
+pub const OPERATION_HOOK_AGENT: &str = "hook_agent";
+pub const OPERATION_SUBAGENT: &str = "subagent";
+pub const OPERATION_ONE_SHOT: &str = "one_shot";
+/// 模型角色：主模型或轻量模型。
+pub const MODEL_ROLE_MAIN: &str = "main";
+pub const MODEL_ROLE_LITE: &str = "lite";
+
 #[derive(Debug, Clone, Default)]
 pub struct CallLogContext {
     pub channel_id: Option<String>,
@@ -40,11 +52,25 @@ pub struct CallLogContext {
     pub subagent_id: Option<String>,
     pub call_kind: Option<String>,
     pub execution_target: Option<String>,
+    /// 为空时按 `agent_step` 记录。
+    pub operation: Option<String>,
+    /// 为空时按 `main` 记录。
+    pub model_role: Option<String>,
 }
 
 impl CallLogContext {
     pub fn with_call_kind(mut self, call_kind: impl Into<String>) -> Self {
         self.call_kind = Some(call_kind.into());
+        self
+    }
+
+    pub fn with_operation(mut self, operation: impl Into<String>) -> Self {
+        self.operation = Some(operation.into());
+        self
+    }
+
+    pub fn with_model_role(mut self, role: impl Into<String>) -> Self {
+        self.model_role = Some(role.into());
         self
     }
 
@@ -71,6 +97,8 @@ impl CallLogContext {
             subagent_id: None,
             call_kind: Some(call_kind.to_string()),
             execution_target,
+            operation: None,
+            model_role: None,
         }
     }
 }
@@ -107,6 +135,8 @@ pub struct NativeApiCallLogInsert {
     pub subagent_id: Option<String>,
     pub call_kind: Option<String>,
     pub execution_target: Option<String>,
+    pub operation: String,
+    pub model_role: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

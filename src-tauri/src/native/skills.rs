@@ -7,6 +7,8 @@ use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Manager, Runtime};
 use tauri_plugin_opener::OpenerExt;
 
+use crate::native::commands::{parse_frontmatter, parse_list_field};
+use crate::native::plugins::{plugin_skill_dirs, NativePlugin};
 use crate::native::tools::ssh::SshToolRuntime;
 
 pub const GLOBAL_SKILLS_DIR_NAME: &str = "native-skills";
@@ -16,25 +18,31 @@ pub const MAX_DESCRIPTION_CHARS: usize = 240;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SkillSource {
+    WorkspaceNoxcode,
     WorkspaceAgents,
     WorkspaceClaude,
+    Plugin,
     Global,
 }
 
 impl SkillSource {
     pub fn label_zh(self) -> &'static str {
         match self {
+            Self::WorkspaceNoxcode => "工作区 .noxcode",
             Self::WorkspaceAgents => "工作区 .agents",
             Self::WorkspaceClaude => "工作区 .claude",
+            Self::Plugin => "插件",
             Self::Global => "全局",
         }
     }
 
     fn rank(self) -> u8 {
         match self {
-            Self::WorkspaceAgents => 0,
-            Self::WorkspaceClaude => 1,
-            Self::Global => 2,
+            Self::WorkspaceNoxcode => 0,
+            Self::WorkspaceAgents => 1,
+            Self::WorkspaceClaude => 2,
+            Self::Plugin => 3,
+            Self::Global => 4,
         }
     }
 }
@@ -48,6 +56,55 @@ pub struct NativeSkill {
     pub skill_md_path: String,
     pub body: String,
     pub extra_files: Vec<String>,
+    /// frontmatter `allowed-tools`：加载技能后建议限定的工具集（提示模型，不做硬限制）。
+    #[serde(default)]
+    pub allowed_tools: Vec<String>,
+    /// frontmatter `argument-hint`：`/skill <name> <参数>` 的参数提示。
+    #[serde(default)]
+    pub argument_hint: Option<String>,
+    /// frontmatter `when_to_use`：何时应主动使用该技能。
+    #[serde(default)]
+    pub when_to_use: Option<String>,
+    /// 来自插件时的插件名。
+    #[serde(default)]
+    pub plugin: Option<String>,
+}
+
+/// 从 SKILL.md 解析出的元数据。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SkillMeta {
+    pub name: String,
+    pub description: String,
+    pub allowed_tools: Vec<String>,
+    pub argument_hint: Option<String>,
+    pub when_to_use: Option<String>,
+}
+
+pub fn parse_skill_meta(raw: &str, fallback_name: &str) -> SkillMeta {
+    let (fields, body) = parse_frontmatter(raw);
+    let mut name = fields.get("name").cloned().unwrap_or_default();
+    if name.trim().is_empty() {
+        name = fallback_name.to_string();
+    }
+    let mut description = fields.get("description").cloned().unwrap_or_default();
+    if description.trim().is_empty() {
+        description = first_non_empty_line(if fields.is_empty() { raw } else { &body });
+    }
+    let non_empty = |value: Option<&String>| {
+        value
+            .map(|item| item.trim().to_string())
+            .filter(|item| !item.is_empty())
+    };
+    SkillMeta {
+        name: name.trim().to_string(),
+        description: truncate_description(&description),
+        allowed_tools: fields
+            .get("allowed-tools")
+            .map(|value| parse_list_field(value))
+            .unwrap_or_default(),
+        argument_hint: non_empty(fields.get("argument-hint")),
+        when_to_use: non_empty(fields.get("when-to-use")),
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -57,49 +114,29 @@ pub struct NativeGlobalSkills {
 }
 
 pub fn parse_skill_markdown(raw: &str, fallback_name: &str) -> (String, String) {
-    let trimmed = raw.trim_start_matches('\u{feff}');
-    let Some(rest) = trimmed.strip_prefix("---") else {
-        return (
-            fallback_name.to_string(),
-            truncate_description(&first_non_empty_line(trimmed)),
-        );
-    };
-    let rest = rest.trim_start_matches(['\r', '\n']);
-    let Some((front, _)) = rest.split_once("\n---") else {
-        return (
-            fallback_name.to_string(),
-            truncate_description(&first_non_empty_line(trimmed)),
-        );
-    };
-    let mut name = String::new();
-    let mut description = String::new();
-    for line in front.lines() {
-        if let Some(value) = line.trim().strip_prefix("name:") {
-            name = unquote(value);
-        } else if let Some(value) = line.trim().strip_prefix("description:") {
-            description = unquote(value);
-        }
-    }
-    if name.is_empty() {
-        name = fallback_name.to_string();
-    }
-    if description.is_empty() {
-        description = first_non_empty_line(trimmed);
-    }
-    (name, truncate_description(&description))
+    let meta = parse_skill_meta(raw, fallback_name);
+    (meta.name, meta.description)
 }
 
 pub fn discover_local_workspace_skills(cwd: &str) -> Vec<NativeSkill> {
     let root = Path::new(cwd);
     let mut out = Vec::new();
     collect_local_skill_dir(
+        root.join(".noxcode/skills"),
+        SkillSource::WorkspaceNoxcode,
+        None,
+        &mut out,
+    );
+    collect_local_skill_dir(
         root.join(".agents/skills"),
         SkillSource::WorkspaceAgents,
+        None,
         &mut out,
     );
     collect_local_skill_dir(
         root.join(".claude/skills"),
         SkillSource::WorkspaceClaude,
+        None,
         &mut out,
     );
     out
@@ -110,8 +147,18 @@ pub fn discover_global_skills(config_dir: &Path) -> Vec<NativeSkill> {
     collect_local_skill_dir(
         config_dir.join(GLOBAL_SKILLS_DIR_NAME),
         SkillSource::Global,
+        None,
         &mut out,
     );
+    out
+}
+
+/// 已启用插件贡献的技能目录。
+pub fn discover_plugin_skills(plugins: &[NativePlugin]) -> Vec<NativeSkill> {
+    let mut out = Vec::new();
+    for (plugin, dir) in plugin_skill_dirs(plugins) {
+        collect_local_skill_dir(dir, SkillSource::Plugin, Some(&plugin), &mut out);
+    }
     out
 }
 
@@ -119,12 +166,14 @@ pub async fn load_session_skills(
     cwd: &str,
     ssh: Option<&SshToolRuntime>,
     config_dir: Option<&Path>,
+    plugins: &[NativePlugin],
 ) -> Vec<NativeSkill> {
     let mut items = if let Some(ssh) = ssh {
         discover_ssh_workspace_skills(ssh).await
     } else {
         discover_local_workspace_skills(cwd)
     };
+    items.extend(discover_plugin_skills(plugins));
     if let Some(dir) = config_dir {
         items.extend(discover_global_skills(dir));
     }
@@ -163,12 +212,16 @@ pub fn format_skills_prompt(skills: &[NativeSkill]) -> String {
         "需要完整说明或附属文件时调用 Skill 工具（参数 name）。不要编造未列出的技能。".to_string(),
     ];
     for skill in skills {
-        lines.push(format!(
+        let mut line = format!(
             "- `{}`：{}（{}）",
             skill.name,
             skill.description,
             skill.source.label_zh()
-        ));
+        );
+        if let Some(when) = skill.when_to_use.as_deref() {
+            line.push_str(&format!(" 何时使用：{when}"));
+        }
+        lines.push(line);
     }
     lines.join("\n")
 }
@@ -189,11 +242,18 @@ pub fn render_skill(skill: &NativeSkill, ssh_session: bool) -> String {
             "\n\n附属文件不在远端工作区；不要用 Read 读取这些本机路径，继续用 Skill 查看。",
         );
     }
+    let mut header = format!("# {}（{}）\n目录: {}", skill.name, skill.source.label_zh(), skill.dir);
+    if !skill.allowed_tools.is_empty() {
+        header.push_str(&format!(
+            "\n建议工具（allowed-tools）: {}",
+            skill.allowed_tools.join(", ")
+        ));
+    }
+    if let Some(hint) = skill.argument_hint.as_deref() {
+        header.push_str(&format!("\n参数提示: {hint}"));
+    }
     format!(
-        "# {}（{}）\n目录: {}\n\n## SKILL.md\n{}\n\n## 目录文件\n{extra}",
-        skill.name,
-        skill.source.label_zh(),
-        skill.dir,
+        "{header}\n\n## SKILL.md\n{}\n\n## 目录文件\n{extra}",
         skill.body.trim()
     )
 }
@@ -212,7 +272,7 @@ pub fn find_skill<'a>(skills: &'a [NativeSkill], name: &str) -> Result<&'a Nativ
 pub async fn discover_ssh_workspace_skills(ssh: &SshToolRuntime) -> Vec<NativeSkill> {
     let listing = ssh
         .bash(
-            "find .agents/skills .claude/skills -mindepth 2 -maxdepth 2 -name SKILL.md 2>/dev/null | head -n 80",
+            "find .noxcode/skills .agents/skills .claude/skills -mindepth 2 -maxdepth 2 -name SKILL.md 2>/dev/null | head -n 80",
         )
         .await
         .unwrap_or_default();
@@ -225,7 +285,9 @@ pub async fn discover_ssh_workspace_skills(ssh: &SshToolRuntime) -> Vec<NativeSk
         if path.is_empty() {
             continue;
         }
-        let source = if path.starts_with(".agents/") {
+        let source = if path.starts_with(".noxcode/") {
+            SkillSource::WorkspaceNoxcode
+        } else if path.starts_with(".agents/") {
             SkillSource::WorkspaceAgents
         } else if path.starts_with(".claude/") {
             SkillSource::WorkspaceClaude
@@ -246,16 +308,20 @@ pub async fn discover_ssh_workspace_skills(ssh: &SshToolRuntime) -> Vec<NativeSk
             .rsplit_once('/')
             .map(|(_, name)| name.to_string())
             .unwrap_or_else(|| dir.clone());
-        let (name, description) = parse_skill_markdown(&body, &fallback);
+        let meta = parse_skill_meta(&body, &fallback);
         let extra = ssh_list_extra_files(ssh, &dir).await;
         out.push(NativeSkill {
-            name,
-            description,
+            name: meta.name,
+            description: meta.description,
             source,
             dir,
             skill_md_path: path.to_string(),
             body,
             extra_files: extra,
+            allowed_tools: meta.allowed_tools,
+            argument_hint: meta.argument_hint,
+            when_to_use: meta.when_to_use,
+            plugin: None,
         });
     }
     out
@@ -285,7 +351,12 @@ async fn ssh_list_extra_files(ssh: &SshToolRuntime, dir: &str) -> Vec<String> {
         .collect()
 }
 
-fn collect_local_skill_dir(dir: PathBuf, source: SkillSource, out: &mut Vec<NativeSkill>) {
+fn collect_local_skill_dir(
+    dir: PathBuf,
+    source: SkillSource,
+    plugin: Option<&str>,
+    out: &mut Vec<NativeSkill>,
+) {
     let Ok(entries) = fs::read_dir(&dir) else {
         return;
     };
@@ -307,15 +378,19 @@ fn collect_local_skill_dir(dir: PathBuf, source: SkillSource, out: &mut Vec<Nati
             .file_name()
             .and_then(|name| name.to_str())
             .unwrap_or("skill");
-        let (name, description) = parse_skill_markdown(&body, fallback);
+        let meta = parse_skill_meta(&body, fallback);
         out.push(NativeSkill {
-            name,
-            description,
+            name: meta.name,
+            description: meta.description,
             source,
             dir: skill_dir.to_string_lossy().into_owned(),
             skill_md_path: skill_md.to_string_lossy().into_owned(),
             body,
             extra_files: list_local_extra_files(&skill_dir),
+            allowed_tools: meta.allowed_tools,
+            argument_hint: meta.argument_hint,
+            when_to_use: meta.when_to_use,
+            plugin: plugin.map(str::to_string),
         });
     }
 }
@@ -359,17 +434,6 @@ fn first_non_empty_line(text: &str) -> String {
         .find(|line| !line.is_empty() && *line != "---")
         .unwrap_or("")
         .to_string()
-}
-
-fn unquote(value: &str) -> String {
-    let value = value.trim();
-    if (value.starts_with('"') && value.ends_with('"') && value.len() >= 2)
-        || (value.starts_with('\'') && value.ends_with('\'') && value.len() >= 2)
-    {
-        value[1..value.len() - 1].to_string()
-    } else {
-        value.to_string()
-    }
 }
 
 fn truncate_description(value: &str) -> String {

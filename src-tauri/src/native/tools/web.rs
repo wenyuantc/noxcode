@@ -1,4 +1,6 @@
-use std::time::Duration;
+use std::collections::HashMap;
+use std::sync::{LazyLock, Mutex};
+use std::time::{Duration, Instant};
 
 use serde_json::Value;
 
@@ -6,6 +8,122 @@ const FETCH_TIMEOUT: Duration = Duration::from_secs(30);
 const FETCH_BODY_LIMIT: usize = 512 * 1024;
 const FETCH_MODEL_CHARS: usize = 80_000;
 const SEARCH_MODEL_CHARS: usize = 20_000;
+/// WebFetch 内存缓存：同一 URL 15 分钟内复用，总量不超过 50 MB。
+const FETCH_CACHE_TTL: Duration = Duration::from_secs(15 * 60);
+const FETCH_CACHE_MAX_BYTES: usize = 50 * 1024 * 1024;
+
+struct CachedFetch {
+    status: u16,
+    text: String,
+    fetched_at: Instant,
+}
+
+struct FetchCache {
+    entries: HashMap<String, CachedFetch>,
+    total_bytes: usize,
+}
+
+impl FetchCache {
+    fn new() -> Self {
+        Self {
+            entries: HashMap::new(),
+            total_bytes: 0,
+        }
+    }
+
+    fn get(&mut self, url: &str, now: Instant) -> Option<(u16, String)> {
+        let expired = self
+            .entries
+            .get(url)
+            .is_some_and(|entry| now.duration_since(entry.fetched_at) > FETCH_CACHE_TTL);
+        if expired {
+            self.remove(url);
+            return None;
+        }
+        self.entries
+            .get(url)
+            .map(|entry| (entry.status, entry.text.clone()))
+    }
+
+    fn remove(&mut self, url: &str) {
+        if let Some(entry) = self.entries.remove(url) {
+            self.total_bytes = self.total_bytes.saturating_sub(entry.text.len());
+        }
+    }
+
+    fn put(&mut self, url: &str, status: u16, text: &str, now: Instant) {
+        if text.len() > FETCH_CACHE_MAX_BYTES {
+            return;
+        }
+        self.remove(url);
+        // 先清过期，再按最早抓取顺序淘汰直到放得下。
+        let expired: Vec<String> = self
+            .entries
+            .iter()
+            .filter(|(_, entry)| now.duration_since(entry.fetched_at) > FETCH_CACHE_TTL)
+            .map(|(key, _)| key.clone())
+            .collect();
+        for key in expired {
+            self.remove(&key);
+        }
+        while self.total_bytes + text.len() > FETCH_CACHE_MAX_BYTES {
+            let Some(oldest) = self
+                .entries
+                .iter()
+                .min_by_key(|(_, entry)| entry.fetched_at)
+                .map(|(key, _)| key.clone())
+            else {
+                break;
+            };
+            self.remove(&oldest);
+        }
+        self.total_bytes += text.len();
+        self.entries.insert(
+            url.to_string(),
+            CachedFetch {
+                status,
+                text: text.to_string(),
+                fetched_at: now,
+            },
+        );
+    }
+}
+
+static FETCH_CACHE: LazyLock<Mutex<FetchCache>> = LazyLock::new(|| Mutex::new(FetchCache::new()));
+
+fn cached_fetch(url: &str) -> Option<(u16, String)> {
+    FETCH_CACHE
+        .lock()
+        .ok()
+        .and_then(|mut cache| cache.get(url, Instant::now()))
+}
+
+fn store_fetch(url: &str, status: u16, text: &str) {
+    if let Ok(mut cache) = FETCH_CACHE.lock() {
+        cache.put(url, status, text, Instant::now());
+    }
+}
+
+async fn fetch_page(url: &str) -> Result<(u16, String), String> {
+    let client = reqwest::Client::builder()
+        .timeout(FETCH_TIMEOUT)
+        .redirect(reqwest::redirect::Policy::limited(5))
+        .build()
+        .map_err(|error| format!("创建 HTTP 客户端失败: {error}"))?;
+    let response = client
+        .get(url)
+        .header("user-agent", "noxcode-native/0.1 (+coding-agent)")
+        .send()
+        .await
+        .map_err(|error| format!("WebFetch 失败: {error}"))?;
+    let status = response.status().as_u16();
+    let bytes = response
+        .bytes()
+        .await
+        .map_err(|error| format!("读取网页失败: {error}"))?;
+    let raw = String::from_utf8_lossy(&bytes[..bytes.len().min(FETCH_BODY_LIMIT)]);
+    Ok((status, truncate_chars(&strip_tags(&raw), FETCH_MODEL_CHARS)))
+}
 
 pub async fn web_fetch(arguments: &str) -> Result<String, String> {
     let args = parse_args(arguments)?;
@@ -17,24 +135,16 @@ pub async fn web_fetch(arguments: &str) -> Result<String, String> {
         .trim()
         .to_string();
     ensure_http_url(&url)?;
-    let client = reqwest::Client::builder()
-        .timeout(FETCH_TIMEOUT)
-        .redirect(reqwest::redirect::Policy::limited(5))
-        .build()
-        .map_err(|error| format!("创建 HTTP 客户端失败: {error}"))?;
-    let response = client
-        .get(&url)
-        .header("user-agent", "codex-ai-native/0.1")
-        .send()
-        .await
-        .map_err(|error| format!("WebFetch 失败: {error}"))?;
-    let status = response.status().as_u16();
-    let bytes = response
-        .bytes()
-        .await
-        .map_err(|error| format!("读取网页失败: {error}"))?;
-    let raw = String::from_utf8_lossy(&bytes[..bytes.len().min(FETCH_BODY_LIMIT)]);
-    let text = truncate_chars(&strip_tags(&raw), FETCH_MODEL_CHARS);
+    let (status, text) = match cached_fetch(&url) {
+        Some(hit) => hit,
+        None => {
+            let fetched = fetch_page(&url).await?;
+            if (200..300).contains(&fetched.0) {
+                store_fetch(&url, fetched.0, &fetched.1);
+            }
+            fetched
+        }
+    };
     if prompt.is_empty() {
         Ok(format!("URL: {url}\nStatus: {status}\n\n{text}"))
     } else {
@@ -250,6 +360,26 @@ mod tests {
     #[test]
     fn accepts_https() {
         ensure_http_url("https://example.com/a").expect("https ok");
+    }
+
+    #[test]
+    fn fetch_cache_expires_and_evicts_oldest() {
+        let mut cache = FetchCache::new();
+        let start = Instant::now();
+        cache.put("https://a", 200, "aaa", start);
+        assert_eq!(
+            cache.get("https://a", start),
+            Some((200, "aaa".to_string()))
+        );
+        let later = start + FETCH_CACHE_TTL + Duration::from_secs(1);
+        assert_eq!(cache.get("https://a", later), None);
+        assert_eq!(cache.total_bytes, 0);
+        cache.put("https://b", 200, "bbb", start);
+        cache.put("https://c", 200, "ccc", start + Duration::from_secs(1));
+        assert_eq!(cache.total_bytes, 6);
+        let huge = "x".repeat(FETCH_CACHE_MAX_BYTES + 1);
+        cache.put("https://huge", 200, &huge, start);
+        assert!(cache.get("https://huge", start).is_none());
     }
 
     #[test]

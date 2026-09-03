@@ -3,7 +3,13 @@ import { useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 
 import { Button } from "@/components/ui/button";
-import { listGitFiles, listNativeGlobalSkills, stopNativeSession } from "@/lib/backend";
+import {
+  compactNativeSession,
+  forkNativeSession,
+  listGitFiles,
+  listNativeGlobalSkills,
+  stopNativeSession,
+} from "@/lib/backend";
 import { submitSessionPrompt } from "@/lib/sessionSubmission";
 import { FALLBACK_THINKING_LEVELS } from "@/lib/modelCatalog";
 import type { NativeSkill } from "@/lib/types";
@@ -17,6 +23,18 @@ import { ContextCapacity } from "./ContextCapacity";
 import { PermissionModePicker } from "./PermissionModePicker";
 import { ThinkingLevelPicker } from "./ThinkingLevelPicker";
 import { WorkspacePicker } from "./WorkspacePicker";
+
+/** `/init [补充要求]` 展开成的提示词：Agent 摸底仓库后生成或补充 AGENTS.md。 */
+export function buildInitPrompt(extra?: string): string {
+  const lines = [
+    "请为当前仓库生成或补充 AGENTS.md（若已有 AGENTS.md / CLAUDE.md 则在其基础上补充，不要重复已有内容）。",
+    "先用 Glob / Read / Grep 摸底：项目结构与模块职责、构建 / 测试 / lint 命令、编码约定、关键架构约束、常见陷阱。",
+    "输出要求：简洁、面向编程 Agent、只写能从仓库验证的事实；每条命令都注明来源文件；不超过 150 行。",
+    "完成后用 Write 写入仓库根目录的 AGENTS.md，并在回复里列出你新增或修改的段落。",
+  ];
+  if (extra?.trim()) lines.push(`补充要求：${extra.trim()}`);
+  return lines.join("\n");
+}
 
 export function Composer({ compact = false }: { compact?: boolean }) {
   const { t } = useTranslation(["sessions", "layout"]);
@@ -97,6 +115,53 @@ export function Composer({ compact = false }: { compact?: boolean }) {
     }
     if (!channelId || !model) {
       setError(t("sessions:needChannel"));
+      return;
+    }
+    // `/init`：让 Agent 分析仓库并生成 / 补充 AGENTS.md（作为普通提示词提交）。
+    const initMatch = /^\/init(?:\s+([\s\S]*))?$/i.exec(prompt);
+    if (initMatch) {
+      setDraft(buildInitPrompt(initMatch[1]));
+      return;
+    }
+    // `/fork [checkpoint_id]`：复制当前会话上下文到新会话（可选先回滚到检查点）。
+    const forkMatch = /^\/fork(?:\s+(\S+))?$/i.exec(prompt);
+    if (forkMatch) {
+      if (!selectedSessionId) {
+        setError(t("sessions:forkNeedsSession"));
+        return;
+      }
+      setError(null);
+      setSending(true);
+      try {
+        const forked = await forkNativeSession(selectedSessionId, forkMatch[1]);
+        await useWorkspaceStore.getState().refreshSessions();
+        useSessionStore.getState().selectSession(forked);
+        setDraft("");
+      } catch (err) {
+        setError(err instanceof Error ? err.message : String(err));
+      } finally {
+        setSending(false);
+      }
+      return;
+    }
+    // `/compact [指令]`：对运行中的会话请求上下文压缩，不算一条用户输入。
+    const compactMatch = /^\/compact(?:\s+([\s\S]*))?$/i.exec(prompt);
+    if (compactMatch) {
+      if (!live) {
+        setError(t("sessions:compactNeedsLiveSession"));
+        return;
+      }
+      setError(null);
+      setSending(true);
+      try {
+        const accepted = await compactNativeSession(live.session_record_id, compactMatch[1]);
+        if (!accepted) setError(t("sessions:compactNeedsLiveSession"));
+        else setDraft("");
+      } catch (err) {
+        setError(err instanceof Error ? err.message : String(err));
+      } finally {
+        setSending(false);
+      }
       return;
     }
     if (sendBusy) return;

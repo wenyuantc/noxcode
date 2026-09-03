@@ -92,14 +92,14 @@ pub async fn insert_native_api_call_log(
             request_truncated, response_body, response_truncated, input_tokens,
             output_tokens, cached_tokens, total_tokens, first_token_ms, duration_ms,
             status, http_status, error_message, session_id, profile_id, workspace_id,
-            subagent_id, call_kind, execution_target
+            subagent_id, call_kind, execution_target, operation, model_role
         ) VALUES (
             $1, $2, $3, $4, $5, $6, $7,
             $8, $9, $10, $11, $12,
             $13, $14, $15, $16,
             $17, $18, $19, $20, $21,
             $22, $23, $24, $25, $26, $27,
-            $28, $29, $30
+            $28, $29, $30, $31, $32
         )
         "#,
     )
@@ -133,6 +133,8 @@ pub async fn insert_native_api_call_log(
     .bind(record.subagent_id.as_deref())
     .bind(record.call_kind.as_deref())
     .bind(record.execution_target.as_deref())
+    .bind(&record.operation)
+    .bind(&record.model_role)
     .execute(pool)
     .await
     .map_err(|error| format!("Failed to insert native API call log: {error}"))?;
@@ -390,6 +392,8 @@ mod tests {
             subagent_id: None,
             call_kind: Some(CALL_KIND_CHAT.to_string()),
             execution_target: Some("local".to_string()),
+            operation: "agent_step".to_string(),
+            model_role: "main".to_string(),
         }
     }
 

@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use sqlx::SqlitePool;
-use tauri::{AppHandle, Runtime, State};
+use tauri::{AppHandle, Manager, Runtime, State};
 use tokio::sync::Mutex;
 
 use crate::app::shared::sqlite_pool;
@@ -223,6 +223,14 @@ pub async fn delete_agent_session<R: Runtime>(
             if let Err(error) = delete_checkpoints_for_session(&pool, &target, &session_id).await {
                 eprintln!("[git] 清理会话 checkpoint 失败: {error}");
             }
+        }
+    }
+    if let Ok(config_dir) = app.path().app_config_dir() {
+        if let Err(error) =
+            crate::native::artifacts::delete_session_artifacts(&pool, &config_dir, &session_id)
+                .await
+        {
+            eprintln!("[native] 清理会话 artifact 失败: {error}");
         }
     }
     delete_agent_session_row(&pool, &session_id).await

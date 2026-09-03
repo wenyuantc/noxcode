@@ -17,7 +17,10 @@
     "hooks": "钩子",
     "usage": "使用统计",
     "database": "数据库维护",
-    "about": "关于"
+    "about": "关于",
+    "permissions": "权限规则",
+    "memory": "记忆",
+    "automations": "自动化"
   },
   "general": {
     "language": "界面语言",
@@ -77,7 +80,10 @@
       "thinkingLevels": "允许的思考等级",
       "thinkingLevelsHint": "显示全部思考等级，可按需勾选。默认勾选该模型在目录中存在的等级；运行时优先使用中等级，否则使用第一个已选等级。",
       "thinkingLevelsEmpty": "开启思考时请至少勾选一个等级。",
-      "extraHeaders": "额外请求头（JSON 对象，可选）"
+      "extraHeaders": "额外请求头（JSON 对象，可选）",
+      "liteModel": "轻量模型（压缩 / 记忆 / 钩子判定）",
+      "liteModelNone": "使用主模型",
+      "liteModelHint": "本渠道里更便宜的模型，用于内部调用：上下文摘要、记忆抽取 / 整理、agent 钩子判定；调用日志记为 model_role = lite。"
     },
     "protocols": {
       "openai": "OpenAI Chat Completions",
@@ -240,8 +246,22 @@
     "checkpointsHint": "写文件工具成功后可自动保存 Git 检查点。已结束会话中过期的工具后检查点会在打开仓库时清理。",
     "autoCheckpoint": "写文件后自动创建检查点",
     "checkpointRetention": "工具后检查点保留天数（0 = 永不清理）",
+    "toolRuntime": "工具运行时",
+    "toolRuntimeHint": "Bash 默认超时（模型可按需提高到 600 秒）、完整工具输出落盘为 artifact 的保留天数、每个会话只导出一次并复用的 login shell 快照，以及在存在内置或系统 rg 时让 Grep 使用 ripgrep。",
+    "bashDefaultTimeout": "Bash 默认超时（秒）",
+    "artifactRetention": "Artifact 保留天数（0 = 永不清理）",
+    "shellSnapshot": "Bash 复用 login shell 快照",
+    "rgSidecar": "有 ripgrep 时 Grep 优先使用",
+    "modelRetry": "模型请求重试",
+    "modelRetryHint": "对限流、过载与流中断做指数退避并加抖动；服务端 Retry-After 会被采纳，但不超过最大延迟。",
+    "modelRetryMax": "最大重试次数",
+    "modelRetryBaseDelay": "基础延迟（毫秒）",
+    "modelRetryMaxDelay": "最大延迟（毫秒）",
+    "modelRetryBackoff": "退避倍数",
     "globalPrompt": "全局提示词模板",
-    "globalPromptHint": "会插入系统提示的「全局提示词」段，位于环境信息之后、AGENTS.md / 档案设定之前。留空则不注入。改完对之后新开的会话生效。"
+    "globalPromptHint": "会插入系统提示的「全局提示词」段，位于 AGENTS.md / 档案设定之前；易变的环境信息放在最后，以便提示词前缀命中缓存。留空则不注入。改完对之后新开的会话生效。",
+    "compactThreshold": "自动压缩阈值（占上下文窗口 %）",
+    "microcompact": "全量摘要前先微压缩旧工具结果"
   },
   "usage": {
     "title": "使用统计",
@@ -388,25 +408,42 @@
   },
   "hooks": {
     "title": "钩子",
-    "hint": "工具调用前退出码 2 会阻断本次调用；调用后失败只记警告。",
+    "hint": "七类生命周期事件，处理器可为 command / http / agent。处理器可输出 JSON：{\"decision\":\"allow|deny|ask|block\",\"reason\":\"…\",\"updated_input\":{…},\"additional_context\":\"…\",\"continue\":true}；command 处理器退出码 2 等价于阻断。工作区的 .noxcode/hooks.json 与 .claude/settings.json 会在全局钩子之后合并执行。",
     "fields": {
-      "event": "钩子类型",
+      "event": "事件",
+      "handler": "处理器",
       "matcher": "匹配工具",
-      "command": "命令"
+      "command": "命令",
+      "url": "POST 地址",
+      "agentPrompt": "判定提示词",
+      "timeout": "超时（秒）"
     },
     "events": {
-      "preToolUse": "工具调用前（可阻断）",
-      "postToolUse": "工具调用后（仅警告）"
+      "session_start": "会话开始（注入上下文）",
+      "user_prompt_submit": "用户提交输入（可阻断 / 注入上下文）",
+      "pre_tool_use": "工具执行前（可阻断 / 改写参数）",
+      "post_tool_use": "工具执行后（告警 / 注入上下文）",
+      "post_tool_use_failure": "工具失败后（仅告警）",
+      "permission_request": "权限确认前（可直接允许 / 拒绝）",
+      "stop": "回合结束（可要求继续）"
+    },
+    "handlers": {
+      "command": "Shell 命令",
+      "http": "HTTP POST",
+      "agent": "Agent 判定"
     },
     "placeholders": {
-      "command": "要执行的命令"
+      "command": "要执行的命令",
+      "agentPrompt": "例如：判断最终回复是否覆盖了测试，用 JSON 回答。"
     },
     "matchers": {
       "all": "全部工具"
     },
     "fieldHints": {
-      "matcher": "可多选。选全部工具即匹配每一次调用。",
-      "command": "在工作区执行的 shell 命令。留空保存时会被丢弃。"
+      "matcher": "可多选工具；「全部工具」匹配每次调用。",
+      "command": "在工作区执行的 shell 命令，载荷在 $NATIVE_HOOK_PAYLOAD；保存时忽略空命令。",
+      "url": "以 JSON 载荷 POST；2xx 响应体按处理器输出解释。",
+      "agentPrompt": "用当前模型做一次无工具判定，把该提示词与载荷一起交给模型；必须按 JSON 协议回答。"
     }
   },
   "subagents": {
@@ -451,7 +488,8 @@
       "scopeHint": "默认所有工作区都可委派该子智能体。指定工作区后，仅这些工作区会出现该选项。",
       "scopeWorkspacesEmpty": "还没有工作区，请先打开或创建一个工作区。",
       "scopeWorkspacesCount": "指定 {{count}} 个工作区",
-      "scopePickWorkspaces": "选择工作区"
+      "scopePickWorkspaces": "选择工作区",
+      "fileProfile": ".md 档案（请编辑文件）"
     },
     "dialogs": {
       "createTitle": "新建子智能体",
@@ -463,6 +501,98 @@
       "created": "子智能体已创建",
       "updated": "子智能体已更新",
       "deleted": "子智能体已删除"
+    },
+    "profilesHint": "也会读取 <工作区>/.noxcode/agents、.claude/agents 与 $APPCONFIG/agents 下的 .md 档案：frontmatter 里 name / description / tools / disallowedTools / permissionMode / maxTurns / skills，正文即系统提示；这里只展示不可编辑。"
+  },
+  "permissions": {
+    "hint": "规则优先于权限模式：deny 先于 allow，allow 先于 ask；未命中的调用再按模式与风险判定。全局规则存 native-permissions.json，工作区规则存 .noxcode/permissions.json。",
+    "addTitle": "新增规则",
+    "addHint": "命令模式支持前缀通配（如 git push*），路径与工具名支持 glob（如 src/**、mcp_fs_*）。",
+    "effectLabel": "效果",
+    "capabilityLabel": "能力",
+    "sourceLabel": "匹配字段",
+    "scopeLabel": "作用域",
+    "patternLabel": "模式",
+    "noteLabel": "备注（可选）",
+    "add": "添加规则",
+    "empty": "暂无规则",
+    "globalTitle": "全局规则",
+    "workspaceTitle": "当前工作区规则",
+    "orderHint": "同一效果内按顺序匹配；工作区规则先于全局规则。",
+    "globalPath": "文件：$APPCONFIG/native-permissions.json",
+    "workspacePath": "文件：{{path}}/.noxcode/permissions.json",
+    "effect": {
+      "allow": "允许",
+      "deny": "拒绝",
+      "ask": "需确认"
+    },
+    "capability": {
+      "bash": "Bash 命令",
+      "edit": "写文件",
+      "read": "读文件",
+      "mcp": "MCP 工具",
+      "web_fetch": "WebFetch",
+      "web_search": "WebSearch",
+      "subagent": "子 Agent",
+      "skill": "技能",
+      "todo_read": "读待办",
+      "todo_write": "写待办",
+      "ask_user": "提问"
+    },
+    "source": {
+      "command": "命令",
+      "path": "路径",
+      "tool_name": "工具名",
+      "input": "参数 JSON"
+    },
+    "scope": {
+      "global": "全局",
+      "workspace": "工作区"
+    },
+    "patternPlaceholder": {
+      "command": "git push*",
+      "path": "src/**",
+      "tool_name": "mcp_github_*",
+      "input": "*\"force\":true*"
     }
+  },
+  "memory": {
+    "hint": "按工作区的长期记忆，存放在 $APPCONFIG/memory/<项目>/：MEMORY.md 是索引，每条事实是带 frontmatter 的 Markdown 文件。索引注入系统提示，每回合按关键词回忆相关条目，会话结束时抽取新记忆。",
+    "settingsTitle": "记忆管线",
+    "settingsHint": "会话结束后用渠道的轻量模型（若配置）抽取记忆。",
+    "enabled": "启用记忆",
+    "dreamInterval": "每 N 次抽取整理一次（dream，0 = 从不）",
+    "entriesTitle": "当前工作区的记忆",
+    "entriesHint": "{{dir}} · 抽取 {{extractions}} 次 · 整理 {{dreams}} 次",
+    "needWorkspace": "先选择一个工作区。",
+    "needChannel": "先选择一个渠道。",
+    "refresh": "刷新",
+    "openDir": "打开目录",
+    "dream": "立即整理",
+    "dreaming": "整理中…",
+    "empty": "还没有记忆。",
+    "kind": {
+      "user": "用户",
+      "feedback": "反馈",
+      "project": "项目",
+      "reference": "参考"
+    }
+  },
+  "automations": {
+    "hint": "Cron 自动化按计划在工作区启动一个新的 Agent 会话执行给定提示词。调度器每 30 秒扫描一次；工作区已有会话在工作中时推迟 1 分钟。Agent 也可以用 CronCreate / CronList / CronDelete 管理（创建需确认）。",
+    "createTitle": "新建自动化",
+    "createHint": "五段 cron（分 时 日 月 周）或 @hourly / @daily / @weekly，按本地时间。使用当前选中的渠道与模型。",
+    "needWorkspace": "先选择一个工作区。",
+    "name": "名称",
+    "cron": "Cron",
+    "prompt": "提示词",
+    "create": "创建",
+    "listTitle": "当前工作区的自动化",
+    "listHint": "可启停、立即运行或删除。",
+    "empty": "还没有自动化。",
+    "runNow": "立即运行",
+    "next": "下次：{{time}}",
+    "last": "上次：{{time}}",
+    "started": "已启动会话 {{session}}。"
   }
 }

@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -26,18 +26,20 @@ use crate::native::api_logs::sqlite_call_log_sink;
 use crate::native::channels::{fetch_channel_record, require_channel_api_key};
 use crate::native::manager::{
     NativeAgentManager, NativeFollowup, NativeLiveSession, NativeSessionInfo, PendingPermission,
-    PendingPlanQuestion, PermissionRequest, PlanQuestionRequest,
+    PendingPlanApproval, PendingPlanQuestion, PermissionRequest, PlanApprovalRequest,
+    PlanQuestionRequest,
 };
-use crate::native::mcp_servers::resolve_effective_mcp_servers;
+use crate::native::mcp_servers::resolve_session_mcp_servers;
 use crate::native::model::call_log::{
     CallLogContext, CALL_KIND_CHAT, CALL_KIND_ONE_SHOT, CALL_KIND_PLAN,
 };
 use crate::native::model::types::StreamDelta;
-use crate::native::model::{ModelClient, ModelClientConfig, RetryConfig};
+use crate::native::model::{ModelClient, ModelClientConfig};
 use crate::native::model_catalog::{
     apply_catalog_defaults, fill_from_catalog, resolve_runtime_reasoning_effort,
 };
 use crate::native::protocol::record_to_channel;
+use crate::native::tools::dispatch::PlanApprovalAnswer;
 use crate::native::tools::permission::{NativePermissionDecision, NativeToolRiskKind};
 use crate::native::tools::question::PlanQuestionAnswer;
 use crate::native::tools::{
@@ -251,6 +253,30 @@ fn question_event(
     }
 }
 
+#[derive(Clone, Serialize)]
+struct NativePlanApprovalEvent {
+    session_record_id: String,
+    request_id: String,
+    profile_id: String,
+    workspace_id: Option<String>,
+    session_kind: String,
+    plan: String,
+}
+
+fn plan_approval_event(
+    session_record_id: &str,
+    request: &PlanApprovalRequest,
+) -> NativePlanApprovalEvent {
+    NativePlanApprovalEvent {
+        session_record_id: session_record_id.to_string(),
+        request_id: request.request_id.clone(),
+        profile_id: request.profile_id.clone(),
+        workspace_id: request.workspace_id.clone(),
+        session_kind: request.session_kind.clone(),
+        plan: request.plan.clone(),
+    }
+}
+
 fn apply_bound_subagent(
     runner: &mut AgentRunner,
     parts: &mut crate::native::prompt::NativePromptParts,
@@ -264,19 +290,206 @@ fn apply_bound_subagent(
     runner.required_subagent_type = Some(def.name.clone());
 }
 
+/// `agent` 类型钩子：用当前会话的模型做一次无工具的判定，只要求输出 JSON。
+fn hook_agent_handler(run: &NativeRunSettings) -> crate::native::tools::hooks::HookAgentHandler {
+    use crate::native::model::call_log::{MODEL_ROLE_LITE, MODEL_ROLE_MAIN, OPERATION_HOOK_AGENT};
+    let (model, role) = match run.lite_model.as_deref() {
+        Some(lite) if !lite.trim().is_empty() => (lite.to_string(), MODEL_ROLE_LITE),
+        _ => (run.model.clone(), MODEL_ROLE_MAIN),
+    };
+    let client = match run.client.call_log_context() {
+        Some(context) => run.client.clone().with_call_log_context(
+            context
+                .clone()
+                .with_operation(OPERATION_HOOK_AGENT)
+                .with_model_role(role),
+        ),
+        None => run.client.clone(),
+    };
+    let effort = if role == MODEL_ROLE_LITE {
+        None
+    } else {
+        run.effort.clone()
+    };
+    Arc::new(move |prompt, payload| {
+        let client = client.clone();
+        let model = model.clone();
+        let effort = effort.clone();
+        Box::pin(async move {
+            let messages = vec![
+                crate::native::model::types::Message::system(
+                    "你是 noxcode 的钩子判定器。根据判定要求与事件载荷，只输出一个 JSON 对象：{\"decision\":\"allow|deny|ask\",\"continue\":true|false,\"reason\":\"简短理由\"}。不要输出其他内容。",
+                ),
+                crate::native::model::types::Message::user(format!(
+                    "判定要求：\n{prompt}\n\n事件载荷：\n{payload}"
+                )),
+            ];
+            let (message, _usage) = client
+                .chat(crate::native::model::client::ChatRequest {
+                    messages: &messages,
+                    tools: &[],
+                    model: &model,
+                    effort: effort.as_deref(),
+                    max_output_tokens: Some(512),
+                    thinking_enabled: false,
+                })
+                .await?;
+            Ok(message.content)
+        })
+    })
+}
+
+/// 本地工作区且开启记忆时：把记忆目录加入可读写根、索引块注入系统提示。返回记忆目录。
+fn attach_memory(
+    app: &AppHandle,
+    runner: &mut AgentRunner,
+    parts: &mut crate::native::prompt::NativePromptParts,
+    settings: Option<&crate::db::models::NativeSettings>,
+) -> Option<PathBuf> {
+    if !settings.is_some_and(|item| item.memory_enabled) || runner.ctx.ssh.is_some() {
+        return None;
+    }
+    let config_dir = app.path().app_config_dir().ok()?;
+    let dir = crate::native::memory::memory_dir(
+        &config_dir,
+        &runner.ctx.workspace.root.to_string_lossy(),
+    );
+    if let Err(error) = std::fs::create_dir_all(&dir) {
+        eprintln!("[native] 创建记忆目录失败: {error}");
+        return None;
+    }
+    if !dir.join(crate::native::memory::MEMORY_INDEX_FILE).exists() {
+        let _ = crate::native::memory::rebuild_index(&dir);
+    }
+    parts.memory = crate::native::memory::memory_prompt_block(&dir);
+    runner.ctx.workspace.extra_write_roots.push(dir.clone());
+    Some(dir)
+}
+
+/// 会话结束后的记忆抽取与周期性 dream；失败只打日志。
+#[allow(clippy::too_many_arguments)]
+async fn finish_memory(
+    app: &AppHandle,
+    run: &NativeRunSettings,
+    runner: &AgentRunner,
+    memory_dir: Option<&Path>,
+    settings: Option<&crate::db::models::NativeSettings>,
+    session_record_id: &str,
+    profile_id: &str,
+    workspace_id: &str,
+    kind: &str,
+    cancelled: bool,
+) {
+    let Some(dir) = memory_dir else {
+        return;
+    };
+    if cancelled {
+        return;
+    }
+    // 至少有一轮完整对话才值得抽取。
+    let exchanges = runner
+        .messages
+        .iter()
+        .filter(|message| {
+            matches!(
+                message.role,
+                crate::native::model::types::Role::User
+                    | crate::native::model::types::Role::Assistant
+            )
+        })
+        .count();
+    if exchanges < 2 {
+        return;
+    }
+    match crate::native::memory::extract_memories(
+        &run.client,
+        &run.model,
+        run.lite_model.as_deref(),
+        &runner.messages,
+        dir,
+    )
+    .await
+    {
+        Ok(0) => {}
+        Ok(count) => {
+            emit_native_line(
+                app,
+                session_record_id,
+                profile_id,
+                Some(workspace_id),
+                kind,
+                format!("[记忆] 已保存 {count} 条记忆到 {}", dir.display()),
+            )
+            .await;
+        }
+        Err(error) => eprintln!("[native] 记忆抽取失败: {error}"),
+    }
+    let interval = settings
+        .map(|item| item.memory_dream_interval.max(0) as u32)
+        .unwrap_or(0);
+    if crate::native::memory::dream_due(dir, interval) {
+        match crate::native::memory::dream(&run.client, &run.model, run.lite_model.as_deref(), dir)
+            .await
+        {
+            Ok(summary) => {
+                emit_native_line(
+                    app,
+                    session_record_id,
+                    profile_id,
+                    Some(workspace_id),
+                    kind,
+                    format!("[记忆] {summary}"),
+                )
+                .await;
+            }
+            Err(error) => eprintln!("[native] 记忆整理失败: {error}"),
+        }
+    }
+}
+
 async fn attach_skills_and_hooks(
     app: &AppHandle,
     runner: &mut AgentRunner,
     parts: &mut crate::native::prompt::NativePromptParts,
 ) {
-    if let Ok(settings) = crate::native::settings::load_native_settings(app) {
-        runner.ctx.hooks = settings.hooks;
-    }
+    let global_hooks = crate::native::settings::load_native_settings(app)
+        .map(|settings| settings.hooks)
+        .unwrap_or_default();
     let config_dir = app.path().app_config_dir().ok();
+    let workspace_root = runner
+        .ctx
+        .ssh
+        .is_none()
+        .then(|| runner.ctx.workspace.root.clone());
+    // 已启用插件贡献的钩子与技能。
+    let plugins = crate::native::plugins::load_enabled_plugins(
+        config_dir.as_deref(),
+        workspace_root.as_deref(),
+    );
+    let plugin_hooks = crate::native::plugins::plugin_hooks(&plugins);
+    // 本地工作区再叠加 .noxcode/hooks.json 与 .claude/settings.json 里的钩子。
+    let workspace_hooks = if runner.ctx.ssh.is_none() {
+        crate::native::hooks_config::load_workspace_hooks(&runner.ctx.workspace.root)
+    } else {
+        Vec::new()
+    };
+    runner.ctx.hooks = crate::native::hooks_config::merge_hooks(
+        crate::native::hooks_config::merge_hooks(global_hooks, plugin_hooks),
+        workspace_hooks,
+    );
+    // session_start 钩子的输出进入系统提示尾段。
+    if !runner.ctx.hooks.is_empty() {
+        let context =
+            crate::native::tools::hooks::run_session_start_hooks(&runner.ctx.hook_runtime()).await;
+        if !context.is_empty() {
+            parts.hook_context = context.join("\n");
+        }
+    }
     let skills = crate::native::skills::load_session_skills(
         &parts.cwd,
         runner.ctx.ssh.as_ref(),
         config_dir.as_deref(),
+        &plugins,
     )
     .await;
     parts.skills = crate::native::skills::format_skills_prompt(&skills);
@@ -293,15 +506,23 @@ fn attach_subagent_runtime(
 ) {
     runner.workspace_context = crate::native::prompt::workspace_context_block(parts);
     runner.project_agents = parts.project_agents.clone();
-    let loaded = crate::native::subagents::load_native_subagents(app).unwrap_or_default();
+    // 本地工作区还会读取 .noxcode/agents、.claude/agents 与全局 agents 目录下的 .md 档案。
+    let workspace_root = runner
+        .ctx
+        .ssh
+        .is_none()
+        .then(|| runner.ctx.workspace.root.clone());
+    let loaded = crate::native::subagents::load_session_subagents(app, workspace_root.as_deref());
     runner.custom_subagents =
         crate::native::subagents::catalog_for_session(&loaded, workspace_id, bound);
     let app_reload = app.clone();
     let workspace_id_owned = workspace_id.map(ToOwned::to_owned);
     let bound_owned = bound.cloned();
     runner.reload_custom_subagents = Some(std::sync::Arc::new(move || {
-        let loaded =
-            crate::native::subagents::load_native_subagents(&app_reload).unwrap_or_default();
+        let loaded = crate::native::subagents::load_session_subagents(
+            &app_reload,
+            workspace_root.as_deref(),
+        );
         crate::native::subagents::catalog_for_session(
             &loaded,
             workspace_id_owned.as_deref(),
@@ -515,6 +736,8 @@ async fn emit_native_line(
 struct NativeRunSettings {
     client: ModelClient,
     model: String,
+    /// 渠道的轻量模型（压缩 / 记忆 / 钩子判定），无则用主模型。
+    lite_model: Option<String>,
     effort: Option<String>,
     max_output_tokens: Option<u32>,
     thinking_enabled: bool,
@@ -535,6 +758,12 @@ fn configure_runner_limits(
         crate::native::settings::session_context_window_tokens(app, model_context_tokens) as usize;
     runner.context_char_limit = context_tokens.saturating_mul(2);
     runner.context_window.set_token_limit(context_tokens);
+    if let Ok(settings) = crate::native::settings::load_native_settings(app) {
+        runner.set_compaction_options(
+            settings.auto_compact_threshold_percent.max(0) as u32,
+            settings.microcompact_enabled,
+        );
+    }
     runner.tool_result_token_limit =
         crate::native::settings::effective_max_tool_output_tokens(app) as usize;
     runner.set_rollout_budget_limit(crate::native::settings::effective_rollout_token_budget(app));
@@ -666,7 +895,7 @@ async fn load_native_client_from_channel(
         base_url: channel.base_url.clone(),
         api_key,
         extra_headers: extra_headers_map(channel.extra_headers_json.as_deref()),
-        retry: RetryConfig::default(),
+        retry: crate::native::settings::effective_model_retry_config(app),
         timeout: Duration::from_secs(if thinking_enabled { 300 } else { 120 }),
         network: load_network_settings(app)?,
     })?
@@ -680,11 +909,14 @@ async fn load_native_client_from_channel(
             subagent_id: None,
             call_kind: Some(CALL_KIND_CHAT.to_string()),
             execution_target: None,
+            operation: None,
+            model_role: None,
         },
         sqlite_call_log_sink(pool.clone()),
     );
     Ok(NativeRunSettings {
         client,
+        lite_model: channel.lite_model.clone(),
         model,
         effort,
         max_output_tokens: model_config.max_output_tokens,
@@ -1075,6 +1307,60 @@ fn attach_mutation_checkpoint(
     }));
 }
 
+/// 按设置装配本地工具运行时：Bash 默认超时、shell 快照、ripgrep、artifact 存储。
+/// SSH 工作区不导出本机 shell 快照，但 artifact 目录仍在本机。
+async fn configure_local_tool_runtime(
+    app: &AppHandle,
+    runner: &mut AgentRunner,
+    session_record_id: &str,
+) {
+    let settings = match crate::native::settings::load_native_settings(app) {
+        Ok(settings) => settings,
+        Err(error) => {
+            eprintln!("[native] 读取运行时设置失败，使用默认值: {error}");
+            return;
+        }
+    };
+    runner.ctx.workspace.bash_default_timeout =
+        Duration::from_secs(settings.bash_default_timeout_secs.max(1) as u64);
+    let config_dir = app.path().app_config_dir().ok();
+    if settings.rg_sidecar_enabled {
+        let bundled = app.path().resource_dir().ok().map(|dir| dir.join("tools"));
+        runner.ctx.workspace.rg_binary =
+            crate::native::tools::local::locate_ripgrep(bundled.as_deref());
+    }
+    if settings.shell_snapshot_enabled && runner.ctx.ssh.is_none() {
+        if let Some(dir) = config_dir.as_ref() {
+            match crate::native::tools::shell_snapshot::capture_shell_snapshot(dir).await {
+                Ok(path) => runner.ctx.workspace.shell_snapshot = Some(path),
+                Err(error) => eprintln!("[native] 导出 shell 快照失败，回退 bash -lc: {error}"),
+            }
+        }
+    }
+    if let Some(dir) = config_dir.as_ref() {
+        let record_app = app.clone();
+        let store = crate::native::artifacts::ArtifactStore::new(dir, session_record_id)
+            .with_recorder(Arc::new(move |record| {
+                let app = record_app.clone();
+                tauri::async_runtime::spawn(async move {
+                    if let Ok(pool) = sqlite_pool(&app).await {
+                        if let Err(error) =
+                            crate::native::artifacts::insert_artifact_row(&pool, &record).await
+                        {
+                            eprintln!("[native] {error}");
+                        }
+                    }
+                });
+            }));
+        runner
+            .ctx
+            .workspace
+            .extra_read_roots
+            .push(store.dir().to_path_buf());
+        runner.set_artifact_store(Arc::new(store));
+    }
+}
+
 #[tauri::command]
 pub async fn start_native_session(
     app: AppHandle,
@@ -1084,7 +1370,7 @@ pub async fn start_native_session(
     start_native_with_manager(app, state.inner().clone(), payload).await
 }
 
-async fn start_native_with_manager(
+pub(crate) async fn start_native_with_manager(
     app: AppHandle,
     manager_state: Arc<Mutex<NativeAgentManager>>,
     payload: StartNativeSessionInput,
@@ -1208,7 +1494,9 @@ async fn start_native_with_manager(
                 CALL_KIND_CHAT
             },
             Some(execution_context.execution_target.clone()),
-        ));
+        ))
+        // OpenAI / Responses 按会话打 prompt_cache_key，Anthropic 走 cache_control。
+        .with_prompt_cache_key(session_record_id.clone());
 
     let ssh = if execution_context.execution_target == EXECUTION_TARGET_SSH {
         let ssh_id = execution_context
@@ -1252,8 +1540,19 @@ async fn start_native_with_manager(
     let cancel = crate::native::tools::CancelFlag::new();
     let permission_mode = crate::native::settings::effective_permission_mode(&app);
     let allow_all_high_risk = Arc::new(AtomicBool::new(
-        permission_mode == crate::native::settings::PERMISSION_MODE_FULL,
+        crate::native::settings::permission_mode_is_yolo(&permission_mode),
     ));
+    let local_workspace_root = (execution_context.execution_target
+        == crate::app::shared::EXECUTION_TARGET_LOCAL)
+        .then(|| PathBuf::from(&run_cwd));
+    let permission_rules =
+        crate::native::permission_rules::shared_rules(match app.path().app_config_dir() {
+            Ok(dir) => crate::native::permission_rules::load_effective_rules(
+                &dir,
+                local_workspace_root.as_deref(),
+            ),
+            Err(_) => Default::default(),
+        });
     let working = Arc::new(AtomicBool::new(true));
     let (loop_ready_tx, loop_ready_rx) = tokio::sync::oneshot::channel();
     let manager_spawn = manager_state.clone();
@@ -1267,6 +1566,7 @@ async fn start_native_with_manager(
     let kind_spawn = kind.clone();
     let image_paths = payload.image_paths.clone();
     let resume_run = payload.resume_session_id.clone();
+    let rules_run = permission_rules.clone();
     let join = tokio::spawn(async move {
         let _ = loop_ready_rx.await;
         run_native_loop(
@@ -1279,6 +1579,7 @@ async fn start_native_with_manager(
             cancel_run,
             allow_all_run,
             working_run,
+            rules_run,
             followup_rx,
             session_spawn,
             profile_spawn,
@@ -1304,8 +1605,11 @@ async fn start_native_with_manager(
         join,
         allow_all_high_risk,
         working,
+        permission_rules,
+        workspace_root: local_workspace_root,
         pending_permission: std::collections::VecDeque::new(),
         pending_question: std::collections::VecDeque::new(),
+        pending_plan_approval: std::collections::VecDeque::new(),
     });
     let _ = loop_ready_tx.send(());
     Ok(started)
@@ -1322,6 +1626,7 @@ async fn run_native_loop(
     cancel: crate::native::tools::CancelFlag,
     allow_all_high_risk: Arc<AtomicBool>,
     working: Arc<AtomicBool>,
+    permission_rules: crate::native::permission_rules::SharedPermissionRules,
     followup_rx: mpsc::Receiver<NativeFollowup>,
     session_record_id: String,
     profile_id: String,
@@ -1337,8 +1642,10 @@ async fn run_native_loop(
     runner.ctx.extra_env = load_network_settings(&app)
         .map(|settings| proxy_env_vars(&settings))
         .unwrap_or_default();
+    configure_local_tool_runtime(&app, &mut runner, &session_record_id).await;
     runner.ctx.cancel = cancel.clone();
     runner.ctx.allow_all_high_risk = allow_all_high_risk;
+    runner.ctx.permission_rules = permission_rules;
     runner.steer_rx = Some(followup_rx.clone());
     if plan_mode {
         runner.set_read_only(true);
@@ -1353,30 +1660,54 @@ async fn run_native_loop(
     let announce_startup = should_announce_session_startup(resume_session_id.as_deref());
     let permission_mode = crate::native::settings::effective_permission_mode(&app);
     runner.ctx.auto_approve_overwrite =
-        permission_mode == crate::native::settings::PERMISSION_MODE_AUTO_EDIT;
-    if announce_startup && permission_mode == crate::native::settings::PERMISSION_MODE_FULL {
-        emit_native_line(
-            &app,
-            &session_record_id,
-            &profile_id,
-            Some(&workspace_id),
-            &kind,
-            "[PERMISSION] 已在设置中关闭高风险确认，本会话工具将直接执行".to_string(),
-        )
-        .await;
+        crate::native::settings::permission_mode_auto_approves_edits(&permission_mode);
+    let build_mode = crate::native::settings::permission_mode_auto_approves_build(&permission_mode);
+    runner.ctx.auto_approve_opaque_bash = build_mode;
+    runner.ctx.auto_approve_readonly_mcp = build_mode;
+    if announce_startup {
+        let notice = match permission_mode.as_str() {
+            crate::native::settings::PERMISSION_MODE_YOLO => Some(
+                "[PERMISSION] 完全访问（yolo）：高风险工具直接执行，只有 ask 规则仍会确认",
+            ),
+            crate::native::settings::PERMISSION_MODE_BUILD => Some(
+                "[PERMISSION] 自动构建（build）：覆盖文件、不透明命令与只读 MCP 直接执行，删除 / 推送 / 强制 Git / 写入型 MCP 仍需确认",
+            ),
+            crate::native::settings::PERMISSION_MODE_EDIT => Some(
+                "[PERMISSION] 自动编辑（edit）：覆盖文件直接执行，删除 / 推送 / 强制 Git / 不透明命令 / MCP 仍需确认",
+            ),
+            _ => None,
+        };
+        if let Some(notice) = notice {
+            emit_native_line(
+                &app,
+                &session_record_id,
+                &profile_id,
+                Some(&workspace_id),
+                &kind,
+                notice.to_string(),
+            )
+            .await;
+        }
+        let rules = runner.ctx.permission_rules_snapshot();
+        if !rules.is_empty() {
+            emit_native_line(
+                &app,
+                &session_record_id,
+                &profile_id,
+                Some(&workspace_id),
+                &kind,
+                format!(
+                    "[PERMISSION] 已加载权限规则：允许 {} / 拒绝 {} / 需确认 {}",
+                    rules.allow.len(),
+                    rules.deny.len(),
+                    rules.ask.len()
+                ),
+            )
+            .await;
+        }
     }
-    if announce_startup && permission_mode == crate::native::settings::PERMISSION_MODE_AUTO_EDIT {
-        emit_native_line(
-            &app,
-            &session_record_id,
-            &profile_id,
-            Some(&workspace_id),
-            &kind,
-            "[PERMISSION] 已开启自动编辑：覆盖文件直接执行，删除 / 推送 / 强制 Git / 不透明命令 / MCP 仍需确认".to_string(),
-        )
-        .await;
-    }
-    if permission_mode != crate::native::settings::PERMISSION_MODE_FULL {
+    // yolo 模式也保留确认通道：ask 规则命中时仍要问用户。
+    {
         let app_perm = app.clone();
         let manager_perm = manager_state.clone();
         let session_perm = session_record_id.clone();
@@ -1401,6 +1732,7 @@ async fn run_native_loop(
                     summary: prompt.summary.clone(),
                     remote: prompt.remote,
                     mcp_server_id: prompt.mcp_server_id.clone(),
+                    suggested_rule: prompt.suggested_rule.clone(),
                 };
                 let should_emit = {
                     let mut manager = manager_state.lock().await;
@@ -1484,7 +1816,73 @@ async fn run_native_loop(
             })
         }));
     }
-    if plan_mode {
+    // AskUserQuestion 在所有模式可用；ExitPlanMode 需要用户批准计划。
+    {
+        let app_q = app.clone();
+        let manager_q = manager_state.clone();
+        let session_q = session_record_id.clone();
+        let profile_q = profile_id.clone();
+        let workspace_q = workspace_id.clone();
+        let kind_q = kind.clone();
+        runner.ctx.request_plan_approval = Some(std::sync::Arc::new(move |prompt, reply| {
+            let app = app_q.clone();
+            let manager_state = manager_q.clone();
+            let session_record_id = session_q.clone();
+            let profile_id = profile_q.clone();
+            let workspace_id = workspace_q.clone();
+            let kind = kind_q.clone();
+            tauri::async_runtime::spawn(async move {
+                let request = PlanApprovalRequest {
+                    request_id: prompt.request_id.clone(),
+                    profile_id: profile_id.clone(),
+                    workspace_id: Some(workspace_id.clone()),
+                    session_kind: kind.clone(),
+                    plan: prompt.plan.clone(),
+                };
+                let should_emit = {
+                    let mut manager = manager_state.lock().await;
+                    match manager.enqueue_plan_approval(
+                        &session_record_id,
+                        PendingPlanApproval {
+                            request: request.clone(),
+                            reply,
+                        },
+                    ) {
+                        Ok(should_emit) => should_emit,
+                        Err(_) => return,
+                    }
+                };
+                emit_native_line(
+                    &app,
+                    &session_record_id,
+                    &profile_id,
+                    Some(&workspace_id),
+                    &kind,
+                    format!("[PLAN]\n{}", prompt.plan),
+                )
+                .await;
+                emit_native_line(
+                    &app,
+                    &session_record_id,
+                    &profile_id,
+                    Some(&workspace_id),
+                    &kind,
+                    "[PLAN] 等待用户批准计划".to_string(),
+                )
+                .await;
+                if should_emit {
+                    let _ = app.emit(
+                        "native-plan-approval-request",
+                        plan_approval_event(&session_record_id, &request),
+                    );
+                    crate::app::notifications::notify_if_unfocused(
+                        &app,
+                        "等待批准计划",
+                        "Agent 已提交计划，等待你批准或退回",
+                    );
+                }
+            });
+        }));
         let app_q = app.clone();
         let manager_q = manager_state.clone();
         let session_q = session_record_id.clone();
@@ -1578,13 +1976,51 @@ async fn run_native_loop(
         required_subagent_name: String::new(),
         required_subagent_description: String::new(),
         permission_mode: if plan_mode {
-            "plan".to_string()
+            crate::native::settings::PERMISSION_MODE_PLAN.to_string()
         } else {
-            String::new()
+            permission_mode.clone()
         },
         skills: String::new(),
+        hook_context: String::new(),
+        memory: String::new(),
     };
+    runner.ctx.session_record_id = session_record_id.clone();
+    runner.lite_model = run.lite_model.clone();
+    runner.ctx.hook_agent = Some(hook_agent_handler(&run));
+    if let Ok(pool) = sqlite_pool(&app).await {
+        let goal_app = app.clone();
+        let goal_session = session_record_id.clone();
+        let goal_profile = profile_id.clone();
+        let goal_workspace = workspace_id.clone();
+        let goal_kind = kind.clone();
+        runner.ctx.session_scope = Some(crate::native::tools::dispatch::SessionScope {
+            pool,
+            workspace_id: Some(workspace_id.clone()),
+            channel_id: run.channel_id.clone(),
+            model: run.model.clone(),
+            on_goal: Some(Arc::new(move |line| {
+                let app = goal_app.clone();
+                let session_record_id = goal_session.clone();
+                let profile_id = goal_profile.clone();
+                let workspace_id = goal_workspace.clone();
+                let kind = goal_kind.clone();
+                tauri::async_runtime::spawn(async move {
+                    emit_native_line(
+                        &app,
+                        &session_record_id,
+                        &profile_id,
+                        Some(&workspace_id),
+                        &kind,
+                        line,
+                    )
+                    .await;
+                });
+            })),
+        });
+    }
     attach_skills_and_hooks(&app, &mut runner, &mut parts).await;
+    let memory_settings = crate::native::settings::load_native_settings(&app).ok();
+    let memory_dir = attach_memory(&app, &mut runner, &mut parts, memory_settings.as_ref());
     attach_subagent_runtime(
         &app,
         &mut runner,
@@ -1608,6 +2044,10 @@ async fn run_native_loop(
             match load_transcript(&pool, resume_id).await {
                 Ok(Some(history)) => {
                     runner.messages.extend(history);
+                    // 恢复到更小窗口的模型（或历史本就很长）时，第一次调用前按 downshift 压缩。
+                    if runner.context_window.should_compact(&runner.messages) {
+                        runner.request_downshift_compaction();
+                    }
                 }
                 Ok(None) => {
                     eprintln!("[native] 未找到可恢复的上下文，已按新对话开始");
@@ -1660,7 +2100,12 @@ async fn run_native_loop(
             .await;
         }
     }
-    match resolve_effective_mcp_servers(&app, Some(&workspace_id)) {
+    let mcp_workspace_root = runner
+        .ctx
+        .ssh
+        .is_none()
+        .then(|| runner.ctx.workspace.root.clone());
+    match resolve_session_mcp_servers(&app, Some(&workspace_id), mcp_workspace_root.as_deref()) {
         Ok(servers) => {
             if announce_startup {
                 emit_native_line(
@@ -1728,6 +2173,7 @@ async fn run_native_loop(
                 .await;
             }
             runner.set_extra_tools(connected.session.tool_specs());
+            runner.set_extra_tool_contracts(connected.session.tool_contracts());
             runner.ctx.mcp = SharedMcp::from_session(connected.session);
         }
         Err(error) => {
@@ -1798,6 +2244,13 @@ async fn run_native_loop(
         )
         .await;
         let images = std::mem::take(&mut pending_images);
+        // 每回合按关键词回忆相关记忆，附在用户消息后。
+        if let Some(dir) = memory_dir.as_deref() {
+            let hits = crate::native::memory::recall(dir, &prompt, 3);
+            if !hits.is_empty() {
+                runner.set_turn_suffix(crate::native::memory::format_recall_block(dir, &hits));
+            }
+        }
         let plan_text = match runner
             .run_with_client(
                 &run.client,
@@ -1842,6 +2295,10 @@ async fn run_native_loop(
             last_transcript_fingerprint.as_ref(),
         )
         .await;
+        // 模型若已通过 ExitPlanMode 获批并在本轮实施，就不再自动追加「开始执行」。
+        if plan_pending && !runner.is_plan_mode() {
+            plan_pending = false;
+        }
         match next_loop_step(
             await_followups,
             NativeLoopEvent::TurnFinished { plan_pending },
@@ -1864,7 +2321,6 @@ async fn run_native_loop(
                 plan_pending = false;
                 runner.set_read_only(false);
                 runner.set_plan_mode(false);
-                runner.ctx.request_question = None;
                 emit_native_line(
                     &app,
                     &session_record_id,
@@ -1895,7 +2351,42 @@ async fn run_native_loop(
                     break;
                 }
                 emit_turn_state(&app, &session_record_id, &working, "waiting_input");
-                match followup_rx.lock().await.recv().await {
+                // 等待输入时收到 /compact：立刻压缩、写回 transcript，然后继续等待，不算用户回合。
+                let followup = loop {
+                    match followup_rx.lock().await.recv().await {
+                        Some(NativeFollowup::Compact(instructions)) => {
+                            emit_turn_state(&app, &session_record_id, &working, "working");
+                            if runner
+                                .compact_now(&run.client, instructions)
+                                .await
+                                .is_none()
+                            {
+                                emit_native_line(
+                                    &app,
+                                    &session_record_id,
+                                    &profile_id,
+                                    Some(&workspace_id),
+                                    &kind,
+                                    "[工具] 当前上下文太短，无需压缩".to_string(),
+                                )
+                                .await;
+                            }
+                            persist_runner_transcript(
+                                &app,
+                                &session_record_id,
+                                &profile_id,
+                                &workspace_id,
+                                &run.model,
+                                &runner.messages,
+                                last_transcript_fingerprint.as_ref(),
+                            )
+                            .await;
+                            emit_turn_state(&app, &session_record_id, &working, "waiting_input");
+                        }
+                        other => break other,
+                    }
+                };
+                match followup {
                     Some(NativeFollowup::Input(input)) => {
                         match next_loop_step(await_followups, NativeLoopEvent::FollowupInput) {
                             NativeLoopAction::RunFollowup => {
@@ -1905,7 +2396,7 @@ async fn run_native_loop(
                             _ => break,
                         }
                     }
-                    Some(NativeFollowup::Finish) | None => {
+                    Some(NativeFollowup::Finish) | Some(NativeFollowup::Compact(_)) | None => {
                         let _ = next_loop_step(await_followups, NativeLoopEvent::FollowupFinish);
                         break;
                     }
@@ -1926,6 +2417,22 @@ async fn run_native_loop(
     )
     .await;
 
+    finish_memory(
+        &app,
+        &run,
+        &runner,
+        memory_dir.as_deref(),
+        memory_settings.as_ref(),
+        &session_record_id,
+        &profile_id,
+        &workspace_id,
+        &kind,
+        cancel.is_cancelled(),
+    )
+    .await;
+
+    // 会话结束时停掉仍在跑的后台子 Agent。
+    runner.background.stop_all();
     runner.on_event.take();
     runner.on_usage.take();
     runner.ctx.mcp.shutdown().await;
@@ -2050,6 +2557,53 @@ pub async fn resolve_native_tool_permission(
     request_id: String,
     decision: NativePermissionDecision,
 ) -> Result<(), String> {
+    // 「总是允许」：先落盘规则（工作区优先，SSH 工作区落全局），再放行。
+    if decision == NativePermissionDecision::AllowAlways {
+        let (suggestion, rules, root) = {
+            let manager = state.lock().await;
+            let session = manager
+                .get_session(&session_record_id)
+                .ok_or_else(|| "没有运行中的内置 Agent 会话".to_string())?;
+            let suggestion = session
+                .pending_permission
+                .front()
+                .filter(|pending| pending.request.request_id == request_id)
+                .and_then(|pending| pending.request.suggested_rule.clone());
+            (
+                suggestion,
+                session.permission_rules.clone(),
+                session.workspace_root.clone(),
+            )
+        };
+        if let Some(suggestion) = suggestion {
+            let config_dir = app
+                .path()
+                .app_config_dir()
+                .map_err(|error| format!("无法读取应用配置目录: {error}"))?;
+            let scope = if root.is_some() {
+                crate::native::tools::permission::RuleScope::Workspace
+            } else {
+                crate::native::tools::permission::RuleScope::Global
+            };
+            let rule = crate::native::tools::permission::PermissionRule {
+                id: String::new(),
+                capability: suggestion.capability,
+                pattern: suggestion.pattern,
+                source: suggestion.source,
+                scope,
+                note: "由权限确认对话框保存".to_string(),
+            };
+            let saved = crate::native::permission_rules::add_rule(
+                &config_dir,
+                root.as_deref(),
+                crate::native::tools::permission::RuleEffect::Allow,
+                rule,
+            )?;
+            if let Ok(mut live) = rules.write() {
+                live.push(crate::native::tools::permission::RuleEffect::Allow, saved);
+            }
+        }
+    }
     let next = state
         .lock()
         .await
@@ -2058,6 +2612,207 @@ pub async fn resolve_native_tool_permission(
         let _ = app.emit(
             "native-permission-request",
             permission_event(&session_record_id, &request),
+        );
+    }
+    Ok(())
+}
+
+/// `/fork [checkpoint_id]`：复制会话上下文到一条新的（已结束、可续聊的）会话记录；
+/// 给了 checkpoint 时先把工作区回滚到该检查点。返回新会话 id。
+#[tauri::command]
+pub async fn fork_native_session(
+    app: AppHandle,
+    state: State<'_, Arc<Mutex<NativeAgentManager>>>,
+    session_record_id: String,
+    checkpoint_id: Option<String>,
+) -> Result<String, String> {
+    if state.lock().await.get_session(&session_record_id).is_some() {
+        return Err("会话仍在运行，请先等它完成或停止后再分叉".to_string());
+    }
+    let pool = sqlite_pool(&app).await?;
+    let source = sqlx::query_as::<_, crate::db::models::AgentSessionRecord>(
+        "SELECT * FROM agent_sessions WHERE id = $1 LIMIT 1",
+    )
+    .bind(&session_record_id)
+    .fetch_optional(&pool)
+    .await
+    .map_err(|error| format!("读取会话失败: {error}"))?
+    .ok_or_else(|| format!("会话不存在: {session_record_id}"))?;
+    let messages = load_transcript(&pool, &session_record_id)
+        .await?
+        .ok_or_else(|| "该会话没有可分叉的上下文".to_string())?;
+    if let Some(checkpoint_id) = checkpoint_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|item| !item.is_empty())
+    {
+        let workspace_id = source
+            .workspace_id
+            .as_deref()
+            .ok_or_else(|| "会话没有工作区，无法回滚检查点".to_string())?;
+        let target = crate::git::resolve_git_target(&app, workspace_id).await?;
+        crate::git::restore_checkpoint(&pool, &target, workspace_id, checkpoint_id, &[])
+            .await
+            .map_err(|error| format!("回滚检查点失败: {error}"))?;
+    }
+    let new_id = new_id();
+    let now = now_sqlite();
+    let title = source
+        .title
+        .as_deref()
+        .map(str::trim)
+        .filter(|item| !item.is_empty())
+        .map(|item| format!("{item}（分叉）"))
+        .unwrap_or_else(|| "分叉会话".to_string());
+    sqlx::query(
+        r#"
+        INSERT INTO agent_sessions (
+            id, ai_channel_id, workspace_id, working_dir, execution_target,
+            ssh_config_id, target_host_label, session_kind, status,
+            started_at, ended_at, exit_code, resume_session_id, created_at, title
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'exited', $9, $9, 0, $10, $9, $11)
+        "#,
+    )
+    .bind(&new_id)
+    .bind(&source.ai_channel_id)
+    .bind(&source.workspace_id)
+    .bind(&source.working_dir)
+    .bind(&source.execution_target)
+    .bind(&source.ssh_config_id)
+    .bind(&source.target_host_label)
+    .bind(&source.session_kind)
+    .bind(&now)
+    .bind(&session_record_id)
+    .bind(&title)
+    .execute(&pool)
+    .await
+    .map_err(|error| format!("创建分叉会话失败: {error}"))?;
+    let model = sqlx::query_scalar::<_, String>(
+        "SELECT model FROM native_session_transcripts WHERE session_record_id = $1",
+    )
+    .bind(&session_record_id)
+    .fetch_optional(&pool)
+    .await
+    .map_err(|error| format!("读取会话模型失败: {error}"))?
+    .unwrap_or_default();
+    let turns = messages
+        .iter()
+        .filter(|message| message.role == crate::native::model::types::Role::User)
+        .count() as u32;
+    save_transcript(
+        &pool,
+        &new_id,
+        &messages,
+        &NativeTranscriptMeta {
+            profile_id: None,
+            workspace_id: source.workspace_id.clone(),
+            model,
+            turns,
+        },
+    )
+    .await?;
+    let _ = insert_session_event(
+        &pool,
+        &new_id,
+        "stdout",
+        Some(&format!(
+            "[续聊] 从会话 {session_record_id} 分叉，共复制 {} 条消息",
+            messages.len()
+        )),
+    )
+    .await;
+    Ok(new_id)
+}
+
+/// 手动触发记忆整理（dream）：用指定渠道（优先其轻量模型）合并、去重工作区记忆。
+#[tauri::command]
+pub async fn dream_native_memory(
+    app: AppHandle,
+    workspace_id: String,
+    channel_id: String,
+    model: Option<String>,
+) -> Result<String, String> {
+    let pool = sqlite_pool(&app).await?;
+    let run = load_native_client(
+        &app,
+        &pool,
+        &channel_id,
+        model.as_deref().unwrap_or(""),
+        None,
+    )
+    .await?;
+    let context = resolve_workspace_execution_context_with_pool(&pool, &workspace_id).await?;
+    if context.execution_target != crate::app::shared::EXECUTION_TARGET_LOCAL {
+        return Err("记忆只对本地工作区可用".to_string());
+    }
+    let root = context
+        .working_dir
+        .ok_or_else(|| "工作区缺少目录".to_string())?;
+    let config_dir = app
+        .path()
+        .app_config_dir()
+        .map_err(|error| format!("无法读取应用配置目录: {error}"))?;
+    let dir = crate::native::memory::memory_dir(&config_dir, &root);
+    let client = run
+        .client
+        .with_call_log_context(CallLogContext::for_session(
+            Some(run.channel_id.clone()),
+            Some(run.channel_name.clone()),
+            None,
+            None,
+            Some(workspace_id.clone()),
+            CALL_KIND_ONE_SHOT,
+            Some(context.execution_target.clone()),
+        ));
+    crate::native::memory::dream(&client, &run.model, run.lite_model.as_deref(), &dir).await
+}
+
+/// `/compact [指令]`：向运行中的会话投递压缩请求；等待输入时立即执行，工作中则在下一次模型调用前执行。
+#[tauri::command]
+pub async fn compact_native_session(
+    state: State<'_, Arc<Mutex<NativeAgentManager>>>,
+    session_record_id: String,
+    instructions: Option<String>,
+) -> Result<bool, String> {
+    let instructions = instructions
+        .map(|item| item.trim().to_string())
+        .filter(|item| !item.is_empty());
+    let tx = {
+        let manager = state.lock().await;
+        manager
+            .get_session(&session_record_id)
+            .map(|session| session.followup_tx.clone())
+    };
+    let Some(tx) = tx else {
+        return Ok(false);
+    };
+    tx.send(NativeFollowup::Compact(instructions))
+        .await
+        .map_err(|_| "会话已结束，无法压缩".to_string())?;
+    Ok(true)
+}
+
+#[tauri::command]
+pub async fn resolve_native_plan_approval(
+    app: AppHandle,
+    state: State<'_, Arc<Mutex<NativeAgentManager>>>,
+    session_record_id: String,
+    request_id: String,
+    approved: bool,
+    feedback: Option<String>,
+) -> Result<(), String> {
+    let next = state.lock().await.resolve_plan_approval(
+        &session_record_id,
+        &request_id,
+        PlanApprovalAnswer {
+            approved,
+            feedback: feedback.unwrap_or_default(),
+        },
+    )?;
+    if let Some(request) = next {
+        let _ = app.emit(
+            "native-plan-approval-request",
+            plan_approval_event(&session_record_id, &request),
         );
     }
     Ok(())
@@ -2331,6 +3086,7 @@ mod tests {
             token_limit: 16_000,
             compactions: 1,
             resets: 1,
+            threshold_percent: 85,
         };
         let details =
             format_native_diagnostics(&budget, &context, &AgentDiagnosticsSnapshot::default());
@@ -2496,6 +3252,9 @@ mod tests {
             working: Arc::new(AtomicBool::new(false)),
             pending_permission: VecDeque::new(),
             pending_question: VecDeque::new(),
+            permission_rules: crate::native::permission_rules::shared_rules(Default::default()),
+            workspace_root: None,
+            pending_plan_approval: VecDeque::new(),
         });
         let manager = tokio::sync::Mutex::new(manager);
 
@@ -2506,7 +3265,9 @@ mod tests {
         assert_eq!(info.session_record_id, "sess-1");
         match rx.recv().await {
             Some(NativeFollowup::Input(text)) => assert_eq!(text, "下一条"),
-            Some(NativeFollowup::Finish) => panic!("unexpected finish"),
+            Some(NativeFollowup::Finish) | Some(NativeFollowup::Compact(_)) => {
+                panic!("unexpected finish")
+            }
             None => panic!("channel closed"),
         }
         assert!(super::enqueue_live_input(&manager, "missing", "x")

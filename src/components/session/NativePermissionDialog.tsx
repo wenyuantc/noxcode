@@ -25,11 +25,14 @@ export function NativePermissionDialog() {
     void resolveNativeToolPermission(current.session_record_id, current.request_id, decision);
   };
 
+  const suggestion = pending?.suggested_rule ?? null;
+  const isRule = pending?.kind === "rule";
+
   return (
     <Dialog open={Boolean(pending)} onOpenChange={(open) => !open && pending && resolve("deny")}>
       <DialogContent className="max-w-md">
         <DialogHeader>
-          <DialogTitle>{t("permissionTitle")}</DialogTitle>
+          <DialogTitle>{isRule ? t("permissionRuleTitle") : t("permissionTitle")}</DialogTitle>
           <DialogDescription>{pending?.summary}</DialogDescription>
         </DialogHeader>
         <p className="text-xs text-muted-foreground">
@@ -41,6 +44,11 @@ export function NativePermissionDialog() {
           ) : (
             <Button onClick={() => resolve("allow_session")}>{t("permissionAllowSession")}</Button>
           )}
+          {suggestion ? (
+            <Button variant="secondary" onClick={() => resolve("allow_always")}>
+              {t("permissionAllowAlways", { pattern: suggestion.pattern })}
+            </Button>
+          ) : null}
           <Button variant="outline" onClick={() => resolve("allow_once")}>
             {t("permissionAllowOnce")}
           </Button>

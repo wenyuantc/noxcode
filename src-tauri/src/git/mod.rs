@@ -25,9 +25,9 @@ use crate::engine::context::resolve_workspace_execution_context_with_pool;
 use crate::native::manager::NativeAgentManager;
 use crate::native::settings::load_native_settings;
 
+pub(crate) use self::checkpoint::restore_checkpoint;
 use self::checkpoint::{
-    list_checkpoints, preview_restore, prune_expired_checkpoints, restore_checkpoint,
-    sweep_orphan_refs,
+    list_checkpoints, preview_restore, prune_expired_checkpoints, sweep_orphan_refs,
 };
 use self::commit::{
     checkout_branch, commit_changes, create_branch, list_branches, push_branch, GitBranch,

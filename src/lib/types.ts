@@ -275,6 +275,7 @@ export interface AiChannel {
   base_url: string;
   extra_headers_json: string | null;
   models: AiChannelModel[];
+  lite_model?: string | null;
   enabled: boolean;
   api_key: string | null;
   api_key_configured: boolean;
@@ -289,6 +290,7 @@ export interface CreateAiChannelInput {
   api_key?: string | null;
   extra_headers_json?: string | null;
   models?: AiChannelModel[];
+  lite_model?: string | null;
   enabled?: boolean;
 }
 
@@ -299,7 +301,80 @@ export interface UpdateAiChannelInput {
   api_key?: string | null;
   extra_headers_json?: string | null;
   models?: AiChannelModel[];
+  lite_model?: string | null;
   enabled?: boolean;
+}
+
+export type NativeMemoryKind = "user" | "feedback" | "project" | "reference";
+
+export interface NativeMemoryEntry {
+  file_name: string;
+  name: string;
+  description: string;
+  kind: NativeMemoryKind | string;
+  created_at: string;
+  updated_at: string;
+  body: string;
+}
+
+export interface NativeAutomation {
+  id: string;
+  workspace_id: string;
+  name: string;
+  prompt: string;
+  cron: string;
+  timezone: string | null;
+  enabled: number;
+  channel_id: string | null;
+  model: string | null;
+  last_run_at: string | null;
+  next_run_at: string | null;
+  last_session_id: string | null;
+  last_error: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface CreateNativeAutomationInput {
+  workspace_id: string;
+  name: string;
+  prompt: string;
+  cron: string;
+  channel_id?: string | null;
+  model?: string | null;
+  enabled?: boolean | null;
+}
+
+export interface UpdateNativeAutomationInput {
+  name?: string;
+  prompt?: string;
+  cron?: string;
+  channel_id?: string | null;
+  model?: string | null;
+  enabled?: boolean;
+}
+
+export interface NativeGoalChecklistItem {
+  item: string;
+  done: boolean;
+}
+
+export interface NativeGoal {
+  id: string;
+  session_record_id: string;
+  title: string;
+  status: string;
+  checklist: NativeGoalChecklistItem[];
+  note: string | null;
+  updated_at: string;
+}
+
+export interface NativeMemoryView {
+  dir: string;
+  index: string;
+  entries: NativeMemoryEntry[];
+  extractions: number;
+  dreams: number;
 }
 
 export interface TestAiChannelInput {
@@ -463,9 +538,64 @@ export interface NativeTextDelta {
   clear: boolean;
 }
 
-export type NativeToolRiskKind = "overwrite" | "delete" | "push" | "force_git" | "mcp" | "opaque";
+export type NativeToolRiskKind =
+  "overwrite" | "delete" | "push" | "force_git" | "mcp" | "opaque" | "rule";
 
-export type NativePermissionDecision = "allow_session" | "allow_once" | "allow_server" | "deny";
+export type NativePermissionDecision =
+  "allow_session" | "allow_once" | "allow_server" | "allow_always" | "deny";
+
+export type PermissionCapability =
+  | "read"
+  | "edit"
+  | "bash"
+  | "mcp"
+  | "web_search"
+  | "web_fetch"
+  | "subagent"
+  | "skill"
+  | "todo_read"
+  | "todo_write"
+  | "ask_user"
+  | "automation_read"
+  | "automation_write"
+  | "agent_message_send"
+  | "agent_message_respond"
+  | "session_context_read"
+  | "goal_read"
+  | "workflow";
+
+export type PermissionPatternSource = "command" | "path" | "input" | "tool_name";
+
+export type PermissionRuleScope = "workspace" | "global";
+
+export type PermissionRuleEffect = "allow" | "deny" | "ask";
+
+export interface PermissionRuleSuggestion {
+  capability: PermissionCapability;
+  pattern: string;
+  source: PermissionPatternSource;
+}
+
+export interface PermissionRule {
+  id: string;
+  capability: PermissionCapability;
+  pattern: string;
+  source: PermissionPatternSource;
+  scope: PermissionRuleScope;
+  note: string;
+}
+
+export interface PermissionRules {
+  allow: PermissionRule[];
+  deny: PermissionRule[];
+  ask: PermissionRule[];
+}
+
+export interface NativePermissionRulesView {
+  global: PermissionRules;
+  workspace: PermissionRules | null;
+  workspace_root: string | null;
+}
 
 export interface NativePermissionRequest {
   session_record_id: string;
@@ -478,6 +608,16 @@ export interface NativePermissionRequest {
   summary: string;
   remote: boolean;
   mcp_server_id: string | null;
+  suggested_rule?: PermissionRuleSuggestion | null;
+}
+
+export interface NativePlanApprovalRequest {
+  session_record_id: string;
+  request_id: string;
+  profile_id: string;
+  workspace_id: string | null;
+  session_kind: string;
+  plan: string;
 }
 
 export interface NativePlanQuestion {
@@ -550,16 +690,49 @@ export interface DatabaseRestoreResult {
   message: string;
 }
 
+export type NativeHookEvent =
+  | "session_start"
+  | "user_prompt_submit"
+  | "pre_tool_use"
+  | "post_tool_use"
+  | "post_tool_use_failure"
+  | "permission_request"
+  | "stop";
+
+export const NATIVE_HOOK_EVENTS: NativeHookEvent[] = [
+  "session_start",
+  "user_prompt_submit",
+  "pre_tool_use",
+  "post_tool_use",
+  "post_tool_use_failure",
+  "permission_request",
+  "stop",
+];
+
+export type NativeHookHandlerType = "command" | "http" | "agent";
+
+export const NATIVE_HOOK_HANDLER_TYPES: NativeHookHandlerType[] = ["command", "http", "agent"];
+
 export interface NativeHook {
   id: string;
-  event: string;
+  event: NativeHookEvent | string;
   matcher: string;
   command: string;
   timeout_secs: number;
   enabled: boolean;
+  handler_type: NativeHookHandlerType | string;
+  url?: string | null;
+  agent_prompt?: string | null;
+  source?: string;
 }
 
-export type NativePermissionMode = "confirm" | "auto_edit" | "full";
+export type NativePermissionMode = "default" | "edit" | "build" | "yolo";
+
+export const NATIVE_PERMISSION_MODES: NativePermissionMode[] = ["default", "edit", "build", "yolo"];
+
+export function isNativePermissionMode(value: unknown): value is NativePermissionMode {
+  return value === "default" || value === "edit" || value === "build" || value === "yolo";
+}
 
 export interface NativeSettings {
   max_turns: number;
@@ -576,6 +749,18 @@ export interface NativeSettings {
   auto_checkpoint_after_tool_call: boolean;
   checkpoint_retention_days: number;
   desktop_notifications: boolean;
+  artifact_retention_days: number;
+  model_retry_max_retries: number;
+  model_retry_base_delay_ms: number;
+  model_retry_max_delay_ms: number;
+  model_retry_backoff_factor: number;
+  bash_default_timeout_secs: number;
+  shell_snapshot_enabled: boolean;
+  rg_sidecar_enabled: boolean;
+  auto_compact_threshold_percent: number;
+  microcompact_enabled: boolean;
+  memory_enabled: boolean;
+  memory_dream_interval: number;
   hooks: NativeHook[];
   global_prompt_template: string;
 }
@@ -595,11 +780,28 @@ export interface UpdateNativeSettingsInput {
   auto_checkpoint_after_tool_call?: boolean;
   checkpoint_retention_days?: number;
   desktop_notifications?: boolean;
+  artifact_retention_days?: number;
+  model_retry_max_retries?: number;
+  model_retry_base_delay_ms?: number;
+  model_retry_max_delay_ms?: number;
+  model_retry_backoff_factor?: number;
+  bash_default_timeout_secs?: number;
+  shell_snapshot_enabled?: boolean;
+  rg_sidecar_enabled?: boolean;
+  auto_compact_threshold_percent?: number;
+  microcompact_enabled?: boolean;
+  memory_enabled?: boolean;
+  memory_dream_interval?: number;
   hooks?: NativeHook[];
   global_prompt_template?: string;
 }
 
-export type NativeSkillSource = "workspace_agents" | "workspace_claude" | "global";
+export type NativeSkillSource =
+  | "workspace_noxcode"
+  | "workspace_agents"
+  | "workspace_claude"
+  | "plugin"
+  | "global";
 
 export interface NativeSkill {
   name: string;
@@ -609,6 +811,70 @@ export interface NativeSkill {
   skill_md_path: string;
   body: string;
   extra_files: string[];
+  allowed_tools: string[];
+  argument_hint: string | null;
+  when_to_use: string | null;
+  plugin: string | null;
+}
+
+export type NativeSlashCommandSource =
+  | "workspace_noxcode"
+  | "workspace_claude"
+  | "plugin"
+  | "global";
+
+/** 自定义斜杠命令（Markdown 文件）。 */
+export interface NativeSlashCommand {
+  name: string;
+  description: string;
+  argument_hint: string | null;
+  allowed_tools: string[];
+  model: string | null;
+  skills: string[];
+  source: NativeSlashCommandSource;
+  plugin: string | null;
+  path: string;
+  body: string;
+}
+
+export interface ExpandedSlashCommand {
+  name: string;
+  prompt: string;
+  allowed_tools: string[];
+  model: string | null;
+  skills: string[];
+}
+
+export type NativePluginSource = "global" | "workspace";
+
+export interface PluginUserConfigField {
+  key: string;
+  description: string;
+  default: string | null;
+  required: boolean;
+}
+
+export interface NativePlugin {
+  name: string;
+  version: string | null;
+  description: string;
+  source: NativePluginSource;
+  root: string;
+  manifest_path: string;
+  enabled: boolean;
+  skill_dirs: string[];
+  command_dirs: string[];
+  agent_dirs: string[];
+  hooks: NativeHook[];
+  mcp_servers: McpServerConfig[];
+  user_config_fields: PluginUserConfigField[];
+  user_config: Record<string, string>;
+  errors: string[];
+}
+
+export interface NativePluginsView {
+  dir: string;
+  plugins: NativePlugin[];
 }
 
 export interface NativeGlobalSkills {
@@ -629,6 +895,13 @@ export interface NativeSubagent {
   inject_agents_md: boolean;
   scope: string;
   workspace_ids: string[];
+  permission_mode?: string | null;
+  disallowed_tools?: string[];
+  /** `json`（设置页维护）或 `file`（`.md` 档案，只读）。 */
+  source?: "json" | "file" | string;
+  path?: string | null;
+  max_turns?: number | null;
+  skills?: string[];
 }
 
 export interface CreateNativeSubagentInput {
@@ -643,6 +916,8 @@ export interface CreateNativeSubagentInput {
   inject_agents_md?: boolean | null;
   scope?: string | null;
   workspace_ids?: string[] | null;
+  permission_mode?: string | null;
+  disallowed_tools?: string[] | null;
 }
 
 export interface UpdateNativeSubagentInput {
@@ -657,11 +932,23 @@ export interface UpdateNativeSubagentInput {
   inject_agents_md?: boolean;
   scope?: string;
   workspace_ids?: string[];
+  permission_mode?: string | null;
+  disallowed_tools?: string[];
 }
 
 export interface McpEnvVar {
   key: string;
   value: string;
+}
+
+export type McpTransport = "stdio" | "http" | "sse";
+
+export interface McpOAuthConfig {
+  client_id: string;
+  client_secret: string | null;
+  authorize_url: string;
+  token_url: string;
+  scopes: string[];
 }
 
 export interface McpServerConfig {
@@ -674,6 +961,29 @@ export interface McpServerConfig {
   notes: string | null;
   scope: "all" | "workspaces";
   workspace_ids: string[];
+  transport: McpTransport;
+  url: string | null;
+  headers: McpEnvVar[];
+  oauth: McpOAuthConfig | null;
+}
+
+export interface McpOAuthStart {
+  serverId: string;
+  authorizeUrl: string;
+  redirectUri: string;
+}
+
+export interface McpOAuthStatus {
+  serverId: string;
+  authorized: boolean;
+  expiresAt: number | null;
+  hasRefreshToken: boolean;
+}
+
+export interface McpOAuthEvent {
+  serverId: string;
+  ok: boolean;
+  message: string;
 }
 
 export interface McpServersDocument {

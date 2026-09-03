@@ -51,8 +51,10 @@ pub fn run() {
             });
             let pool = SshPool::new(trust, Duration::from_secs(600));
             app.manage(pool.clone());
-            app.manage(Arc::new(Mutex::new(NativeAgentManager::new())));
+            let manager = Arc::new(Mutex::new(NativeAgentManager::new()));
+            app.manage(manager.clone());
             pool.start_idle_reaper(Duration::from_secs(60));
+            native::scheduler::spawn_scheduler(app.handle().clone(), manager);
 
             if cfg!(debug_assertions) {
                 let app_handle = app.handle().clone();
@@ -60,6 +62,7 @@ pub fn run() {
                     app::database::log_database_startup_status(&app_handle).await;
                 });
             }
+            native::artifacts::spawn_startup_prune(app.handle());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -117,6 +120,23 @@ pub fn run() {
             native::session::finish_native_input,
             native::session::resolve_native_tool_permission,
             native::session::answer_native_plan_question,
+            native::session::resolve_native_plan_approval,
+            native::session::compact_native_session,
+            native::session::dream_native_memory,
+            native::session::fork_native_session,
+            native::scheduler::list_native_automations,
+            native::scheduler::create_native_automation,
+            native::scheduler::update_native_automation,
+            native::scheduler::delete_native_automation,
+            native::scheduler::run_native_automation_now,
+            native::memory::list_native_memories,
+            native::memory::save_native_memory,
+            native::memory::delete_native_memory,
+            native::memory::open_native_memory_dir,
+            native::permission_rules::get_native_permission_rules,
+            native::permission_rules::update_native_permission_rules,
+            native::permission_rules::add_native_permission_rule,
+            native::permission_rules::delete_native_permission_rule,
             native::settings::get_native_settings,
             native::settings::update_native_settings,
             native::skills::list_native_global_skills,
@@ -131,6 +151,18 @@ pub fn run() {
             native::mcp_servers::update_mcp_servers,
             native::mcp_servers::reset_mcp_servers,
             native::mcp_servers::export_mcp_servers_snippet,
+            native::mcp_oauth::start_mcp_oauth,
+            native::mcp_oauth::get_mcp_oauth_status,
+            native::mcp_oauth::clear_mcp_oauth,
+            native::commands::list_native_slash_commands,
+            native::commands::expand_native_slash_command,
+            native::commands::open_native_commands_dir,
+            native::plugins::list_native_plugins,
+            native::plugins::install_native_plugin,
+            native::plugins::set_native_plugin_enabled,
+            native::plugins::set_native_plugin_user_config,
+            native::plugins::uninstall_native_plugin,
+            native::plugins::open_native_plugins_dir,
             app::workspaces::list_workspaces,
             app::workspaces::create_workspace,
             app::workspaces::update_workspace,

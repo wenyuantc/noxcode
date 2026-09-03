@@ -7,7 +7,11 @@ use std::sync::Arc;
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 
-use crate::native::tools::permission::{NativePermissionDecision, NativeToolRiskKind};
+use crate::native::permission_rules::SharedPermissionRules;
+use crate::native::tools::dispatch::PlanApprovalAnswer;
+use crate::native::tools::permission::{
+    NativePermissionDecision, NativeToolRiskKind, PermissionRuleSuggestion,
+};
 use crate::native::tools::question::{PlanQuestion, PlanQuestionAnswer};
 use crate::native::tools::CancelFlag;
 
@@ -22,6 +26,8 @@ pub struct NativeSessionInfo {
 
 pub enum NativeFollowup {
     Input(String),
+    /// `/compact [指令]`：在等待输入或下一次模型调用前压缩上下文。
+    Compact(Option<String>),
     Finish,
 }
 
@@ -36,11 +42,26 @@ pub struct PermissionRequest {
     pub summary: String,
     pub remote: bool,
     pub mcp_server_id: Option<String>,
+    pub suggested_rule: Option<PermissionRuleSuggestion>,
 }
 
 pub struct PendingPermission {
     pub request: PermissionRequest,
     pub reply: oneshot::Sender<NativePermissionDecision>,
+}
+
+#[derive(Debug, Clone)]
+pub struct PlanApprovalRequest {
+    pub request_id: String,
+    pub profile_id: String,
+    pub workspace_id: Option<String>,
+    pub session_kind: String,
+    pub plan: String,
+}
+
+pub struct PendingPlanApproval {
+    pub request: PlanApprovalRequest,
+    pub reply: oneshot::Sender<PlanApprovalAnswer>,
 }
 
 #[derive(Debug, Clone)]
@@ -64,8 +85,13 @@ pub struct NativeLiveSession {
     pub join: JoinHandle<()>,
     pub allow_all_high_risk: Arc<AtomicBool>,
     pub working: Arc<AtomicBool>,
+    /// 与 `ToolCtx` 共享的规则；「总是允许」写入后即时生效。
+    pub permission_rules: SharedPermissionRules,
+    /// 本地工作区目录（工作区规则文件的落点）；SSH 工作区为 `None`。
+    pub workspace_root: Option<std::path::PathBuf>,
     pub pending_permission: VecDeque<PendingPermission>,
     pub pending_question: VecDeque<PendingPlanQuestion>,
+    pub pending_plan_approval: VecDeque<PendingPlanApproval>,
 }
 
 #[derive(Default)]
@@ -97,7 +123,55 @@ impl NativeAgentManager {
                 let _ = pending.reply.send(NativePermissionDecision::Deny);
             }
             session.pending_question.clear();
+            while let Some(pending) = session.pending_plan_approval.pop_front() {
+                let _ = pending.reply.send(PlanApprovalAnswer {
+                    approved: false,
+                    feedback: "会话已停止".to_string(),
+                });
+            }
         }
+    }
+
+    pub fn enqueue_plan_approval(
+        &mut self,
+        session_record_id: &str,
+        pending: PendingPlanApproval,
+    ) -> Result<bool, String> {
+        let session = self
+            .sessions
+            .get_mut(session_record_id)
+            .ok_or_else(|| "没有运行中的内置 Agent 会话".to_string())?;
+        let should_emit = session.pending_plan_approval.is_empty();
+        session.pending_plan_approval.push_back(pending);
+        Ok(should_emit)
+    }
+
+    pub fn resolve_plan_approval(
+        &mut self,
+        session_record_id: &str,
+        request_id: &str,
+        answer: PlanApprovalAnswer,
+    ) -> Result<Option<PlanApprovalRequest>, String> {
+        let session = self
+            .sessions
+            .get_mut(session_record_id)
+            .ok_or_else(|| "没有运行中的内置 Agent 会话".to_string())?;
+        let pending = session
+            .pending_plan_approval
+            .pop_front()
+            .ok_or_else(|| "没有待批准的计划".to_string())?;
+        if pending.request.request_id != request_id {
+            session.pending_plan_approval.push_front(pending);
+            return Err("计划批准请求已过期".to_string());
+        }
+        pending
+            .reply
+            .send(answer)
+            .map_err(|_| "计划批准通道已关闭".to_string())?;
+        Ok(session
+            .pending_plan_approval
+            .front()
+            .map(|item| item.request.clone()))
     }
 
     pub fn enqueue_permission(
@@ -297,6 +371,9 @@ mod tests {
             working: Arc::new(AtomicBool::new(true)),
             pending_permission: VecDeque::new(),
             pending_question: VecDeque::new(),
+            permission_rules: crate::native::permission_rules::shared_rules(Default::default()),
+            workspace_root: None,
+            pending_plan_approval: VecDeque::new(),
         });
         assert!(manager.has_channel_processes("ch-1"));
         assert!(manager.has_workspace_processes("ws-1"));
@@ -329,6 +406,9 @@ mod tests {
             working: Arc::new(AtomicBool::new(false)),
             pending_permission: VecDeque::new(),
             pending_question: VecDeque::new(),
+            permission_rules: crate::native::permission_rules::shared_rules(Default::default()),
+            workspace_root: None,
+            pending_plan_approval: VecDeque::new(),
         }
     }
 
@@ -352,6 +432,7 @@ mod tests {
                     summary: format!("覆盖 {tool}"),
                     remote: false,
                     mcp_server_id: None,
+                    suggested_rule: None,
                 },
                 reply,
             },
@@ -426,7 +507,9 @@ mod tests {
         let join = tokio::spawn(async move {
             match rx.recv().await {
                 Some(NativeFollowup::Finish) => {}
-                Some(NativeFollowup::Input(_)) => panic!("unexpected input"),
+                Some(NativeFollowup::Input(_)) | Some(NativeFollowup::Compact(_)) => {
+                    panic!("unexpected input")
+                }
                 None => panic!("channel closed"),
             }
             flag.store(true, std::sync::atomic::Ordering::SeqCst);
@@ -446,6 +529,9 @@ mod tests {
             working: Arc::new(AtomicBool::new(true)),
             pending_permission: VecDeque::new(),
             pending_question: VecDeque::new(),
+            permission_rules: crate::native::permission_rules::shared_rules(Default::default()),
+            workspace_root: None,
+            pending_plan_approval: VecDeque::new(),
         });
         let (pending, pending_rx) = pending("r1", "Write");
         let _ = manager.enqueue_permission("sess-shutdown", pending);

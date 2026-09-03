@@ -1,14 +1,18 @@
 import { useEffect, useState } from "react";
-import { Loader2, Plus, RefreshCw, Save, Trash2 } from "lucide-react";
+import { KeyRound, Loader2, Plus, RefreshCw, Save, Trash2 } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
 import {
+  clearMcpOAuth,
   exportMcpServersSnippet,
+  getMcpOAuthStatus,
   getMcpServers,
+  onNativeMcpOAuth,
   resetMcpServers,
+  startMcpOAuth,
   updateMcpServers,
 } from "@/lib/backend";
-import type { McpServerConfig } from "@/lib/types";
+import type { McpEnvVar, McpOAuthConfig, McpServerConfig, McpTransport } from "@/lib/types";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import {
@@ -34,7 +38,182 @@ function createEmptyServer(): McpServerConfig {
     notes: null,
     scope: "all",
     workspace_ids: [],
+    transport: "stdio",
+    url: null,
+    headers: [],
+    oauth: null,
   };
+}
+
+const TRANSPORTS: McpTransport[] = ["stdio", "http", "sse"];
+
+/** `KEY=value` 每行一条 ↔ 键值数组。 */
+export function parseKeyValueLines(text: string): McpEnvVar[] {
+  return text
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .map((line) => {
+      const index = line.indexOf("=");
+      if (index <= 0) return { key: line, value: "" };
+      return { key: line.slice(0, index).trim(), value: line.slice(index + 1).trim() };
+    })
+    .filter((pair) => pair.key.length > 0);
+}
+
+export function formatKeyValueLines(pairs: McpEnvVar[]): string {
+  return pairs.map((pair) => `${pair.key}=${pair.value}`).join("\n");
+}
+
+function emptyOAuth(): McpOAuthConfig {
+  return { client_id: "", client_secret: null, authorize_url: "", token_url: "", scopes: [] };
+}
+
+function McpOAuthPanel({
+  server,
+  saving,
+  onChange,
+}: {
+  server: McpServerConfig;
+  saving: boolean;
+  onChange: (oauth: McpOAuthConfig | null) => void;
+}) {
+  const { t } = useTranslation("settings");
+  const [authorized, setAuthorized] = useState<boolean | null>(null);
+  const [expiresAt, setExpiresAt] = useState<number | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [notice, setNotice] = useState<string | null>(null);
+  const oauth = server.oauth;
+
+  const refresh = async () => {
+    try {
+      const status = await getMcpOAuthStatus(server.id);
+      setAuthorized(status.authorized);
+      setExpiresAt(status.expiresAt);
+    } catch {
+      setAuthorized(null);
+    }
+  };
+
+  useEffect(() => {
+    if (!oauth) return;
+    void refresh();
+    let unlisten: (() => void) | undefined;
+    void onNativeMcpOAuth((event) => {
+      if (event.serverId !== server.id) return;
+      setNotice(event.message);
+      setBusy(false);
+      void refresh();
+    }).then((fn) => {
+      unlisten = fn;
+    });
+    return () => unlisten?.();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [server.id, Boolean(oauth)]);
+
+  if (!oauth) {
+    return (
+      <Button size="sm" variant="outline" disabled={saving} onClick={() => onChange(emptyOAuth())}>
+        <KeyRound className="h-4 w-4" />
+        {t("mcp.oauth.enable")}
+      </Button>
+    );
+  }
+
+  const patch = (next: Partial<McpOAuthConfig>) => onChange({ ...oauth, ...next });
+
+  return (
+    <div className="space-y-2 rounded-md border border-border p-3">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <p className="text-xs font-medium">{t("mcp.oauth.title")}</p>
+        <Button size="sm" variant="ghost" disabled={saving} onClick={() => onChange(null)}>
+          {t("mcp.oauth.disable")}
+        </Button>
+      </div>
+      <div className="grid gap-2 sm:grid-cols-2">
+        <Input
+          placeholder={t("mcp.oauth.clientId")}
+          value={oauth.client_id}
+          onChange={(event) => patch({ client_id: event.target.value })}
+        />
+        <Input
+          placeholder={t("mcp.oauth.clientSecret")}
+          type="password"
+          value={oauth.client_secret ?? ""}
+          onChange={(event) => patch({ client_secret: event.target.value || null })}
+        />
+        <Input
+          placeholder={t("mcp.oauth.authorizeUrl")}
+          value={oauth.authorize_url}
+          onChange={(event) => patch({ authorize_url: event.target.value })}
+        />
+        <Input
+          placeholder={t("mcp.oauth.tokenUrl")}
+          value={oauth.token_url}
+          onChange={(event) => patch({ token_url: event.target.value })}
+        />
+      </div>
+      <Input
+        placeholder={t("mcp.oauth.scopes")}
+        value={oauth.scopes.join(" ")}
+        onChange={(event) =>
+          patch({ scopes: event.target.value.split(/[\s,]+/).filter(Boolean) })
+        }
+      />
+      <div className="flex flex-wrap items-center gap-2 text-xs">
+        <Button
+          size="sm"
+          variant="outline"
+          disabled={busy || saving}
+          onClick={async () => {
+            setBusy(true);
+            setNotice(null);
+            try {
+              const started = await startMcpOAuth(server.id);
+              setNotice(t("mcp.oauth.browserOpened", { url: started.authorizeUrl }));
+            } catch (err) {
+              setBusy(false);
+              setNotice(err instanceof Error ? err.message : String(err));
+            }
+          }}
+        >
+          {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : <KeyRound className="h-4 w-4" />}
+          {t("mcp.oauth.authorize")}
+        </Button>
+        {authorized ? (
+          <Button
+            size="sm"
+            variant="ghost"
+            disabled={saving}
+            onClick={async () => {
+              try {
+                await clearMcpOAuth(server.id);
+                setNotice(t("mcp.oauth.cleared"));
+                await refresh();
+              } catch (err) {
+                setNotice(err instanceof Error ? err.message : String(err));
+              }
+            }}
+          >
+            {t("mcp.oauth.clear")}
+          </Button>
+        ) : null}
+        <span className="text-muted-foreground">
+          {authorized === null
+            ? t("mcp.oauth.statusUnknown")
+            : authorized
+              ? expiresAt
+                ? t("mcp.oauth.statusAuthorizedUntil", {
+                    time: new Date(expiresAt * 1000).toLocaleString(),
+                  })
+                : t("mcp.oauth.statusAuthorized")
+              : t("mcp.oauth.statusMissing")}
+        </span>
+      </div>
+      <p className="text-xs text-muted-foreground">{t("mcp.oauth.hint")}</p>
+      {notice ? <p className="break-all text-xs text-muted-foreground">{notice}</p> : null}
+    </div>
+  );
 }
 
 function localizeExampleServers(
@@ -161,6 +340,10 @@ export function McpSettingsTab() {
         notes: t("mcp.playwright.notes"),
         scope: "all",
         workspace_ids: [],
+        transport: "stdio",
+        url: null,
+        headers: [],
+        oauth: null,
       },
     ]);
     setMessage(t("mcp.messages.playwrightAdded"));
@@ -240,24 +423,73 @@ export function McpSettingsTab() {
                 value={server.name}
                 onChange={(event) => updateServer(server.id, { name: event.target.value })}
               />
-              <Input
-                placeholder={t("mcp.fields.commandPlaceholder")}
-                value={server.command}
-                onChange={(event) => updateServer(server.id, { command: event.target.value })}
-              />
+              <Select
+                value={server.transport ?? "stdio"}
+                disabled={saving}
+                onValueChange={(value) => {
+                  if (TRANSPORTS.includes(value as McpTransport)) {
+                    updateServer(server.id, { transport: value as McpTransport });
+                  }
+                }}
+              >
+                <SelectTrigger className="bg-background">
+                  <SelectValue>
+                    {(value) => t(`mcp.transport.${String(value || "stdio")}`)}
+                  </SelectValue>
+                </SelectTrigger>
+                <SelectContent>
+                  {TRANSPORTS.map((transport) => (
+                    <SelectItem key={transport} value={transport}>
+                      {t(`mcp.transport.${transport}`)}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
             </div>
-            <Input
-              placeholder={t("mcp.fields.argsPlaceholder")}
-              value={server.args.join(" ")}
-              onChange={(event) =>
-                updateServer(server.id, {
-                  args: event.target.value
-                    .split(/\s+/)
-                    .map((part) => part.trim())
-                    .filter(Boolean),
-                })
-              }
-            />
+            {server.transport === "http" || server.transport === "sse" ? (
+              <>
+                <Input
+                  placeholder={t("mcp.fields.urlPlaceholder")}
+                  value={server.url ?? ""}
+                  onChange={(event) =>
+                    updateServer(server.id, { url: event.target.value || null })
+                  }
+                />
+                <Textarea
+                  placeholder={t("mcp.fields.headersPlaceholder")}
+                  value={formatKeyValueLines(server.headers ?? [])}
+                  onChange={(event) =>
+                    updateServer(server.id, { headers: parseKeyValueLines(event.target.value) })
+                  }
+                  rows={2}
+                />
+                <McpOAuthPanel
+                  server={server}
+                  saving={saving}
+                  onChange={(oauth) => updateServer(server.id, { oauth })}
+                />
+              </>
+            ) : (
+              <>
+                <Input
+                  placeholder={t("mcp.fields.commandPlaceholder")}
+                  value={server.command}
+                  onChange={(event) => updateServer(server.id, { command: event.target.value })}
+                />
+                <Input
+                  placeholder={t("mcp.fields.argsPlaceholder")}
+                  value={server.args.join(" ")}
+                  onChange={(event) =>
+                    updateServer(server.id, {
+                      args: event.target.value
+                        .split(/\s+/)
+                        .map((part) => part.trim())
+                        .filter(Boolean),
+                    })
+                  }
+                />
+              </>
+            )}
             <div>
               <label className="text-xs font-medium text-muted-foreground">
                 {t("mcp.fields.scope")}

@@ -12,6 +12,7 @@ import {
   isHiddenSessionCeremonyLine,
   latestTodos,
   parseAgentBanner,
+  parseCompactBoundary,
   parseMcpStatus,
   parseReadResultLines,
   parseTodoList,
@@ -69,6 +70,31 @@ describe("sessionLines", () => {
 
   it("keeps multiline tool results", () => {
     expect(stripUserPrefix("[USER_INPUT]  a")).toBe("a");
+  });
+
+  it("parses compact boundaries into their own segment", () => {
+    const boundaryLine =
+      '[COMPACT_BOUNDARY] {"trigger":"manual","source":"model","pre_tokens":120000,"post_tokens":30000,"pre_messages":80,"post_messages":12,"instructions":"keep stacks"}';
+    const parsed = parseCompactBoundary(boundaryLine);
+    expect(parsed?.trigger).toBe("manual");
+    expect(parsed?.source).toBe("model");
+    expect(parsed?.pre_tokens).toBe(120000);
+    expect(parsed?.instructions).toBe("keep stacks");
+    expect(parseCompactBoundary("[工具] 已压缩上下文")).toBeNull();
+    expect(parseCompactBoundary("[COMPACT_BOUNDARY] not json")).toBeNull();
+    expect(classifyLine(boundaryLine)).toBe("system");
+    const blocks = buildTurnBlocks(
+      groupSessionLines([
+        line("1", "[USER_INPUT] 继续"),
+        line("2", "[工具] 已压缩上下文（模型摘要）：120000 → 30000 token（manual）"),
+        line("3", boundaryLine),
+        line("4", "继续工作"),
+      ]),
+    );
+    const kinds = blocks[0]?.segments.map((segment) => segment.kind);
+    // `[工具] 已压缩…` 仍按工具行展示，边界行独立成段。
+    expect(kinds).toEqual(["tools", "compact", "assistant"]);
+    expect(blocks[0]?.segments[1]?.items).toHaveLength(1);
   });
 
   it("attaches leading status lines to the first user turn", () => {

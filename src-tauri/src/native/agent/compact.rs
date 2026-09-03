@@ -255,6 +255,88 @@ fn decrement_atomic(value: &AtomicU64, amount: u64) {
         .ok();
 }
 
+/// 触发压缩的原因，写入压缩边界记录。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CompactTrigger {
+    /// 超过阈值自动压缩。
+    Auto,
+    /// 用户 `/compact`。
+    Manual,
+    /// 供应商报上下文溢出后被动压缩再重试。
+    Reactive,
+    /// 会话恢复到更小上下文窗口的模型。
+    Downshift,
+}
+
+impl CompactTrigger {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::Manual => "manual",
+            Self::Reactive => "reactive",
+            Self::Downshift => "downshift",
+        }
+    }
+}
+
+/// 一次压缩的结果记录（对齐 ZCode 的 compactBoundary）。
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct CompactBoundary {
+    pub trigger: CompactTrigger,
+    /// `microcompact` / `model` / `local` / `reset`。
+    pub source: String,
+    pub pre_tokens: usize,
+    pub post_tokens: usize,
+    pub pre_messages: usize,
+    pub post_messages: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub instructions: Option<String>,
+}
+
+pub const COMPACT_BOUNDARY_PREFIX: &str = "[COMPACT_BOUNDARY] ";
+
+impl CompactBoundary {
+    /// 写进事件流的一行：前端解析成压缩边界行。
+    pub fn line(&self) -> String {
+        format!(
+            "{COMPACT_BOUNDARY_PREFIX}{}",
+            serde_json::to_string(self).unwrap_or_default()
+        )
+    }
+
+    pub fn parse_line(line: &str) -> Option<Self> {
+        let json = line
+            .trim()
+            .strip_prefix(COMPACT_BOUNDARY_PREFIX.trim_end())?;
+        serde_json::from_str(json.trim()).ok()
+    }
+}
+
+/// 供应商上下文溢出错误的启发式识别（OpenAI / Anthropic / 兼容网关的常见文案）。
+pub fn is_context_overflow_error(error: &str) -> bool {
+    let lower = error.to_ascii_lowercase();
+    [
+        "context_length_exceeded",
+        "context length",
+        "maximum context",
+        "context window",
+        "prompt is too long",
+        "input is too long",
+        "too many tokens",
+        "tokens exceed",
+        "exceeds the model",
+        "request too large",
+        "reduce the length of the messages",
+        "max_tokens is too large",
+        "上下文长度",
+        "超出最大长度",
+    ]
+    .iter()
+    .any(|needle| lower.contains(needle))
+        && !lower.contains("rate limit")
+}
+
 /// State for a logical model context window. A new generation is used after
 /// local compaction/reset, making it possible to diagnose repeated input
 /// growth without retaining the old messages.
@@ -264,6 +346,8 @@ pub struct ContextWindow {
     pub token_limit: usize,
     pub compactions: u32,
     pub resets: u32,
+    /// 自动压缩阈值（占窗口的百分比）。
+    pub threshold_percent: usize,
 }
 
 impl ContextWindow {
@@ -273,6 +357,7 @@ impl ContextWindow {
             token_limit,
             compactions: 0,
             resets: 0,
+            threshold_percent: COMPACT_THRESHOLD_PERCENT,
         }
     }
 
@@ -280,8 +365,16 @@ impl ContextWindow {
         self.token_limit = token_limit;
     }
 
+    pub fn set_threshold_percent(&mut self, percent: usize) {
+        self.threshold_percent = percent.clamp(30, 99);
+    }
+
     pub fn should_compact(&self, messages: &[Message]) -> bool {
-        should_compact_tokens(messages, self.token_limit)
+        should_compact_tokens_with(messages, self.token_limit, self.threshold_percent)
+    }
+
+    pub fn threshold_tokens(&self) -> usize {
+        self.token_limit.saturating_mul(self.threshold_percent) / 100
     }
 
     pub fn mark_compacted(&mut self) {
@@ -308,11 +401,62 @@ pub fn should_compact(messages: &[Message], limit: usize) -> bool {
 }
 
 pub fn should_compact_tokens(messages: &[Message], limit: usize) -> bool {
+    should_compact_tokens_with(messages, limit, COMPACT_THRESHOLD_PERCENT)
+}
+
+pub fn should_compact_tokens_with(messages: &[Message], limit: usize, percent: usize) -> bool {
     if limit == 0 {
         return false;
     }
-    total_message_tokens(messages).saturating_mul(100)
-        >= limit.saturating_mul(COMPACT_THRESHOLD_PERCENT)
+    total_message_tokens(messages).saturating_mul(100) >= limit.saturating_mul(percent.max(1))
+}
+
+const MICROCOMPACT_KEEP_RECENT_TOOL_RESULTS: usize = 6;
+const MICROCOMPACT_MIN_CHARS: usize = 400;
+const MICROCOMPACT_STUB_PREFIX: &str = "[已微压缩]";
+
+/// 微压缩：把较早的、较长的工具结果替换成一行占位，保留调用结构与最近几条完整结果。
+/// 返回被替换的条数。比全量摘要便宜，先于全量压缩尝试。
+pub fn microcompact(messages: &mut [Message]) -> usize {
+    let tool_indexes: Vec<usize> = messages
+        .iter()
+        .enumerate()
+        .filter(|(_, message)| message.role == Role::Tool)
+        .map(|(index, _)| index)
+        .collect();
+    if tool_indexes.len() <= MICROCOMPACT_KEEP_RECENT_TOOL_RESULTS {
+        return 0;
+    }
+    let cutoff = tool_indexes.len() - MICROCOMPACT_KEEP_RECENT_TOOL_RESULTS;
+    let mut replaced = 0;
+    for index in &tool_indexes[..cutoff] {
+        let message = &mut messages[*index];
+        if message.content.starts_with(MICROCOMPACT_STUB_PREFIX)
+            || message.content.chars().count() < MICROCOMPACT_MIN_CHARS
+        {
+            continue;
+        }
+        let chars = message.content.chars().count();
+        let label = if message.name.is_empty() {
+            "工具".to_string()
+        } else {
+            message.name.clone()
+        };
+        let first_line: String = message
+            .content
+            .lines()
+            .next()
+            .unwrap_or("")
+            .chars()
+            .take(120)
+            .collect();
+        message.content = format!(
+            "{MICROCOMPACT_STUB_PREFIX} {label} 结果共 {chars} 字符已省略；首行：{first_line}。需要时请重新调用。"
+        );
+        message.images.clear();
+        replaced += 1;
+    }
+    replaced
 }
 
 /// Compact old user turns while keeping the system constraints and the latest
@@ -386,6 +530,14 @@ pub fn compact_with_summary(messages: &mut Vec<Message>, summary: &str) -> bool 
 /// The user turn includes a richer `handoff_transcript` (not the 800-char local
 /// preview) so error stacks and tool observations survive the first pass.
 pub fn compaction_prompt(messages: &[Message]) -> Option<Vec<Message>> {
+    compaction_prompt_with_instructions(messages, None)
+}
+
+/// 同上，但允许附加用户的 `/compact` 指令（例如「保留所有失败堆栈」）。
+pub fn compaction_prompt_with_instructions(
+    messages: &[Message],
+    instructions: Option<&str>,
+) -> Option<Vec<Message>> {
     let (sys_len, to_summarize, _preserved) = compaction_segments(messages)?;
     let constraints = messages[..sys_len]
         .iter()
@@ -393,8 +545,13 @@ pub fn compaction_prompt(messages: &[Message]) -> Option<Vec<Message>> {
         .filter(|content| !content.is_empty())
         .collect::<Vec<_>>()
         .join("\n\n");
+    let extra = instructions
+        .map(str::trim)
+        .filter(|item| !item.is_empty())
+        .map(|item| format!("\n\nAdditional instructions from the user for this summary (follow them while keeping the headings):\n{item}"))
+        .unwrap_or_default();
     let prompt = format!(
-        "Create a concise structured handoff for the next model turn. Preserve the active user goal, system constraints, completed changes, important tool observations, verification results, and pending work. Do not call tools and do not answer the user directly. Use these headings: User goal, Constraints, Completed work, Verification, Pending work.\n\nSystem constraints:\n{}\n\nEarlier conversation:\n{}",
+        "Create a concise structured handoff for the next model turn. Preserve the active user goal, system constraints, completed changes, important tool observations, verification results, and pending work. Do not call tools and do not answer the user directly. Use these headings: User goal, Constraints, Completed work, Verification, Pending work.{extra}\n\nSystem constraints:\n{}\n\nEarlier conversation:\n{}",
         if constraints.is_empty() {
             "(none)"
         } else {
@@ -673,6 +830,90 @@ fn is_context_summary(message: &Message) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn tool_message(id: &str, name: &str, content: String) -> Message {
+        let mut message = Message::tool_result(id, content);
+        message.name = name.to_string();
+        message
+    }
+
+    #[test]
+    fn microcompact_stubs_old_long_tool_results_only() {
+        let mut messages = vec![Message::system("sys"), Message::user("go")];
+        for index in 0..9 {
+            messages.push(Message::assistant_text(format!("step {index}")));
+            messages.push(tool_message(
+                &format!("c{index}"),
+                "Read",
+                format!("line one of {index}\n{}", "x".repeat(600)),
+            ));
+        }
+        messages.push(tool_message("short", "Glob", "tiny".to_string()));
+        let replaced = microcompact(&mut messages);
+        // 10 条工具结果，保留最近 6 条 → 前 4 条里 4 条够长被替换。
+        assert_eq!(replaced, 4);
+        let stubs: Vec<&Message> = messages
+            .iter()
+            .filter(|message| message.content.starts_with("[已微压缩]"))
+            .collect();
+        assert_eq!(stubs.len(), 4);
+        assert!(stubs[0].content.contains("Read"));
+        assert!(stubs[0].content.contains("line one of 0"));
+        // 再跑一次不重复替换。
+        assert_eq!(microcompact(&mut messages), 0);
+        let mut few = vec![tool_message("a", "Read", "y".repeat(1000))];
+        assert_eq!(microcompact(&mut few), 0);
+    }
+
+    #[test]
+    fn boundary_line_round_trips_and_overflow_detection() {
+        let boundary = CompactBoundary {
+            trigger: CompactTrigger::Reactive,
+            source: "model".to_string(),
+            pre_tokens: 120_000,
+            post_tokens: 30_000,
+            pre_messages: 80,
+            post_messages: 12,
+            instructions: Some("keep stacks".to_string()),
+        };
+        let line = boundary.line();
+        assert!(line.starts_with(COMPACT_BOUNDARY_PREFIX));
+        let parsed = CompactBoundary::parse_line(&line).expect("parse");
+        assert_eq!(parsed, boundary);
+        assert!(CompactBoundary::parse_line("[工具] nope").is_none());
+        assert!(is_context_overflow_error(
+            "模型请求失败（HTTP 400）: This model's maximum context length is 128000 tokens"
+        ));
+        assert!(is_context_overflow_error(
+            "prompt is too long: 210000 tokens > 200000"
+        ));
+        assert!(is_context_overflow_error("context_length_exceeded"));
+        assert!(!is_context_overflow_error(
+            "rate limit exceeded, context window fine"
+        ));
+        assert!(!is_context_overflow_error("invalid api key"));
+    }
+
+    #[test]
+    fn threshold_percent_and_instruction_prompt() {
+        let mut window = ContextWindow::new(1_000);
+        window.set_threshold_percent(50);
+        assert_eq!(window.threshold_tokens(), 500);
+        window.set_threshold_percent(5);
+        assert_eq!(window.threshold_percent, 30);
+        let messages = vec![
+            Message::system("sys"),
+            Message::user("first task"),
+            Message::assistant_text("done first"),
+            Message::user("second task"),
+        ];
+        let prompt = compaction_prompt_with_instructions(&messages, Some("保留所有失败堆栈"))
+            .expect("prompt");
+        assert!(prompt[1].content.contains("保留所有失败堆栈"));
+        assert!(prompt[1].content.contains("Additional instructions"));
+        let plain = compaction_prompt(&messages).expect("prompt");
+        assert!(!plain[1].content.contains("Additional instructions"));
+    }
 
     #[test]
     fn budget_reservation_is_shared_and_settled() {

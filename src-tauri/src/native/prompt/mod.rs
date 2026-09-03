@@ -41,6 +41,10 @@ pub struct NativePromptParts {
     pub required_subagent_description: String,
     pub permission_mode: String,
     pub skills: String,
+    /// `session_start` 钩子注入的上下文。
+    pub hook_context: String,
+    /// 记忆索引块（`memory::memory_prompt_block`）。
+    pub memory: String,
 }
 
 pub fn compose_system(parts: &NativePromptParts) -> String {
@@ -53,10 +57,6 @@ pub fn compose_system(parts: &NativePromptParts) -> String {
     let policy_block = subagent_policy_block(&parts.subagent_policy);
     if !policy_block.is_empty() {
         blocks.push(policy_block);
-    }
-    let context = workspace_context_block(parts);
-    if !context.is_empty() {
-        blocks.push(context);
     }
     if !parts.global_template.trim().is_empty() {
         blocks.push(format!("# 全局提示词\n{}", parts.global_template.trim()));
@@ -77,6 +77,21 @@ pub fn compose_system(parts: &NativePromptParts) -> String {
         blocks.push(required_subagent_block(
             parts.required_subagent_name.trim(),
             parts.required_subagent_description.trim(),
+        ));
+    }
+    if !parts.memory.trim().is_empty() {
+        blocks.push(parts.memory.trim().to_string());
+    }
+    // 易变内容（日期、git 状态、权限模式）放在最后：前面的静态段落才能命中
+    // provider 的 prompt cache。
+    let context = workspace_context_block(parts);
+    if !context.is_empty() {
+        blocks.push(context);
+    }
+    if !parts.hook_context.trim().is_empty() {
+        blocks.push(format!(
+            "# 会话钩子上下文（session_start）\n{}",
+            parts.hook_context.trim()
         ));
     }
     blocks.join("\n\n")
@@ -112,7 +127,7 @@ pub fn workspace_context_block(parts: &NativePromptParts) -> String {
 
 fn environment_block(parts: &NativePromptParts) -> String {
     let permission_mode = if parts.permission_mode.trim().is_empty() {
-        "confirm-high-risk"
+        crate::native::settings::PERMISSION_MODE_DEFAULT
     } else {
         parts.permission_mode.trim()
     };
@@ -131,9 +146,9 @@ fn environment_block(parts: &NativePromptParts) -> String {
             normalize_subagent_policy(Some(parts.subagent_policy.as_str()))
         ),
     ];
-    if permission_mode == "plan" {
+    if permission_mode == crate::native::settings::PERMISSION_MODE_PLAN {
         lines.push(
-            "- Plan mode: only Read/Glob/Grep/TodoRead/TodoWrite/WebFetch/WebSearch/Skill/AskQuestion. Do not edit files. If a user decision is required, call AskQuestion; if the plan is ready, output it and stop. The system will start implementation automatically after this plan turn."
+            "- Plan mode: only Read/Glob/Grep/TodoRead/TodoWrite/WebFetch/WebSearch/Skill/AskUserQuestion/ExitPlanMode. Do not edit files. If a user decision is required, call AskUserQuestion. When the plan is ready, either call ExitPlanMode with the full plan to request approval, or output the plan and stop — the system then starts implementation automatically."
                 .to_string(),
         );
     }
@@ -322,9 +337,14 @@ mod tests {
             required_subagent_description: String::new(),
             permission_mode: String::new(),
             skills: String::new(),
+            hook_context: "分支保护：不要直接推 main".to_string(),
+            memory: "# 记忆（MEMORY.md）\n- [偏好](pref.md) — 用 pnpm".to_string(),
         });
+        assert!(text.contains("# 记忆（MEMORY.md）"));
         assert!(text.contains("内置编程 Agent"));
-        assert!(text.contains("confirm-high-risk"));
+        assert!(text.contains("会话钩子上下文"));
+        assert!(text.ends_with("分支保护：不要直接推 main"));
+        assert!(text.contains("Permission mode: default"));
         assert!(text.contains("Max concurrent sub-agents: 5"));
         assert!(text.contains("Sub-agent policy: aggressive"));
         assert!(text.contains("子 Agent 策略（aggressive）"));
@@ -336,6 +356,11 @@ mod tests {
         assert!(text.contains("用 2 空格缩进"));
         assert!(text.contains("# Agent 档案设定"));
         assert!(text.contains("角色：reviewer"));
+        // 易变的环境 / Git 块必须在静态段之后，保证 prompt cache 前缀稳定。
+        let env_at = text.find("Working directory").expect("env");
+        let agents_at = text.find("用 2 空格缩进").expect("agents");
+        let profile_at = text.find("角色：reviewer").expect("profile");
+        assert!(env_at > agents_at && env_at > profile_at);
         let with_skills = compose_system(&NativePromptParts {
             skills: "# 可用技能\n- `demo`：desc（全局）".to_string(),
             ..NativePromptParts::default()
@@ -367,6 +392,12 @@ mod tests {
             inject_agents_md: true,
             scope: "all".to_string(),
             workspace_ids: Vec::new(),
+            permission_mode: None,
+            disallowed_tools: Vec::new(),
+            source: "json".to_string(),
+            path: None,
+            max_turns: None,
+            skills: Vec::new(),
         };
         let with_custom =
             agent_tool_description(3, "balanced", std::slice::from_ref(&custom), None);

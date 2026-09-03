@@ -17,7 +17,10 @@
     "hooks": "Hooks",
     "usage": "Usage",
     "database": "Database",
-    "about": "About"
+    "about": "About",
+    "permissions": "Permission rules",
+    "memory": "Memory",
+    "automations": "Automations"
   },
   "general": {
     "language": "Language",
@@ -77,7 +80,10 @@
       "thinkingLevels": "Allowed thinking levels",
       "thinkingLevelsHint": "All thinking levels are listed. Defaults to the levels this model has in the catalog. Runtime uses medium when selected, otherwise the first selected level.",
       "thinkingLevelsEmpty": "Select at least one thinking level when thinking is on.",
-      "extraHeaders": "Extra headers (JSON object, optional)"
+      "extraHeaders": "Extra headers (JSON object, optional)",
+      "liteModel": "Lite model (compaction, memory, hook judgement)",
+      "liteModelNone": "Use the main model",
+      "liteModelHint": "A cheaper model from this channel for internal calls: context summaries, memory extraction / consolidation and agent hooks. Logged with model_role = lite."
     },
     "protocols": {
       "openai": "OpenAI Chat Completions",
@@ -240,8 +246,22 @@
     "checkpointsHint": "Optionally save a Git checkpoint after successful file-writing tools. Expired post-tool checkpoints from ended sessions are pruned when a repository opens.",
     "autoCheckpoint": "Create a checkpoint after file changes",
     "checkpointRetention": "Post-tool checkpoint retention days (0 = never prune)",
+    "toolRuntime": "Tool runtime",
+    "toolRuntimeHint": "Bash default timeout (the model may raise it up to 600 s), retention for full tool outputs saved as artifacts, a one-time login-shell snapshot reused by every Bash call, and ripgrep for Grep when a bundled or system rg exists.",
+    "bashDefaultTimeout": "Bash default timeout (seconds)",
+    "artifactRetention": "Artifact retention days (0 = never prune)",
+    "shellSnapshot": "Reuse a login-shell snapshot for Bash",
+    "rgSidecar": "Use ripgrep for Grep when available",
+    "modelRetry": "Model request retries",
+    "modelRetryHint": "Exponential backoff with jitter for rate limits, overloads, and interrupted streams. Retry-After headers are honored up to the maximum delay.",
+    "modelRetryMax": "Max retries",
+    "modelRetryBaseDelay": "Base delay (ms)",
+    "modelRetryMaxDelay": "Max delay (ms)",
+    "modelRetryBackoff": "Backoff factor",
     "globalPrompt": "Global prompt template",
-    "globalPromptHint": "Inserted as the Global prompt block after environment context and before AGENTS.md / profile settings. Leave empty to skip. Applies to sessions started after you change it."
+    "globalPromptHint": "Inserted as the Global prompt block before AGENTS.md / profile settings; the volatile environment block comes last so cached prompt prefixes stay stable. Leave empty to skip. Applies to sessions started after you change it.",
+    "compactThreshold": "Auto-compact threshold (% of context window)",
+    "microcompact": "Micro-compact old tool results before a full summary"
   },
   "usage": {
     "title": "Usage",
@@ -388,25 +408,42 @@
   },
   "hooks": {
     "title": "Hooks",
-    "hint": "A pre-hook exit code 2 blocks the tool call; post-hook failures are warnings only.",
+    "hint": "Seven lifecycle events with command / http / agent handlers. Handlers may print JSON: {\"decision\":\"allow|deny|ask|block\",\"reason\":\"…\",\"updated_input\":{…},\"additional_context\":\"…\",\"continue\":true}. For command handlers exit code 2 blocks. Workspace hooks in .noxcode/hooks.json and .claude/settings.json are merged in after global hooks.",
     "fields": {
-      "event": "Hook type",
+      "event": "Event",
+      "handler": "Handler",
       "matcher": "Match tools",
-      "command": "Command"
+      "command": "Command",
+      "url": "POST URL",
+      "agentPrompt": "Judgement prompt",
+      "timeout": "Timeout (s)"
     },
     "events": {
-      "preToolUse": "Before tool use (can block)",
-      "postToolUse": "After tool use (warn only)"
+      "session_start": "Session start (adds context)",
+      "user_prompt_submit": "User prompt submitted (can block / add context)",
+      "pre_tool_use": "Before tool use (can block / rewrite input)",
+      "post_tool_use": "After tool use (warn / add context)",
+      "post_tool_use_failure": "After tool failure (warn only)",
+      "permission_request": "Permission request (can allow / deny)",
+      "stop": "Turn finished (can ask to continue)"
+    },
+    "handlers": {
+      "command": "Shell command",
+      "http": "HTTP POST",
+      "agent": "Agent judgement"
     },
     "placeholders": {
-      "command": "Command to run"
+      "command": "Command to run",
+      "agentPrompt": "e.g. Decide whether the final answer covers tests; reply with JSON."
     },
     "matchers": {
       "all": "All tools"
     },
     "fieldHints": {
       "matcher": "Select one or more tools. All tools matches every call.",
-      "command": "Shell command in the workspace. Empty commands are dropped on save."
+      "command": "Shell command in the workspace; the payload is in $NATIVE_HOOK_PAYLOAD. Empty commands are dropped on save.",
+      "url": "The JSON payload is POSTed; a 2xx JSON body is read like command output.",
+      "agentPrompt": "A one-shot model call with this prompt plus the payload; it must answer with the JSON protocol."
     }
   },
   "subagents": {
@@ -451,7 +488,8 @@
       "scopeHint": "Available in every workspace by default. Limit to selected workspaces to show it only there.",
       "scopeWorkspacesEmpty": "No workspaces yet. Open or create a workspace first.",
       "scopeWorkspacesCount": "{{count}} workspace(s)",
-      "scopePickWorkspaces": "Choose workspaces"
+      "scopePickWorkspaces": "Choose workspaces",
+      "fileProfile": "Markdown profile (edit the .md file)"
     },
     "dialogs": {
       "createTitle": "New sub-agent",
@@ -463,6 +501,98 @@
       "created": "Sub-agent created",
       "updated": "Sub-agent updated",
       "deleted": "Sub-agent deleted"
+    },
+    "profilesHint": "Markdown profiles are also loaded from <workspace>/.noxcode/agents, .claude/agents and $APPCONFIG/agents: frontmatter name / description / tools / disallowedTools / permissionMode / maxTurns / skills, body = system prompt. They are read-only here."
+  },
+  "permissions": {
+    "hint": "Rules take precedence over the permission mode: deny before allow, allow before ask; calls that match nothing fall back to mode and risk classification. Global rules live in native-permissions.json, workspace rules in .noxcode/permissions.json.",
+    "addTitle": "Add a rule",
+    "addHint": "Command patterns support prefix wildcards (git push*); paths and tool names support globs (src/**, mcp_fs_*).",
+    "effectLabel": "Effect",
+    "capabilityLabel": "Capability",
+    "sourceLabel": "Match field",
+    "scopeLabel": "Scope",
+    "patternLabel": "Pattern",
+    "noteLabel": "Note (optional)",
+    "add": "Add rule",
+    "empty": "No rules yet",
+    "globalTitle": "Global rules",
+    "workspaceTitle": "Current workspace rules",
+    "orderHint": "Within one effect, rules match in order; workspace rules come before global rules.",
+    "globalPath": "File: $APPCONFIG/native-permissions.json",
+    "workspacePath": "File: {{path}}/.noxcode/permissions.json",
+    "effect": {
+      "allow": "Allow",
+      "deny": "Deny",
+      "ask": "Ask"
+    },
+    "capability": {
+      "bash": "Bash command",
+      "edit": "Write files",
+      "read": "Read files",
+      "mcp": "MCP tool",
+      "web_fetch": "WebFetch",
+      "web_search": "WebSearch",
+      "subagent": "Sub-agent",
+      "skill": "Skill",
+      "todo_read": "Read todos",
+      "todo_write": "Write todos",
+      "ask_user": "Ask user"
+    },
+    "source": {
+      "command": "Command",
+      "path": "Path",
+      "tool_name": "Tool name",
+      "input": "Arguments JSON"
+    },
+    "scope": {
+      "global": "Global",
+      "workspace": "Workspace"
+    },
+    "patternPlaceholder": {
+      "command": "git push*",
+      "path": "src/**",
+      "tool_name": "mcp_github_*",
+      "input": "*\"force\":true*"
     }
+  },
+  "memory": {
+    "hint": "Per-workspace long-term memory under $APPCONFIG/memory/<project>/: MEMORY.md is the index, each fact is a Markdown file with frontmatter. The index is injected into the system prompt, related entries are recalled per turn, and new memories are extracted when a session ends.",
+    "settingsTitle": "Memory pipeline",
+    "settingsHint": "Extraction runs after each session with the channel's lite model when configured.",
+    "enabled": "Enable memory",
+    "dreamInterval": "Consolidate (dream) every N extractions (0 = never)",
+    "entriesTitle": "Entries for the active workspace",
+    "entriesHint": "{{dir}} · {{extractions}} extractions · {{dreams}} consolidations",
+    "needWorkspace": "Select a workspace to see its memories.",
+    "needChannel": "Select a channel first.",
+    "refresh": "Refresh",
+    "openDir": "Open folder",
+    "dream": "Consolidate now",
+    "dreaming": "Consolidating…",
+    "empty": "No memories yet.",
+    "kind": {
+      "user": "user",
+      "feedback": "feedback",
+      "project": "project",
+      "reference": "reference"
+    }
+  },
+  "automations": {
+    "hint": "Cron automations start a new agent session in the workspace with the given prompt. The scheduler scans every 30 s; a workspace with a working session is deferred by one minute. The agent can also manage them with CronCreate / CronList / CronDelete (creation asks for confirmation).",
+    "createTitle": "New automation",
+    "createHint": "5-field cron (minute hour day month weekday) or @hourly / @daily / @weekly; local time. The current channel and model are used.",
+    "needWorkspace": "Select a workspace first.",
+    "name": "Name",
+    "cron": "Cron",
+    "prompt": "Prompt",
+    "create": "Create",
+    "listTitle": "Automations in this workspace",
+    "listHint": "Toggle, run immediately or delete.",
+    "empty": "No automations yet.",
+    "runNow": "Run now",
+    "next": "Next: {{time}}",
+    "last": "Last: {{time}}",
+    "started": "Started session {{session}}."
   }
 }

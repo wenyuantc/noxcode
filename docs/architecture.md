@@ -50,7 +50,7 @@ flowchart LR
 | 层 | 现状 | 目标 |
 | --- | --- | --- |
 | 前端 `src/` | P5 单主界面 + 全屏设置 + Git 抽屉 + API 日志，见 [`frontend.md`](frontend.md) | 保持；斜杠命令完整版 / Markdown 富渲染留 backlog |
-| `db/` | version 7（9 张业务表；version 6 增 `ssh_configs.algorithms_json`，version 7 增 `activity_logs`，已去掉 `agent_profiles`） | 只追加连续迁移 `8..N` |
+| `db/` | version 9（12 张业务表；version 6 增 `ssh_configs.algorithms_json`，version 7 增 `activity_logs`，version 8 增 `native_tool_artifacts` 与 call log / 渠道新列，version 9 增 `native_automations` / `native_goals`，已去掉 `agent_profiles`） | 只追加连续迁移 `10..N` |
 | `app/database` + `app/shared` | 健康检查 / 备份 / 恢复 | 保持 |
 | `app/activity_logs` + `app/notifications` | checkpoint 活动审计 + 主窗口失焦桌面通知 | 保持 |
 | `app/ssh/` + `app/secret_store` | P2 + P5 设置页 / 信任对话框 / 高级算法，见 [`ssh.md`](ssh.md) | 保持 |

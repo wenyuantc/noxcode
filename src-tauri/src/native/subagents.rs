@@ -2,7 +2,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
@@ -13,7 +13,7 @@ use crate::app::shared::{new_id, sqlite_pool};
 use crate::native::api_logs::sqlite_call_log_sink;
 use crate::native::channels::{fetch_channel_record, require_channel_api_key};
 use crate::native::model::call_log::{CallLogContext, CALL_KIND_SUBAGENT};
-use crate::native::model::{ModelClient, ModelClientConfig, RetryConfig};
+use crate::native::model::{ModelClient, ModelClientConfig};
 use crate::native::model_catalog::{apply_catalog_defaults, fill_from_catalog};
 use crate::native::protocol::record_to_channel;
 
@@ -61,6 +61,238 @@ pub struct NativeSubagent {
     pub scope: String,
     #[serde(default)]
     pub workspace_ids: Vec<String>,
+    /// 子 Agent 自己的权限模式（default / edit / build / yolo）；`None` 继承父会话。
+    #[serde(default)]
+    pub permission_mode: Option<String>,
+    /// 从可见工具里剔除的工具名（对 `tool_mode=all` 也生效）。
+    #[serde(default)]
+    pub disallowed_tools: Vec<String>,
+    /// `json`（设置页维护）或 `file`（`.md` 档案，只读）。
+    #[serde(default = "default_subagent_source")]
+    pub source: String,
+    /// `.md` 档案的绝对路径。
+    #[serde(default)]
+    pub path: Option<String>,
+    /// 覆盖子 Agent 的最大工具轮次；`None` 用全局设置。
+    #[serde(default)]
+    pub max_turns: Option<i32>,
+    /// 只对子 Agent 开放的技能名；空表示继承父会话全部技能。
+    #[serde(default)]
+    pub skills: Vec<String>,
+}
+
+pub const SUBAGENT_SOURCE_JSON: &str = "json";
+pub const SUBAGENT_SOURCE_FILE: &str = "file";
+
+fn default_subagent_source() -> String {
+    SUBAGENT_SOURCE_JSON.to_string()
+}
+
+/// `.md` 档案目录：工作区 `.noxcode/agents`、`.claude/agents`，全局 `$APPCONFIG/agents`。
+pub const WORKSPACE_AGENT_DIRS: &[&str] = &[".noxcode/agents", ".claude/agents"];
+pub const GLOBAL_AGENT_DIR: &str = "agents";
+
+fn split_frontmatter(text: &str) -> Option<(Vec<(String, String)>, String)> {
+    let trimmed = text.trim_start();
+    let rest = trimmed.strip_prefix("---")?;
+    let end = rest.find("\n---")?;
+    let header = &rest[..end];
+    let body = rest[end + 4..].trim_matches('\n').to_string();
+    let fields = header
+        .lines()
+        .filter_map(|line| {
+            let (key, value) = line.split_once(':')?;
+            Some((
+                key.trim().to_string(),
+                value.trim().trim_matches(['"', '\'']).to_string(),
+            ))
+        })
+        .collect();
+    Some((fields, body))
+}
+
+fn frontmatter_list(value: &str) -> Vec<String> {
+    let inner = value.trim().trim_start_matches('[').trim_end_matches(']');
+    inner
+        .split(',')
+        .map(|item| item.trim().trim_matches(['"', '\'']).to_string())
+        .filter(|item| !item.is_empty())
+        .collect()
+}
+
+/// 解析一份 `.md` 子 Agent 档案：frontmatter 里 `name` 必填，`description`、`tools`、
+/// `disallowedTools`、`model`、`permissionMode`、`maxTurns`、`skills` 可选；正文即系统提示。
+pub fn parse_subagent_markdown(text: &str, path: &Path) -> Result<NativeSubagent, String> {
+    let (fields, body) =
+        split_frontmatter(text).ok_or_else(|| format!("{} 缺少 frontmatter", path.display()))?;
+    let field = |key: &str| -> Option<String> {
+        fields
+            .iter()
+            .find(|(name, _)| name.eq_ignore_ascii_case(key))
+            .map(|(_, value)| value.clone())
+            .filter(|value| !value.trim().is_empty())
+    };
+    let name = field("name")
+        .or_else(|| {
+            path.file_stem()
+                .map(|stem| stem.to_string_lossy().into_owned())
+        })
+        .ok_or_else(|| format!("{} 缺少 name", path.display()))?;
+    let name = normalize_subagent_name(&name)?;
+    let description = field("description").unwrap_or_else(|| format!("{name} 子 Agent"));
+    let tools = field("tools")
+        .map(|value| frontmatter_list(&value))
+        .unwrap_or_default();
+    let tool_mode = if tools.is_empty() || tools.iter().any(|item| item == "*") {
+        TOOL_MODE_ALL.to_string()
+    } else {
+        TOOL_MODE_CUSTOM.to_string()
+    };
+    let tools = if tool_mode == TOOL_MODE_ALL {
+        Vec::new()
+    } else {
+        normalize_custom_tools(&tools)?
+    };
+    let disallowed_tools = field("disallowedTools")
+        .or_else(|| field("disallowed_tools"))
+        .map(|value| normalize_disallowed_tools(&frontmatter_list(&value)))
+        .unwrap_or_default();
+    // `model` 只接受「继承」；指定渠道模型需要渠道 id，文件档案不携带，留给设置页。
+    let permission_mode = normalize_subagent_permission_mode(
+        field("permissionMode")
+            .or_else(|| field("permission_mode"))
+            .as_deref(),
+    );
+    let max_turns = field("maxTurns")
+        .or_else(|| field("max_turns"))
+        .and_then(|value| value.parse::<i32>().ok())
+        .filter(|value| (1..=500).contains(value));
+    let skills = field("skills")
+        .map(|value| frontmatter_list(&value))
+        .unwrap_or_default();
+    let inject_agents_md = field("injectAgentsMd")
+        .or_else(|| field("inject_agents_md"))
+        .map(|value| {
+            !matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "false" | "0" | "no"
+            )
+        })
+        .unwrap_or(true);
+    Ok(NativeSubagent {
+        id: format!("md:{}", path.to_string_lossy()),
+        name,
+        description: cap_description(&description),
+        model_mode: MODEL_MODE_INHERIT.to_string(),
+        channel_id: None,
+        model: None,
+        tool_mode,
+        tools,
+        system_prompt: body.trim().to_string(),
+        inject_agents_md,
+        scope: SCOPE_ALL.to_string(),
+        workspace_ids: Vec::new(),
+        permission_mode,
+        disallowed_tools,
+        source: SUBAGENT_SOURCE_FILE.to_string(),
+        path: Some(path.to_string_lossy().into_owned()),
+        max_turns,
+        skills,
+    })
+}
+
+fn cap_description(value: &str) -> String {
+    let trimmed = value.trim();
+    if trimmed.chars().count() <= 200 {
+        trimmed.to_string()
+    } else {
+        trimmed.chars().take(200).collect()
+    }
+}
+
+fn load_agent_dir(dir: &Path) -> Vec<NativeSubagent> {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut items: Vec<NativeSubagent> = entries
+        .flatten()
+        .filter_map(|entry| {
+            let path = entry.path();
+            if path.extension().and_then(|ext| ext.to_str()) != Some("md") {
+                return None;
+            }
+            let text = fs::read_to_string(&path).ok()?;
+            match parse_subagent_markdown(&text, &path) {
+                Ok(item) => Some(item),
+                Err(error) => {
+                    eprintln!("[native] 忽略无效的子 Agent 档案: {error}");
+                    None
+                }
+            }
+        })
+        .collect();
+    items.sort_by(|a, b| a.name.cmp(&b.name));
+    items
+}
+
+/// 读取工作区、已启用插件与全局目录里的 `.md` 档案；按该顺序优先，同名只保留先出现的。
+pub fn load_markdown_subagents(
+    workspace_root: Option<&Path>,
+    config_dir: Option<&Path>,
+) -> Vec<NativeSubagent> {
+    let plugins = crate::native::plugins::load_enabled_plugins(config_dir, workspace_root);
+    load_markdown_subagents_with(
+        workspace_root,
+        config_dir,
+        &crate::native::plugins::plugin_agent_dirs(&plugins),
+    )
+}
+
+pub fn load_markdown_subagents_with(
+    workspace_root: Option<&Path>,
+    config_dir: Option<&Path>,
+    plugin_dirs: &[std::path::PathBuf],
+) -> Vec<NativeSubagent> {
+    let mut out: Vec<NativeSubagent> = Vec::new();
+    let mut push_all = |items: Vec<NativeSubagent>| {
+        for item in items {
+            if !out
+                .iter()
+                .any(|existing| names_equal(&existing.name, &item.name))
+            {
+                out.push(item);
+            }
+        }
+    };
+    if let Some(root) = workspace_root {
+        for dir in WORKSPACE_AGENT_DIRS {
+            push_all(load_agent_dir(&root.join(dir)));
+        }
+    }
+    for dir in plugin_dirs {
+        push_all(load_agent_dir(dir));
+    }
+    if let Some(config) = config_dir {
+        push_all(load_agent_dir(&config.join(GLOBAL_AGENT_DIR)));
+    }
+    out
+}
+
+/// 合并设置页（json）与档案（file）子 Agent：json 优先，同名档案被跳过。
+pub fn merge_subagent_sources(
+    json_items: Vec<NativeSubagent>,
+    file_items: Vec<NativeSubagent>,
+) -> Vec<NativeSubagent> {
+    let mut out = json_items;
+    for item in file_items {
+        if !out
+            .iter()
+            .any(|existing| names_equal(&existing.name, &item.name))
+        {
+            out.push(item);
+        }
+    }
+    out
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -76,6 +308,10 @@ pub struct CreateNativeSubagent {
     pub inject_agents_md: Option<bool>,
     pub scope: Option<String>,
     pub workspace_ids: Option<Vec<String>>,
+    #[serde(default)]
+    pub permission_mode: Option<String>,
+    #[serde(default)]
+    pub disallowed_tools: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -91,6 +327,42 @@ pub struct UpdateNativeSubagent {
     pub inject_agents_md: Option<bool>,
     pub scope: Option<String>,
     pub workspace_ids: Option<Vec<String>>,
+    /// `Some(Some(mode))` 设置，`Some(None)` 清空回继承，`None` 不改。
+    #[serde(default, deserialize_with = "deserialize_explicit_nullable")]
+    pub permission_mode: Option<Option<String>>,
+    #[serde(default)]
+    pub disallowed_tools: Option<Vec<String>>,
+}
+
+fn deserialize_explicit_nullable<'de, D, T>(deserializer: D) -> Result<Option<Option<T>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Deserialize::deserialize(deserializer).map(Some)
+}
+
+/// 子 Agent 权限模式：空 / 非法值视为继承（`None`）。
+pub fn normalize_subagent_permission_mode(value: Option<&str>) -> Option<String> {
+    let trimmed = value.map(str::trim).unwrap_or("");
+    if trimmed.is_empty() || trimmed == "inherit" {
+        return None;
+    }
+    Some(crate::native::settings::normalize_permission_mode(Some(
+        trimmed,
+    )))
+}
+
+pub fn normalize_disallowed_tools(tools: &[String]) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for tool in tools {
+        let trimmed = tool.trim();
+        if trimmed.is_empty() || out.iter().any(|existing| names_equal(existing, trimmed)) {
+            continue;
+        }
+        out.push(trimmed.to_string());
+    }
+    out
 }
 
 #[derive(Debug, Default, Deserialize, Serialize)]
@@ -322,6 +594,8 @@ fn normalize_record(mut item: NativeSubagent) -> Result<NativeSubagent, String> 
             return Err("指定工作区时至少选择一个工作区".to_string());
         }
     }
+    item.permission_mode = normalize_subagent_permission_mode(item.permission_mode.as_deref());
+    item.disallowed_tools = normalize_disallowed_tools(&item.disallowed_tools);
     Ok(item)
 }
 
@@ -487,7 +761,7 @@ pub async fn resolve_child_model<R: Runtime>(
         base_url: channel.base_url,
         api_key,
         extra_headers: extra_headers_map(channel.extra_headers_json.as_deref()),
-        retry: RetryConfig::default(),
+        retry: crate::native::settings::effective_model_retry_config(app),
         timeout: Duration::from_secs(if thinking_enabled { 300 } else { 120 }),
         network: load_network_settings(app)?,
     })?
@@ -501,6 +775,8 @@ pub async fn resolve_child_model<R: Runtime>(
             subagent_id: None,
             call_kind: Some(CALL_KIND_SUBAGENT.to_string()),
             execution_target: None,
+            operation: None,
+            model_role: None,
         },
         sqlite_call_log_sink(pool.clone()),
     );
@@ -516,8 +792,27 @@ pub async fn resolve_child_model<R: Runtime>(
 #[tauri::command]
 pub async fn list_native_subagents<R: Runtime>(
     app: AppHandle<R>,
+    workspace_id: Option<String>,
 ) -> Result<Vec<NativeSubagent>, String> {
-    load_native_subagents(&app)
+    let json_items = load_native_subagents(&app)?;
+    let config_dir = app.path().app_config_dir().ok();
+    let workspace_root =
+        crate::native::permission_rules::local_workspace_root(&app, workspace_id.as_deref())
+            .await
+            .unwrap_or(None);
+    let file_items = load_markdown_subagents(workspace_root.as_deref(), config_dir.as_deref());
+    Ok(merge_subagent_sources(json_items, file_items))
+}
+
+/// 会话可用的全部子 Agent：设置页 json + 工作区 / 全局 `.md` 档案，再按工作区作用域过滤。
+pub fn load_session_subagents<R: Runtime>(
+    app: &AppHandle<R>,
+    workspace_root: Option<&Path>,
+) -> Vec<NativeSubagent> {
+    let json_items = load_native_subagents(app).unwrap_or_default();
+    let config_dir = app.path().app_config_dir().ok();
+    let file_items = load_markdown_subagents(workspace_root, config_dir.as_deref());
+    merge_subagent_sources(json_items, file_items)
 }
 
 #[tauri::command]
@@ -546,6 +841,12 @@ pub async fn create_native_subagent<R: Runtime>(
         inject_agents_md: payload.inject_agents_md.unwrap_or(true),
         scope: payload.scope.unwrap_or_else(|| SCOPE_ALL.to_string()),
         workspace_ids: payload.workspace_ids.unwrap_or_default(),
+        permission_mode: payload.permission_mode,
+        disallowed_tools: payload.disallowed_tools.unwrap_or_default(),
+        source: SUBAGENT_SOURCE_JSON.to_string(),
+        path: None,
+        max_turns: None,
+        skills: Vec::new(),
     })?;
     ensure_unique_name(&items, &record.name, None)?;
     if record.scope == SCOPE_WORKSPACES {
@@ -615,6 +916,12 @@ pub async fn update_native_subagent<R: Runtime>(
     if let Some(workspace_ids) = payload.workspace_ids {
         next.workspace_ids = workspace_ids;
     }
+    if let Some(permission_mode) = payload.permission_mode {
+        next.permission_mode = permission_mode;
+    }
+    if let Some(disallowed_tools) = payload.disallowed_tools {
+        next.disallowed_tools = disallowed_tools;
+    }
     let record = normalize_record(next)?;
     ensure_unique_name(&items, &record.name, Some(&id))?;
     if record.scope == SCOPE_WORKSPACES {
@@ -664,6 +971,55 @@ pub async fn delete_native_subagent<R: Runtime>(
 mod tests {
     use super::*;
 
+    #[test]
+    fn markdown_profiles_parse_and_merge_after_json() {
+        let dir = std::env::temp_dir().join(format!(
+            "noxcode-agent-md-{}",
+            crate::native::artifacts::unique_suffix()
+        ));
+        let agents = dir.join(".noxcode/agents");
+        fs::create_dir_all(&agents).expect("mkdir");
+        fs::write(
+            agents.join("reviewer.md"),
+            "---\nname: code-reviewer\ndescription: 审查 diff\ntools: Read, Grep, Glob\ndisallowedTools: [Bash]\npermissionMode: yolo\nmaxTurns: 12\nskills: [review]\n---\n你是严格的审查员。\n",
+        )
+        .expect("write");
+        fs::write(agents.join("broken.md"), "no frontmatter").expect("write");
+        fs::write(
+            agents.join("all-tools.md"),
+            "---\nname: fixer\n---\n修 bug。",
+        )
+        .expect("write");
+        let items = load_markdown_subagents(Some(&dir), None);
+        assert_eq!(items.len(), 2);
+        let reviewer = items
+            .iter()
+            .find(|item| item.name == "code-reviewer")
+            .expect("reviewer");
+        assert_eq!(reviewer.source, SUBAGENT_SOURCE_FILE);
+        assert_eq!(reviewer.tool_mode, TOOL_MODE_CUSTOM);
+        assert_eq!(reviewer.tools, vec!["Read", "Grep", "Glob"]);
+        assert_eq!(reviewer.disallowed_tools, vec!["Bash"]);
+        assert_eq!(reviewer.permission_mode.as_deref(), Some("yolo"));
+        assert_eq!(reviewer.max_turns, Some(12));
+        assert_eq!(reviewer.skills, vec!["review"]);
+        assert_eq!(reviewer.system_prompt, "你是严格的审查员。");
+        assert!(reviewer.path.as_deref().unwrap().ends_with("reviewer.md"));
+        let fixer = items
+            .iter()
+            .find(|item| item.name == "fixer")
+            .expect("fixer");
+        assert_eq!(fixer.tool_mode, TOOL_MODE_ALL);
+        assert_eq!(fixer.description, "fixer 子 Agent");
+        // 同名的 json 条目优先。
+        let mut json_item = sample();
+        json_item.name = "code-reviewer".to_string();
+        let merged = merge_subagent_sources(vec![json_item], items);
+        assert_eq!(merged.len(), 2);
+        assert_eq!(merged[0].source, SUBAGENT_SOURCE_JSON);
+        let _ = fs::remove_dir_all(dir);
+    }
+
     fn sample() -> NativeSubagent {
         NativeSubagent {
             id: "1".to_string(),
@@ -678,6 +1034,12 @@ mod tests {
             inject_agents_md: true,
             scope: SCOPE_ALL.to_string(),
             workspace_ids: Vec::new(),
+            permission_mode: None,
+            disallowed_tools: Vec::new(),
+            source: SUBAGENT_SOURCE_JSON.to_string(),
+            path: None,
+            max_turns: None,
+            skills: Vec::new(),
         }
     }
 

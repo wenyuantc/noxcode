@@ -10,7 +10,7 @@ React (UI) → Tauri IPC commands → Rust service layer → SQLite
 前端永不直接读写 SQLite。`src/lib/database.ts` 是 hard-fail stub（`select` / `execute` / `getDb` 直接抛错）。`src-tauri/capabilities/default.json` 不授予任何 `sql:*` 权限（包括 `sql:default`，因为它含 `allow-select`）。所有读写必须走 `src/lib/backend.ts` 封装的 Tauri command。
 
 ## 开发约束
-- 数据库迁移版本必须连续（`1..N`），由 `migration_versions_are_contiguous` 单测强制。当前最新版本为 7，共 9 张业务表（迁移 6 仅为 `ssh_configs` 增加 `algorithms_json`；迁移 7 新增 `activity_logs`；`agent_profiles` 已在迁移 2 删除）。
+- 数据库迁移版本必须连续（`1..N`），由 `migration_versions_are_contiguous` 单测强制。当前最新版本为 9，共 12 张业务表（迁移 6 仅为 `ssh_configs` 增加 `algorithms_json`；迁移 7 新增 `activity_logs`；迁移 8 新增 `native_tool_artifacts` 并给 `native_api_call_logs` 加 `operation` / `model_role`、给 `ai_channels` 加 `lite_model`；迁移 9 新增 `native_automations` 与 `native_goals`；`agent_profiles` 已在迁移 2 删除）。
 - 全仓库只允许 `src-tauri/src/git/runner.rs` spawn `git`。业务代码一律通过该 runner。
 - `russh` 必须保持 ring 后端。`cargo tree -i aws-lc-rs` 必须无匹配。
 - 运行时外部依赖只有系统 `git` ≥ 2.23；启动预检失败则弹中文错误并退出。

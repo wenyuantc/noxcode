@@ -48,6 +48,7 @@ interface ChannelFormState {
   apiKey: string;
   models: AiChannelModel[];
   extraHeaders: string;
+  liteModel: string;
   enabled: boolean;
 }
 
@@ -58,6 +59,7 @@ const EMPTY_FORM: ChannelFormState = {
   apiKey: "",
   models: [],
   extraHeaders: "",
+  liteModel: "",
   enabled: true,
 };
 
@@ -69,6 +71,7 @@ function channelToForm(channel: AiChannel): ChannelFormState {
     apiKey: channel.api_key?.trim() ?? "",
     models: channel.models.length > 0 ? channel.models : [],
     extraHeaders: channel.extra_headers_json ?? "",
+    liteModel: channel.lite_model ?? "",
     enabled: channel.enabled,
   };
 }
@@ -167,6 +170,7 @@ export function AiChannelsSettingsTab() {
           api_key: form.apiKey.trim() || undefined,
           extra_headers_json: extraHeaders,
           models,
+          lite_model: form.liteModel.trim() || null,
           enabled: form.enabled,
         });
         setChannels((current) =>
@@ -182,6 +186,7 @@ export function AiChannelsSettingsTab() {
           api_key: form.apiKey.trim() || null,
           extra_headers_json: extraHeaders,
           models,
+          lite_model: form.liteModel.trim() || null,
           enabled: form.enabled,
         });
         setChannels((current) => [created, ...current]);
@@ -444,6 +449,33 @@ export function AiChannelsSettingsTab() {
                 rows={3}
                 disabled={formLocked}
               />
+              <div>
+                <label
+                  className="text-xs font-medium text-muted-foreground"
+                  htmlFor="channel-lite-model"
+                >
+                  {t("channels.fields.liteModel")}
+                </label>
+                <select
+                  id="channel-lite-model"
+                  className="mt-1 h-8 w-full rounded-md border bg-background px-2 text-sm"
+                  value={form.liteModel}
+                  disabled={formLocked}
+                  onChange={(event) => patchForm({ liteModel: event.target.value })}
+                >
+                  <option value="">{t("channels.fields.liteModelNone")}</option>
+                  {form.models
+                    .filter((item) => item.id.trim().length > 0)
+                    .map((item) => (
+                      <option key={item.id} value={item.id}>
+                        {item.id}
+                      </option>
+                    ))}
+                </select>
+                <p className="mt-1 text-xs text-muted-foreground">
+                  {t("channels.fields.liteModelHint")}
+                </p>
+              </div>
               <div>
                 <label className="text-xs font-medium text-muted-foreground">
                   {t("channels.fields.enabled")}

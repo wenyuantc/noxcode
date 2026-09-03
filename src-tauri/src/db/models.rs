@@ -152,6 +152,9 @@ pub struct AiChannelRecord {
     pub enabled: i64,
     pub created_at: String,
     pub updated_at: String,
+    /// 轻量模型（压缩摘要 / 记忆抽取 / 钩子判定用），为空则用主模型。
+    #[sqlx(default)]
+    pub lite_model: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -177,6 +180,8 @@ pub struct AiChannel {
     pub base_url: String,
     pub extra_headers_json: Option<String>,
     pub models: Vec<ChannelModelConfig>,
+    #[serde(default)]
+    pub lite_model: Option<String>,
     pub enabled: bool,
     pub api_key: Option<String>,
     pub api_key_configured: bool,
@@ -192,6 +197,8 @@ pub struct CreateAiChannel {
     pub api_key: Option<String>,
     pub extra_headers_json: Option<String>,
     pub models: Option<Vec<ChannelModelConfig>>,
+    #[serde(default)]
+    pub lite_model: Option<String>,
     pub enabled: Option<bool>,
 }
 
@@ -204,6 +211,8 @@ pub struct UpdateAiChannel {
     #[serde(default, deserialize_with = "deserialize_explicit_nullable")]
     pub extra_headers_json: Option<Option<String>>,
     pub models: Option<Vec<ChannelModelConfig>>,
+    #[serde(default, deserialize_with = "deserialize_explicit_nullable")]
+    pub lite_model: Option<Option<String>>,
     pub enabled: Option<bool>,
 }
 
@@ -340,20 +349,130 @@ pub struct NativeSettings {
     pub auto_checkpoint_after_tool_call: bool,
     pub checkpoint_retention_days: i32,
     pub desktop_notifications: bool,
+    #[serde(default = "default_artifact_retention_days")]
+    pub artifact_retention_days: i32,
+    #[serde(default = "default_model_retry_max_retries")]
+    pub model_retry_max_retries: i32,
+    #[serde(default = "default_model_retry_base_delay_ms")]
+    pub model_retry_base_delay_ms: i32,
+    #[serde(default = "default_model_retry_max_delay_ms")]
+    pub model_retry_max_delay_ms: i32,
+    #[serde(default = "default_model_retry_backoff_factor")]
+    pub model_retry_backoff_factor: f64,
+    #[serde(default = "default_bash_default_timeout_secs")]
+    pub bash_default_timeout_secs: i32,
+    #[serde(default = "default_true")]
+    pub shell_snapshot_enabled: bool,
+    #[serde(default = "default_true")]
+    pub rg_sidecar_enabled: bool,
+    #[serde(default = "default_auto_compact_threshold_percent")]
+    pub auto_compact_threshold_percent: i32,
+    #[serde(default = "default_true")]
+    pub microcompact_enabled: bool,
+    #[serde(default = "default_true")]
+    pub memory_enabled: bool,
+    #[serde(default = "default_memory_dream_interval")]
+    pub memory_dream_interval: i32,
     #[serde(default)]
     pub hooks: Vec<NativeHook>,
     #[serde(default)]
     pub global_prompt_template: String,
 }
 
+fn default_auto_compact_threshold_percent() -> i32 {
+    crate::native::settings::DEFAULT_NATIVE_AUTO_COMPACT_THRESHOLD_PERCENT
+}
+
+fn default_memory_dream_interval() -> i32 {
+    crate::native::settings::DEFAULT_NATIVE_MEMORY_DREAM_INTERVAL
+}
+
+fn default_true() -> bool {
+    true
+}
+
+fn default_artifact_retention_days() -> i32 {
+    crate::native::settings::DEFAULT_NATIVE_ARTIFACT_RETENTION_DAYS
+}
+
+fn default_model_retry_max_retries() -> i32 {
+    crate::native::settings::DEFAULT_NATIVE_MODEL_RETRY_MAX_RETRIES
+}
+
+fn default_model_retry_base_delay_ms() -> i32 {
+    crate::native::settings::DEFAULT_NATIVE_MODEL_RETRY_BASE_DELAY_MS
+}
+
+fn default_model_retry_max_delay_ms() -> i32 {
+    crate::native::settings::DEFAULT_NATIVE_MODEL_RETRY_MAX_DELAY_MS
+}
+
+fn default_model_retry_backoff_factor() -> f64 {
+    crate::native::settings::DEFAULT_NATIVE_MODEL_RETRY_BACKOFF_FACTOR
+}
+
+fn default_bash_default_timeout_secs() -> i32 {
+    crate::native::settings::DEFAULT_NATIVE_BASH_DEFAULT_TIMEOUT_SECS
+}
+
+fn default_hook_handler_type() -> String {
+    "command".to_string()
+}
+
+fn default_hook_source() -> String {
+    "global".to_string()
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct NativeHook {
     pub id: String,
+    /// `session_start` / `user_prompt_submit` / `pre_tool_use` / `post_tool_use` /
+    /// `post_tool_use_failure` / `permission_request` / `stop`。
     pub event: String,
+    /// 工具名列表或 `*`；非工具事件忽略。
     pub matcher: String,
+    /// `command` 处理器的 shell 命令；`http` / `agent` 处理器可留空。
+    #[serde(default)]
     pub command: String,
     pub timeout_secs: i32,
     pub enabled: bool,
+    /// `command` | `http` | `agent`。
+    #[serde(default = "default_hook_handler_type")]
+    pub handler_type: String,
+    /// `http` 处理器的 POST 地址。
+    #[serde(default)]
+    pub url: Option<String>,
+    /// `agent` 处理器的判定提示词。
+    #[serde(default)]
+    pub agent_prompt: Option<String>,
+    /// `global` | `workspace` | `plugin`：来源，用于展示与去重。
+    #[serde(default = "default_hook_source")]
+    pub source: String,
+}
+
+impl NativeHook {
+    /// 构造一条 `command` 处理器的钩子（测试与旧调用方用）。
+    pub fn shell(
+        id: impl Into<String>,
+        event: impl Into<String>,
+        matcher: impl Into<String>,
+        command: impl Into<String>,
+        timeout_secs: i32,
+        enabled: bool,
+    ) -> Self {
+        Self {
+            id: id.into(),
+            event: event.into(),
+            matcher: matcher.into(),
+            command: command.into(),
+            timeout_secs,
+            enabled,
+            handler_type: default_hook_handler_type(),
+            url: None,
+            agent_prompt: None,
+            source: default_hook_source(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -372,6 +491,30 @@ pub struct UpdateNativeSettings {
     pub auto_checkpoint_after_tool_call: Option<bool>,
     pub checkpoint_retention_days: Option<i32>,
     pub desktop_notifications: Option<bool>,
+    #[serde(default)]
+    pub artifact_retention_days: Option<i32>,
+    #[serde(default)]
+    pub model_retry_max_retries: Option<i32>,
+    #[serde(default)]
+    pub model_retry_base_delay_ms: Option<i32>,
+    #[serde(default)]
+    pub model_retry_max_delay_ms: Option<i32>,
+    #[serde(default)]
+    pub model_retry_backoff_factor: Option<f64>,
+    #[serde(default)]
+    pub bash_default_timeout_secs: Option<i32>,
+    #[serde(default)]
+    pub shell_snapshot_enabled: Option<bool>,
+    #[serde(default)]
+    pub rg_sidecar_enabled: Option<bool>,
+    #[serde(default)]
+    pub auto_compact_threshold_percent: Option<i32>,
+    #[serde(default)]
+    pub microcompact_enabled: Option<bool>,
+    #[serde(default)]
+    pub memory_enabled: Option<bool>,
+    #[serde(default)]
+    pub memory_dream_interval: Option<i32>,
     pub hooks: Option<Vec<NativeHook>>,
     pub global_prompt_template: Option<String>,
 }
@@ -380,7 +523,9 @@ pub struct UpdateNativeSettings {
 pub struct McpServerConfig {
     pub id: String,
     pub name: String,
+    #[serde(default)]
     pub command: String,
+    #[serde(default)]
     pub args: Vec<String>,
     #[serde(default)]
     pub env: Vec<McpEnvVar>,
@@ -391,6 +536,37 @@ pub struct McpServerConfig {
     pub scope: String,
     #[serde(default)]
     pub workspace_ids: Vec<String>,
+    /// `stdio`（默认）| `http`（Streamable HTTP）| `sse`（旧版 HTTP+SSE）。
+    #[serde(default = "default_mcp_transport")]
+    pub transport: String,
+    /// http / sse 传输的地址。
+    #[serde(default)]
+    pub url: Option<String>,
+    /// http / sse 传输附加的请求头。
+    #[serde(default)]
+    pub headers: Vec<McpEnvVar>,
+    /// OAuth 2.1 授权码 + PKCE 配置；有则请求带 `Authorization: Bearer`。
+    #[serde(default)]
+    pub oauth: Option<McpOAuthConfig>,
+}
+
+pub const MCP_TRANSPORT_STDIO: &str = "stdio";
+pub const MCP_TRANSPORT_HTTP: &str = "http";
+pub const MCP_TRANSPORT_SSE: &str = "sse";
+
+fn default_mcp_transport() -> String {
+    MCP_TRANSPORT_STDIO.to_string()
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct McpOAuthConfig {
+    pub client_id: String,
+    #[serde(default)]
+    pub client_secret: Option<String>,
+    pub authorize_url: String,
+    pub token_url: String,
+    #[serde(default)]
+    pub scopes: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

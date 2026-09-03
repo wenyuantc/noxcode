@@ -4,6 +4,7 @@ import {
   onNativeContextUsage,
   onNativeExit,
   onNativePermissionRequest,
+  onNativePlanApprovalRequest,
   onNativePlanQuestion,
   onNativeSession,
   onNativeStdout,
@@ -50,6 +51,9 @@ export function useNativeEvents() {
       onNativePermissionRequest((request) => useSessionStore.getState().setPermission(request)),
     );
     track(onNativePlanQuestion((request) => useSessionStore.getState().setPlanQuestion(request)));
+    track(
+      onNativePlanApprovalRequest((request) => useSessionStore.getState().setPlanApproval(request)),
+    );
 
     return () => {
       cancelled = true;

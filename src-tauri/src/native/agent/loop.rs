@@ -10,8 +10,12 @@ use tokio::sync::{mpsc, Mutex, Semaphore};
 use tokio::task::JoinSet;
 
 use crate::engine::UsageDelta;
+use crate::native::artifacts::{bound_with_artifact, ArtifactStore};
 use crate::native::manager::NativeFollowup;
-use crate::native::model::call_log::{CALL_KIND_COMPACT, CALL_KIND_SUBAGENT};
+use crate::native::model::call_log::{
+    CALL_KIND_COMPACT, CALL_KIND_SUBAGENT, MODEL_ROLE_LITE, MODEL_ROLE_MAIN, OPERATION_COMPACT,
+    OPERATION_SUBAGENT,
+};
 use crate::native::model::client::{ChatRequest, ModelClient};
 use crate::native::model::types::{
     Message, NativeImage, Role, StreamDelta, ToolCall, ToolSpec, Usage,
@@ -22,17 +26,22 @@ use crate::native::subagents::{
     custom_tools_are_read_only, effective_custom_tools, find_native_subagent, ChildModelSettings,
     NativeSubagent, MODEL_MODE_CHANNEL, TOOL_MODE_ALL,
 };
+use crate::native::tools::contract::ContractRegistry;
+use crate::native::tools::hooks::{run_stop_hooks, run_user_prompt_submit_hooks};
 use crate::native::tools::{
-    ask_question_spec, execute_tool, tool_specs, CancelFlag, LocalWorkspace, SharedMcp, ToolCtx,
+    execute_tool_call, read_only_tool_names, tool_contracts, tool_specs, LocalWorkspace,
+    ToolContract, ToolCtx, ToolOutput,
 };
 
+use super::background::BackgroundTaskRegistry;
 use super::compact::{
-    compact_local, compact_with_summary, compaction_prompt, is_usable_compaction_summary,
-    reset_local, BudgetSnapshot, ChildQuota, ContextWindow, RolloutBudget,
+    compact_local, compact_with_summary, compaction_prompt_with_instructions,
+    is_context_overflow_error, is_usable_compaction_summary, microcompact, reset_local,
+    BudgetSnapshot, ChildQuota, CompactBoundary, CompactTrigger, ContextWindow, RolloutBudget,
 };
 use super::subagent::{
     child_system_prompt, custom_child_system_prompt, format_subagent_log_tag,
-    format_subagent_result, parse_subagent_args_with, SubagentKind, SubagentSpec,
+    format_subagent_result, parse_subagent_args_with, truncate_report, SubagentKind, SubagentSpec,
 };
 use super::truncate::{
     chars_to_tokens, context_usage_breakdown, message_tokens, total_message_tokens,
@@ -51,6 +60,10 @@ const DEFAULT_FINAL_OUTPUT_RESERVE: u64 = 1_024;
 /// this (or the remaining budget, whichever is smaller) as a hard request cap.
 const FALLBACK_OUTPUT_TOKEN_GUARD: u64 = 16_384;
 const REPEAT_TOOL_LIMIT: u32 = 3;
+/// 同一轮里并行执行只读工具的上限。
+const MAX_PARALLEL_TOOL_CALLS: usize = 8;
+/// stop 钩子在一个用户回合内最多要求继续的次数，防止死循环。
+const MAX_STOP_HOOK_CONTINUES: u32 = 3;
 const LAST_TURN_REMINDER: &str = "工具轮次已达上限。请立即给出最终结论，不要再调用工具。";
 const LAST_TURN_FALLBACK: &str = "已达到最大工具轮次，已根据已有工具结果停止。";
 const TOOL_RESULT_DISPLAY_MAX_LINES: usize = 2000;
@@ -134,13 +147,32 @@ pub struct AgentRunner {
     pub project_agents: String,
     pub required_subagent_type: Option<String>,
     extra_tools: Vec<ToolSpec>,
+    /// MCP 等动态工具的契约；内置工具契约来自 catalog。
+    extra_tool_contracts: Vec<ToolContract>,
+    /// 大输出落盘用的 artifact 存储；父子 Agent 共享同一会话目录。
+    pub artifacts: Option<Arc<ArtifactStore>>,
+    /// 渠道配置的轻量模型：压缩摘要等内部调用优先使用。
+    pub lite_model: Option<String>,
+    /// 后台子 Agent 任务注册表（只有主 Agent 使用）。
+    pub background: Arc<BackgroundTaskRegistry>,
     pub skills_prompt: String,
     last_usage: Option<Usage>,
     allowed_tools: Option<HashSet<String>>,
-    plan_mode: bool,
+    disallowed_tools: Option<HashSet<String>>,
     turns: u32,
     last_tool_key: Option<String>,
     last_tool_repeat: u32,
+    stop_hook_continues: u32,
+    /// `/compact [指令]` 请求，下一次模型调用前执行。
+    pending_manual_compact: Option<Option<String>>,
+    /// 下一条用户消息末尾要附加的文本（记忆回忆等），用后即清。
+    turn_suffix: Option<String>,
+    /// 会话恢复到更小窗口的模型时置位，超阈值即以 downshift 触发压缩。
+    pending_downshift_compact: bool,
+    /// 全量压缩前先尝试微压缩（替换旧工具结果）。
+    microcompact_enabled: bool,
+    /// 本回合内因供应商溢出而做的被动压缩次数（上限 2）。
+    reactive_compactions: u32,
     depth: u8,
     event_prefix: String,
     subagent_seq: u32,
@@ -188,27 +220,12 @@ pub enum NativeEvent {
 
 impl AgentRunner {
     pub fn new(workspace: LocalWorkspace) -> Self {
+        let background = Arc::new(BackgroundTaskRegistry::new());
+        let mut ctx = ToolCtx::new(workspace);
+        ctx.background = Some(background.clone());
         Self {
-            ctx: ToolCtx {
-                workspace,
-                ssh: None,
-                extra_env: Vec::new(),
-                cancel: CancelFlag::new(),
-                read_files: HashSet::new(),
-                todos: Vec::new(),
-                mcp: SharedMcp::empty(),
-                allow_all_high_risk: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
-                auto_approve_overwrite: false,
-                allowed_mcp_servers: std::sync::Arc::new(std::sync::Mutex::new(HashSet::new())),
-                request_permission: None,
-                expire_permission: None,
-                permission_timeout: std::time::Duration::ZERO,
-                request_question: None,
-                read_only: false,
-                skills: Vec::new(),
-                hooks: Vec::new(),
-                on_mutation: None,
-            },
+            ctx,
+            background,
             messages: Vec::new(),
             max_turns: DEFAULT_NATIVE_MAX_TURNS as u32,
             max_subagent_turns: crate::native::settings::DEFAULT_NATIVE_MAX_SUBAGENT_TURNS as u32,
@@ -238,13 +255,22 @@ impl AgentRunner {
             project_agents: String::new(),
             required_subagent_type: None,
             extra_tools: Vec::new(),
+            extra_tool_contracts: Vec::new(),
+            artifacts: None,
+            lite_model: None,
             skills_prompt: String::new(),
             last_usage: None,
             allowed_tools: None,
-            plan_mode: false,
+            disallowed_tools: None,
             turns: 0,
             last_tool_key: None,
             last_tool_repeat: 0,
+            stop_hook_continues: 0,
+            pending_manual_compact: None,
+            turn_suffix: None,
+            pending_downshift_compact: false,
+            microcompact_enabled: true,
+            reactive_compactions: 0,
             depth: 0,
             event_prefix: String::new(),
             subagent_seq: 0,
@@ -267,16 +293,41 @@ impl AgentRunner {
         self.extra_tools = tools;
     }
 
-    pub fn set_allowed_tools(&mut self, names: &[&str]) {
-        self.allowed_tools = Some(names.iter().map(|name| (*name).to_string()).collect());
+    /// 注册动态工具（MCP）的契约，用于并行判定与结果预算。
+    pub fn set_extra_tool_contracts(&mut self, contracts: Vec<ToolContract>) {
+        self.extra_tool_contracts = contracts;
+    }
+
+    pub fn set_artifact_store(&mut self, store: Arc<ArtifactStore>) {
+        self.artifacts = Some(store);
+    }
+
+    pub fn set_allowed_tools<S: AsRef<str>>(&mut self, names: &[S]) {
+        self.allowed_tools = Some(names.iter().map(|name| name.as_ref().to_string()).collect());
+    }
+
+    /// 子 Agent 档案的 `disallowedTools`：从可见工具里剔除。
+    pub fn set_disallowed_tools<S: AsRef<str>>(&mut self, names: &[S]) {
+        self.disallowed_tools = Some(names.iter().map(|name| name.as_ref().to_string()).collect());
+    }
+
+    fn contract_registry(&self) -> ContractRegistry {
+        let mut registry = ContractRegistry::new(tool_contracts());
+        registry.extend(self.extra_tool_contracts.iter().cloned());
+        registry
     }
 
     pub fn set_read_only(&mut self, read_only: bool) {
-        self.ctx.read_only = read_only;
+        self.ctx.set_read_only(read_only);
     }
 
     pub fn set_plan_mode(&mut self, plan_mode: bool) {
-        self.plan_mode = plan_mode;
+        self.ctx.set_plan_mode(plan_mode);
+    }
+
+    /// 模型可能已通过 ExitPlanMode 结束计划模式，会话层据此决定是否还要自动实施。
+    pub fn is_plan_mode(&self) -> bool {
+        self.ctx.is_plan_mode()
     }
 
     pub fn take_steer_finish(&mut self) -> bool {
@@ -298,12 +349,124 @@ impl AgentRunner {
                     self.messages.push(Message::user(text));
                     injected = true;
                 }
+                NativeFollowup::Compact(instructions) => {
+                    self.pending_manual_compact = Some(instructions);
+                }
                 NativeFollowup::Finish => {
                     self.pending_steer_finish = true;
                 }
             }
         }
         injected
+    }
+
+    /// `/compact [指令]`：下一次模型调用前压缩。
+    pub fn request_manual_compaction(&mut self, instructions: Option<String>) {
+        self.pending_manual_compact = Some(instructions);
+    }
+
+    /// 给下一条用户消息附加文本（记忆回忆）；不影响事件流里的 `[USER_INPUT]` 行。
+    pub fn set_turn_suffix(&mut self, text: impl Into<String>) {
+        let text = text.into();
+        self.turn_suffix = if text.trim().is_empty() {
+            None
+        } else {
+            Some(text)
+        };
+    }
+
+    /// 会话恢复到更小窗口模型时调用；只有超阈值才真正压缩。
+    pub fn request_downshift_compaction(&mut self) {
+        self.pending_downshift_compact = true;
+    }
+
+    pub fn set_compaction_options(&mut self, threshold_percent: u32, microcompact_enabled: bool) {
+        self.context_window
+            .set_threshold_percent(threshold_percent as usize);
+        self.microcompact_enabled = microcompact_enabled;
+    }
+
+    /// 等待输入状态下的 `/compact`：立刻压缩并写边界记录。
+    pub async fn compact_now(
+        &mut self,
+        client: &ModelClient,
+        instructions: Option<String>,
+    ) -> Option<CompactBoundary> {
+        let client = self.observe_client(client);
+        self.run_compaction(Some(&client), CompactTrigger::Manual, instructions)
+            .await
+    }
+
+    /// 统一的压缩入口：微压缩 → 模型摘要 → 本地摘要 → 重置。返回边界记录（已写入事件流）。
+    async fn run_compaction(
+        &mut self,
+        client: Option<&ModelClient>,
+        trigger: CompactTrigger,
+        instructions: Option<String>,
+    ) -> Option<CompactBoundary> {
+        let pre_tokens = total_message_tokens(&self.messages);
+        let pre_messages = self.messages.len();
+        let mut source: Option<&str> = None;
+        // 自动 / 降级 / 被动触发时，先试便宜的微压缩；用户明确 /compact 时直接做摘要。
+        if trigger != CompactTrigger::Manual && self.microcompact_enabled {
+            let replaced = microcompact(&mut self.messages);
+            if replaced > 0 && !self.context_window.should_compact(&self.messages) {
+                source = Some("microcompact");
+            }
+        }
+        if source.is_none() {
+            let mut compacted = false;
+            if let Some(client) = client {
+                compacted = self
+                    .compact_with_model(client, instructions.as_deref())
+                    .await;
+                if compacted {
+                    source = Some("model");
+                }
+            }
+            if !compacted && compact_local(&mut self.messages) {
+                source = Some("local");
+                compacted = true;
+            }
+            if !compacted && reset_local(&mut self.messages) {
+                source = Some("reset");
+                compacted = true;
+            }
+            if !compacted {
+                return None;
+            }
+        }
+        let source = source.unwrap_or("local");
+        if source == "reset" {
+            self.context_window.mark_reset();
+        } else {
+            self.context_window.mark_compacted();
+        }
+        let boundary = CompactBoundary {
+            trigger,
+            source: source.to_string(),
+            pre_tokens,
+            post_tokens: total_message_tokens(&self.messages),
+            pre_messages,
+            post_messages: self.messages.len(),
+            instructions: instructions.filter(|item| !item.trim().is_empty()),
+        };
+        let label = match source {
+            "microcompact" => "已微压缩旧工具结果",
+            "model" => "已压缩上下文（模型摘要）",
+            "local" => "已压缩上下文（本地摘要）",
+            _ => "已重置上下文窗口（保留当前任务）",
+        };
+        self.emit(format!(
+            "[工具] {label}：{} → {} token（{}）",
+            boundary.pre_tokens,
+            boundary.post_tokens,
+            boundary.trigger.as_str()
+        ));
+        self.emit(boundary.line());
+        self.emit_context_usage();
+        self.checkpoint_transcript().await;
+        Some(boundary)
     }
 
     async fn checkpoint_transcript(&self) {
@@ -338,9 +501,47 @@ impl AgentRunner {
 
     fn combined_tools(&self) -> Vec<ToolSpec> {
         let mut tools = tool_specs();
-        if self.depth > 0 || self.ctx.read_only {
+        let read_only = self.ctx.is_read_only();
+        let plan_mode = self.ctx.is_plan_mode();
+        if self.depth > 0 || read_only {
             tools.retain(|tool| tool.name != "Agent");
         }
+        // 子 Agent 没有用户交互通道：不给提问与计划模式工具；后台任务管理只给主 Agent。
+        if self.depth > 0 {
+            tools.retain(|tool| {
+                !matches!(
+                    tool.name.as_str(),
+                    "AskUserQuestion"
+                        | "EnterPlanMode"
+                        | "ExitPlanMode"
+                        | "TaskOutput"
+                        | "TaskStop"
+                        | "SendMessage"
+                        | "CronCreate"
+                        | "CronList"
+                        | "CronDelete"
+                        | "Goal"
+                        | "GoalRead"
+                )
+            });
+        }
+        // RespondToCoordinator 只对后台子 Agent 可见。
+        let is_background_child = self.ctx.coordinator.is_some();
+        tools.retain(|tool| tool.name != "RespondToCoordinator" || is_background_child);
+        if read_only {
+            tools.retain(|tool| {
+                !matches!(
+                    tool.name.as_str(),
+                    "TaskOutput" | "TaskStop" | "SendMessage"
+                )
+            });
+        }
+        // EnterPlanMode 只在执行模式可见，ExitPlanMode 只在计划模式可见。
+        tools.retain(|tool| match tool.name.as_str() {
+            "EnterPlanMode" => !plan_mode && !read_only,
+            "ExitPlanMode" => plan_mode,
+            _ => true,
+        });
         let cap = self.max_concurrent_subagents.max(1);
         for tool in &mut tools {
             if tool.name == "Agent" {
@@ -356,11 +557,11 @@ impl AgentRunner {
         if let Some(allowed) = &self.allowed_tools {
             tools.retain(|tool| allowed.contains(&tool.name));
         }
-        if self.ctx.read_only {
-            tools.retain(|tool| crate::native::tools::is_read_only_native_tool(&tool.name));
+        if let Some(disallowed) = &self.disallowed_tools {
+            tools.retain(|tool| !disallowed.contains(&tool.name));
         }
-        if self.plan_mode && !tools.iter().any(|tool| tool.name == "AskQuestion") {
-            tools.push(ask_question_spec());
+        if read_only {
+            tools.retain(|tool| crate::native::tools::is_read_only_native_tool(&tool.name));
         }
         tools
     }
@@ -465,7 +666,8 @@ impl AgentRunner {
             .cloned()
             .or_else(|| parent_context.cloned())
             .unwrap_or_default()
-            .with_call_kind(CALL_KIND_SUBAGENT);
+            .with_call_kind(CALL_KIND_SUBAGENT)
+            .with_operation(OPERATION_SUBAGENT);
         if context.session_id.is_none() {
             context.session_id = parent_context.and_then(|item| item.session_id.clone());
         }
@@ -592,7 +794,7 @@ impl AgentRunner {
             max_output_tokens,
             thinking_enabled,
         });
-        self.begin_user_turn(user, images)?;
+        self.begin_user_turn(user, images).await?;
         self.checkpoint_transcript().await;
         let client = self.observe_client(client);
         self.streaming = true;
@@ -639,6 +841,9 @@ impl AgentRunner {
                 Err(error) => {
                     self.release_model_reservation();
                     self.emit_delta_clear();
+                    if self.try_reactive_compaction(&client, &error).await {
+                        continue;
+                    }
                     return Err(error);
                 }
             };
@@ -661,6 +866,26 @@ impl AgentRunner {
         }
     }
 
+    /// 供应商报上下文溢出时被动压缩再重试；连续两次仍溢出则放弃。
+    async fn try_reactive_compaction(&mut self, client: &ModelClient, error: &str) -> bool {
+        if !is_context_overflow_error(error) || self.reactive_compactions >= 2 {
+            return false;
+        }
+        self.reactive_compactions += 1;
+        self.emit(format!(
+            "[工具] 模型报上下文溢出，尝试被动压缩后重试（{}/2）：{error}",
+            self.reactive_compactions
+        ));
+        // 被动压缩不再依赖阈值判断，直接做全量摘要。
+        let boundary = self
+            .run_compaction(Some(client), CompactTrigger::Reactive, None)
+            .await;
+        if boundary.is_none() {
+            self.emit("[工具] 被动压缩无法再缩减上下文，停止重试");
+        }
+        boundary.is_some()
+    }
+
     #[allow(clippy::too_many_arguments)]
     async fn run_child_with_client(
         &mut self,
@@ -679,7 +904,7 @@ impl AgentRunner {
             max_output_tokens,
             thinking_enabled,
         });
-        self.begin_user_turn(user, Vec::new())?;
+        self.begin_user_turn(user, Vec::new()).await?;
         self.checkpoint_transcript().await;
         let client = self.observe_child_client(parent, client, spec);
         loop {
@@ -715,6 +940,9 @@ impl AgentRunner {
                 Ok(value) => value,
                 Err(error) => {
                     self.release_model_reservation();
+                    if self.try_reactive_compaction(&client, &error).await {
+                        continue;
+                    }
                     return Err(error);
                 }
             };
@@ -739,7 +967,7 @@ impl AgentRunner {
         user: &str,
         replies: Vec<Message>,
     ) -> Result<String, String> {
-        self.begin_user_turn(user, Vec::new())?;
+        self.begin_user_turn(user, Vec::new()).await?;
         self.checkpoint_transcript().await;
         let mut queue = VecDeque::from(replies);
         loop {
@@ -777,15 +1005,60 @@ impl AgentRunner {
         }
     }
 
-    fn begin_user_turn(&mut self, user: &str, images: Vec<NativeImage>) -> Result<(), String> {
+    async fn begin_user_turn(
+        &mut self,
+        user: &str,
+        images: Vec<NativeImage>,
+    ) -> Result<(), String> {
         if self.ctx.cancel.is_cancelled() {
             return Err("已取消".to_string());
         }
         self.turns = 0;
         self.last_tool_key = None;
         self.last_tool_repeat = 0;
-        self.messages.push(Message::user_with_images(user, images));
+        self.stop_hook_continues = 0;
+        self.reactive_compactions = 0;
+        let mut text = user.to_string();
+        if let Some(suffix) = self.turn_suffix.take() {
+            text = format!("{text}\n\n{suffix}");
+        }
+        if self.depth == 0 && !self.ctx.hooks.is_empty() {
+            match run_user_prompt_submit_hooks(&self.ctx.hook_runtime(), user).await {
+                Ok(context) if !context.is_empty() => {
+                    self.emit("[钩子] user_prompt_submit 注入了附加上下文");
+                    text = format!("{text}\n\n[钩子上下文]\n{}", context.join("\n"));
+                }
+                Ok(_) => {}
+                Err(reason) => return Err(format!("输入被钩子阻断：{reason}")),
+            }
+        }
+        self.messages.push(Message::user_with_images(text, images));
         Ok(())
+    }
+
+    /// 回合结束前询问 stop 钩子；要求继续时把理由作为用户消息追加，最多 3 次。
+    async fn stop_hooks_want_continue(&mut self, final_text: &str) -> bool {
+        if self.depth > 0 || self.ctx.hooks.is_empty() {
+            return false;
+        }
+        if self.stop_hook_continues >= MAX_STOP_HOOK_CONTINUES {
+            return false;
+        }
+        let result = run_stop_hooks(&self.ctx.hook_runtime(), final_text).await;
+        for warning in &result.warnings {
+            self.emit(format!("[钩子警告] {warning}"));
+        }
+        let Some(reason) = result.continue_reason else {
+            return false;
+        };
+        self.stop_hook_continues += 1;
+        self.emit(format!(
+            "[钩子] stop 钩子要求继续（{}/{}）：{reason}",
+            self.stop_hook_continues, MAX_STOP_HOOK_CONTINUES
+        ));
+        self.messages
+            .push(Message::user(format!("[Stop 钩子要求继续] {reason}")));
+        true
     }
 
     async fn prepare_model_call(&mut self, client: Option<&ModelClient>) -> Result<bool, String> {
@@ -797,24 +1070,30 @@ impl AgentRunner {
         }
         self.turns += 1;
         self.sync_context_window();
-        if self.context_window.should_compact(&self.messages) {
-            let mut compacted = false;
-            if let Some(client) = client {
-                compacted = self.compact_with_model(client).await;
-                if compacted {
-                    self.context_window.mark_compacted();
-                    self.emit("[工具] 已压缩上下文（模型摘要）");
-                }
+        // 后台任务完成 / 子 Agent 留言：在模型看到下一次请求前提醒。
+        if self.depth == 0 {
+            if let Some(notice) = self.background.pending_notice() {
+                self.emit(notice.clone());
+                append_user_note(&mut self.messages, &notice);
             }
-            if !compacted && compact_local(&mut self.messages) {
-                self.context_window.mark_compacted();
-                self.emit("[工具] 已压缩上下文（本地摘要）");
-                compacted = true;
+        }
+        if let Some(instructions) = self.pending_manual_compact.take() {
+            if self
+                .run_compaction(client, CompactTrigger::Manual, instructions)
+                .await
+                .is_none()
+            {
+                self.emit("[工具] 当前上下文太短，无需压缩");
             }
-            if !compacted && reset_local(&mut self.messages) {
-                self.context_window.mark_reset();
-                self.emit("[工具] 已重置上下文窗口（保留当前任务）");
-            }
+        } else if self.context_window.should_compact(&self.messages) {
+            let trigger = if std::mem::take(&mut self.pending_downshift_compact) {
+                CompactTrigger::Downshift
+            } else {
+                CompactTrigger::Auto
+            };
+            self.run_compaction(client, trigger, None).await;
+        } else {
+            self.pending_downshift_compact = false;
         }
         let tool_context_tokens = total_tool_tokens(&self.combined_tools());
         // Tool schemas are part of the request context too. If MCP/schema
@@ -906,8 +1185,14 @@ impl AgentRunner {
         }
     }
 
-    async fn compact_with_model(&mut self, client: &ModelClient) -> bool {
-        let Some(summary_messages) = compaction_prompt(&self.messages) else {
+    async fn compact_with_model(
+        &mut self,
+        client: &ModelClient,
+        instructions: Option<&str>,
+    ) -> bool {
+        let Some(summary_messages) =
+            compaction_prompt_with_instructions(&self.messages, instructions)
+        else {
             return false;
         };
         let Some(summary) = self
@@ -953,15 +1238,26 @@ impl AgentRunner {
             return None;
         }
         self.pending_budget_reservation = reservation;
-        let summary_model = self
+        // 配置了轻量模型时用它做摘要，更便宜也更快。
+        let main_model = self
             .model_turn
             .as_ref()
             .map(|turn| turn.model.clone())
             .unwrap_or_default();
+        let (summary_model, model_role) = match self.lite_model.as_deref() {
+            Some(lite) if !lite.trim().is_empty() && lite != main_model => {
+                (lite.to_string(), MODEL_ROLE_LITE)
+            }
+            _ => (main_model, MODEL_ROLE_MAIN),
+        };
         let compact_client = match client.call_log_context() {
-            Some(context) => client
-                .clone_for_conversation()
-                .with_call_log_context(context.clone().with_call_kind(CALL_KIND_COMPACT)),
+            Some(context) => client.clone_for_conversation().with_call_log_context(
+                context
+                    .clone()
+                    .with_call_kind(CALL_KIND_COMPACT)
+                    .with_operation(OPERATION_COMPACT)
+                    .with_model_role(model_role),
+            ),
             None => client.clone_for_conversation(),
         };
         let result = compact_client
@@ -1116,6 +1412,10 @@ impl AgentRunner {
             } else {
                 text
             };
+            if !last_turn && self.stop_hooks_want_continue(&text).await {
+                self.checkpoint_transcript().await;
+                return Ok(TurnControl::Continue);
+            }
             self.checkpoint_transcript().await;
             return Ok(TurnControl::Stop(text));
         }
@@ -1164,18 +1464,19 @@ impl AgentRunner {
                 return Err("已取消".to_string());
             }
             if call.name == "Agent" {
-                self.push_tool_output(&call, "子 Agent 不能再委派子 Agent".to_string());
+                self.push_tool_output(&call, ToolOutput::text("子 Agent 不能再委派子 Agent"));
                 continue;
             }
             self.emit(tool_start_line(&call.name, &call.arguments));
             let output = self.execute_logged_tool(&call).await;
-            self.emit(tool_result_line(&call.name, &output));
+            self.emit(tool_result_line(&call.name, &output.text));
             self.append_tool_message(&call, output);
         }
         Ok(TurnControl::Continue)
     }
 
-    async fn execute_logged_tool(&mut self, call: &ToolCall) -> String {
+    /// 连续相同参数的调用计数；达到上限时返回拒绝文案。
+    fn repeat_guard(&mut self, call: &ToolCall) -> Option<String> {
         let key = format!("{}\n{}", call.name, call.arguments);
         if self.last_tool_key.as_deref() == Some(key.as_str()) {
             self.last_tool_repeat = self.last_tool_repeat.saturating_add(1);
@@ -1184,22 +1485,33 @@ impl AgentRunner {
             self.last_tool_repeat = 1;
         }
         if self.last_tool_repeat >= REPEAT_TOOL_LIMIT {
-            return format!(
+            return Some(format!(
                 "重复调用被拒绝：你已用相同参数连续调用 {} {} 次。请改用其他工具或直接给出最终结论。",
                 call.name, self.last_tool_repeat
-            );
+            ));
         }
-        match execute_tool(&mut self.ctx, &call.name, &call.arguments).await {
+        None
+    }
+
+    async fn execute_logged_tool(&mut self, call: &ToolCall) -> ToolOutput {
+        if let Some(rejection) = self.repeat_guard(call) {
+            return ToolOutput::text(rejection);
+        }
+        match execute_tool_call(&self.ctx, call).await {
             Ok(value) => value,
-            Err(error) => error,
+            Err(error) => ToolOutput::text(error),
         }
     }
 
+    /// 同一轮工具调用的调度：连续的 `Agent` 调用成批并行；连续的
+    /// `concurrent_safe` 只读工具并行（上限 [`MAX_PARALLEL_TOOL_CALLS`]）；
+    /// 其余按顺序执行。结果始终按模型给出的顺序回填。
     async fn execute_tool_calls(
         &mut self,
         calls: Vec<ToolCall>,
         client: Option<&ModelClient>,
     ) -> Result<(), String> {
+        let registry = self.contract_registry();
         let mut index = 0;
         while index < calls.len() {
             if self.ctx.cancel.is_cancelled() {
@@ -1212,14 +1524,66 @@ impl AgentRunner {
                 }
                 self.run_agent_batch(&calls[index..end], client).await?;
                 index = end;
-            } else {
-                let call = &calls[index];
-                self.emit(tool_start_line(&call.name, &call.arguments));
-                let output = self.execute_logged_tool(call).await;
-                self.emit(tool_result_line(&call.name, &output));
-                self.append_tool_message(call, output);
-                index += 1;
+                continue;
             }
+            let parallel_ok = |call: &ToolCall| {
+                call.name != "Agent" && registry.resolve(&call.name).can_run_concurrently()
+            };
+            if parallel_ok(&calls[index]) {
+                let mut end = index + 1;
+                while end < calls.len()
+                    && end - index < MAX_PARALLEL_TOOL_CALLS
+                    && parallel_ok(&calls[end])
+                {
+                    end += 1;
+                }
+                if end - index > 1 {
+                    self.run_parallel_batch(&calls[index..end]).await?;
+                    index = end;
+                    continue;
+                }
+            }
+            let call = &calls[index];
+            self.emit(tool_start_line(&call.name, &call.arguments));
+            let output = self.execute_logged_tool(call).await;
+            self.emit(tool_result_line(&call.name, &output.text));
+            self.append_tool_message(call, output);
+            index += 1;
+        }
+        Ok(())
+    }
+
+    /// 并行执行一批只读工具；`ToolCtx` 克隆共享已读文件与待办状态。
+    async fn run_parallel_batch(&mut self, calls: &[ToolCall]) -> Result<(), String> {
+        let mut slot: Vec<Option<ToolOutput>> = vec![None; calls.len()];
+        let mut join_set = JoinSet::new();
+        for (pos, call) in calls.iter().enumerate() {
+            self.emit(tool_start_line(&call.name, &call.arguments));
+            if let Some(rejection) = self.repeat_guard(call) {
+                slot[pos] = Some(ToolOutput::text(rejection));
+                continue;
+            }
+            let ctx = self.ctx.clone();
+            let call = call.clone();
+            join_set.spawn(async move {
+                let output = match execute_tool_call(&ctx, &call).await {
+                    Ok(value) => value,
+                    Err(error) => ToolOutput::text(error),
+                };
+                (pos, output)
+            });
+        }
+        while let Some(joined) = join_set.join_next().await {
+            let (pos, output) = joined.map_err(|error| format!("并行工具任务失败: {error}"))?;
+            slot[pos] = Some(output);
+        }
+        if self.ctx.cancel.is_cancelled() {
+            return Err("已取消".to_string());
+        }
+        for (call, output) in calls.iter().zip(slot.into_iter()) {
+            let output = output.unwrap_or_else(|| ToolOutput::text("工具未返回结果"));
+            self.emit(tool_result_line(&call.name, &output.text));
+            self.append_tool_message(call, output);
         }
         Ok(())
     }
@@ -1245,17 +1609,11 @@ impl AgentRunner {
         child_quota: Option<Arc<ChildQuota>>,
     ) -> AgentRunner {
         let mut child = AgentRunner::new(self.ctx.workspace.clone());
-        child.ctx.ssh = self.ctx.ssh.clone();
-        child.ctx.extra_env = self.ctx.extra_env.clone();
-        child.ctx.cancel = self.ctx.cancel.clone();
-        child.ctx.allow_all_high_risk = self.ctx.allow_all_high_risk.clone();
-        child.ctx.auto_approve_overwrite = self.ctx.auto_approve_overwrite;
-        child.ctx.allowed_mcp_servers = self.ctx.allowed_mcp_servers.clone();
-        child.ctx.request_permission = self.ctx.request_permission.clone();
-        child.ctx.expire_permission = self.ctx.expire_permission.clone();
-        child.ctx.permission_timeout = self.ctx.permission_timeout;
-        child.ctx.skills = self.ctx.skills.clone();
-        child.ctx.hooks = self.ctx.hooks.clone();
+        // 共享取消 / 权限放行 / MCP 服务器放行 / 代理环境；已读文件与待办独立。
+        child.ctx = self.ctx.fork_for_child();
+        child.artifacts = self.artifacts.clone();
+        child.lite_model = self.lite_model.clone();
+        child.extra_tool_contracts = self.extra_tool_contracts.clone();
         child.skills_prompt = self.skills_prompt.clone();
         child.depth = self.depth.saturating_add(1);
         child.event_prefix = format!(
@@ -1285,8 +1643,8 @@ impl AgentRunner {
         };
         match &spec.kind {
             SubagentKind::Explore => {
-                child.ctx.read_only = true;
-                child.set_allowed_tools(crate::native::tools::READ_ONLY_NATIVE_TOOL_NAMES);
+                child.ctx.set_read_only(true);
+                child.set_allowed_tools(&read_only_tool_names());
             }
             SubagentKind::General => {
                 child.ctx.mcp = self.ctx.mcp.clone();
@@ -1302,8 +1660,40 @@ impl AgentRunner {
                         let names: Vec<&str> = tools.iter().map(String::as_str).collect();
                         child.set_allowed_tools(&names);
                         if custom_tools_are_read_only(&tools) {
-                            child.ctx.read_only = true;
+                            child.ctx.set_read_only(true);
                         }
+                    }
+                    if !def.disallowed_tools.is_empty() {
+                        child.set_disallowed_tools(&def.disallowed_tools);
+                    }
+                    if let Some(max_turns) = def.max_turns {
+                        child.max_turns = max_turns.max(1) as u32;
+                    }
+                    // 档案限定了技能时，子 Agent 只看到这些技能。
+                    if !def.skills.is_empty() {
+                        child.ctx.skills.retain(|skill| {
+                            def.skills
+                                .iter()
+                                .any(|name| name.eq_ignore_ascii_case(&skill.name))
+                        });
+                        child.skills_prompt =
+                            crate::native::skills::format_skills_prompt(&child.ctx.skills);
+                    }
+                    // 档案自带权限模式时，子 Agent 用自己的放行开关，不再共享父会话的。
+                    if let Some(mode) = def.permission_mode.as_deref() {
+                        use crate::native::settings::{
+                            permission_mode_auto_approves_build,
+                            permission_mode_auto_approves_edits, permission_mode_is_yolo,
+                        };
+                        child.ctx.allow_all_high_risk = Arc::new(
+                            std::sync::atomic::AtomicBool::new(permission_mode_is_yolo(mode)),
+                        );
+                        child.ctx.auto_approve_overwrite =
+                            permission_mode_auto_approves_edits(mode);
+                        child.ctx.auto_approve_opaque_bash =
+                            permission_mode_auto_approves_build(mode);
+                        child.ctx.auto_approve_readonly_mcp =
+                            permission_mode_auto_approves_build(mode);
                     }
                 }
             }
@@ -1329,8 +1719,7 @@ impl AgentRunner {
     ) -> Result<(), String> {
         if self.depth > 0 {
             for call in calls {
-                let output = "子 Agent 不能再委派子 Agent".to_string();
-                self.push_tool_output(call, output);
+                self.push_tool_output(call, ToolOutput::text("子 Agent 不能再委派子 Agent"));
             }
             return Ok(());
         }
@@ -1392,49 +1781,76 @@ impl AgentRunner {
             self.diagnostics
                 .subagents_started
                 .fetch_add(1, Ordering::AcqRel);
+            if job.spec.run_in_background {
+                // 后台任务：立刻返回 task_id，子 Agent 在独立任务里跑，结果进注册表。
+                let (task, steer_rx) = self
+                    .background
+                    .register(&job.spec.description, job.spec.kind.as_str());
+                let parent_cancel = self.ctx.cancel.clone();
+                child.ctx.cancel = task.cancel.clone();
+                child.steer_rx = Some(Arc::new(Mutex::new(steer_rx)));
+                child.ctx.coordinator = Some((self.background.clone(), task.id.clone()));
+                let registry = self.background.clone();
+                let task_id = task.id.clone();
+                let on_event = self.on_event.clone();
+                let prefix = self.event_prefix.clone();
+                let tag = format_subagent_log_tag(job.index, &job.spec.kind, &job.spec.description);
+                let spec = job.spec.clone();
+                let run = run_child_job(
+                    child,
+                    spec.clone(),
+                    None,
+                    stub,
+                    custom_override,
+                    child_model_loader,
+                    client_owned,
+                    model_turn,
+                );
+                let cancel_flag = task.cancel.clone();
+                tokio::spawn(async move {
+                    let outcome = tokio::select! {
+                        result = run => result,
+                        _ = async {
+                            loop {
+                                if parent_cancel.is_cancelled() {
+                                    cancel_flag.cancel();
+                                    break;
+                                }
+                                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                            }
+                        } => Err("父会话已取消".to_string()),
+                    };
+                    let status = if outcome.is_ok() { "成功" } else { "失败" };
+                    Self::send_prefixed_event(
+                        &on_event,
+                        &prefix,
+                        format!("{tag} 后台任务 {task_id} 结束 {status}"),
+                    );
+                    registry.finish(&task_id, outcome.map(|report| truncate_report(&report)));
+                });
+                slot[pos] = Some((
+                    job.call,
+                    format!(
+                        "后台任务已启动：task_id={}（{} / {}）。用 TaskOutput 读取结果、SendMessage 追加指令、TaskStop 停止；任务完成时会收到提醒。",
+                        task.id,
+                        spec.kind.as_str(),
+                        spec.description
+                    ),
+                ));
+                continue;
+            }
+            let run = run_child_job(
+                child,
+                job.spec.clone(),
+                Some(permit),
+                stub,
+                custom_override,
+                child_model_loader,
+                client_owned,
+                model_turn,
+            );
             join_set.spawn(async move {
-                let outcome = async {
-                    let _permit = permit
-                        .acquire_owned()
-                        .await
-                        .map_err(|_| "子 Agent 并发许可已关闭".to_string())?;
-                    if let Some(stub) = stub {
-                        Ok(stub(&job.spec))
-                    } else if let Some((channel_id, model)) = custom_override {
-                        let Some(loader) = child_model_loader else {
-                            return Err("子 Agent 需要模型客户端".to_string());
-                        };
-                        let settings = loader(channel_id, model).await?;
-                        child
-                            .run_child_with_client(
-                                client_owned.as_ref(),
-                                &settings.client,
-                                &job.spec.prompt,
-                                &settings.model,
-                                settings.effort.as_deref(),
-                                settings.max_output_tokens,
-                                settings.thinking_enabled,
-                                Some(&job.spec),
-                            )
-                            .await
-                    } else if let (Some(client), Some(cfg)) = (client_owned.as_ref(), model_turn) {
-                        child
-                            .run_child_with_client(
-                                Some(client),
-                                client,
-                                &job.spec.prompt,
-                                &cfg.model,
-                                cfg.effort.as_deref(),
-                                cfg.max_output_tokens,
-                                cfg.thinking_enabled,
-                                Some(&job.spec),
-                            )
-                            .await
-                    } else {
-                        Err("子 Agent 需要模型客户端".to_string())
-                    }
-                }
-                .await;
+                let outcome = run.await;
                 (pos, job, outcome)
             });
         }
@@ -1461,27 +1877,32 @@ impl AgentRunner {
             slot[pos] = Some((job.call, output));
         }
         for item in slot.into_iter().flatten() {
-            self.push_tool_output(&item.0, item.1);
+            self.push_tool_output(&item.0, ToolOutput::text(item.1));
         }
         Ok(())
     }
 
-    fn push_tool_output(&mut self, call: &ToolCall, output: String) {
-        if !output.starts_with("子 Agent（") {
+    fn push_tool_output(&mut self, call: &ToolCall, output: ToolOutput) {
+        if !output.text.starts_with("子 Agent（") {
             self.emit(tool_start_line(&call.name, &call.arguments));
         }
-        self.emit(tool_result_line(&call.name, &output));
+        self.emit(tool_result_line(&call.name, &output.text));
         self.append_tool_message(call, output);
     }
 
-    fn append_tool_message(&mut self, call: &ToolCall, output: String) {
+    /// 先按契约结果预算裁决（超预算的 Artifact 策略落盘、只留预览），再按会话的
+    /// token 上限截断；图片附件以紧随其后的用户消息形式交给模型。
+    fn append_tool_message(&mut self, call: &ToolCall, output: ToolOutput) {
+        let contract = self.contract_registry().resolve(&call.name);
+        let budgeted =
+            bound_with_artifact(self.artifacts.as_deref(), &contract, call, &output.text);
         let bounded = truncate_tool_result(
             &call.name,
             &call.arguments,
-            &output,
+            &budgeted,
             self.tool_result_token_limit,
         );
-        if bounded != output {
+        if bounded != output.text {
             self.diagnostics
                 .tool_results_truncated
                 .fetch_add(1, Ordering::AcqRel);
@@ -1489,7 +1910,78 @@ impl AgentRunner {
         let mut message = Message::tool_result(&call.id, bounded);
         message.name = call.name.clone();
         self.messages.push(message);
+        if !output.images.is_empty() {
+            let names: Vec<&str> = output
+                .images
+                .iter()
+                .map(|image| image.name.as_str())
+                .collect();
+            self.messages.push(Message::user_with_images(
+                format!("（{} 工具返回的图片：{}）", call.name, names.join("、")),
+                output.images,
+            ));
+        }
     }
+}
+
+/// 跑一个子 Agent：可选并发许可、测试桩、自定义渠道模型或继承父模型。
+#[allow(clippy::too_many_arguments)]
+fn run_child_job(
+    mut child: AgentRunner,
+    spec: SubagentSpec,
+    permit: Option<Arc<Semaphore>>,
+    stub: Option<SubagentStub>,
+    custom_override: Option<(String, String)>,
+    child_model_loader: Option<ChildModelLoader>,
+    client_owned: Option<ModelClient>,
+    model_turn: Option<ModelTurnCfg>,
+) -> Pin<Box<dyn Future<Output = Result<String, String>> + Send>> {
+    Box::pin(async move {
+        let _permit = match permit {
+            Some(semaphore) => Some(
+                semaphore
+                    .acquire_owned()
+                    .await
+                    .map_err(|_| "子 Agent 并发许可已关闭".to_string())?,
+            ),
+            None => None,
+        };
+        if let Some(stub) = stub {
+            Ok(stub(&spec))
+        } else if let Some((channel_id, model)) = custom_override {
+            let Some(loader) = child_model_loader else {
+                return Err("子 Agent 需要模型客户端".to_string());
+            };
+            let settings = loader(channel_id, model).await?;
+            child
+                .run_child_with_client(
+                    client_owned.as_ref(),
+                    &settings.client,
+                    &spec.prompt,
+                    &settings.model,
+                    settings.effort.as_deref(),
+                    settings.max_output_tokens,
+                    settings.thinking_enabled,
+                    Some(&spec),
+                )
+                .await
+        } else if let (Some(client), Some(cfg)) = (client_owned.as_ref(), model_turn) {
+            child
+                .run_child_with_client(
+                    Some(client),
+                    client,
+                    &spec.prompt,
+                    &cfg.model,
+                    cfg.effort.as_deref(),
+                    cfg.max_output_tokens,
+                    cfg.thinking_enabled,
+                    Some(&spec),
+                )
+                .await
+        } else {
+            Err("子 Agent 需要模型客户端".to_string())
+        }
+    })
 }
 
 fn last_turn_after_response(
@@ -1513,16 +2005,21 @@ fn apply_usable_summary(messages: &mut Vec<Message>, summary: &Message) -> bool 
 }
 
 fn append_last_turn_reminder(messages: &mut Vec<Message>) {
+    append_user_note(messages, LAST_TURN_REMINDER);
+}
+
+/// 把提示追加到最后一条用户 / 工具消息末尾（保持角色交替），否则新起一条用户消息。
+fn append_user_note(messages: &mut Vec<Message>, note: &str) {
     if let Some(last) = messages.last_mut() {
         if last.role == Role::User || last.role == Role::Tool {
             if !last.content.is_empty() {
                 last.content.push_str("\n\n");
             }
-            last.content.push_str(LAST_TURN_REMINDER);
+            last.content.push_str(note);
             return;
         }
     }
-    messages.push(Message::user(LAST_TURN_REMINDER.to_string()));
+    messages.push(Message::user(note.to_string()));
 }
 
 fn unix_now_ms() -> u64 {
@@ -1740,6 +2237,181 @@ mod tests {
             })
         }));
         snapshots
+    }
+
+    fn assistant_tool_calls(calls: &[(&str, &str, &str)]) -> Message {
+        Message {
+            role: Role::Assistant,
+            content: String::new(),
+            tool_calls: calls
+                .iter()
+                .map(|(id, name, arguments)| ToolCall {
+                    id: (*id).to_string(),
+                    name: (*name).to_string(),
+                    arguments: (*arguments).to_string(),
+                })
+                .collect(),
+            tool_call_id: String::new(),
+            name: String::new(),
+            reasoning_content: String::new(),
+            images: Vec::new(),
+        }
+    }
+
+    #[tokio::test]
+    async fn parallel_read_only_batch_keeps_result_order_and_serializes_writes() {
+        let (mut runner, root) = temp_runner();
+        fs::write(root.join("second.txt"), "second file\n").expect("write");
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        runner.on_event = Some(tx);
+        let text = runner
+            .run_scripted(
+                "并行读取",
+                vec![
+                    assistant_tool_calls(&[
+                        ("c1", "Read", r#"{"file_path":"hello.txt"}"#),
+                        ("c2", "Glob", r#"{"pattern":"*.txt"}"#),
+                        ("c3", "Read", r#"{"file_path":"second.txt"}"#),
+                        (
+                            "c4",
+                            "Write",
+                            r#"{"file_path":"hello.txt","content":"rewritten"}"#,
+                        ),
+                        ("c5", "Read", r#"{"file_path":"hello.txt"}"#),
+                    ]),
+                    Message::assistant_text("done"),
+                ],
+            )
+            .await
+            .expect("run");
+        assert_eq!(text, "done");
+        let tool_messages: Vec<&Message> = runner
+            .messages
+            .iter()
+            .filter(|message| message.role == Role::Tool)
+            .collect();
+        assert_eq!(
+            tool_messages
+                .iter()
+                .map(|message| message.tool_call_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["c1", "c2", "c3", "c4", "c5"]
+        );
+        assert!(tool_messages[0].content.contains("hello world"));
+        assert!(tool_messages[1].content.contains("second.txt"));
+        assert!(tool_messages[2].content.contains("second file"));
+        assert!(tool_messages[3].content.contains("Wrote"));
+        // 写入排在并行批之后串行执行，之后的 Read 必须看到新内容。
+        assert!(tool_messages[4].content.contains("rewritten"));
+        let lines = drain_events(&mut rx);
+        let starts: Vec<&String> = lines
+            .iter()
+            .filter(|line| line.starts_with("[读取]") || line.starts_with("[工具] Glob"))
+            .collect();
+        assert_eq!(starts.len(), 4);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn manual_compaction_writes_boundary_and_summarizes_history() {
+        let (mut runner, root) = temp_runner();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        runner.on_event = Some(tx);
+        // 先跑两个回合积累历史，再请求手动压缩。
+        runner
+            .run_scripted("第一件事", vec![Message::assistant_text("做完第一件")])
+            .await
+            .expect("first");
+        runner
+            .run_scripted("第二件事", vec![Message::assistant_text("做完第二件")])
+            .await
+            .expect("second");
+        runner.request_manual_compaction(Some("保留失败堆栈".to_string()));
+        let text = runner
+            .run_scripted("第三件事", vec![Message::assistant_text("继续")])
+            .await
+            .expect("third");
+        assert_eq!(text, "继续");
+        let lines = drain_events(&mut rx);
+        let boundary_line = lines
+            .iter()
+            .find(|line| line.starts_with("[COMPACT_BOUNDARY]"))
+            .expect("boundary line");
+        let boundary = CompactBoundary::parse_line(boundary_line).expect("parse");
+        assert_eq!(boundary.trigger, CompactTrigger::Manual);
+        assert_eq!(boundary.source, "local");
+        assert_eq!(boundary.instructions.as_deref(), Some("保留失败堆栈"));
+        assert!(boundary.post_messages <= boundary.pre_messages);
+        assert_eq!(runner.context_window.compactions, 1);
+        assert!(runner
+            .messages
+            .iter()
+            .any(|message| message.content.contains("第三件事")));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn background_agent_returns_task_id_and_task_output_waits() {
+        let (mut runner, root) = temp_runner();
+        runner.subagent_stub = Some(Arc::new(|spec| format!("stub:{}", spec.description)));
+        let text = runner
+            .run_scripted(
+                "go",
+                vec![
+                    assistant_tool_call(
+                        "c1",
+                        "Agent",
+                        r#"{"description":"bg","prompt":"do it","run_in_background":true}"#,
+                    ),
+                    assistant_tool_call(
+                        "c2",
+                        "TaskOutput",
+                        r#"{"task_id":"task-1","wait":true,"timeout_ms":5000}"#,
+                    ),
+                    assistant_tool_call("c3", "TaskStop", r#"{"task_id":"task-1"}"#),
+                    Message::assistant_text("done"),
+                ],
+            )
+            .await
+            .expect("run");
+        assert_eq!(text, "done");
+        let tools: Vec<&Message> = runner
+            .messages
+            .iter()
+            .filter(|message| message.role == Role::Tool)
+            .collect();
+        assert!(
+            tools[0].content.contains("task_id=task-1"),
+            "{}",
+            tools[0].content
+        );
+        assert!(tools[1].content.contains("stub:bg"), "{}", tools[1].content);
+        assert!(
+            tools[2].content.contains("早已结束"),
+            "{}",
+            tools[2].content
+        );
+        // 主 Agent 能看到后台任务工具，子 Agent 看不到。
+        assert!(runner.tool_names().iter().any(|name| name == "TaskOutput"));
+        let spec = parse_subagent_args(r#"{"prompt":"x","subagent_type":"general"}"#).unwrap();
+        let child = runner.spawn_child_runner(&spec, 9);
+        assert!(!child.tool_names().iter().any(|name| name == "TaskOutput"));
+        assert!(!child
+            .tool_names()
+            .iter()
+            .any(|name| name == "RespondToCoordinator"));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn compaction_options_apply_threshold_and_microcompact_flag() {
+        let (mut runner, root) = temp_runner();
+        runner.set_compaction_options(60, false);
+        assert_eq!(runner.context_window.threshold_percent, 60);
+        assert!(!runner.microcompact_enabled);
+        runner.set_compaction_options(5, true);
+        assert_eq!(runner.context_window.threshold_percent, 30);
+        let _ = fs::remove_dir_all(root);
     }
 
     #[tokio::test]
@@ -1999,7 +2671,7 @@ mod tests {
     async fn read_only_emits_read_and_blocks_write() {
         let (mut runner, root) = temp_runner();
         runner.set_read_only(true);
-        runner.set_allowed_tools(crate::native::tools::READ_ONLY_NATIVE_TOOL_NAMES);
+        runner.set_allowed_tools(&crate::native::tools::read_only_tool_names());
         let (tx, mut rx) = mpsc::unbounded_channel();
         runner.on_event = Some(tx);
         let replies = vec![
@@ -2267,12 +2939,12 @@ mod tests {
         let general = parse_subagent_args(r#"{"prompt":"go","description":"改文件"}"#).unwrap();
         let child = runner.spawn_child_runner(&general, 1);
         assert!(!child.tool_names().iter().any(|name| name == "Agent"));
-        assert!(!child.ctx.read_only);
+        assert!(!child.ctx.is_read_only());
         assert_eq!(child.ctx.extra_env, runner.ctx.extra_env);
         assert_eq!(child.event_prefix, "[子 Agent 1(general) - 改文件] ");
         let explore = parse_subagent_args(r#"{"prompt":"go","subagent_type":"explore"}"#).unwrap();
         let explore_child = runner.spawn_child_runner(&explore, 2);
-        assert!(explore_child.ctx.read_only);
+        assert!(explore_child.ctx.is_read_only());
         assert!(!explore_child
             .tool_names()
             .iter()
@@ -2295,6 +2967,12 @@ mod tests {
             inject_agents_md: false,
             scope: "all".to_string(),
             workspace_ids: Vec::new(),
+            permission_mode: None,
+            disallowed_tools: Vec::new(),
+            source: "json".to_string(),
+            path: None,
+            max_turns: None,
+            skills: Vec::new(),
         }];
         custom_runner.workspace_context = "Working directory: /repo".to_string();
         custom_runner.project_agents = "secret agents".to_string();
@@ -2304,7 +2982,7 @@ mod tests {
         )
         .unwrap();
         let custom_child = custom_runner.spawn_child_runner(&custom, 3);
-        assert!(custom_child.ctx.read_only);
+        assert!(custom_child.ctx.is_read_only());
         assert!(custom_child.tool_names().iter().any(|name| name == "Read"));
         assert!(!custom_child.tool_names().iter().any(|name| name == "Write"));
         assert!(!custom_child.tool_names().iter().any(|name| name == "Agent"));
@@ -2319,7 +2997,7 @@ mod tests {
         assert!(!system.contains("secret agents"));
         let mut readonly = AgentRunner::new(LocalWorkspace::new(root.clone()));
         readonly.set_read_only(true);
-        readonly.set_allowed_tools(crate::native::tools::READ_ONLY_NATIVE_TOOL_NAMES);
+        readonly.set_allowed_tools(&crate::native::tools::read_only_tool_names());
         assert!(!readonly.tool_names().iter().any(|name| name == "Agent"));
         let mut extra = AgentRunner::new(LocalWorkspace::new(root.clone()));
         extra.set_read_only(true);
@@ -2339,12 +3017,23 @@ mod tests {
         plan.set_read_only(true);
         plan.set_plan_mode(true);
         let plan_names = plan.tool_names();
-        assert!(plan_names.iter().any(|name| name == "AskQuestion"));
+        assert!(plan_names.iter().any(|name| name == "AskUserQuestion"));
+        assert!(plan_names.iter().any(|name| name == "ExitPlanMode"));
+        assert!(!plan_names.iter().any(|name| name == "EnterPlanMode"));
         assert!(plan_names.iter().any(|name| name == "Skill"));
         assert!(!plan_names.iter().any(|name| name == "Write"));
         assert!(!plan_names.iter().any(|name| name == "ApplyPatch"));
         plan.set_plan_mode(false);
-        assert!(!plan.tool_names().iter().any(|name| name == "AskQuestion"));
+        plan.set_read_only(false);
+        let exec_names = plan.tool_names();
+        // 执行模式：提问工具始终可用，EnterPlanMode 可见，ExitPlanMode 隐藏。
+        assert!(exec_names.iter().any(|name| name == "AskUserQuestion"));
+        assert!(exec_names.iter().any(|name| name == "EnterPlanMode"));
+        assert!(!exec_names.iter().any(|name| name == "ExitPlanMode"));
+        // 子 Agent 没有交互通道，看不到提问与计划模式工具。
+        let child_names = child.tool_names();
+        assert!(!child_names.iter().any(|name| name == "AskUserQuestion"));
+        assert!(!child_names.iter().any(|name| name == "EnterPlanMode"));
         runner.cancel();
         assert!(child.ctx.cancel.is_cancelled());
         let _ = fs::remove_dir_all(root);
@@ -2571,7 +3260,7 @@ mod tests {
             name: "Read".to_string(),
             arguments: r#"{"file_path":"hello.txt"}"#.to_string(),
         };
-        runner.append_tool_message(&call, "line\n".repeat(500));
+        runner.append_tool_message(&call, ToolOutput::text("line\n".repeat(500)));
         assert_eq!(runner.diagnostics_snapshot().tool_results_truncated, 1);
         let _ = fs::remove_dir_all(root);
     }
@@ -2721,10 +3410,10 @@ mod tests {
     async fn explore_child_rejects_write() {
         let (runner, root) = temp_runner();
         let spec = parse_subagent_args(r#"{"prompt":"look","subagent_type":"explore"}"#).unwrap();
-        let mut child = runner.spawn_child_runner(&spec, 1);
+        let child = runner.spawn_child_runner(&spec, 1);
         child.ctx.allow_all_high_risk.store(true, Ordering::SeqCst);
         let error = crate::native::tools::execute_tool(
-            &mut child.ctx,
+            &child.ctx,
             "Write",
             r#"{"file_path":"hello.txt","content":"changed"}"#,
         )

@@ -47,6 +47,60 @@ pub fn build_anthropic_body(
     body
 }
 
+/// 给已构建的 Anthropic 请求体加 prompt cache 断点：system 末块、最后一个工具、
+/// 最后一条消息的最后一个内容块（共 3 个断点，未超过 4 个的上限）。
+pub fn apply_anthropic_prompt_cache(body: &mut Value) {
+    let marker = json!({"type": "ephemeral"});
+    if let Some(system) = body.get("system").cloned() {
+        match system {
+            Value::String(text) if !text.is_empty() => {
+                body["system"] = json!([{
+                    "type": "text",
+                    "text": text,
+                    "cache_control": marker.clone(),
+                }]);
+            }
+            Value::Array(mut blocks) => {
+                if let Some(last) = blocks.last_mut() {
+                    last["cache_control"] = marker.clone();
+                }
+                body["system"] = Value::Array(blocks);
+            }
+            _ => {}
+        }
+    }
+    if let Some(tools) = body.get_mut("tools").and_then(Value::as_array_mut) {
+        if let Some(last) = tools.last_mut() {
+            last["cache_control"] = marker.clone();
+        }
+    }
+    let Some(messages) = body.get_mut("messages").and_then(Value::as_array_mut) else {
+        return;
+    };
+    let Some(last) = messages.last_mut() else {
+        return;
+    };
+    match last.get("content").cloned() {
+        Some(Value::String(text)) => {
+            last["content"] = json!([{
+                "type": "text",
+                "text": text,
+                "cache_control": marker,
+            }]);
+        }
+        Some(Value::Array(mut blocks)) => {
+            if let Some(block) = blocks.last_mut() {
+                // thinking 块不允许带 cache_control，跳过。
+                if block.get("type").and_then(Value::as_str) != Some("thinking") {
+                    block["cache_control"] = marker;
+                }
+            }
+            last["content"] = Value::Array(blocks);
+        }
+        _ => {}
+    }
+}
+
 pub fn anthropic_tools(tools: &[ToolSpec]) -> Vec<Value> {
     tools
         .iter()
@@ -442,5 +496,63 @@ mod tests {
         assert_eq!(content[1]["type"], "image");
         assert_eq!(content[1]["source"]["media_type"], "image/png");
         assert_eq!(content[1]["source"]["data"], "QQ==");
+    }
+
+    #[test]
+    fn prompt_cache_marks_system_last_tool_and_last_message() {
+        let messages = vec![
+            Message::system("sys"),
+            Message::user("first"),
+            Message::assistant_text("reply"),
+            Message::tool_result("toolu_1", "ok"),
+        ];
+        let tools = vec![
+            ToolSpec {
+                name: "Read".to_string(),
+                description: "read".to_string(),
+                parameters: json!({"type": "object"}),
+            },
+            ToolSpec {
+                name: "Write".to_string(),
+                description: "write".to_string(),
+                parameters: json!({"type": "object"}),
+            },
+        ];
+        let mut body = build_anthropic_body(
+            &messages,
+            &tools,
+            "claude-sonnet-4",
+            None,
+            Some(1024),
+            false,
+            true,
+        );
+        apply_anthropic_prompt_cache(&mut body);
+        assert_eq!(body["system"][0]["text"], "sys");
+        assert_eq!(body["system"][0]["cache_control"]["type"], "ephemeral");
+        assert!(body["tools"][0].get("cache_control").is_none());
+        assert_eq!(body["tools"][1]["cache_control"]["type"], "ephemeral");
+        let wire = body["messages"].as_array().expect("messages");
+        assert!(wire[0]["content"].is_string());
+        let last = wire.last().expect("last");
+        assert_eq!(last["content"][0]["type"], "tool_result");
+        assert_eq!(last["content"][0]["cache_control"]["type"], "ephemeral");
+
+        let mut plain = build_anthropic_body(
+            &[Message::user("hi")],
+            &[],
+            "claude-sonnet-4",
+            None,
+            Some(1024),
+            false,
+            false,
+        );
+        apply_anthropic_prompt_cache(&mut plain);
+        assert_eq!(plain["messages"][0]["content"][0]["text"], "hi");
+        assert_eq!(
+            plain["messages"][0]["content"][0]["cache_control"]["type"],
+            "ephemeral"
+        );
+        assert!(plain.get("system").is_none());
     }
 }

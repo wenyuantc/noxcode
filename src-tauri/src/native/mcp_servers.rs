@@ -1,5 +1,5 @@
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use tauri::{AppHandle, Manager, Runtime};
 
@@ -38,6 +38,10 @@ pub fn default_mcp_servers() -> McpServersDocument {
             ),
             scope: SCOPE_ALL.to_string(),
             workspace_ids: Vec::new(),
+            transport: "stdio".to_string(),
+            url: None,
+            headers: Vec::new(),
+            oauth: None,
         }],
     }
 }
@@ -48,8 +52,51 @@ fn normalize_server(mut server: McpServerConfig) -> Result<McpServerConfig, Stri
     if server.name.is_empty() {
         return Err("MCP 服务器名称不能为空".to_string());
     }
-    if server.command.is_empty() {
-        return Err("MCP 启动命令不能为空".to_string());
+    server.transport = match server.transport.trim().to_ascii_lowercase().as_str() {
+        crate::db::models::MCP_TRANSPORT_HTTP | "streamable-http" | "streamable_http" => {
+            crate::db::models::MCP_TRANSPORT_HTTP.to_string()
+        }
+        crate::db::models::MCP_TRANSPORT_SSE => crate::db::models::MCP_TRANSPORT_SSE.to_string(),
+        _ => crate::db::models::MCP_TRANSPORT_STDIO.to_string(),
+    };
+    server.url = server
+        .url
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned);
+    if server.transport == crate::db::models::MCP_TRANSPORT_STDIO {
+        if server.command.is_empty() {
+            return Err("MCP 启动命令不能为空".to_string());
+        }
+    } else {
+        let url = server
+            .url
+            .as_deref()
+            .ok_or_else(|| "http / sse 传输需要填写 url".to_string())?;
+        if !(url.starts_with("http://") || url.starts_with("https://")) {
+            return Err(format!("MCP url 必须是 http(s) 地址: {url}"));
+        }
+    }
+    server.headers = server
+        .headers
+        .into_iter()
+        .filter_map(|header| {
+            let key = header.key.trim().to_string();
+            (!key.is_empty()).then_some(McpEnvVar {
+                key,
+                value: header.value,
+            })
+        })
+        .collect();
+    if let Some(oauth) = server.oauth.as_mut() {
+        oauth.client_id = oauth.client_id.trim().to_string();
+        oauth.authorize_url = oauth.authorize_url.trim().to_string();
+        oauth.token_url = oauth.token_url.trim().to_string();
+        if oauth.client_id.is_empty() || oauth.authorize_url.is_empty() || oauth.token_url.is_empty()
+        {
+            return Err("OAuth 配置需要 client_id、authorize_url 与 token_url".to_string());
+        }
     }
     if server.id.trim().is_empty() {
         server.id = new_id();
@@ -139,6 +186,87 @@ pub fn resolve_effective_mcp_servers<R: Runtime>(
         .into_iter()
         .filter(|server| server.enabled && server_matches_workspace(server, workspace_id))
         .collect())
+}
+
+/// 项目级 MCP 文件：`.noxcode/mcp.json`（本项目形状 `{ servers: [...] }`）与 `.mcp.json`
+/// （Claude Code 形状 `{ mcpServers: { name: {...} } }`）。
+pub const PROJECT_MCP_FILES: &[&str] = &[".noxcode/mcp.json", ".mcp.json"];
+
+/// 读取工作区根目录下的项目级 MCP 服务器；文件缺失或非法返回空。id 前缀 `project-`。
+pub fn load_project_mcp_servers(workspace_root: &Path) -> Vec<McpServerConfig> {
+    let mut out: Vec<McpServerConfig> = Vec::new();
+    for file in PROJECT_MCP_FILES {
+        let path = workspace_root.join(file);
+        let Ok(text) = fs::read_to_string(&path) else {
+            continue;
+        };
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(&text) else {
+            eprintln!("[MCP] 项目级配置不是合法 JSON，已跳过: {}", path.display());
+            continue;
+        };
+        for mut server in crate::native::plugins::parse_plugin_mcp_servers(&value, "project") {
+            // parse_plugin_mcp_servers 会加 `plugin-project-` 前缀与 `project/` 名称前缀，这里改回项目级标识。
+            server.id = server
+                .id
+                .strip_prefix("plugin-project-")
+                .map(|rest| format!("project-{rest}"))
+                .unwrap_or(server.id);
+            server.name = server
+                .name
+                .strip_prefix("project/")
+                .map(str::to_string)
+                .unwrap_or(server.name);
+            server.notes = Some(format!("来自 {file}"));
+            server.scope = SCOPE_ALL.to_string();
+            server.workspace_ids.clear();
+            if server.enabled
+                && !out
+                    .iter()
+                    .any(|existing| existing.name.eq_ignore_ascii_case(&server.name))
+            {
+                out.push(server);
+            }
+        }
+    }
+    out
+}
+
+/// 会话实际连接的服务器：全局（按工作区过滤）+ 已启用插件 + 项目级文件；
+/// 同名以项目级为准，其次插件，最后全局。
+pub fn resolve_session_mcp_servers<R: Runtime>(
+    app: &AppHandle<R>,
+    workspace_id: Option<&str>,
+    workspace_root: Option<&Path>,
+) -> Result<Vec<McpServerConfig>, String> {
+    let global = resolve_effective_mcp_servers(app, workspace_id)?;
+    let config_dir = app_config_dir(app).ok();
+    let plugins = crate::native::plugins::load_enabled_plugins(config_dir.as_deref(), workspace_root);
+    let plugin_servers = crate::native::plugins::plugin_mcp_servers(&plugins);
+    let project_servers = workspace_root
+        .map(load_project_mcp_servers)
+        .unwrap_or_default();
+    Ok(merge_mcp_sources(global, plugin_servers, project_servers))
+}
+
+pub fn merge_mcp_sources(
+    global: Vec<McpServerConfig>,
+    plugin: Vec<McpServerConfig>,
+    project: Vec<McpServerConfig>,
+) -> Vec<McpServerConfig> {
+    let mut out: Vec<McpServerConfig> = Vec::new();
+    for server in project.into_iter().chain(plugin).chain(global) {
+        if !server.enabled {
+            continue;
+        }
+        if out
+            .iter()
+            .any(|existing| existing.name.eq_ignore_ascii_case(&server.name))
+        {
+            continue;
+        }
+        out.push(server);
+    }
+    out
 }
 
 fn server_matches_workspace(server: &McpServerConfig, workspace_id: Option<&str>) -> bool {
@@ -265,6 +393,10 @@ mod tests {
             notes: None,
             scope: SCOPE_ALL.to_string(),
             workspace_ids: Vec::new(),
+            transport: "stdio".to_string(),
+            url: None,
+            headers: Vec::new(),
+            oauth: None,
         })
         .expect_err("empty name");
         assert!(err.contains("名称不能为空"));
@@ -281,6 +413,10 @@ mod tests {
             notes: Some("  ".to_string()),
             scope: SCOPE_WORKSPACES.to_string(),
             workspace_ids: vec![" ws-1 ".to_string(), "ws-1".to_string(), String::new()],
+            transport: "stdio".to_string(),
+            url: None,
+            headers: Vec::new(),
+            oauth: None,
         })
         .expect("normalize");
         assert!(!ok.id.is_empty());
@@ -307,6 +443,10 @@ mod tests {
                     notes: None,
                     scope: SCOPE_ALL.to_string(),
                     workspace_ids: Vec::new(),
+                    transport: "stdio".to_string(),
+                    url: None,
+                    headers: Vec::new(),
+                    oauth: None,
                 },
                 McpServerConfig {
                     id: "b".to_string(),
@@ -318,6 +458,10 @@ mod tests {
                     notes: None,
                     scope: SCOPE_ALL.to_string(),
                     workspace_ids: Vec::new(),
+                    transport: "stdio".to_string(),
+                    url: None,
+                    headers: Vec::new(),
+                    oauth: None,
                 },
             ],
         };

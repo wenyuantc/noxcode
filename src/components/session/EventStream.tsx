@@ -17,7 +17,9 @@ import {
 import { cn } from "@/lib/utils";
 import { useSessionStore } from "@/stores/sessionStore";
 import { AssistantMarkdown } from "./AssistantMarkdown";
+import { CompactBoundaryRow } from "./CompactBoundaryRow";
 import { FileChangeRow } from "./FileChangeRow";
+import { GoalRow } from "./GoalRow";
 import { RetryRow } from "./RetryRow";
 import { AgentStatusRow, McpStatusRow, PermissionStatusRow } from "./SessionStatusRows";
 import { TerminalRow } from "./TerminalRow";
@@ -67,6 +69,10 @@ function renderSegment(segment: TurnSegment, running: boolean, nowMs?: number, l
       return <ThinkingRow items={segment.items} nowMs={nowMs} />;
     case "retry":
       return <RetryRow items={segment.items} live={live && running} />;
+    case "compact":
+      return <CompactBoundaryRow item={segment.items[0]!} />;
+    case "goal":
+      return <GoalRow item={segment.items[0]!} />;
     case "tools":
       return (
         <ToolSummaryRow

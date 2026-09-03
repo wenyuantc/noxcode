@@ -57,30 +57,41 @@
   "collapseTools": "Collapse tool calls",
   "toolResult": "Tool result",
   "permissionTitle": "High-risk action needs confirmation",
+  "permissionRuleTitle": "A permission rule requires confirmation",
   "permissionAllowOnce": "Allow once",
   "permissionAllowSession": "Allow this session",
   "permissionAllowServer": "Allow this server",
+  "permissionAllowAlways": "Always allow {{pattern}} (save rule)",
   "permissionDeny": "Deny",
   "planQuestionTitle": "Plan question",
   "planSkip": "Skip",
   "planSubmit": "Submit",
+  "planApprovalTitle": "The agent submitted a plan",
+  "planApprovalHint": "Approving starts implementation; when sending it back you can note what to change.",
+  "planApprovalFeedbackPlaceholder": "Optional feedback or extra requirements for the agent",
+  "planApprovalApprove": "Approve and implement",
+  "planApprovalReject": "Send back",
   "model": "Model",
   "effort": "Reasoning",
   "permissionMode": "Permission",
   "permission": {
-    "confirm": {
+    "default": {
       "title": "Confirm before change",
       "description": "Ask me before changing files."
     },
-    "auto_edit": {
+    "edit": {
       "title": "Automatic editing",
       "description": "Automatically edit files."
+    },
+    "build": {
+      "title": "Auto build",
+      "description": "Edits, opaque commands and read-only MCP run without asking."
     },
     "plan": {
       "title": "Plan mode",
       "description": "Make a plan before editing."
     },
-    "full": {
+    "yolo": {
       "title": "Full access",
       "description": "Reduce confirmation frequency."
     }
@@ -141,5 +152,25 @@
   "needWorkspace": "Select a workspace first",
   "needChannel": "Select an AI channel and model first",
   "manageModels": "Manage models",
-  "emptyPrompt": "Enter a prompt"
+  "emptyPrompt": "Enter a prompt",
+  "compactNeedsLiveSession": "/compact needs a running session.",
+  "compactBoundary": "Context compacted · {{trigger}} · {{source}}",
+  "compactTrigger": {
+    "auto": "auto",
+    "manual": "manual",
+    "reactive": "after overflow",
+    "downshift": "smaller model window"
+  },
+  "compactSource": {
+    "microcompact": "micro-compact",
+    "model": "model summary",
+    "local": "local summary",
+    "reset": "reset"
+  },
+  "forkNeedsSession": "/fork needs a selected session.",
+  "goalCleared": "Goal cleared",
+  "goalStatus": {
+    "active": "in progress",
+    "completed": "completed"
+  }
 }

@@ -1,5 +1,6 @@
 use serde_json::{Map, Value};
 
+use crate::app::shared::normalize_optional_text;
 use crate::db::models::{AiChannel, AiChannelRecord, ChannelModelConfig};
 use crate::native::model_catalog::fill_from_catalog;
 
@@ -211,6 +212,7 @@ pub fn record_to_channel(record: AiChannelRecord) -> Result<AiChannel, String> {
         base_url: record.base_url,
         extra_headers_json: record.extra_headers_json,
         models: parse_channel_models_json(&record.models_json)?,
+        lite_model: normalize_optional_text(record.lite_model.as_deref()),
         enabled: record.enabled != 0,
         api_key,
         api_key_configured,
@@ -343,6 +345,7 @@ mod tests {
             enabled: 1,
             created_at: "2026-08-20 00:00:00".to_string(),
             updated_at: "2026-08-20 00:00:00".to_string(),
+            lite_model: None,
         }
     }
 
