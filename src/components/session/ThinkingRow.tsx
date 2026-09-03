@@ -3,13 +3,16 @@ import { useState } from "react";
 import { useTranslation } from "react-i18next";
 
 import type { GroupedSessionItem } from "@/lib/sessionLines";
-import { segmentDurationSeconds, thinkingText } from "@/lib/sessionLines";
+import { formatSessionDuration, thinkingDurationSeconds, thinkingText } from "@/lib/sessionLines";
 
 export function ThinkingRow({ items, nowMs }: { items: GroupedSessionItem[]; nowMs?: number }) {
   const { t } = useTranslation("sessions");
   const [open, setOpen] = useState(true);
-  const seconds = segmentDurationSeconds(items, nowMs);
-  const label = seconds < 1 ? t("thinkingForBrief") : t("thinkingForSeconds", { seconds });
+  const seconds = thinkingDurationSeconds(items, nowMs);
+  const label =
+    seconds < 1
+      ? t("thinkingForBrief")
+      : t("thinkingFor", { duration: formatSessionDuration(t, seconds) });
   const body = thinkingText(items);
 
   return (

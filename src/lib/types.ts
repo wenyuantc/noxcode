@@ -541,6 +541,7 @@ export interface NativeSettings {
   max_concurrent_subagents: number;
   subagent_policy: string;
   context_window_tokens: number;
+  use_custom_context_window: boolean;
   rollout_token_budget: number;
   max_tool_output_tokens: number;
   permission_timeout_secs: number;
@@ -556,6 +557,7 @@ export interface UpdateNativeSettingsInput {
   max_concurrent_subagents?: number;
   subagent_policy?: string;
   context_window_tokens?: number;
+  use_custom_context_window?: boolean;
   rollout_token_budget?: number;
   max_tool_output_tokens?: number;
   permission_timeout_secs?: number;

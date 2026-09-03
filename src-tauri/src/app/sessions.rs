@@ -319,11 +319,9 @@ mod tests {
         );
 
         let missing = set_agent_session_pinned_with(&pool, "missing", true).await;
-        assert!(
-            missing
-                .expect_err("missing session")
-                .contains("会话不存在: missing")
-        );
+        assert!(missing
+            .expect_err("missing session")
+            .contains("会话不存在: missing"));
     }
 
     #[tokio::test]

@@ -1,4 +1,6 @@
+import { Loader2 } from "lucide-react";
 import { useRef, useState } from "react";
+import { useTranslation } from "react-i18next";
 
 import { GitPanel } from "@/components/git/GitPanel";
 import { cn } from "@/lib/utils";
@@ -21,6 +23,7 @@ function rememberSession(ids: string[], sessionId: string): string[] {
 }
 
 export function SessionView() {
+  const { t } = useTranslation("common");
   const sessionId = useSessionStore((state) => state.selectedSessionId);
   const hasSelectedLines = useSessionStore((state) =>
     sessionId ? Boolean(state.lines[sessionId]) : false,
@@ -29,6 +32,7 @@ export function SessionView() {
   const streamRef = useRef<HTMLDivElement>(null);
   const [viewedId, setViewedId] = useState(() => cachedSessionIds(sessionId)[0] ?? null);
   const [mountedIds, setMountedIds] = useState(() => cachedSessionIds(sessionId));
+  const historyReady = Boolean(sessionId && hasSelectedLines);
 
   if (sessionId && hasSelectedLines && viewedId !== sessionId) {
     setViewedId(sessionId);
@@ -41,18 +45,21 @@ export function SessionView() {
       <div className="flex min-h-0 min-w-0 flex-1 flex-col">
         <SessionHeader />
         <div ref={streamRef} className="relative min-h-0 flex-1">
-          {mountedIds.map((id) => (
-            <div
-              key={id}
-              className={cn(
-                "h-full min-h-0",
-                id !== viewedId && "pointer-events-none invisible absolute inset-0",
-              )}
-            >
-              <EventStream sessionId={id} active={id === viewedId} />
+          {historyReady ? (
+            mountedIds.map((id) => (
+              <div key={id} className={cn("h-full min-h-0", id !== viewedId && "hidden")}>
+                <EventStream sessionId={id} active={id === viewedId} />
+              </div>
+            ))
+          ) : (
+            <div className="flex h-full items-center justify-center gap-2 text-sm text-muted-foreground">
+              <Loader2 className="size-4 animate-spin" />
+              {t("loading")}
             </div>
-          ))}
-          {viewedId ? <TodoProcessPanel sessionId={viewedId} containerRef={streamRef} /> : null}
+          )}
+          {historyReady && viewedId ? (
+            <TodoProcessPanel sessionId={viewedId} containerRef={streamRef} />
+          ) : null}
         </div>
         <div className="border-t px-4 py-3">
           <Composer compact />

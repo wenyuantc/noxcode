@@ -3,6 +3,7 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::Value;
 use tokio::sync::{mpsc, Mutex, Semaphore};
@@ -146,6 +147,8 @@ pub struct AgentRunner {
     pending_steer_finish: bool,
     budget_exhausted: bool,
     streaming: bool,
+    call_started_ms: Arc<AtomicU64>,
+    reasoning_started_ms: Arc<AtomicU64>,
 }
 
 enum TurnControl {
@@ -246,6 +249,8 @@ impl AgentRunner {
             pending_steer_finish: false,
             budget_exhausted: false,
             streaming: false,
+            call_started_ms: Arc::new(AtomicU64::new(0)),
+            reasoning_started_ms: Arc::new(AtomicU64::new(0)),
         }
     }
 
@@ -379,10 +384,24 @@ impl AgentRunner {
         }
     }
 
+    fn begin_model_call(&self) {
+        self.call_started_ms.store(unix_now_ms(), Ordering::Relaxed);
+        self.reasoning_started_ms.store(0, Ordering::Relaxed);
+    }
+
+    fn thinking_elapsed_seconds(&self) -> u32 {
+        let now = unix_now_ms();
+        let reasoning = self.reasoning_started_ms.swap(0, Ordering::Relaxed);
+        let call = self.call_started_ms.swap(0, Ordering::Relaxed);
+        let start = if reasoning > 0 { reasoning } else { call };
+        thinking_duration_seconds(now.saturating_sub(start))
+    }
+
     fn observe_client(&self, client: &ModelClient) -> ModelClient {
         let on_event = self.on_event.clone();
         let prefix = self.event_prefix.clone();
         let delta_events = self.on_event.clone();
+        let reasoning_started_ms = self.reasoning_started_ms.clone();
         client
             .clone_for_conversation()
             .with_cancel(self.ctx.cancel.clone())
@@ -392,6 +411,14 @@ impl AgentRunner {
             // Only the top-level runner streams: concurrent child agents would
             // interleave their fragments into one unreadable line.
             .with_delta_hook(Arc::new(move |delta: StreamDelta| {
+                if matches!(&delta, StreamDelta::Reasoning(text) if !text.is_empty()) {
+                    let _ = reasoning_started_ms.compare_exchange(
+                        0,
+                        unix_now_ms(),
+                        Ordering::Relaxed,
+                        Ordering::Relaxed,
+                    );
+                }
                 if let Some(tx) = &delta_events {
                     let _ = tx.send(NativeEvent::Delta(delta));
                 }
@@ -575,6 +602,7 @@ impl AgentRunner {
                     };
                     budget
                 };
+            self.begin_model_call();
             let result = client
                 .chat(ChatRequest {
                     messages: &self.messages,
@@ -650,6 +678,7 @@ impl AgentRunner {
                     };
                     budget
                 };
+            self.begin_model_call();
             let result = client
                 .chat(ChatRequest {
                     messages: &self.messages,
@@ -828,8 +857,11 @@ impl AgentRunner {
             return;
         }
         if let Some(tx) = &self.on_event {
-            let breakdown =
-                context_usage_breakdown(&self.messages, &self.combined_tools(), &self.skills_prompt);
+            let breakdown = context_usage_breakdown(
+                &self.messages,
+                &self.combined_tools(),
+                &self.skills_prompt,
+            );
             let (prompt_tokens, cached_tokens) = self
                 .last_usage
                 .map(|usage| (usage.prompt_tokens as usize, usage.cached_tokens as usize))
@@ -1042,7 +1074,10 @@ impl AgentRunner {
         }
         // The persisted lines below supersede whatever streamed live.
         self.emit_delta_clear();
-        if let Some(line) = thinking_start_line(&assistant.reasoning_content) {
+        if let Some(line) = thinking_start_line(
+            &assistant.reasoning_content,
+            self.thinking_elapsed_seconds(),
+        ) {
             self.emit(line);
         }
         let text = assistant.content.clone();
@@ -1078,7 +1113,10 @@ impl AgentRunner {
         if last_turn {
             assistant.tool_calls.clear();
         }
-        if let Some(line) = thinking_start_line(&assistant.reasoning_content) {
+        if let Some(line) = thinking_start_line(
+            &assistant.reasoning_content,
+            self.thinking_elapsed_seconds(),
+        ) {
             self.emit(line);
         }
         let text = assistant.content.clone();
@@ -1461,12 +1499,25 @@ fn append_last_turn_reminder(messages: &mut Vec<Message>) {
     messages.push(Message::user(LAST_TURN_REMINDER.to_string()));
 }
 
-fn thinking_start_line(content: &str) -> Option<String> {
+fn unix_now_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|item| item.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+fn thinking_duration_seconds(elapsed_ms: u64) -> u32 {
+    u32::try_from(elapsed_ms.saturating_add(500) / 1000)
+        .unwrap_or(u32::MAX)
+        .max(1)
+}
+
+fn thinking_start_line(content: &str, seconds: u32) -> Option<String> {
     let trimmed = content.trim();
     if trimmed.is_empty() {
         return None;
     }
-    Some(format!("[思考]\n{trimmed}"))
+    Some(format!("[思考] {seconds}秒\n{trimmed}"))
 }
 
 fn tool_start_line(name: &str, arguments: &str) -> String {
@@ -1885,11 +1936,16 @@ mod tests {
 
     #[test]
     fn thinking_start_line_keeps_full_content() {
-        assert_eq!(thinking_start_line("   "), None);
+        assert_eq!(thinking_start_line("   ", 3), None);
         assert_eq!(
-            thinking_start_line("先看入口再改 Composer"),
-            Some("[思考]\n先看入口再改 Composer".to_string())
+            thinking_start_line("先看入口再改 Composer", 8),
+            Some("[思考] 8秒\n先看入口再改 Composer".to_string())
         );
+        assert_eq!(thinking_duration_seconds(0), 1);
+        assert_eq!(thinking_duration_seconds(499), 1);
+        assert_eq!(thinking_duration_seconds(500), 1);
+        assert_eq!(thinking_duration_seconds(1499), 1);
+        assert_eq!(thinking_duration_seconds(1500), 2);
     }
 
     #[test]

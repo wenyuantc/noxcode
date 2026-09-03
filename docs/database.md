@@ -106,7 +106,7 @@ SSH 连接配置。密码与密钥口令只存 keyring 引用（`password_ref` /
 
 ### `agent_sessions`
 
-一次 Agent 运行记录。没有 `task_id` / `cli_session_id` / `ai_provider` 等 CLI 引擎列。
+一条可多次激活的逻辑会话记录。没有 `task_id` / `cli_session_id` / `ai_provider` 等 CLI 引擎列。`start` 仅在没有 `resume_session_id` 时插入新行；`send` / `resume` / `restart` 都复用已有 `id`，事件与 transcript 追加在同一记录上。
 
 | 列 | 说明 |
 | --- | --- |
@@ -117,7 +117,7 @@ SSH 连接配置。密码与密钥口令只存 keyring 引用（`password_ref` /
 | `session_kind` | 默认 `execution` |
 | `status` | 默认 `pending` |
 | `started_at` / `ended_at` / `exit_code` | 生命周期 |
-| `resume_session_id` | 续聊来源 |
+| `resume_session_id` | 旧数据里的续聊来源。现运行时不再为续聊插入新行，此列仅兼容历史记录 |
 | `title` | 会话标题。新建取首句最多 30 个 Unicode 字；续聊继承来源会话，不覆盖。version 3 从最早一条 `[USER_INPUT]` / `[用户输入]` 回填 |
 | `pinned` | 侧栏置顶。`0` 未置顶，`1` 已置顶。version 4 新增，默认 `0`。取消置顶后仍按 `workspace_id` 归队 |
 | `input_tokens` / `output_tokens` / `total_tokens` / `reasoning_tokens` / `cached_tokens` | 用量 |

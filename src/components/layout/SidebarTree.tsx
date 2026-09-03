@@ -31,7 +31,7 @@ function SessionRow({
       role="button"
       tabIndex={0}
       className={cn(
-        "group flex items-center rounded-md p-[10px] hover:bg-sidebar-accent",
+        "group flex cursor-pointer items-center rounded-md p-[10px] select-none hover:bg-sidebar-accent",
         indent && "ml-[10px]",
         selected && "bg-sidebar-accent",
       )}
@@ -45,7 +45,7 @@ function SessionRow({
       <button
         type="button"
         className={cn(
-          "rounded p-1 text-muted-foreground hover:text-foreground",
+          "cursor-pointer rounded p-1 text-muted-foreground hover:text-foreground",
           pinned
             ? "visible"
             : "invisible pointer-events-none group-hover:visible group-hover:pointer-events-auto",
@@ -71,7 +71,7 @@ function SessionRow({
       </span>
       <button
         type="button"
-        className="invisible pointer-events-none rounded p-1 text-muted-foreground group-hover:visible group-hover:pointer-events-auto hover:text-destructive"
+        className="invisible pointer-events-none cursor-pointer rounded p-1 text-muted-foreground group-hover:visible group-hover:pointer-events-auto hover:text-destructive"
         onClick={(event) => {
           event.stopPropagation();
           void deleteAgentSession(session.id).then(() =>

@@ -2,10 +2,9 @@ import { ArrowUp, Check, Copy, Pencil, X } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 
-import { sendNativeInput, startNativeSession } from "@/lib/backend";
+import { submitSessionPrompt } from "@/lib/sessionSubmission";
 import { cn } from "@/lib/utils";
 import { useChannelStore } from "@/stores/channelStore";
-import { useSessionStore } from "@/stores/sessionStore";
 import { useUiStore } from "@/stores/uiStore";
 import { useWorkspaceStore } from "@/stores/workspaceStore";
 
@@ -32,7 +31,6 @@ export function UserBubble({
   const channelId = useChannelStore((state) => state.activeChannelId);
   const modelId = useChannelStore((state) => state.activeModelId);
   const planMode = useUiStore((state) => state.composerPlanMode);
-  const live = useSessionStore((state) => state.liveBySession[sessionId]);
 
   useEffect(() => {
     setDraft(text);
@@ -55,17 +53,15 @@ export function UserBubble({
     if (!prompt || working || sending) return;
     setSending(true);
     try {
-      if (live && live.session_record_id === sessionId) {
-        await sendNativeInput(sessionId, prompt);
-      } else if (workspaceId && channelId) {
-        await startNativeSession({
-          ai_channel_id: channelId,
-          workspace_id: workspaceId,
-          prompt,
-          model: modelId,
-          plan_mode: planMode,
-        });
-      }
+      if (!workspaceId || !channelId) return;
+      await submitSessionPrompt({
+        sessionId,
+        workspaceId,
+        channelId,
+        prompt,
+        model: modelId,
+        planMode,
+      });
       setEditing(false);
     } finally {
       setSending(false);

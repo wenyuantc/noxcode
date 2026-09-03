@@ -63,6 +63,8 @@ struct RawNativeSettings {
     #[serde(default)]
     context_window_tokens: Option<i32>,
     #[serde(default)]
+    use_custom_context_window: Option<bool>,
+    #[serde(default)]
     rollout_token_budget: Option<i64>,
     #[serde(default)]
     max_tool_output_tokens: Option<i32>,
@@ -216,6 +218,7 @@ fn default_settings() -> NativeSettings {
         max_concurrent_subagents: DEFAULT_NATIVE_MAX_CONCURRENT_SUBAGENTS,
         subagent_policy: DEFAULT_NATIVE_SUBAGENT_POLICY.to_string(),
         context_window_tokens: DEFAULT_NATIVE_CONTEXT_WINDOW_TOKENS,
+        use_custom_context_window: false,
         rollout_token_budget: DEFAULT_NATIVE_ROLLOUT_TOKEN_BUDGET,
         max_tool_output_tokens: DEFAULT_NATIVE_MAX_TOOL_OUTPUT_TOKENS,
         permission_timeout_secs: DEFAULT_NATIVE_PERMISSION_TIMEOUT_SECS,
@@ -235,6 +238,7 @@ fn normalize_settings(raw: RawNativeSettings) -> NativeSettings {
         ),
         subagent_policy: normalize_subagent_policy(raw.subagent_policy.as_deref()),
         context_window_tokens: normalize_native_context_window_tokens(raw.context_window_tokens),
+        use_custom_context_window: raw.use_custom_context_window.unwrap_or(false),
         rollout_token_budget: normalize_native_rollout_token_budget(raw.rollout_token_budget),
         max_tool_output_tokens: normalize_native_max_tool_output_tokens(raw.max_tool_output_tokens),
         permission_timeout_secs: normalize_native_permission_timeout_secs(
@@ -302,6 +306,7 @@ fn save_native_settings<R: Runtime>(
         context_window_tokens: Some(normalize_native_context_window_tokens(Some(
             settings.context_window_tokens,
         ))),
+        use_custom_context_window: Some(settings.use_custom_context_window),
         rollout_token_budget: Some(normalize_native_rollout_token_budget(Some(
             settings.rollout_token_budget,
         ))),
@@ -364,6 +369,9 @@ async fn merge_native_settings<R: Runtime>(
         next.context_window_tokens =
             normalize_native_context_window_tokens(Some(context_window_tokens));
     }
+    if let Some(use_custom_context_window) = updates.use_custom_context_window {
+        next.use_custom_context_window = use_custom_context_window;
+    }
     if let Some(rollout_token_budget) = updates.rollout_token_budget {
         next.rollout_token_budget =
             normalize_native_rollout_token_budget(Some(rollout_token_budget));
@@ -392,7 +400,7 @@ async fn merge_native_settings<R: Runtime>(
 
 fn native_settings_activity_details(settings: &NativeSettings) -> String {
     format!(
-        "{}；{}；权限模式：{}；确认超时：{}；同轮子 Agent 上限：{}；子 Agent 策略：{}；子 Agent 预算占比：{}%；上下文窗口：{} token；会话预算：{}；单条工具结果：{} token；钩子：{} 条",
+        "{}；{}；权限模式：{}；确认超时：{}；同轮子 Agent 上限：{}；子 Agent 策略：{}；子 Agent 预算占比：{}%；上下文窗口：{} token；自定义上下文：{}；会话预算：{}；单条工具结果：{} token；钩子：{} 条",
         max_turns_activity_details(settings.max_turns),
         max_subagent_turns_activity_details(settings.max_subagent_turns),
         permission_mode_label_zh(&settings.permission_mode),
@@ -405,6 +413,11 @@ fn native_settings_activity_details(settings: &NativeSettings) -> String {
         subagent_policy_label_zh(&settings.subagent_policy),
         settings.subagent_budget_share_percent,
         settings.context_window_tokens,
+        if settings.use_custom_context_window {
+            "开"
+        } else {
+            "关"
+        },
         if settings.rollout_token_budget == 0 {
             "不限制".to_string()
         } else {
@@ -435,6 +448,45 @@ pub fn effective_context_window_tokens<R: Runtime>(app: &AppHandle<R>) -> u32 {
                 .max(MIN_NATIVE_CONTEXT_WINDOW_TOKENS) as u32
         })
         .unwrap_or(DEFAULT_NATIVE_CONTEXT_WINDOW_TOKENS as u32)
+}
+
+pub fn resolve_session_context_window_tokens(
+    use_custom: bool,
+    configured_tokens: u32,
+    model_context_tokens: Option<u32>,
+) -> u32 {
+    let model = model_context_tokens.filter(|value| *value > 0);
+    if use_custom {
+        let configured = configured_tokens.max(1);
+        match model {
+            Some(model) => configured.min(model),
+            None => configured,
+        }
+    } else {
+        model
+            .unwrap_or(DEFAULT_NATIVE_CONTEXT_WINDOW_TOKENS as u32)
+            .max(1)
+    }
+}
+
+pub fn session_context_window_tokens<R: Runtime>(
+    app: &AppHandle<R>,
+    model_context_tokens: Option<u32>,
+) -> u32 {
+    match load_native_settings(app) {
+        Ok(settings) => resolve_session_context_window_tokens(
+            settings.use_custom_context_window,
+            settings
+                .context_window_tokens
+                .max(MIN_NATIVE_CONTEXT_WINDOW_TOKENS) as u32,
+            model_context_tokens,
+        ),
+        Err(_) => resolve_session_context_window_tokens(
+            false,
+            DEFAULT_NATIVE_CONTEXT_WINDOW_TOKENS as u32,
+            model_context_tokens,
+        ),
+    }
 }
 
 pub fn effective_rollout_token_budget<R: Runtime>(app: &AppHandle<R>) -> u64 {
@@ -571,6 +623,7 @@ mod tests {
             max_concurrent_subagents: None,
             subagent_policy: None,
             context_window_tokens: None,
+            use_custom_context_window: None,
             rollout_token_budget: None,
             max_tool_output_tokens: None,
             permission_timeout_secs: None,
@@ -610,6 +663,7 @@ mod tests {
             settings.subagent_budget_share_percent,
             DEFAULT_NATIVE_SUBAGENT_BUDGET_SHARE_PERCENT
         );
+        assert!(!settings.use_custom_context_window);
     }
 
     #[test]
@@ -816,6 +870,54 @@ mod tests {
         assert_eq!(
             normalize_native_subagent_budget_share_percent(Some(100)),
             100
+        );
+    }
+
+    #[test]
+    fn missing_custom_context_window_defaults_off() {
+        let from_none = normalize_settings(RawNativeSettings::default());
+        assert!(!from_none.use_custom_context_window);
+
+        let from_json: RawNativeSettings =
+            serde_json::from_str(r#"{"context_window_tokens":256000}"#).unwrap();
+        let settings = normalize_settings(from_json);
+        assert!(!settings.use_custom_context_window);
+        assert_eq!(settings.context_window_tokens, 256_000);
+
+        let from_null: RawNativeSettings =
+            serde_json::from_str(r#"{"use_custom_context_window":null}"#).unwrap();
+        assert!(!normalize_settings(from_null).use_custom_context_window);
+
+        let from_true: RawNativeSettings =
+            serde_json::from_str(r#"{"use_custom_context_window":true}"#).unwrap();
+        assert!(normalize_settings(from_true).use_custom_context_window);
+    }
+
+    #[test]
+    fn resolve_session_context_window_tokens_respects_toggle() {
+        assert_eq!(
+            resolve_session_context_window_tokens(false, 256_000, Some(1_000_000)),
+            1_000_000
+        );
+        assert_eq!(
+            resolve_session_context_window_tokens(false, 256_000, None),
+            DEFAULT_NATIVE_CONTEXT_WINDOW_TOKENS as u32
+        );
+        assert_eq!(
+            resolve_session_context_window_tokens(false, 256_000, Some(0)),
+            DEFAULT_NATIVE_CONTEXT_WINDOW_TOKENS as u32
+        );
+        assert_eq!(
+            resolve_session_context_window_tokens(true, 256_000, Some(1_000_000)),
+            256_000
+        );
+        assert_eq!(
+            resolve_session_context_window_tokens(true, 256_000, Some(128_000)),
+            128_000
+        );
+        assert_eq!(
+            resolve_session_context_window_tokens(true, 256_000, None),
+            256_000
         );
     }
 

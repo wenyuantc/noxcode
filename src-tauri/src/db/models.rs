@@ -315,6 +315,8 @@ pub struct NativeSettings {
     pub max_concurrent_subagents: i32,
     pub subagent_policy: String,
     pub context_window_tokens: i32,
+    #[serde(default)]
+    pub use_custom_context_window: bool,
     pub rollout_token_budget: i64,
     pub max_tool_output_tokens: i32,
     pub permission_timeout_secs: i32,
@@ -343,6 +345,7 @@ pub struct UpdateNativeSettings {
     pub max_concurrent_subagents: Option<i32>,
     pub subagent_policy: Option<String>,
     pub context_window_tokens: Option<i32>,
+    pub use_custom_context_window: Option<bool>,
     pub rollout_token_budget: Option<i64>,
     pub max_tool_output_tokens: Option<i32>,
     pub permission_timeout_secs: Option<i32>,

@@ -1,6 +1,6 @@
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { ArrowDown, Loader2 } from "lucide-react";
-import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 
 import {
@@ -30,6 +30,7 @@ import { WorkSummaryBar } from "./WorkSummaryBar";
 
 const EMPTY_LINES: RawSessionLine[] = [];
 const BOTTOM_THRESHOLD = 80;
+const VIRTUALIZE_AFTER = 24;
 
 function attachLiveStream(
   block: SessionTurnBlock,
@@ -153,6 +154,10 @@ export const EventStream = memo(function EventStream({
     return undefined;
   }, [blocks]);
   const working = turnState === "working";
+  const virtualize = blocks.length > VIRTUALIZE_AFTER;
+  const layoutSignature = blocks
+    .map((block) => `${block.id}:${block.segments.length}:${block.endedAt}`)
+    .join("|");
   const [nowMs, setNowMs] = useState(() => Date.now());
   const [showLatest, setShowLatest] = useState(false);
   const pinnedRef = useRef(true);
@@ -160,13 +165,17 @@ export const EventStream = memo(function EventStream({
   const prevWorkingRef = useRef(working);
   const prevHasStreamRef = useRef(Boolean(stream?.text));
   const virtualizer = useVirtualizer({
-    count: blocks.length,
+    count: virtualize ? blocks.length : 0,
     getScrollElement: () => parentRef.current,
-    estimateSize: () => 64,
-    overscan: 3,
+    estimateSize: () => 240,
+    overscan: 4,
     gap: 16,
     getItemKey: (index) => blocks[index]?.id ?? index,
-    measureElement: (element) => (element as HTMLElement).offsetHeight,
+    measureElement: (element, entry) => {
+      const fromEntry = entry?.borderBoxSize?.[0]?.blockSize;
+      if (typeof fromEntry === "number" && fromEntry > 0) return fromEntry;
+      return (element as HTMLElement).getBoundingClientRect().height;
+    },
   });
 
   const syncScrollState = useCallback(() => {
@@ -181,6 +190,11 @@ export const EventStream = memo(function EventStream({
     if (blocks.length === 0) return;
     pinnedRef.current = true;
     setShowLatest(false);
+    if (!virtualize) {
+      const node = parentRef.current;
+      if (node) node.scrollTop = node.scrollHeight;
+      return;
+    }
     virtualizer.scrollToIndex(blocks.length - 1, { align: "end" });
   };
 
@@ -195,10 +209,10 @@ export const EventStream = memo(function EventStream({
     return () => window.clearInterval(timer);
   }, [active, working]);
 
-  useEffect(() => {
-    if (!active) return;
+  useLayoutEffect(() => {
+    if (!active || !virtualize) return;
     virtualizer.measure();
-  }, [active, virtualizer]);
+  }, [active, layoutSignature, virtualize, virtualizer]);
 
   useEffect(() => {
     const hasStream = Boolean(stream?.text);
@@ -206,18 +220,38 @@ export const EventStream = memo(function EventStream({
     const workingEnded = prevWorkingRef.current && !working;
     prevHasStreamRef.current = hasStream;
     prevWorkingRef.current = working;
-    if (streamGone || workingEnded) virtualizer.measure();
-  }, [stream?.text, working, virtualizer]);
+    if (virtualize && (streamGone || workingEnded)) virtualizer.measure();
+  }, [stream?.text, virtualize, working, virtualizer]);
 
   useEffect(() => {
     if (blocks.length === 0 || !pinnedRef.current) return;
+    if (!virtualize) {
+      const node = parentRef.current;
+      if (node) node.scrollTop = node.scrollHeight;
+      return;
+    }
     virtualizer.scrollToIndex(blocks.length - 1, { align: "end" });
-  }, [blocks.length, stream?.text, virtualizer]);
+  }, [blocks.length, stream?.text, virtualize, virtualizer]);
 
+  const totalSize = virtualizer.getTotalSize();
   useEffect(() => {
     const frame = window.requestAnimationFrame(syncScrollState);
     return () => window.cancelAnimationFrame(frame);
-  }, [blocks.length, syncScrollState, virtualizer.getTotalSize()]);
+  }, [blocks.length, syncScrollState, virtualize, totalSize]);
+
+  const renderBlock = (block: SessionTurnBlock, index: number) => {
+    const isLast = index === blocks.length - 1;
+    const view = isLast ? attachLiveStream(block, stream) : block;
+    return (
+      <TurnBlockView
+        block={view}
+        sessionId={sessionId}
+        working={isLast && working}
+        nowMs={isLast && working ? nowMs : undefined}
+        editableUser={view.id === lastUserBlockId}
+      />
+    );
+  };
 
   return (
     <div className="relative h-full min-h-0">
@@ -226,13 +260,12 @@ export const EventStream = memo(function EventStream({
         className="h-full overflow-auto overscroll-y-contain px-6 py-4"
         onScroll={syncScrollState}
       >
-        <div className="relative mx-auto max-w-3xl" style={{ height: virtualizer.getTotalSize() }}>
-          {virtualizer.getVirtualItems().map((virtual) => {
-            const isLast = virtual.index === blocks.length - 1;
-            const block = isLast
-              ? attachLiveStream(blocks[virtual.index]!, stream)
-              : blocks[virtual.index]!;
-            return (
+        {virtualize ? (
+          <div
+            className="relative mx-auto max-w-3xl"
+            style={{ height: virtualizer.getTotalSize() }}
+          >
+            {virtualizer.getVirtualItems().map((virtual) => (
               <div
                 key={virtual.key}
                 data-index={virtual.index}
@@ -240,17 +273,17 @@ export const EventStream = memo(function EventStream({
                 className="absolute top-0 left-0 w-full"
                 style={{ transform: `translateY(${virtual.start}px)` }}
               >
-                <TurnBlockView
-                  block={block}
-                  sessionId={sessionId}
-                  working={isLast && working}
-                  nowMs={isLast && working ? nowMs : undefined}
-                  editableUser={block.id === lastUserBlockId}
-                />
+                {renderBlock(blocks[virtual.index]!, virtual.index)}
               </div>
-            );
-          })}
-        </div>
+            ))}
+          </div>
+        ) : (
+          <div className="mx-auto flex max-w-3xl flex-col gap-4">
+            {blocks.map((block, index) => (
+              <div key={block.id}>{renderBlock(block, index)}</div>
+            ))}
+          </div>
+        )}
       </div>
       {showLatest ? (
         <button

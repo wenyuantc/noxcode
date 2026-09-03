@@ -3,7 +3,7 @@ import { useState } from "react";
 import { useTranslation } from "react-i18next";
 
 import type { GroupedSessionItem, SessionTurnBlock } from "@/lib/sessionLines";
-import { workDurationSeconds } from "@/lib/sessionLines";
+import { formatSessionDuration, workDurationSeconds } from "@/lib/sessionLines";
 import { ToolCallLine } from "./ToolCallLine";
 
 export function WorkSummaryBar({
@@ -20,7 +20,8 @@ export function WorkSummaryBar({
   const { t } = useTranslation("sessions");
   const [open, setOpen] = useState(false);
   const seconds = workDurationSeconds(block, working ? nowMs : undefined);
-  const label = working ? t("workingFor", { seconds }) : t("workedFor", { seconds });
+  const duration = formatSessionDuration(t, seconds);
+  const label = working ? t("workingFor", { duration }) : t("workedFor", { duration });
 
   return (
     <div>

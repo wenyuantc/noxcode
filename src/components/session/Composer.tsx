@@ -3,13 +3,8 @@ import { useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 
 import { Button } from "@/components/ui/button";
-import {
-  listGitFiles,
-  listNativeGlobalSkills,
-  sendNativeInput,
-  startNativeSession,
-  stopNativeSession,
-} from "@/lib/backend";
+import { listGitFiles, listNativeGlobalSkills, stopNativeSession } from "@/lib/backend";
+import { submitSessionPrompt } from "@/lib/sessionSubmission";
 import { FALLBACK_THINKING_LEVELS } from "@/lib/modelCatalog";
 import type { NativeSkill } from "@/lib/types";
 import { useChannelStore } from "@/stores/channelStore";
@@ -108,18 +103,15 @@ export function Composer({ compact = false }: { compact?: boolean }) {
     setError(null);
     setSending(true);
     try {
-      if (live) {
-        await sendNativeInput(live.session_record_id, prompt);
-      } else {
-        await startNativeSession({
-          ai_channel_id: channelId,
-          workspace_id: workspaceId,
-          prompt,
-          model: model || null,
-          reasoning_effort: resolvedEffort || null,
-          plan_mode: composerPlanMode,
-        });
-      }
+      await submitSessionPrompt({
+        sessionId: selectedSessionId,
+        workspaceId,
+        channelId,
+        prompt,
+        model: model || null,
+        reasoningEffort: resolvedEffort || null,
+        planMode: composerPlanMode,
+      });
       setDraft("");
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));

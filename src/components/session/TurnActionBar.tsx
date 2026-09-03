@@ -2,10 +2,9 @@ import { Check, Copy, RotateCcw, ThumbsDown, ThumbsUp } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 
-import { sendNativeInput, startNativeSession } from "@/lib/backend";
+import { submitSessionPrompt } from "@/lib/sessionSubmission";
 import { cn } from "@/lib/utils";
 import { useChannelStore } from "@/stores/channelStore";
-import { useSessionStore } from "@/stores/sessionStore";
 import { useUiStore } from "@/stores/uiStore";
 import { useWorkspaceStore } from "@/stores/workspaceStore";
 
@@ -42,7 +41,6 @@ export function TurnActionBar({
   const channelId = useChannelStore((state) => state.activeChannelId);
   const modelId = useChannelStore((state) => state.activeModelId);
   const planMode = useUiStore((state) => state.composerPlanMode);
-  const live = useSessionStore((state) => state.liveBySession[sessionId]);
 
   useEffect(() => {
     return () => window.clearTimeout(copiedTimer.current);
@@ -58,17 +56,14 @@ export function TurnActionBar({
   const retry = () => {
     const prompt = userText?.trim();
     if (!prompt || working) return;
-    if (live && live.session_record_id === sessionId) {
-      void sendNativeInput(sessionId, prompt);
-      return;
-    }
     if (!workspaceId || !channelId) return;
-    void startNativeSession({
-      ai_channel_id: channelId,
-      workspace_id: workspaceId,
+    void submitSessionPrompt({
+      sessionId,
+      workspaceId,
+      channelId,
       prompt,
       model: modelId,
-      plan_mode: planMode,
+      planMode,
     });
   };
 

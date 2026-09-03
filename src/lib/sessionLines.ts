@@ -280,11 +280,28 @@ export function isThinkingItem(item: GroupedSessionItem): boolean {
   return item.text.startsWith("[思考]");
 }
 
+const THINKING_DURATION_RE = /^\[思考\]\s*(\d+)秒(?:\s|$)/;
+
+export function parseThinkingDurationSeconds(text: string): number | null {
+  const match = text.trim().match(THINKING_DURATION_RE);
+  if (!match) return null;
+  const seconds = Number(match[1]);
+  return Number.isFinite(seconds) ? seconds : null;
+}
+
+export function thinkingDurationSeconds(items: GroupedSessionItem[], nowMs?: number): number {
+  for (let index = items.length - 1; index >= 0; index -= 1) {
+    const parsed = parseThinkingDurationSeconds(items[index]?.text ?? "");
+    if (parsed != null) return parsed;
+  }
+  return segmentDurationSeconds(items, nowMs);
+}
+
 export function thinkingText(items: GroupedSessionItem[]): string {
   const live = items.find((item) => !item.text.startsWith("[思考]"));
   if (live) return live.text;
   return items
-    .map((item) => item.text.replace(/^\[思考\]\s*/, "").trim())
+    .map((item) => item.text.replace(/^\[思考\](?:\s*\d+秒)?\s*/, "").trim())
     .filter((text) => text.length > 0)
     .join("\n\n");
 }
@@ -363,9 +380,16 @@ export function displaySessionTitle(title: string | null | undefined): string {
   return Array.from(trimmed).slice(0, 30).join("");
 }
 
+export function isHiddenSessionCeremonyLine(text: string): boolean {
+  const line = text.trim();
+  if (line.startsWith("[续聊]")) return true;
+  return line === "内置 Agent 会话已恢复" || line === "内置 Agent 会话已创建";
+}
+
 export function groupSessionLines(lines: RawSessionLine[]): GroupedSessionItem[] {
   const grouped: GroupedSessionItem[] = [];
   for (const line of lines) {
+    if (isHiddenSessionCeremonyLine(line.text)) continue;
     const kind = classifyLine(line.text);
     if (kind === "tool_result") {
       const result = line.text.replace(/^\[工具结果\]\s*/, "");
@@ -448,6 +472,23 @@ export function buildTurnSegments(items: GroupedSessionItem[]): TurnSegment[] {
   return segments;
 }
 
+export function isSessionStartLine(text: string): boolean {
+  const line = text.trim();
+  if (line === "内置 Agent 会话已恢复" || line === "内置 Agent 会话已创建") {
+    return true;
+  }
+  if (line.startsWith("[续聊]")) return true;
+  if (line.startsWith("[PLAN] 已进入计划模式")) return true;
+  if (parseAgentBanner(line)) return true;
+  if (
+    line.startsWith("[PERMISSION] 已在设置中关闭高风险确认") ||
+    line.startsWith("[PERMISSION] 已开启自动编辑")
+  ) {
+    return true;
+  }
+  return line.startsWith("[MCP] 未启用服务器") || line.startsWith("[MCP] 将连接 ");
+}
+
 export function buildTurnBlocks(items: GroupedSessionItem[]): SessionTurnBlock[] {
   const blocks: SessionTurnBlock[] = [];
   let current: SessionTurnBlock | null = null;
@@ -481,8 +522,9 @@ export function buildTurnBlocks(items: GroupedSessionItem[]): SessionTurnBlock[]
   };
 
   for (const item of items) {
-    const startUserTurn = item.kind === "user" && current?.user;
-    if (startUserTurn || !current) {
+    const startUserTurn = item.kind === "user" && Boolean(current?.user);
+    const startResumeTurn = Boolean(current?.user && isSessionStartLine(item.text));
+    if (startUserTurn || startResumeTurn || !current) {
       if (current) finish(current, currentItems);
       current = startBlock(item);
       currentItems = [];
@@ -498,6 +540,34 @@ export function buildTurnBlocks(items: GroupedSessionItem[]): SessionTurnBlock[]
   }
   if (current) finish(current, currentItems);
   return blocks;
+}
+
+export type DurationTranslate = (key: string, options?: Record<string, number>) => string;
+
+export function splitSessionDuration(totalSeconds: number): {
+  hours: number;
+  minutes: number;
+  seconds: number;
+} {
+  const safe = Math.max(0, Math.round(totalSeconds));
+  return {
+    hours: Math.floor(safe / 3600),
+    minutes: Math.floor((safe % 3600) / 60),
+    seconds: safe % 60,
+  };
+}
+
+export function formatSessionDuration(t: DurationTranslate, totalSeconds: number): string {
+  const { hours, minutes, seconds } = splitSessionDuration(totalSeconds);
+  if (hours === 0 && minutes === 0) return t("durationSeconds", { seconds });
+  if (hours === 0) {
+    return seconds === 0
+      ? t("durationMinutesOnly", { minutes })
+      : t("durationMinutesSeconds", { minutes, seconds });
+  }
+  if (minutes === 0 && seconds === 0) return t("durationHoursOnly", { hours });
+  if (seconds === 0) return t("durationHoursMinutes", { hours, minutes });
+  return t("durationHoursMinutesSeconds", { hours, minutes, seconds });
 }
 
 export function workDurationSeconds(block: SessionTurnBlock, nowMs?: number): number {

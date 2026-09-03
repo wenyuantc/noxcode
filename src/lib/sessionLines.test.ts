@@ -7,7 +7,9 @@ import {
   commandText,
   displaySessionTitle,
   filePathText,
+  formatSessionDuration,
   groupSessionLines,
+  isHiddenSessionCeremonyLine,
   latestTodos,
   parseAgentBanner,
   parseMcpStatus,
@@ -18,7 +20,10 @@ import {
   stripAgentPrefix,
   stripUserPrefix,
   summarizeTools,
+  parseThinkingDurationSeconds,
+  thinkingDurationSeconds,
   thinkingText,
+  workDurationSeconds,
 } from "./sessionLines";
 
 function line(id: string, text: string, createdAt = id) {
@@ -68,6 +73,88 @@ describe("sessionLines", () => {
     expect(blocks[0]?.user?.text).toBe("分析项目");
     expect(blocks[0]?.startedAt).toBe("2026-01-01T00:00:01Z");
     expect(blocks[0]?.segments.map((segment) => segment.kind)).toEqual(["system", "assistant"]);
+  });
+
+  it("hides historical resume ceremony lines", () => {
+    expect(isHiddenSessionCeremonyLine("[续聊] 已恢复上一会话 2 条上下文（图片附件不恢复）")).toBe(
+      true,
+    );
+    expect(isHiddenSessionCeremonyLine("内置 Agent 会话已恢复")).toBe(true);
+    expect(isHiddenSessionCeremonyLine("内置 Agent 会话已创建")).toBe(true);
+    expect(isHiddenSessionCeremonyLine("[MCP] 未启用服务器")).toBe(false);
+    const grouped = groupSessionLines([
+      line("1", "[USER_INPUT] 你好", "2026-01-01T00:00:00Z"),
+      line("2", "[续聊] 已恢复上一会话 2 条上下文（图片附件不恢复）", "2026-09-03T07:00:00Z"),
+      line("3", "内置 Agent 会话已恢复", "2026-09-03T07:00:01Z"),
+      line("4", "内置 Agent 会话已创建", "2026-09-03T07:00:02Z"),
+      line("5", "先这样", "2026-01-01T00:00:10Z"),
+    ]);
+    expect(grouped.map((item) => item.text)).toEqual(["你好", "先这样"]);
+  });
+
+  it("starts a new turn when resume banners follow a completed user turn", () => {
+    const blocks = buildTurnBlocks(
+      groupSessionLines([
+        line("1", "[USER_INPUT] 你好你能做什么", "2026-01-01T00:00:00Z"),
+        line("2", "[思考] 用户在问好", "2026-01-01T00:00:01Z"),
+        line("3", "- 写代码", "2026-01-01T00:00:20Z"),
+        line("4", "内置 Agent 会话已恢复", "2026-09-03T07:00:00Z"),
+        line("5", "[PERMISSION] 已在设置中关闭高风险确认", "2026-09-03T07:00:01Z"),
+        line("6", "[续聊] 已恢复上一会话 4 条上下文（图片附件不恢复）", "2026-09-03T07:00:02Z"),
+        line(
+          "7",
+          "[内置 Agent] 启动会话 渠道=Mai-grok 协议=openai model=grok-4.6 effort=medium thinking=on",
+          "2026-09-03T07:00:03Z",
+        ),
+        line("8", "[MCP] 未启用服务器", "2026-09-03T07:00:04Z"),
+        line("9", "[USER_INPUT] 你是什么模型？", "2026-09-03T07:00:05Z"),
+        line("10", "我是 grok-4.6", "2026-09-03T07:00:08Z"),
+      ]),
+    );
+    expect(blocks).toHaveLength(2);
+    expect(blocks[0]?.user?.text).toBe("你好你能做什么");
+    expect(blocks[0]?.endedAt).toBe("2026-01-01T00:00:20Z");
+    expect(blocks[0]?.assistant.map((item) => item.text)).toEqual(["- 写代码"]);
+    expect(workDurationSeconds(blocks[0]!)).toBe(20);
+    expect(blocks[1]?.user?.text).toBe("你是什么模型？");
+    expect(blocks[1]?.startedAt).toBe("2026-09-03T07:00:05Z");
+    expect(blocks[1]?.endedAt).toBe("2026-09-03T07:00:08Z");
+  });
+
+  it("starts a new turn from live resume banners without a session_requested line", () => {
+    const blocks = buildTurnBlocks(
+      groupSessionLines([
+        line("1", "[USER_INPUT] 你好", "2026-01-01T00:00:00Z"),
+        line("2", "先这样", "2026-01-01T00:00:10Z"),
+        line("3", "[续聊] 已恢复上一会话 2 条上下文（图片附件不恢复）", "2026-09-03T07:00:00Z"),
+        line(
+          "4",
+          "[内置 Agent] 启动会话 渠道=Mai-grok 协议=openai model=grok-4.6 effort=medium thinking=on",
+          "2026-09-03T07:00:01Z",
+        ),
+        line("5", "[USER_INPUT] 你是什么模型？", "2026-09-03T07:00:02Z"),
+      ]),
+    );
+    expect(blocks).toHaveLength(2);
+    expect(blocks[0]?.endedAt).toBe("2026-01-01T00:00:10Z");
+    expect(blocks[1]?.user?.text).toBe("你是什么模型？");
+  });
+
+  it("does not split a turn on mid-turn permission prompts", () => {
+    const blocks = buildTurnBlocks(
+      groupSessionLines([
+        line("1", "[USER_INPUT] 删文件", "2026-01-01T00:00:00Z"),
+        line("2", "[PERMISSION] 等待确认高风险操作（local / Shell）：rm", "2026-01-01T00:00:01Z"),
+        line("3", "[命令] rm x", "2026-01-01T00:00:02Z"),
+        line("4", "已删除", "2026-01-01T00:00:03Z"),
+      ]),
+    );
+    expect(blocks).toHaveLength(1);
+    expect(blocks[0]?.segments.map((segment) => segment.kind)).toEqual([
+      "system",
+      "terminal",
+      "assistant",
+    ]);
   });
 
   it("groups a turn around the user line", () => {
@@ -312,6 +399,38 @@ describe("sessionLines", () => {
   it("keeps full thinking body after the prefix", () => {
     const items = groupSessionLines([line("1", "[思考]\n先看入口再改 Composer")]);
     expect(thinkingText(items)).toBe("先看入口再改 Composer");
+    expect(thinkingText(groupSessionLines([line("2", "[思考] 8秒\n先看入口再改 Composer")]))).toBe(
+      "先看入口再改 Composer",
+    );
+  });
+
+  it("reads persisted thinking duration instead of a zero-width timestamp span", () => {
+    expect(parseThinkingDurationSeconds("[思考] 8秒\n先看入口")).toBe(8);
+    expect(parseThinkingDurationSeconds("[思考]\n先看入口")).toBeNull();
+    const untimed = groupSessionLines([
+      line("1", "[思考]\n旧记录没有秒数", "2026-01-01T00:00:00Z"),
+    ]);
+    expect(thinkingDurationSeconds(untimed)).toBe(0);
+    const timed = groupSessionLines([
+      line("1", "[思考] 11秒\n先看仓库文档", "2026-01-01T00:00:00Z"),
+    ]);
+    expect(thinkingDurationSeconds(timed)).toBe(11);
+  });
+
+  it("formats durations with minutes and hours after 60 seconds", () => {
+    const t = (key: string, options?: Record<string, number>) => {
+      if (key === "durationSeconds") return `${options?.seconds}秒`;
+      if (key === "durationMinutesOnly") return `${options?.minutes}分钟`;
+      if (key === "durationMinutesSeconds") return `${options?.minutes}分${options?.seconds}秒`;
+      if (key === "durationHoursOnly") return `${options?.hours}小时`;
+      if (key === "durationHoursMinutes") return `${options?.hours}小时${options?.minutes}分`;
+      return `${options?.hours}小时${options?.minutes}分${options?.seconds}秒`;
+    };
+    expect(formatSessionDuration(t, 11)).toBe("11秒");
+    expect(formatSessionDuration(t, 60)).toBe("1分钟");
+    expect(formatSessionDuration(t, 83)).toBe("1分23秒");
+    expect(formatSessionDuration(t, 3600)).toBe("1小时");
+    expect(formatSessionDuration(t, 3661)).toBe("1小时1分1秒");
   });
 
   it("truncates display titles to 30 characters", () => {

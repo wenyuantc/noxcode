@@ -12,6 +12,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
+import { Switch } from "@/components/ui/switch";
 import { Textarea } from "@/components/ui/textarea";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { SettingCard } from "./SettingCard";
@@ -154,13 +155,30 @@ export function NativeRuntimeSection() {
         title={t("settings:runtime.contextWindow")}
         description={t("settings:runtime.contextWindowHint")}
       >
-        <TokenKInput
-          id="native-context-window-k"
-          min={8}
-          max={1000}
-          value={draft.context_window_tokens / 1000}
-          onChange={(value) => setDraft({ ...draft, context_window_tokens: value * 1000 })}
-        />
+        <div className="space-y-3">
+          <TokenKInput
+            id="native-context-window-k"
+            min={8}
+            max={1000}
+            value={draft.context_window_tokens / 1000}
+            onChange={(value) => setDraft({ ...draft, context_window_tokens: value * 1000 })}
+          />
+          <label
+            htmlFor="native-use-custom-context-window"
+            className="flex max-w-xs cursor-pointer items-center justify-between gap-3 text-sm"
+          >
+            <span>{t("settings:runtime.useCustomContextWindow")}</span>
+            <Switch
+              id="native-use-custom-context-window"
+              checked={draft.use_custom_context_window}
+              onCheckedChange={(checked) => {
+                const next = { ...draft, use_custom_context_window: checked };
+                setDraft(next);
+                void updateNativeSettings({ use_custom_context_window: checked }).then(setNative);
+              }}
+            />
+          </label>
+        </div>
       </SettingCard>
       <SettingCard
         title={t("settings:runtime.rolloutBudget")}

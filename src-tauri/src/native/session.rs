@@ -12,8 +12,8 @@ use crate::app::network_settings::load_network_settings;
 use crate::app::shared::{new_id, now_sqlite, sqlite_pool, EXECUTION_TARGET_SSH};
 use crate::app::ssh::configs::fetch_ssh_config_record_by_id;
 use crate::db::models::{
-    AgentSessionExit, AgentSessionOutput, AgentSessionStarted, NativeContextUsage, NativeTextDelta,
-    NativeTurnState, StartNativeSessionInput,
+    AgentSessionExit, AgentSessionOutput, AgentSessionRecord, AgentSessionStarted,
+    NativeContextUsage, NativeTextDelta, NativeTurnState, StartNativeSessionInput,
 };
 use crate::engine::context::resolve_workspace_execution_context_with_pool;
 use crate::engine::UsageDelta;
@@ -471,13 +471,8 @@ fn configure_runner_limits(
     runner: &mut AgentRunner,
     model_context_tokens: Option<u32>,
 ) {
-    let configured_context = crate::native::settings::effective_context_window_tokens(app) as usize;
-    let context_tokens = model_context_tokens
-        .map(|value| value as usize)
-        .filter(|value| *value > 0)
-        .map(|value| value.min(configured_context))
-        .unwrap_or(configured_context)
-        .max(1);
+    let context_tokens =
+        crate::native::settings::session_context_window_tokens(app, model_context_tokens) as usize;
     runner.context_char_limit = context_tokens.saturating_mul(2);
     runner.context_window.set_token_limit(context_tokens);
     runner.tool_result_token_limit =
@@ -539,6 +534,23 @@ fn native_startup_banner(
     format!(
         "[内置 Agent] 启动会话 渠道={channel_name} 协议={protocol} model={model} effort={effort} thinking={thinking}"
     )
+}
+
+fn should_announce_session_startup(resume_session_id: Option<&str>) -> bool {
+    resume_session_id
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .is_none()
+}
+
+fn is_mcp_error_status(text: &str) -> bool {
+    let line = text.trim();
+    line.starts_with("[MCP]")
+        && (line.contains("无法连接")
+            || line.contains("握手失败")
+            || line.contains("读取配置失败")
+            || line.contains("没有成功连接")
+            || line.contains("已取消"))
 }
 
 pub struct NativeOneShotResult {
@@ -818,6 +830,86 @@ async fn insert_agent_session(
     Ok(id)
 }
 
+async fn enqueue_live_input(
+    manager: &Mutex<NativeAgentManager>,
+    session_record_id: &str,
+    input: &str,
+) -> Result<Option<NativeSessionInfo>, String> {
+    let trimmed = input.trim();
+    if trimmed.is_empty() {
+        return Err("输入内容不能为空".to_string());
+    }
+    let live = {
+        let manager = manager.lock().await;
+        manager
+            .get_session(session_record_id)
+            .map(|session| (session.info.clone(), session.followup_tx.clone()))
+    };
+    let Some((info, tx)) = live else {
+        return Ok(None);
+    };
+    tx.send(NativeFollowup::Input(trimmed.to_string()))
+        .await
+        .map_err(|_| "内置 Agent 会话已结束，无法发送输入".to_string())?;
+    Ok(Some(info))
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn reactivate_agent_session(
+    pool: &sqlx::SqlitePool,
+    session_id: &str,
+    workspace_id: &str,
+    ai_channel_id: &str,
+    working_dir: &str,
+    execution_target: &str,
+    ssh_config_id: Option<&str>,
+    target_host_label: Option<&str>,
+    kind: &str,
+) -> Result<String, String> {
+    let session = sqlx::query_as::<_, AgentSessionRecord>(
+        "SELECT * FROM agent_sessions WHERE id = $1 LIMIT 1",
+    )
+    .bind(session_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(|error| format!("读取会话失败: {error}"))?
+    .ok_or_else(|| format!("会话不存在: {session_id}"))?;
+    if session.workspace_id.as_deref() != Some(workspace_id) {
+        return Err("会话不属于当前工作区".to_string());
+    }
+    let now = now_sqlite();
+    sqlx::query(
+        r#"
+        UPDATE agent_sessions SET
+            ai_channel_id = $1,
+            workspace_id = $2,
+            working_dir = $3,
+            execution_target = $4,
+            ssh_config_id = $5,
+            target_host_label = $6,
+            session_kind = $7,
+            status = 'running',
+            started_at = $8,
+            ended_at = NULL,
+            exit_code = NULL
+        WHERE id = $9
+        "#,
+    )
+    .bind(ai_channel_id)
+    .bind(workspace_id)
+    .bind(working_dir)
+    .bind(execution_target)
+    .bind(ssh_config_id)
+    .bind(target_host_label)
+    .bind(kind)
+    .bind(&now)
+    .bind(session_id)
+    .execute(pool)
+    .await
+    .map_err(|error| format!("恢复会话失败: {error}"))?;
+    Ok(session_id.to_string())
+}
+
 async fn update_agent_session_status(
     pool: &sqlx::SqlitePool,
     session_record_id: &str,
@@ -931,15 +1023,24 @@ async fn start_native_with_manager(
     if workspace_id.is_empty() {
         return Err("必须选择工作区".to_string());
     }
-    if let Some(resume_id) = payload
+    let resume_id = payload
         .resume_session_id
         .as_deref()
         .map(str::trim)
         .filter(|item| !item.is_empty())
-    {
-        let manager = manager_state.lock().await;
-        if manager.get_session(resume_id).is_some() {
-            return Err(format!("会话 {resume_id} 已在运行"));
+        .map(ToOwned::to_owned);
+    if let Some(resume_id) = resume_id.as_deref() {
+        if let Some(info) =
+            enqueue_live_input(manager_state.as_ref(), resume_id, &payload.prompt).await?
+        {
+            let started = AgentSessionStarted {
+                profile_id: info.profile_id,
+                workspace_id: info.workspace_id.unwrap_or_else(|| workspace_id.clone()),
+                session_kind: info.session_kind,
+                session_record_id: info.session_record_id,
+            };
+            let _ = app.emit("native-session", &started);
+            return Ok(started);
         }
     }
 
@@ -982,27 +1083,44 @@ async fn start_native_with_manager(
         payload.prompt.clone()
     };
 
-    let session_record_id = insert_agent_session(
-        &pool,
-        &channel_id,
-        &workspace_id,
-        &run_cwd,
-        &execution_context.execution_target,
-        execution_context.ssh_config_id.as_deref(),
-        execution_context.target_host_label.as_deref(),
-        &kind,
-        payload.resume_session_id.as_deref(),
-        &payload.prompt,
-    )
-    .await?;
+    let session_record_id = if let Some(resume_id) = resume_id.as_deref() {
+        reactivate_agent_session(
+            &pool,
+            resume_id,
+            &workspace_id,
+            &channel_id,
+            &run_cwd,
+            &execution_context.execution_target,
+            execution_context.ssh_config_id.as_deref(),
+            execution_context.target_host_label.as_deref(),
+            &kind,
+        )
+        .await?
+    } else {
+        insert_agent_session(
+            &pool,
+            &channel_id,
+            &workspace_id,
+            &run_cwd,
+            &execution_context.execution_target,
+            execution_context.ssh_config_id.as_deref(),
+            execution_context.target_host_label.as_deref(),
+            &kind,
+            None,
+            &payload.prompt,
+        )
+        .await?
+    };
 
-    let _ = insert_session_event(
-        &pool,
-        &session_record_id,
-        "session_requested",
-        Some("内置 Agent 会话已创建"),
-    )
-    .await;
+    if resume_id.is_none() {
+        let _ = insert_session_event(
+            &pool,
+            &session_record_id,
+            "session_requested",
+            Some("内置 Agent 会话已创建"),
+        )
+        .await;
+    }
 
     run.client = run
         .client
@@ -1152,10 +1270,11 @@ async fn run_native_loop(
         workspace_id.clone(),
         session_record_id.clone(),
     );
+    let announce_startup = should_announce_session_startup(resume_session_id.as_deref());
     let permission_mode = crate::native::settings::effective_permission_mode(&app);
     runner.ctx.auto_approve_overwrite =
         permission_mode == crate::native::settings::PERMISSION_MODE_AUTO_EDIT;
-    if permission_mode == crate::native::settings::PERMISSION_MODE_FULL {
+    if announce_startup && permission_mode == crate::native::settings::PERMISSION_MODE_FULL {
         emit_native_line(
             &app,
             &session_record_id,
@@ -1166,7 +1285,7 @@ async fn run_native_loop(
         )
         .await;
     }
-    if permission_mode == crate::native::settings::PERMISSION_MODE_AUTO_EDIT {
+    if announce_startup && permission_mode == crate::native::settings::PERMISSION_MODE_AUTO_EDIT {
         emit_native_line(
             &app,
             &session_record_id,
@@ -1398,39 +1517,13 @@ async fn run_native_loop(
         if let Ok(pool) = sqlite_pool(&app).await {
             match load_transcript(&pool, resume_id).await {
                 Ok(Some(history)) => {
-                    let restored = history.len();
                     runner.messages.extend(history);
-                    emit_native_line(
-                        &app,
-                        &session_record_id,
-                        &profile_id,
-                        Some(&workspace_id),
-                        &kind,
-                        format!("[续聊] 已恢复上一会话 {restored} 条上下文（图片附件不恢复）"),
-                    )
-                    .await;
                 }
                 Ok(None) => {
-                    emit_native_line(
-                        &app,
-                        &session_record_id,
-                        &profile_id,
-                        Some(&workspace_id),
-                        &kind,
-                        "[续聊] 未找到可恢复的上下文，已按新对话开始".to_string(),
-                    )
-                    .await;
+                    eprintln!("[native] 未找到可恢复的上下文，已按新对话开始");
                 }
                 Err(error) => {
-                    emit_native_line(
-                        &app,
-                        &session_record_id,
-                        &profile_id,
-                        Some(&workspace_id),
-                        &kind,
-                        format!("[续聊] 恢复上下文失败：{error}"),
-                    )
-                    .await;
+                    eprintln!("[native] 恢复上下文失败：{error}");
                 }
             }
         }
@@ -1439,49 +1532,53 @@ async fn run_native_loop(
     runner.on_event = Some(event_tx);
     let (usage_tx, mut usage_rx) = mpsc::unbounded_channel();
     runner.on_usage = Some(usage_tx);
-    emit_native_line(
-        &app,
-        &session_record_id,
-        &profile_id,
-        Some(&workspace_id),
-        &kind,
-        native_startup_banner(
-            &run.channel_name,
-            &run.protocol,
-            &run.model,
-            run.effort.as_deref(),
-            run.thinking_enabled,
-        ),
-    )
-    .await;
-    if plan_mode {
+    if announce_startup {
         emit_native_line(
             &app,
             &session_record_id,
             &profile_id,
             Some(&workspace_id),
             &kind,
-            "[PLAN] 已进入计划模式：只读摸底，本轮结束后自动开始执行".to_string(),
+            native_startup_banner(
+                &run.channel_name,
+                &run.protocol,
+                &run.model,
+                run.effort.as_deref(),
+                run.thinking_enabled,
+            ),
         )
         .await;
-    }
-    match resolve_effective_mcp_servers(&app) {
-        Ok(servers) => {
+        if plan_mode {
             emit_native_line(
                 &app,
                 &session_record_id,
                 &profile_id,
                 Some(&workspace_id),
                 &kind,
-                if servers.is_empty() {
-                    "[MCP] 未启用服务器".to_string()
-                } else {
-                    format!("[MCP] 将连接 {} 个已启用服务器", servers.len())
-                },
+                "[PLAN] 已进入计划模式：只读摸底，本轮结束后自动开始执行".to_string(),
             )
             .await;
+        }
+    }
+    match resolve_effective_mcp_servers(&app) {
+        Ok(servers) => {
+            if announce_startup {
+                emit_native_line(
+                    &app,
+                    &session_record_id,
+                    &profile_id,
+                    Some(&workspace_id),
+                    &kind,
+                    if servers.is_empty() {
+                        "[MCP] 未启用服务器".to_string()
+                    } else {
+                        format!("[MCP] 将连接 {} 个已启用服务器", servers.len())
+                    },
+                )
+                .await;
+            }
             let ssh_config = runner.ctx.ssh.as_ref().map(|item| item.config.clone());
-            if ssh_config.is_some() {
+            if announce_startup && ssh_config.is_some() {
                 emit_native_line(
                     &app,
                     &session_record_id,
@@ -1495,15 +1592,17 @@ async fn run_native_loop(
             let connected =
                 connect_mcp_servers(&app, &servers, ssh_config.as_ref(), &runner.ctx.cancel).await;
             for warning in connected.warnings {
-                emit_native_line(
-                    &app,
-                    &session_record_id,
-                    &profile_id,
-                    Some(&workspace_id),
-                    &kind,
-                    warning,
-                )
-                .await;
+                if announce_startup || is_mcp_error_status(&warning) {
+                    emit_native_line(
+                        &app,
+                        &session_record_id,
+                        &profile_id,
+                        Some(&workspace_id),
+                        &kind,
+                        warning,
+                    )
+                    .await;
+                }
             }
             if connected.connected.is_empty() {
                 if !servers.is_empty() {
@@ -1517,7 +1616,7 @@ async fn run_native_loop(
                     )
                     .await;
                 }
-            } else {
+            } else if announce_startup {
                 emit_native_line(
                     &app,
                     &session_record_id,
@@ -1911,24 +2010,15 @@ pub async fn send_native_input(
     session_record_id: String,
     input: String,
 ) -> Result<(), String> {
-    let trimmed = input.trim();
-    if trimmed.is_empty() {
-        return Err("输入内容不能为空".to_string());
-    }
-    let tx = {
-        let manager = state.lock().await;
-        manager
-            .get_session(&session_record_id)
-            .map(|session| session.followup_tx.clone())
-    };
-    let Some(tx) = tx else {
+    if enqueue_live_input(state.inner().as_ref(), &session_record_id, &input)
+        .await?
+        .is_none()
+    {
         return Err(format!(
             "会话 {session_record_id} 当前没有运行中的内置 Agent"
         ));
-    };
-    tx.send(NativeFollowup::Input(trimmed.to_string()))
-        .await
-        .map_err(|_| "内置 Agent 会话已结束，无法发送输入".to_string())
+    }
+    Ok(())
 }
 
 #[tauri::command]
@@ -2008,8 +2098,9 @@ pub async fn resume_native_session(
 #[cfg(test)]
 mod tests {
     use super::{
-        format_native_diagnostics, native_startup_banner, next_loop_step, usable_native_plan_text,
-        NativeLoopAction, NativeLoopEvent,
+        format_native_diagnostics, is_mcp_error_status, native_startup_banner, next_loop_step,
+        should_announce_session_startup, usable_native_plan_text, NativeLoopAction,
+        NativeLoopEvent,
     };
     use crate::native::agent::compact::{BudgetSnapshot, ContextWindow};
     use crate::native::agent::r#loop::AgentDiagnosticsSnapshot;
@@ -2080,6 +2171,23 @@ mod tests {
             native_startup_banner("DeepSeek", "openai", "deepseek-v4-flash", None, false),
             "[内置 Agent] 启动会话 渠道=DeepSeek 协议=openai model=deepseek-v4-flash effort=默认 thinking=off"
         );
+    }
+
+    #[test]
+    fn resume_does_not_announce_startup_or_restore_banners() {
+        assert!(should_announce_session_startup(None));
+        assert!(should_announce_session_startup(Some("")));
+        assert!(should_announce_session_startup(Some("   ")));
+        assert!(!should_announce_session_startup(Some("sess-1")));
+        assert!(is_mcp_error_status(
+            "[MCP] 无法连接 files：timeout（已跳过，不回退到其他位置）"
+        ));
+        assert!(is_mcp_error_status("[MCP] 握手失败 git：boom（已跳过）"));
+        assert!(is_mcp_error_status("[MCP] 读取配置失败：bad json"));
+        assert!(is_mcp_error_status("[MCP] 没有成功连接的服务器"));
+        assert!(!is_mcp_error_status("[MCP] 未启用服务器"));
+        assert!(!is_mcp_error_status("[MCP] 已连接：a"));
+        assert!(!is_mcp_error_status("[续聊] 已恢复上一会话 2 条上下文"));
     }
 
     #[test]
@@ -2233,5 +2341,211 @@ mod tests {
             Some("一二三四五六七八九十一二三四五六七八九十一二三四五六七八九十")
         );
         assert_eq!(resume_title, source_title);
+    }
+
+    #[tokio::test]
+    async fn enqueue_live_input_sends_followup_without_reactivate() {
+        use crate::native::manager::{NativeAgentManager, NativeFollowup, NativeLiveSession};
+        use crate::native::tools::CancelFlag;
+        use std::collections::VecDeque;
+        use std::sync::atomic::AtomicBool;
+        use std::sync::Arc;
+
+        let mut manager = NativeAgentManager::new();
+        let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+        manager.add_session(NativeLiveSession {
+            info: crate::native::manager::NativeSessionInfo {
+                profile_id: String::new(),
+                channel_id: "ch-1".to_string(),
+                workspace_id: Some("ws-1".to_string()),
+                session_kind: "execution".to_string(),
+                session_record_id: "sess-1".to_string(),
+            },
+            cancel: CancelFlag::new(),
+            followup_tx: tx,
+            join: tokio::spawn(async {}),
+            allow_all_high_risk: Arc::new(AtomicBool::new(false)),
+            pending_permission: VecDeque::new(),
+            pending_question: VecDeque::new(),
+        });
+        let manager = tokio::sync::Mutex::new(manager);
+
+        let info = super::enqueue_live_input(&manager, "sess-1", "  下一条  ")
+            .await
+            .expect("enqueue")
+            .expect("live");
+        assert_eq!(info.session_record_id, "sess-1");
+        match rx.recv().await {
+            Some(NativeFollowup::Input(text)) => assert_eq!(text, "下一条"),
+            Some(NativeFollowup::Finish) => panic!("unexpected finish"),
+            None => panic!("channel closed"),
+        }
+        assert!(super::enqueue_live_input(&manager, "missing", "x")
+            .await
+            .expect("missing")
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn reactivate_session_reuses_row_and_preserves_identity() {
+        let pool = crate::db::test_support::setup_migrated_pool().await;
+        sqlx::query(
+            "INSERT INTO workspaces (id, name, workspace_type) VALUES ('ws-t', 'ws', 'local'), ('ws-other', 'other', 'local')",
+        )
+        .execute(&pool)
+        .await
+        .expect("ws");
+        sqlx::query(
+            "INSERT INTO ai_channels (id, name, protocol, base_url) VALUES ('ch-t', 'ch', 'openai', 'http://x'), ('ch-new', 'ch2', 'openai', 'http://y')",
+        )
+        .execute(&pool)
+        .await
+        .expect("ch");
+        sqlx::query(
+            r#"
+            INSERT INTO agent_sessions (
+                id, ai_channel_id, workspace_id, working_dir, execution_target,
+                session_kind, status, started_at, ended_at, exit_code, created_at,
+                title, pinned, input_tokens, output_tokens, total_tokens
+            ) VALUES (
+                'sess-keep', 'ch-t', 'ws-t', '/old', 'local',
+                'execution', 'exited', '2026-01-01 00:00:00', '2026-01-02 00:00:00', 0,
+                '2026-01-01 00:00:00', '原标题', 1, 11, 22, 33
+            )
+            "#,
+        )
+        .execute(&pool)
+        .await
+        .expect("seed");
+
+        let mismatched = super::reactivate_agent_session(
+            &pool,
+            "sess-keep",
+            "ws-other",
+            "ch-new",
+            "/new",
+            "local",
+            None,
+            None,
+            "execution",
+        )
+        .await;
+        assert!(mismatched
+            .expect_err("workspace mismatch")
+            .contains("会话不属于当前工作区"));
+
+        let missing = super::reactivate_agent_session(
+            &pool,
+            "missing",
+            "ws-t",
+            "ch-new",
+            "/new",
+            "local",
+            None,
+            None,
+            "execution",
+        )
+        .await;
+        assert!(missing
+            .expect_err("missing")
+            .contains("会话不存在: missing"));
+
+        let reactivated = super::reactivate_agent_session(
+            &pool,
+            "sess-keep",
+            "ws-t",
+            "ch-new",
+            "/new",
+            "local",
+            None,
+            None,
+            "plan",
+        )
+        .await
+        .expect("reactivate");
+        assert_eq!(reactivated, "sess-keep");
+
+        let row = sqlx::query_as::<_, crate::db::models::AgentSessionRecord>(
+            "SELECT * FROM agent_sessions WHERE id = 'sess-keep'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("row");
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(1) FROM agent_sessions")
+            .fetch_one(&pool)
+            .await
+            .expect("count");
+        assert_eq!(count, 1);
+        assert_eq!(row.id, "sess-keep");
+        assert_eq!(row.title.as_deref(), Some("原标题"));
+        assert_eq!(row.pinned, 1);
+        assert_eq!(row.created_at, "2026-01-01 00:00:00");
+        assert_eq!(row.input_tokens, Some(11));
+        assert_eq!(row.output_tokens, Some(22));
+        assert_eq!(row.total_tokens, Some(33));
+        assert_eq!(row.status, "running");
+        assert_eq!(row.ai_channel_id.as_deref(), Some("ch-new"));
+        assert_eq!(row.working_dir.as_deref(), Some("/new"));
+        assert_eq!(row.session_kind, "plan");
+        assert!(row.ended_at.is_none());
+        assert!(row.exit_code.is_none());
+        assert_ne!(row.started_at, "2026-01-01 00:00:00");
+    }
+
+    #[tokio::test]
+    async fn reactivate_stale_running_session_keeps_same_id() {
+        let pool = crate::db::test_support::setup_migrated_pool().await;
+        sqlx::query(
+            "INSERT INTO workspaces (id, name, workspace_type) VALUES ('ws-t', 'ws', 'local')",
+        )
+        .execute(&pool)
+        .await
+        .expect("ws");
+        sqlx::query(
+            "INSERT INTO ai_channels (id, name, protocol, base_url) VALUES ('ch-t', 'ch', 'openai', 'http://x')",
+        )
+        .execute(&pool)
+        .await
+        .expect("ch");
+        sqlx::query(
+            r#"
+            INSERT INTO agent_sessions (
+                id, ai_channel_id, workspace_id, working_dir, execution_target,
+                session_kind, status, started_at, created_at, title
+            ) VALUES (
+                'sess-stale', 'ch-t', 'ws-t', '/old', 'local',
+                'execution', 'running', '2026-01-01 00:00:00', '2026-01-01 00:00:00', '卡住'
+            )
+            "#,
+        )
+        .execute(&pool)
+        .await
+        .expect("seed");
+
+        let reactivated = super::reactivate_agent_session(
+            &pool,
+            "sess-stale",
+            "ws-t",
+            "ch-t",
+            "/old",
+            "local",
+            None,
+            None,
+            "execution",
+        )
+        .await
+        .expect("reactivate stale");
+        assert_eq!(reactivated, "sess-stale");
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(1) FROM agent_sessions")
+            .fetch_one(&pool)
+            .await
+            .expect("count");
+        assert_eq!(count, 1);
+        let status: String =
+            sqlx::query_scalar("SELECT status FROM agent_sessions WHERE id = 'sess-stale'")
+                .fetch_one(&pool)
+                .await
+                .expect("status");
+        assert_eq!(status, "running");
     }
 }

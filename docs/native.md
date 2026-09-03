@@ -9,7 +9,7 @@ P4 把进程内编程 Agent 接到渠道 + 工作区外壳。数据流仍是 `Re
 | `src-tauri/src/native/model/` | 三协议 HTTP 客户端、SSE、usage、call log |
 | `src-tauri/src/native/tools/` | 本地 / SSH 工具、MCP、权限、hooks |
 | `src-tauri/src/native/agent/` | 主循环、压缩、截断、子 Agent |
-| `src-tauri/src/native/session.rs` | 启动 / 停止 / 续聊 / 权限 / 计划提问 |
+| `src-tauri/src/native/session.rs` | 启动 / 停止 / 原位继续 / 权限 / 计划提问 |
 | `src-tauri/src/native/manager.rs` | 运行中会话（同一工作区可多个 live） |
 | `src-tauri/src/native/prompt/` | identity + 环境 / Git / 项目指令 |
 | `src-tauri/src/app/workspaces.rs` | 工作区 CRUD 与健康检查 |
@@ -17,11 +17,11 @@ P4 把进程内编程 Agent 接到渠道 + 工作区外壳。数据流仍是 `Re
 
 ## 会话生命周期
 
-1. 同一工作区可以同时有多个 live session；同一 `session_record_id` 不能重复拉起。删除工作区仍要求该工作区没有 live。
+1. 同一工作区可以同时有多个 live session。`agent_sessions` 是可多次激活的逻辑会话：`resume` / `restart` / 会话内继续发送都复用同一 `session_record_id`，不为已有会话插入新行。删除工作区仍要求该工作区没有 live。
 2. 解析工作区执行上下文（本地目录或 SSH 远端路径）。
 3. 读取渠道，允许本次覆盖 model / effort / system_prompt。
 4. 建 `ModelClient`（渠道密钥 + 网络设置 + SQLite call log）。
-5. 插入 `agent_sessions`（`status=running`），发出 `native-session`。
+5. 无 `resume_session_id` 时插入 `agent_sessions`（`status=running`），并写出一次启动状态（渠道 banner / 权限说明 / MCP 状态）。有 `resume_session_id` 时：runtime 仍在则把 prompt 投到同一 live 的 `followup_tx`；runtime 已不在则校验工作区后原位重激活（刷新 `started_at` / 渠道 / 执行上下文，清空 `ended_at` / `exit_code`，保留 ID、标题、置顶、`created_at`、累计 token、旧事件和 checkpoint），并静默从同一 ID 的 transcript 恢复。冷启动不把「续聊 / 已恢复」或重复启动状态写进聊天；MCP 连接失败仍写出。发出 `native-session`。
 6. 组装系统提示：identity → 子 Agent 策略 → 环境 → Git → 全局模板 → `AGENTS.md` / `CLAUDE.md` → skills。
 7. 若工作区是 git 仓：`create_checkpoint(kind=session_start)`，失败只打日志。
 8. `Write` / `Edit` / `ApplyPatch` 成功后异步 `create_checkpoint(kind=after_tool_call)`，同一会话同时只允许一个在途打点。
@@ -31,7 +31,7 @@ P4 把进程内编程 Agent 接到渠道 + 工作区外壳。数据流仍是 `Re
 
 权限模式（`permission_mode`）三档：`confirm` 变更前确认；`auto_edit` 自动编辑（只放行 `Overwrite`，删除 / 推送 / 强制 Git / 不透明命令 / MCP 仍弹确认）；`full` 完全访问（`allow_all_high_risk=true`）。旧文件的 `confirm_high_risk: false` 读成 `full`。
 
-`send_native_input` / `finish_native_input` 按 `session_record_id` 寻址。续聊若源会话仍在跑则拒绝。
+`send_native_input` / `finish_native_input` 按 `session_record_id` 寻址。`resume_native_session` 若源会话仍在跑，则向同一 live 投递输入；进程不在则原位静默恢复 transcript。同一会话继续发送不是单独的「续聊」产品流程。
 
 ## 命令
 
@@ -83,6 +83,6 @@ MCP 连接失败只写警告行，不中断会话。SSH 工作区在远端拉起
 - 高风险写文件弹出确认：允许一次、拒绝一次
 - `git_checkpoints` 出现 `session_start` 与 `after_tool_call`
 - 最终有汇报文本
-- `stop_native_session` 后 `resume_native_session` 能续聊
+- `stop_native_session` 后在同一会话再发送，能静默恢复 transcript 并继续
 
 临时脚本与夹具只放 `/tmp`，不进仓库。本阶段无会话 UI（P5）。
