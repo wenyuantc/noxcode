@@ -32,7 +32,7 @@ flowchart LR
 
 | 路径 | 职责 |
 | --- | --- |
-| [`src-tauri/src/git/mod.rs`](../src-tauri/src/git/mod.rs) | 17 个 Tauri 命令、`workspace_id` → `GitTarget` |
+| [`src-tauri/src/git/mod.rs`](../src-tauri/src/git/mod.rs) | 18 个 Tauri 命令、`workspace_id` → `GitTarget`、运行会话拦截与活动审计 |
 | [`runner.rs`](../src-tauri/src/git/runner.rs) | `GitTarget` / `IndexMode` / `ScratchIndex` / 守卫 / per-repo 锁 |
 | [`repo.rs`](../src-tauri/src/git/repo.rs) | rev-parse 四参数、版本、中间态 |
 | [`status.rs`](../src-tauri/src/git/status.rs) | `status --porcelain=v2 --branch -z` |
@@ -56,6 +56,8 @@ B / C 类操作走 per-repo 锁，key 为 `--absolute-git-dir`（SSH 前缀 `ssh
 
 SSH 命令是 `sh -c`（非 login），避免 profile 污染 `-z` 输出。临时索引在远端放 `$HOME/.noxcode/tmp-index/`，显式 `cleanup()`，`Drop` 补发 `rm -f`。
 
+`ScratchIndex::from_head` 已实现：先用 `read-tree --empty` 初始化临时索引；HEAD 存在时再 `read-tree HEAD`，unborn HEAD 则保持空索引。它与复制用户 index 的路径一样不触碰真实暂存区。
+
 ## checkpoint
 
 ref：`refs/noxcode/checkpoints/<session_id>/<seq>`。author / committer 固定 `noxcode <noxcode@local>`。首次打点写入 `log.excludeDecoration=refs/noxcode/`。
@@ -69,7 +71,11 @@ ref：`refs/noxcode/checkpoints/<session_id>/<seq>`。author / committer 固定 
 3. 自动打 `auto_pre_restore` 检查点，失败则中止
 4. `restore --source=<oid> --worktree`（不加 `--staged`，不动 HEAD）；勾选删除时先 `check-ignore --no-index`，gitignore 内永不删
 
-打开工作区（`get_git_repo_info`）时清扫表中不存在的孤儿 ref。会话删除走 `delete_checkpoints_for_session`（P4.4 接线）。
+预览和回滚都会检查 `NativeAgentManager`：同一工作区只要有处于 `working` 状态的会话就拦截，等待本轮结束或停止后才允许执行。
+
+打开工作区（`get_git_repo_info`）时清扫表中不存在的孤儿 ref，并按 `checkpoint_retention_days` 清理过期检查点。保留期默认 7 天，`0` 表示不清理；只清理已经结束会话中超过保留期的 `after_tool_call`，不动 `session_start`、`manual` 或 `auto_pre_restore`。会话删除走 `delete_checkpoints_for_session`（P4.4 接线）。
+
+回滚成功 / 失败分别写 `git_checkpoint_restore` / `git_checkpoint_restore_failed`，清除全部写 `git_checkpoints_cleared` 到 `activity_logs`，供恢复历史和审计使用。
 
 ## Tauri 命令
 
@@ -87,20 +93,16 @@ ref：`refs/noxcode/checkpoints/<session_id>/<seq>`。author / committer 固定 
 | `list_git_files` | `ls-files --cached --others --exclude-standard -z`，供 ⌘K / `@` |
 | `create_git_checkpoint` / `list_git_checkpoints` | 打点；列表带 `ref_valid` |
 | `preview_git_checkpoint_restore` / `restore_git_checkpoint` | 预览 / 回滚 |
-| `clear_git_checkpoints` | 清本仓库全部检查点 |
+| `clear_git_checkpoints` | 清本仓库全部检查点并写活动审计 |
 
-前端对应函数在 `backend.ts`：`getGitRepoInfo`、`getGitStatus`、`getGitFileDiff`、`getGitNumstat`、`stageGitPaths`、`unstageGitPaths`、`restoreGitPaths`、`commitGitChanges`、`pushGitBranch`、`listGitBranches`、`createGitBranch`、`checkoutGitBranch`、`listGitFiles`、`createGitCheckpoint`、`listGitCheckpoints`、`previewGitCheckpointRestore`、`restoreGitCheckpoint`、`clearGitCheckpoints`。
+前端对应函数在 `backend.ts`：`getGitRepoInfo`、`getGitStatus`、`getGitFileDiff`、`getGitNumstat`、`stageGitPaths`、`unstageGitPaths`、`restoreGitPaths`、`commitGitChanges`、`pushGitBranch`、`listGitBranches`、`createGitBranch`、`checkoutGitBranch`、`listGitFiles`、`createGitCheckpoint`、`listGitCheckpoints`、`previewGitCheckpointRestore`、`restoreGitCheckpoint`、`clearGitCheckpoints`；恢复历史另通过 `listActivityLogs` 读取。
 
 ## 测试
 
 `cargo test --manifest-path src-tauri/Cargo.toml`。本地 temp 仓库与进程内 russh `real_shell` 各跑一遍。
 
-覆盖：status / stage / commit / push、index 字节级不变、空格 / 中文 / 换行文件名、rename numstat、回滚三类影响面、gitignore 不删、merge 中间态拒绝、ref 失效、只读部分失败、删会话后 gc 无残留。
+覆盖：status / stage / commit / push、index 字节级不变、`ScratchIndex::from_head` 的 HEAD / unborn 初始化、空格 / 中文 / 换行文件名、rename numstat、回滚三类影响面、gitignore 不删、merge 中间态拒绝、ref 失效、过期 `after_tool_call` 清理、只读部分失败、删会话后 gc 无残留。
 
 ## Native 自动打点（P4.4）
 
-`native/session.rs` 在会话开始时尝试 `create_checkpoint(kind=session_start)`。`Write` / `Edit` / `ApplyPatch` 成功后由 `ToolCtx.on_mutation` 异步打 `after_tool_call`，同一会话同时只允许一个在途打点；失败只警告。`delete_agent_session` 先 `delete_checkpoints_for_session`，`delete_workspace` 先 `clear_workspace_checkpoints`，避免 CASCADE 删行后 `refs/noxcode/*` 泄漏。
-
-## 暂不做
-
-- `ScratchIndex::from_head`（本阶段无 AI 触发的选中路径提交）
+`native/session.rs` 在会话开始时尝试 `create_checkpoint(kind=session_start)`。`auto_checkpoint_after_tool_call=true`（默认）时，`Write` / `Edit` / `ApplyPatch` 成功后由 `ToolCtx.on_mutation` 异步打 `after_tool_call`，同一会话同时只允许一个在途打点；关闭该设置只禁用工具后的自动打点，失败只警告。`delete_agent_session` 先 `delete_checkpoints_for_session`，`delete_workspace` 先 `clear_workspace_checkpoints`，避免 CASCADE 删行后 `refs/noxcode/*` 泄漏。

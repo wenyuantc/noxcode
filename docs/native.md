@@ -14,6 +14,7 @@ P4 把进程内编程 Agent 接到渠道 + 工作区外壳。数据流仍是 `Re
 | `src-tauri/src/native/prompt/` | identity + 环境 / Git / 项目指令 |
 | `src-tauri/src/app/workspaces.rs` | 工作区 CRUD 与健康检查 |
 | `src-tauri/src/app/sessions.rs` | 历史会话列表、日志、续聊判定、删除 |
+| `src-tauri/src/app/notifications.rs` | 主窗口未聚焦时的桌面通知 |
 
 ## 会话生命周期
 
@@ -24,8 +25,9 @@ P4 把进程内编程 Agent 接到渠道 + 工作区外壳。数据流仍是 `Re
 5. 无 `resume_session_id` 时插入 `agent_sessions`（`status=running`），并写出一次启动状态（渠道 banner / 权限说明 / MCP 状态）。有 `resume_session_id` 时：runtime 仍在则把 prompt 投到同一 live 的 `followup_tx`；runtime 已不在则校验工作区后原位重激活（刷新 `started_at` / 渠道 / 执行上下文，清空 `ended_at` / `exit_code`，保留 ID、标题、置顶、`created_at`、累计 token、旧事件和 checkpoint），并静默从同一 ID 的 transcript 恢复。冷启动不把「续聊 / 已恢复」或重复启动状态写进聊天；MCP 连接失败仍写出。发出 `native-session`。
 6. 组装系统提示：identity → 子 Agent 策略 → 环境 → Git → 全局模板 → `AGENTS.md` / `CLAUDE.md` → skills。
 7. 若工作区是 git 仓：`create_checkpoint(kind=session_start)`，失败只打日志。
-8. `Write` / `Edit` / `ApplyPatch` 成功后异步 `create_checkpoint(kind=after_tool_call)`，同一会话同时只允许一个在途打点。
-9. `run_native_loop` 转发 stdout / delta / context usage / 权限 / 计划提问；退出时写 tokens、status、`native-exit`，并从 manager 移除。托盘 / 进程退出走 `shutdown_all_sessions`：拒绝待确认、cancel、`Finish`、await join，再关 SSH pool。
+8. `auto_checkpoint_after_tool_call=true` 时，`Write` / `Edit` / `ApplyPatch` 成功后异步 `create_checkpoint(kind=after_tool_call)`，同一会话同时只允许一个在途打点；关闭开关不影响会话开始或回滚前检查点。
+9. 按当前 `workspace_id` 筛选并连接 `enabled=true` 且 `scope=all` 或命中 `scope=workspaces` / `workspace_ids` 的 MCP server。
+10. `run_native_loop` 转发 stdout / delta / context usage / 权限 / 计划提问；退出时写 tokens、status、`native-exit`，并从 manager 移除。主窗口未聚焦且 `desktop_notifications=true` 时，会话结束 / 失败、权限确认和计划问题会发桌面通知。托盘 / 进程退出走 `shutdown_all_sessions`：拒绝待确认、cancel、`Finish`、await join，再关 SSH pool。
 
 `session_kind` 只有 `execution` 与 `plan`。`plan_mode=true` 时先只读规划，本轮结束后自动放开写工具并继续实施。计划模式由启动参数决定，不写入 `native-settings.json`。
 
@@ -46,11 +48,17 @@ P4 把进程内编程 Agent 接到渠道 + 工作区外壳。数据流仍是 `Re
 
 保存前会去掉 system、图片，并清洗孤立 tool pair。子 Agent 不写父会话 transcript。硬中断时至少能恢复当前用户任务和已完成的模型 / 工具轮次。
 
+## 工具与 MCP 子进程环境
+
+会话启动时把 `network-settings.json` 转成代理 / CA 环境变量：代理写入大小写 `HTTP_PROXY` / `HTTPS_PROXY`，不代理地址写入 `NO_PROXY`，自定义 CA 写入 `SSL_CERT_FILE` / `NODE_EXTRA_CA_CERTS`。本地 Bash 和本地 MCP 子进程会注入这些变量；MCP 自身的 `env` 随后应用。SSH 远端 Bash 与远端 MCP 不注入本机网络设置。
+
+子 Agent 克隆父 Agent 的 `ToolCtx.extra_env`，因此本地 Bash 的网络环境在子 Agent 中保持一致。
+
 ## 命令
 
 会话：`start_native_session`、`stop_native_session`、`stop_native`、`restart_native_session`、`resume_native_session`、`send_native_input`、`finish_native_input`、`resolve_native_tool_permission`、`answer_native_plan_question`。
 
-工作区 / 历史：`list/create/update/delete_workspace`、`check_workspace_health`、`list_agent_sessions`、`get_agent_session_log_lines`、`prepare_agent_session_resume`、`set_agent_session_pinned`、`delete_agent_session`。
+工作区 / 历史：`list/create/update/delete_workspace`、`check_workspace_health`、`list_agent_sessions`、`get_agent_session_log_lines`、`prepare_agent_session_resume`、`set_agent_session_pinned`、`delete_agent_session`、`list_activity_logs`。
 
 设置：`get/update_native_settings`、`list_native_global_skills`、`open_native_skills_dir`、`list/create/update/delete_native_subagent`、`get/update/reset_mcp_servers`、`export_mcp_servers_snippet`、`list/get_native_api_call_log`。
 
@@ -75,9 +83,9 @@ P4 把进程内编程 Agent 接到渠道 + 工作区外壳。数据流仍是 `Re
 
 都在 `$APPCONFIG`：
 
-- `native-settings.json`：轮次、`permission_mode`、权限超时、子 Agent 策略、`global_prompt_template`
+- `native-settings.json`：轮次、`permission_mode`、权限超时、子 Agent 策略、`global_prompt_template`、`auto_checkpoint_after_tool_call`（默认 `true`）、`checkpoint_retention_days`（默认 7，`0` 不清理）、`desktop_notifications`（默认 `true`）
 - `native-subagents.json`：自定义子智能体（`scope=all|workspaces`）
-- `mcp-servers.json`：全局 MCP；会话只连接 `enabled=true` 的服务器（工作区绑定留 v2）
+- `mcp-servers.json`：MCP server 支持 `scope=all|workspaces` 与 `workspace_ids`；会话只连接已启用且匹配当前工作区的服务器
 - `native-skills/`：全局技能；工作区另读 `.agents/skills` 与 `.claude/skills`
 
 MCP 连接失败只写警告行，不中断会话。SSH 工作区在远端拉起 MCP，失败不回退本机。
@@ -98,4 +106,4 @@ MCP 连接失败只写警告行，不中断会话。SSH 工作区在远端拉起
 - 最终有汇报文本
 - `stop_native_session` 后在同一会话再发送，能静默恢复 transcript 并继续
 
-临时脚本与夹具只放 `/tmp`，不进仓库。本阶段无会话 UI（P5）。
+临时脚本与夹具只放 `/tmp`，不进仓库。会话 UI 与设置入口见 [`frontend.md`](frontend.md)。

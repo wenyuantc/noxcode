@@ -62,17 +62,21 @@ Composer / 编辑重发 / 重试走 `submitSessionPrompt`：有选中会话则 `
 
 工作区选择器五条路径：搜索切换、打开文件夹（`plugin-dialog` `open({directory:true})` 后 `createWorkspace` local）、远程连接（选或建 SSH 配置 + 远端路径）、不在项目中工作（`ensureScratchWorkspace` → `$APPCONFIG/scratch` + 「临时工作区」）。打开历史会话时，若该会话有 `workspace_id` 且与当前不同，则把 `activeWorkspaceId` 同步到该工作区。
 
+侧栏工作区行悬停显示操作菜单，可重命名或删除。删除先弹不可撤销确认；后端发现该工作区仍有运行中的会话时拒绝删除并把错误展示给用户。
+
 分支选择器：`listGitBranches` 搜索切换已有分支（`checkoutGitBranch` / `git switch`），以及「创建并检出」。点外或 Escape 关闭菜单。
 
 命令面板：`Dialog` + 键盘导航，三类过滤（操作 / 最近会话 / `list_git_files`）。
 
 ## 设置
 
-左导航三组：基础设置（general / appearance / channels / ssh）、Agent 能力（runtime / subagents / mcp / skills / hooks）、数据与统计（usage / database / about）。开关即时生效，文本输入配「保存」。渠道删除时若有 live session 则后端拒绝，错误原文展示。子智能体是列表 + 弹窗 CRUD，可配模型、工具与工作区作用域。MCP 为卡片列表，支持备注、删除、Playwright 预设和导出片段。数据库维护展示路径与迁移版本、备份范围（SQL 本体 vs 配置目录/密钥环），并提供导出 / 导入 SQL 与打开数据库目录。关于页用 `getVersion()` 显示真实版本，可检查 / 下载 / 重启更新；开发模式会提示无法检查。`AppShell` 顶部挂启动更新横幅（正式包才出现），跳转到 `/settings/about`。
+左导航三组：基础设置（general / appearance / channels / ssh）、Agent 能力（runtime / subagents / mcp / skills / hooks）、数据与统计（usage / database / about）。开关即时生效，文本输入配「保存」。通用设置提供桌面通知开关；Native runtime 提供工具后自动 checkpoint 开关和保留天数（`0` 不清理）；SSH 编辑弹窗提供 KEX / Host Key / Cipher / MAC 高级算法区，以及旧服务器预设 / 恢复默认；MCP 卡片可在全部工作区和指定工作区之间切换并勾选绑定工作区。
+
+渠道删除时若有 live session 则后端拒绝，错误原文展示。子智能体是列表 + 弹窗 CRUD，可配模型、工具与工作区作用域。MCP 还支持备注、删除、Playwright 预设和导出片段。数据库维护展示路径与迁移版本、备份范围（SQL 本体 vs 配置目录/密钥环），并提供导出 / 导入 SQL 与打开数据库目录。关于页用 `getVersion()` 显示真实版本，可检查 / 下载 / 重启更新；开发模式会提示无法检查。`AppShell` 顶部挂启动更新横幅（正式包才出现），跳转到 `/settings/about`。
 
 ## Git 抽屉
 
-会话页 `⌘⇧G` / SessionHeader 打开。变更 Tab：已暂存 / 未暂存 / 未跟踪，勾选后暂存、取消暂存、丢弃，`DiffView` 按行着色，提交 + 推送。检查点 Tab：`ref_valid=false` 标失效；回滚先 `previewGitCheckpointRestore`，展示将覆盖 / 将重建 / 不会自动删除，删除新建文件默认不勾，确认按钮危险色且非默认焦点。gitignore 文件后端永不删。
+会话页 `⌘⇧G` / SessionHeader 打开。变更 Tab：已暂存 / 未暂存 / 未跟踪，勾选后暂存、取消暂存、丢弃，`DiffView` 按行着色，提交 + 推送。检查点 Tab：`ref_valid=false` 标失效；可经确认清除本仓库全部 checkpoint，并在可折叠的「回滚记录」中查看回滚成功 / 失败审计。回滚先 `previewGitCheckpointRestore`，展示将覆盖 / 将重建 / 不会自动删除；同工作区有 `working` 会话时预览和执行都会被后端拦截。删除新建文件默认不勾，确认按钮危险色且非默认焦点，gitignore 文件后端永不删。
 
 ## 快捷键
 

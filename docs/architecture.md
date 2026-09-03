@@ -50,14 +50,15 @@ flowchart LR
 | 层 | 现状 | 目标 |
 | --- | --- | --- |
 | 前端 `src/` | P5 单主界面 + 全屏设置 + Git 抽屉 + API 日志，见 [`frontend.md`](frontend.md) | 保持；斜杠命令完整版 / Markdown 富渲染留 backlog |
-| `db/` | version 5（8 张表 + `agent_sessions.title` + `pinned` + `context_usage_json`，已去掉 `agent_profiles`） | 只追加连续迁移 `6..N` |
+| `db/` | version 7（9 张业务表；version 6 增 `ssh_configs.algorithms_json`，version 7 增 `activity_logs`，已去掉 `agent_profiles`） | 只追加连续迁移 `8..N` |
 | `app/database` + `app/shared` | 健康检查 / 备份 / 恢复 | 保持 |
-| `app/ssh/` + `app/secret_store` | P2 + P5 设置页 / 信任对话框，见 [`ssh.md`](ssh.md) | 保持 |
+| `app/activity_logs` + `app/notifications` | checkpoint 活动审计 + 主窗口失焦桌面通知 | 保持 |
+| `app/ssh/` + `app/secret_store` | P2 + P5 设置页 / 信任对话框 / 高级算法，见 [`ssh.md`](ssh.md) | 保持 |
 | `app/workspaces` | CRUD + 健康检查 + scratch 工作区 | 保持 |
 | `app/sessions` | 历史列表 / 续聊判定 / 删会话清 checkpoint | 保持 |
-| `git/` | P2.5 + P4.4 自动打点 + P5 Git 抽屉 + 分支切换 | 保持 |
+| `git/` | P2.5 + P4.4 可配置自动打点 / 保留清理 + P5 Git 抽屉 / 恢复审计 + 分支切换 | 保持 |
 | `engine/` | `ExecutionContext`（local \| ssh） | 继续用 |
-| `native/` | P4 运行时 + P5 会话流 / 设置页 | 保持 |
+| `native/` | P4 运行时 + P5 会话流 / 设置页 + MCP 工作区作用域 | 保持 |
 
 策略是「保留内核 + 替换外壳」：`native/model`、`native/tools`、`native/agent` 从参考实现近乎原样搬运；`native/session.rs` / `manager.rs` 重写（按渠道 + 模型启动，去掉档案 / task / run_queue / 任务自动化）；SSH 与 Git 按本仓库决策新写，不搬系统 `ssh` 子进程和 Node git bridge。
 
@@ -76,11 +77,13 @@ flowchart LR
 
 | 命令 | 模块 |
 | --- | --- |
+| `list_activity_logs` | `app::activity_logs` |
 | `health_check` / `backup_database` / `restore_database` / `open_database_folder` | `app::database` |
 | `list_ssh_configs` / `get_ssh_config` / `create_ssh_config` / `update_ssh_config` / `delete_ssh_config` | `app::ssh` |
 | `probe_ssh_password_auth` / `test_ssh_connection` | `app::ssh` |
 | `list_ssh_config_file_hosts` / `import_ssh_config_file_host` | `app::ssh` |
 | `resolve_ssh_host_trust` | `app::ssh`（`ask` 模式确认回传） |
+| `list_ssh_supported_algorithms` | `app::ssh::algorithms` |
 | `get_git_repo_info` / `get_git_status` / `get_git_file_diff` / `get_git_numstat` | `git` |
 | `stage_git_paths` / `unstage_git_paths` / `restore_git_paths` | `git` |
 | `commit_git_changes` / `push_git_branch` / `list_git_branches` / `create_git_branch` / `checkout_git_branch` / `list_git_files` | `git` |
@@ -111,6 +114,7 @@ flowchart LR
 - 连接复用：`SshPool` 按 `ssh_config_id` 串行持有一条连接 + keepalive，替代 OpenSSH ControlMaster。
 - known_hosts 四态：`accept-new` / `strict` / `ask` / `off`。已知匹配放行；新主机按策略；`KeyChanged` 在前三态一律拒绝并告 MITM。
 - `~/.ssh/config` 用 `ssh2-config` 导入 Host 别名。第一版不支持 `ProxyJump`，导入时必须明示，不能静默忽略。
+- 配置可持久化 KEX / Host Key / Cipher / MAC 列表；空分类使用 `russh` 默认，未知算法严格拒绝。设置页提供旧服务器预设与恢复默认。
 - `exec` 仍经远端 shell，必须保留 `shell_escape_single_quoted`。返回 `SshCommandOutput`，不是 `std::process::Output`。
 
 ## Git
@@ -125,7 +129,7 @@ flowchart LR
 | 用户在 GitPanel 点暂存 | 写真实 `.git/index`（这是用户意图） |
 | checkpoint ref | `refs/noxcode/checkpoints/<session_id>/<seq>`，`git log` / `git branch` 看不见 |
 
-`IndexMode`（ReadOnly / UserIndex / Scratch）是 `git()` 的必填参数。回滚是破坏性操作：前置校验 → 影响面预览 → 自动 pre-restore checkpoint → `restore --worktree` + 可选删除 checkpoint 之后新建的未跟踪文件。细节以 `plan.md` §8 为准。
+`IndexMode`（ReadOnly / UserIndex / Scratch）是 `git()` 的必填参数。回滚是破坏性操作：前置校验 → 影响面预览 → 自动 pre-restore checkpoint → `restore --worktree` + 可选删除 checkpoint 之后新建的未跟踪文件；同工作区有 `working` 会话时预览 / 回滚都拦截。工具后自动打点可关闭，过期清理默认保留 7 天且只处理已结束会话的 `after_tool_call`，回滚 / 清除写入 `activity_logs`。细节见 [`git.md`](git.md)。
 
 ## 模型渠道
 
@@ -133,7 +137,7 @@ flowchart LR
 
 模型目录保持扁平 `model_catalog.json`（`lookup_catalog` 精确 ID / 别名 / 归一化 / 前缀模糊）。完整 `ModelClient`（chat / SSE / 重试 / call log）已在 P4.1 落地，并保留 `ModelClientConfig.network` 与 `build_http_client`。§1 决策 4 的 provider 分层 schema（`noxcode.model-providers.v1` + JSON path 注入思考等级）留到 v2。
 
-HTTP 代理 / 不代理地址 / 自定义 CA 存在 `$APPCONFIG/network-settings.json`，测通与拉模型走 `build_http_client`。
+HTTP 代理 / 不代理地址 / 自定义 CA 存在 `$APPCONFIG/network-settings.json`，模型请求走 `build_http_client`；本地 Bash / MCP 子进程注入对应代理与 CA 环境，SSH 远端 Bash / MCP 不注入，子 Agent 继承本地 `extra_env`。
 
 ## 前端形态（P5）
 

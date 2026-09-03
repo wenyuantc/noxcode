@@ -47,7 +47,7 @@ React (UI) → Tauri IPC commands → Rust service layer → SQLite
 
 ### Constraints
 
-- SQLite lives at `$APPCONFIG/noxcode.db`. The current schema has 8 tables (including `git_checkpoints`; `agent_profiles` was dropped in migration 2). Migration versions in `db/migrations.rs` must stay contiguous `1..N`; this is enforced by `migration_versions_are_contiguous`.
+- SQLite lives at `$APPCONFIG/noxcode.db`. The current schema is migration 7 with 9 business tables (`activity_logs` included; `agent_profiles` was dropped in migration 2). Migration 6 only adds `ssh_configs.algorithms_json`; migration 7 adds `activity_logs`. Versions in `db/migrations.rs` must stay contiguous `1..N`; this is enforced by `migration_versions_are_contiguous`.
 - The only runtime external dependency is system `git` ≥ 2.23. Startup preflight fails hard below that.
 - The entire repo may spawn `git` only from `src-tauri/src/git/runner.rs`. Other modules must go through that runner.
 - `russh` must keep the `ring` backend (`default-features = false`, features `ring,flate2,rsa`). `cargo tree -i aws-lc-rs` must report no matches.

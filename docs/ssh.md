@@ -1,6 +1,6 @@
 # SSH
 
-P2 用进程内 `russh` 实现 SSH 后端：配置 CRUD、认证、连接池、远端 exec、known_hosts 四态、`~/.ssh/config` 导入、keyring 密钥存储。前端只封装 `src/lib/backend.ts` / `src/lib/types.ts`。设置页与信任横幅留给 P5。
+P2 用进程内 `russh` 实现 SSH 后端：配置 CRUD、认证、连接池、远端 exec、known_hosts 四态、`~/.ssh/config` 导入、keyring 密钥存储，以及可选算法偏好。前端只封装 `src/lib/backend.ts` / `src/lib/types.ts`；设置页与信任对话框已经接线。
 
 不调系统 `ssh`，不用 `ssh2` C 绑定。`russh` 必须保持 ring 后端：`default-features = false`，features `ring,flate2,rsa`。`cargo tree -i aws-lc-rs` 必须无匹配。
 
@@ -32,7 +32,8 @@ flowchart LR
 
 | 路径 | 职责 |
 | --- | --- |
-| [`src-tauri/src/app/ssh/mod.rs`](../src-tauri/src/app/ssh/mod.rs) | 10 个 Tauri 命令、`resolve_connect_params`、非 DB DTO |
+| [`src-tauri/src/app/ssh/mod.rs`](../src-tauri/src/app/ssh/mod.rs) | 11 个 Tauri 命令、`resolve_connect_params`、非 DB DTO |
+| [`src-tauri/src/app/ssh/algorithms.rs`](../src-tauri/src/app/ssh/algorithms.rs) | 支持 / 默认算法目录、严格校验、旧服务器预设 |
 | [`src-tauri/src/app/ssh/client.rs`](../src-tauri/src/app/ssh/client.rs) | `ConnectParams` / `AuthMaterial` / `connect_and_authenticate` |
 | [`src-tauri/src/app/ssh/pool.rs`](../src-tauri/src/app/ssh/pool.rs) | 每配置一条连接、存活校验、空闲回收、`shutdown` |
 | [`src-tauri/src/app/ssh/exec.rs`](../src-tauri/src/app/ssh/exec.rs) | `SshCommandOutput`、stdin / 超时 / 断线重试一次 |
@@ -61,6 +62,12 @@ flowchart LR
 返回值是自定义 `SshCommandOutput { stdout, stderr, exit_code }`，不是 `std::process::Output`。后续 `tools/ssh.rs` 用 `.success()`（`exit_code == Some(0)`）。
 
 远端命令走 `sh -lc '<bootstrap><script>'`。bootstrap 只补通用 PATH（`/opt/homebrew/bin`、`/usr/local/bin`、`$HOME/.local/bin`、`$HOME/bin`），不含 Node / nvm / pnpm。
+
+## 算法偏好
+
+每条 SSH 配置可在 `ssh_configs.algorithms_json` 持久化可选的 `kex`、`host_key`、`cipher`、`mac` 列表，对外 DTO 字段为 `algorithms`。保存时会去空、去重并使用 `russh` 的算法解析器逐项严格校验；未知名称会拒绝保存或连接。
+
+四个分类独立应用：非空列表替换该分类的 `Preferred::DEFAULT`，空分类继续使用 `russh` 默认。四类全空会归一化为 NULL，等同恢复默认。设置页的高级算法区域从 `list_ssh_supported_algorithms` 读取支持目录、默认值和旧服务器预设，可一键套用兼容 SHA-1 / CBC 等旧算法，也可一键清空并恢复默认；ring 后端约束不变。
 
 ## 连接池
 
@@ -125,8 +132,9 @@ flowchart LR
 | `list_ssh_config_file_hosts` | 列出 `~/.ssh/config` 中的具体 Host |
 | `import_ssh_config_file_host` | 按别名合并导入预填 |
 | `resolve_ssh_host_trust` | `ask` 模式确认回传 |
+| `list_ssh_supported_algorithms` | 返回支持算法、`russh` 默认值与旧服务器预设 |
 
-前端对应函数在 `backend.ts`：`listSshConfigs`、`getSshConfig`、`createSshConfig`、`updateSshConfig`、`deleteSshConfig`、`probeSshPasswordAuth`、`testSshConnection`、`listSshConfigFileHosts`、`importSshConfigFileHost`、`resolveSshHostTrust`。
+前端对应函数在 `backend.ts`：`listSshConfigs`、`getSshConfig`、`createSshConfig`、`updateSshConfig`、`deleteSshConfig`、`probeSshPasswordAuth`、`testSshConnection`、`listSshConfigFileHosts`、`importSshConfigFileHost`、`resolveSshHostTrust`、`listSshSupportedAlgorithms`。
 
 ## 事件
 
@@ -135,7 +143,7 @@ flowchart LR
 | `ssh-host-trust-request` | `SshHostTrustPrompt`（`prompt_id`、主机、指纹、known_hosts 路径） | `onSshHostTrustRequest` |
 | `ssh-host-key-changed` | `SshHostKeyChanged`（另含 `line`） | `onSshHostKeyChanged` |
 
-P5 再用这两个事件做确认 UI。现在前端只提供 listen 封装。
+`App` 已通过 `useSshTrustEvents` 接入确认 / 警告对话框。
 
 ## 测试
 
@@ -144,10 +152,11 @@ P5 再用这两个事件做确认 UI。现在前端只提供 listen 封装。
 | 范围 | 覆盖 |
 | --- | --- |
 | `shell.rs` | 引号转义、`~` / `$HOME`、redact、`sh -lc` bootstrap |
+| `algorithms.rs` | 四类算法校验与应用、旧服务器预设 |
 | `known_hosts.rs` | 三态、四策略、Ask 接受/拒绝/超时、算法重排 |
 | `config_file.rs` | 跳过通配符、合并默认、ProxyJump 标记 |
 | `secret_store.rs` | roundtrip / 替换 / 清扫 / 索引损坏 |
-| `configs.rs` | 内存 SQLite + `SecretStore::in_memory` 的 CRUD 与引用拒删 |
+| `configs.rs` | 内存 SQLite + `SecretStore::in_memory` 的 CRUD、算法 roundtrip / 清空与引用拒删 |
 | `context.rs` | local 路径校验、ssh 缺 `remote_repo_path`、label |
 | `integration.rs` | 进程内 russh 服务器：密码/公钥（含加密私钥）、exec、stdin、超时、连接池复用与重连、known_hosts 端到端 |
 

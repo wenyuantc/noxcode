@@ -1,6 +1,6 @@
 # AI 渠道
 
-P3 落地模型渠道后端：协议归一化、扁平模型目录、渠道 CRUD、测通 / 拉模型，以及 HTTP 代理与自定义 CA。前端只封装 `src/lib/backend.ts` / `src/lib/types.ts` / `src/lib/modelCatalog.ts`。设置页（`AiChannelsSettingsTab` / `ChannelModelsEditor`）留给 P5。
+P3 落地模型渠道后端：协议归一化、扁平模型目录、渠道 CRUD、测通 / 拉模型，以及 HTTP 代理与自定义 CA。前端只封装 `src/lib/backend.ts` / `src/lib/types.ts` / `src/lib/modelCatalog.ts`，设置页由 `AiChannelsSettingsTab` / `ChannelModelsEditor` 接入。
 
 渠道 API Key 直接落 `ai_channels.api_key` 列，不走 keyring。SSH 密码仍走 `noxcode-ssh`。
 
@@ -77,7 +77,9 @@ Base URL 必须是 `http://` 或 `https://`，末尾 `/` 会去掉后再拼路�
 | `no_proxy` | 逗号分隔，交给 `reqwest::NoProxy` |
 | `ca_cert_path` | PEM 包，可含多张；`add_root_certificate` 追加，不关掉系统根证书 |
 
-命令：`get_network_settings` / `update_network_settings`。渠道测通与拉模型都走 `build_http_client`。
+命令：`get_network_settings` / `update_network_settings`。渠道测通、拉模型和会话模型请求都走 `build_http_client`。
+
+同一设置还通过 `proxy_env_vars` 转成大小写 HTTP(S) 代理、`NO_PROXY`、`SSL_CERT_FILE` 与 `NODE_EXTRA_CA_CERTS`，注入本地 Bash 和本地 MCP 子进程；子 Agent 继承该环境。SSH 远端 Bash / MCP 不注入本机代理或 CA 环境。
 
 ## 前端封装
 

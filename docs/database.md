@@ -1,6 +1,6 @@
 # 数据层
 
-noxcode 用一份 SQLite 库保存渠道、工作区、会话与 Git checkpoint。前端不碰 SQL。
+noxcode 用一份 SQLite 库保存渠道、工作区、会话、Git checkpoint 与活动审计。前端不碰 SQL。
 
 ```
 React (UI) → Tauri IPC commands → Rust service layer → SQLite
@@ -10,10 +10,11 @@ React (UI) → Tauri IPC commands → Rust service layer → SQLite
 
 | 路径 | 职责 |
 | --- | --- |
-| [`src-tauri/src/db/migrations.rs`](../src-tauri/src/db/migrations.rs) | 迁移清单（version 1 baseline + version 2 去掉档案 + version 3 `agent_sessions.title` + version 4 `agent_sessions.pinned` + version 5 `agent_sessions.context_usage_json`） |
+| [`src-tauri/src/db/migrations.rs`](../src-tauri/src/db/migrations.rs) | 迁移清单（version 1 baseline + version 2 去掉档案 + version 3 `agent_sessions.title` + version 4 `agent_sessions.pinned` + version 5 `agent_sessions.context_usage_json` + version 6 `ssh_configs.algorithms_json` + version 7 `activity_logs`） |
 | [`src-tauri/src/db/models.rs`](../src-tauri/src/db/models.rs) | 行模型与 IPC DTO |
 | [`src-tauri/src/app/shared.rs`](../src-tauri/src/app/shared.rs) | `sqlite_pool` / `database_path` / `now_sqlite` / `new_id` |
 | [`src-tauri/src/app/database.rs`](../src-tauri/src/app/database.rs) | 健康检查、备份、恢复 |
+| [`src-tauri/src/app/activity_logs.rs`](../src-tauri/src/app/activity_logs.rs) | 活动审计写入与 `list_activity_logs` |
 
 `src/lib/database.ts` 是 hard-fail stub。`src-tauri/capabilities/default.json` 不授予任何 `sql:*` 权限。
 
@@ -31,14 +32,14 @@ React (UI) → Tauri IPC commands → Rust service layer → SQLite
 
 ## 迁移
 
-`tauri-plugin-sql` 在启动时按 `get_all_migrations()` 升级。版本号必须连续 `1..N`，由 `migration_versions_are_contiguous` 强制。当前最新版本是 **5**（`agent_sessions.context_usage_json`），跑完后共 8 张业务表。
+`tauri-plugin-sql` 在启动时按 `get_all_migrations()` 升级。版本号必须连续 `1..N`，由 `migration_versions_are_contiguous` 强制。当前最新版本是 **7**：version 6 只为 `ssh_configs` 增加 `algorithms_json`，不增加表；version 7 新增 `activity_logs`，业务表由 8 张变为 9 张。
 
-后续只能追加 `version: 6`……，禁止改已发布的 SQL，禁止插队。
+后续只能追加 `version: 8`……，禁止改已发布的 SQL，禁止插队。
 
 应用的 `_sqlx_migrations` 表记录已应用版本。debug 启动会打印：
 
 ```
-[db] 迁移检查完成: applied_count=1, current_version=1, latest_registered_version=1, ...
+[db] 迁移检查完成: applied_count=7, current_version=7, latest_registered_version=7, ...
 ```
 
 ## 表关系
@@ -53,6 +54,7 @@ workspaces     ──CASCADE──► git_checkpoints
 
 native_api_call_logs        无外键（日志需在会话删除后仍可查）
 native_session_transcripts  无外键（主键 session_record_id 对应 agent_sessions.id）
+activity_logs               无外键（checkpoint 回滚 / 清除审计需独立保留）
 ```
 
 RESTRICT：仍被工作区引用的 SSH 配置不能删。  
@@ -60,7 +62,7 @@ RESTRICT：仍被工作区引用的 SSH 配置不能删。
 CASCADE：删会话会清事件和 checkpoint 行；删工作区会清该工作区的 checkpoint 行。  
 `git update-ref -d` 清仓库 ref 属于 Git 层，不在本模块。
 
-## 八张表
+## 九张业务表
 
 ### `ssh_configs`
 
@@ -74,6 +76,7 @@ SSH 连接配置。密码与密钥口令只存 keyring 引用（`password_ref` /
 | `private_key_path` | 私钥路径（key 认证） |
 | `password_ref` / `passphrase_ref` | keyring 引用 |
 | `known_hosts_mode` | `accept-new`（默认）/ `strict` / `ask` / `off` |
+| `algorithms_json` | 可选的 KEX / Host Key / Cipher / MAC 列表 JSON；空分类使用 `russh` 默认算法 |
 | `last_checked_*` | 最近连通探测 |
 | `password_probe_*` | 密码认证探测；`passed` / `available` 时 DTO 的 `password_execution_allowed` 为 true |
 | `created_at` / `updated_at` | 更新触发器会刷新 `updated_at` |
@@ -147,18 +150,31 @@ Git plumbing 快照的数据库索引。真实对象在仓库 `refs/noxcode/chec
 | `label` | 如「会话开始」 |
 | `kind` | `session_start` / `after_tool_call` / `manual` / `auto_pre_restore` |
 
+### `activity_logs`
+
+独立活动审计日志，目前记录 Git checkpoint 回滚成功 / 失败与清除全部。无外键，删除工作区或会话后仍保留审计记录。
+
+| 列 | 说明 |
+| --- | --- |
+| `id` / `kind` | UUID 主键与活动类型 |
+| `workspace_id` / `session_id` | 可空的工作区 / 会话关联标识 |
+| `summary` | 面向界面的简短摘要 |
+| `payload_json` | 可空 JSON 详情 |
+| `created_at` | 创建时间 |
+
 ## 已注册命令
 
 | 命令 | 作用 |
 | --- | --- |
+| `list_activity_logs` | 按工作区可选过滤活动审计，默认 50 条、最多 200 条 |
 | `health_check` | 库是否加载、当前/最新迁移版本、系统 git 是否 ≥ 2.23 |
 | `backup_database` | 导出 SQL 脚本（含 schema、数据、`_sqlx_migrations`） |
 | `restore_database` | 校验脚本 → 写 `noxcode.pre-import-backup-*.sql` → 清库导入 → 补迁移 → 完整性检查 |
 | `open_database_folder` | 用系统文件管理器打开 `$APPCONFIG` |
 | `list_ssh_configs` / `get_ssh_config` / `create_ssh_config` / `update_ssh_config` / `delete_ssh_config` | SSH 配置 CRUD，见 [`ssh.md`](ssh.md) |
-| `probe_ssh_password_auth` / `test_ssh_connection` | 写 `password_probe_*` / `last_check_*` |
+| `probe_ssh_password_auth` / `test_ssh_connection` / `list_ssh_supported_algorithms` | 写 `password_probe_*` / `last_check_*`；列出支持、默认和旧服务器预设算法 |
 
-备份范围只覆盖 SQLite 本体，包括工作区、SSH 配置、`ai_channels`（**API 密钥在库内，会随 SQL 导出**）、会话与事件、Git checkpoint 元数据、API 调用日志，以及 `_sqlx_migrations`。不包括：
+备份范围只覆盖 SQLite 本体，包括工作区、SSH 配置、`ai_channels`（**API 密钥在库内，会随 SQL 导出**）、会话与事件、Git checkpoint 元数据、checkpoint 活动审计、API 调用日志，以及 `_sqlx_migrations`。不包括：
 
 - keyring 里的 SSH 密码 / 私钥口令（服务名 `noxcode-ssh`）
 - 应用配置目录里的 `ssh-secret-index.json`
@@ -179,4 +195,4 @@ sqlite3 "$HOME/Library/Application Support/com.wenyuan.noxcode/noxcode.db" \
   "SELECT version, description, success FROM _sqlx_migrations;"
 ```
 
-应看到 9 张业务表加 `_sqlx_migrations`，且 version 1 成功。
+应看到 9 张业务表加 `_sqlx_migrations`，且 version 7 成功。
