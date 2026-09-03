@@ -21,6 +21,8 @@ import {
   stripUserPrefix,
   summarizeTools,
   parseThinkingDurationSeconds,
+  parseRetryLine,
+  summarizeRetry,
   thinkingDurationSeconds,
   thinkingText,
   workDurationSeconds,
@@ -39,6 +41,15 @@ describe("sessionLines", () => {
     expect(classifyLine("[思考]\n先看入口再改 Composer")).toBe("system");
     expect(classifyLine("最终汇报")).toBe("assistant");
     expect(classifyLine("[ERROR] boom")).toBe("error");
+    expect(classifyLine("[重试] 模型请求失败（HTTP 429）: {}, 3 秒后进行第 1/10 次重试")).toBe(
+      "system",
+    );
+    expect(
+      classifyLine(
+        "[子 Agent 1(general) - 改文件] [重试] 模型请求失败（HTTP 502）: x，3 秒后进行第 1/10 次重试",
+      ),
+    ).toBe("system");
+    expect(classifyLine("[子 Agent 1(general) - 改文件] [读取] a.ts")).toBe("tool");
   });
 
   it("pairs tool results with the previous tool call", () => {
@@ -441,5 +452,95 @@ describe("sessionLines", () => {
     expect(
       displaySessionTitle("一二三四五六七八九十一二三四五六七八九十一二三四五六七八九十超出"),
     ).toBe("一二三四五六七八九十一二三四五六七八九十一二三四五六七八九十");
+  });
+
+  it("parses rust retry lines and ascii punctuation", () => {
+    const rust = parseRetryLine(
+      '[重试] 模型请求失败（HTTP 429）: {"error":{"message":"All available accounts are currently rate-limited. Please retry later.","type":"rate_limit_error"}}，3 秒后进行第 2/10 次重试',
+    );
+    expect(rust).toMatchObject({
+      failed: false,
+      status: 429,
+      delaySeconds: 3,
+      attempt: 2,
+      maxRetries: 10,
+      title: "模型请求失败",
+      message: "All available accounts are currently rate-limited. Please retry later.",
+    });
+    expect(rust?.json).toContain('"type": "rate_limit_error"');
+
+    const ascii = parseRetryLine(
+      '[重试] 模型请求失败 (HTTP 502) : {"error":{"message":"bad gateway"}}, 3 秒后进行第 1/10 次重试',
+    );
+    expect(ascii).toMatchObject({
+      status: 502,
+      attempt: 1,
+      maxRetries: 10,
+      message: "bad gateway",
+    });
+
+    const child = parseRetryLine(
+      "[子 Agent 1(general) - 改文件] [重试] 模型请求失败（HTTP 503）: gateway，3 秒后进行第 1/10 次重试",
+    );
+    expect(child).toMatchObject({
+      agentPrefix: "[子 Agent 1(general) - 改文件]",
+      status: 503,
+      attempt: 1,
+      title: "模型请求失败: gateway",
+    });
+
+    expect(
+      parseRetryLine(
+        '[ERROR] 模型请求失败（HTTP 429）: {"error":{"message":"rate limited","type":"rate_limit_error"}}',
+      ),
+    ).toMatchObject({
+      failed: true,
+      status: 429,
+      message: "rate limited",
+    });
+    expect(parseRetryLine("[ERROR] boom")).toBeNull();
+  });
+
+  it("groups consecutive retries and folds the trailing model error", () => {
+    const blocks = buildTurnBlocks(
+      groupSessionLines([
+        line("1", "[USER_INPUT] 分析项目", "2026-01-01T00:00:00Z"),
+        line(
+          "2",
+          '[重试] 模型请求失败（HTTP 502）: {"error":{"message":"bad gateway"}}，3 秒后进行第 1/10 次重试',
+          "2026-01-01T00:00:01Z",
+        ),
+        line(
+          "3",
+          '[重试] 模型请求失败（HTTP 429）: {"error":{"message":"rate limited"}}，3 秒后进行第 2/10 次重试',
+          "2026-01-01T00:00:04Z",
+        ),
+        line(
+          "4",
+          '[ERROR] 模型请求失败（HTTP 429）: {"error":{"message":"rate limited"}}',
+          "2026-01-01T00:00:07Z",
+        ),
+      ]),
+    );
+    expect(blocks[0]?.segments.map((segment) => segment.kind)).toEqual(["retry"]);
+    expect(blocks[0]?.segments[0]?.items).toHaveLength(3);
+    expect(summarizeRetry(blocks[0]!.segments[0]!.items)).toEqual({
+      status: 429,
+      attempt: 2,
+      maxRetries: 10,
+      count: 2,
+      failed: true,
+    });
+  });
+
+  it("keeps unrelated errors out of the retry segment", () => {
+    const blocks = buildTurnBlocks(
+      groupSessionLines([
+        line("1", "[USER_INPUT] 问好", "2026-01-01T00:00:00Z"),
+        line("2", "[ERROR] boom", "2026-01-01T00:00:01Z"),
+        line("3", "已取消", "2026-01-01T00:00:02Z"),
+      ]),
+    );
+    expect(blocks[0]?.segments.map((segment) => segment.kind)).toEqual(["system", "assistant"]);
   });
 });

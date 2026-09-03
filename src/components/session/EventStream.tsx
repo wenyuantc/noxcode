@@ -18,6 +18,7 @@ import { cn } from "@/lib/utils";
 import { useSessionStore } from "@/stores/sessionStore";
 import { AssistantMarkdown } from "./AssistantMarkdown";
 import { FileChangeRow } from "./FileChangeRow";
+import { RetryRow } from "./RetryRow";
 import { AgentStatusRow, McpStatusRow, PermissionStatusRow } from "./SessionStatusRows";
 import { TerminalRow } from "./TerminalRow";
 import { ThinkingRow } from "./ThinkingRow";
@@ -60,10 +61,12 @@ function attachLiveStream(
   };
 }
 
-function renderSegment(segment: TurnSegment, running: boolean, nowMs?: number) {
+function renderSegment(segment: TurnSegment, running: boolean, nowMs?: number, live?: boolean) {
   switch (segment.kind) {
     case "thinking":
       return <ThinkingRow items={segment.items} nowMs={nowMs} />;
+    case "retry":
+      return <RetryRow items={segment.items} live={live && running} />;
     case "tools":
       return (
         <ToolSummaryRow
@@ -334,7 +337,12 @@ const TurnBlockView = memo(function TurnBlockView({
       ) : null}
       {block.segments.map((segment, index) => (
         <div key={`${segment.kind}-${segment.items[0]?.id ?? index}`}>
-          {renderSegment(segment, working, working ? nowMs : undefined)}
+          {renderSegment(
+            segment,
+            working,
+            working ? nowMs : undefined,
+            index === block.segments.length - 1,
+          )}
         </div>
       ))}
       {!working && assistantText ? (

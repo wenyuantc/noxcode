@@ -9,7 +9,8 @@ export type TurnSegmentKind =
   | "todo"
   | "assistant"
   | "system"
-  | "usage";
+  | "usage"
+  | "retry";
 
 export interface ParsedUsage {
   input?: number;
@@ -100,10 +101,119 @@ const SYSTEM_PREFIXES = [
 
 const TODO_STATUSES: TodoStatus[] = ["pending", "in_progress", "completed"];
 const TODO_LINE_RE = /^- \[(\w+)\] (.+) \(([^)]+)\)\s*$/;
+const SUBAGENT_PREFIX_RE = /^(\[子 Agent[^\]]*\])\s*/;
+const RETRY_TAIL_RE = /(?:，|,)\s*(\d+)\s*秒后进行第\s*(\d+)\s*\/\s*(\d+)\s*次重试\s*$/;
+const HTTP_STATUS_RE = /HTTP\s*(\d{3})/i;
+
+export function stripSubagentPrefix(text: string): { prefix: string | null; body: string } {
+  const line = text.trimStart();
+  const match = line.match(SUBAGENT_PREFIX_RE);
+  if (!match) return { prefix: null, body: line };
+  return { prefix: match[1] ?? null, body: line.slice(match[0].length) };
+}
+
+export function isRetryLine(text: string): boolean {
+  return stripSubagentPrefix(text).body.startsWith("[重试]");
+}
+
+export function isRetryFailureLine(text: string): boolean {
+  const body = stripSubagentPrefix(text).body;
+  return body.startsWith("[ERROR]") && body.includes("模型请求失败");
+}
+
+export interface ParsedRetryLine {
+  agentPrefix?: string;
+  failed: boolean;
+  status?: number;
+  delaySeconds?: number;
+  attempt?: number;
+  maxRetries?: number;
+  title: string;
+  message?: string;
+  json?: string;
+}
+
+function extractJsonSnippet(text: string): string | null {
+  const start = text.indexOf("{");
+  if (start < 0) return null;
+  const end = text.lastIndexOf("}");
+  return end > start ? text.slice(start, end + 1) : text.slice(start);
+}
+
+function prettyJson(raw: string): string {
+  try {
+    return JSON.stringify(JSON.parse(raw), null, 2);
+  } catch {
+    return raw;
+  }
+}
+
+function extractApiMessage(raw: string): string | undefined {
+  try {
+    const value: unknown = JSON.parse(raw);
+    if (!value || typeof value !== "object") return undefined;
+    const record = value as { message?: unknown; error?: { message?: unknown } };
+    const message = record.error?.message ?? record.message;
+    return typeof message === "string" && message.trim() ? message : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+export function parseRetryLine(text: string): ParsedRetryLine | null {
+  const { prefix, body } = stripSubagentPrefix(text);
+  const retry = body.startsWith("[重试]");
+  const failed = isRetryFailureLine(text);
+  if (!retry && !failed) return null;
+  const payload = (retry ? body.slice("[重试]".length) : body.slice("[ERROR]".length)).trim();
+  const tail = payload.match(RETRY_TAIL_RE);
+  const withoutTail = (tail ? payload.slice(0, tail.index) : payload).trim();
+  const jsonRaw = extractJsonSnippet(withoutTail);
+  const statusMatch = withoutTail.match(HTTP_STATUS_RE);
+  let title = jsonRaw ? withoutTail.replace(jsonRaw, "") : withoutTail;
+  title = title
+    .replace(/[（(]HTTP\s*\d{3}[）)]/gi, "")
+    .replace(/\s*[:：]\s*$/, "")
+    .trim();
+  return {
+    agentPrefix: prefix ?? undefined,
+    failed,
+    status: statusMatch ? Number(statusMatch[1]) : undefined,
+    delaySeconds: tail ? Number(tail[1]) : undefined,
+    attempt: tail ? Number(tail[2]) : undefined,
+    maxRetries: tail ? Number(tail[3]) : undefined,
+    title,
+    message: jsonRaw ? extractApiMessage(jsonRaw) : undefined,
+    json: jsonRaw ? prettyJson(jsonRaw) : undefined,
+  };
+}
+
+export function summarizeRetry(items: GroupedSessionItem[]): {
+  status?: number;
+  attempt?: number;
+  maxRetries?: number;
+  count: number;
+  failed: boolean;
+} {
+  const parsed = items
+    .map((item) => parseRetryLine(item.text))
+    .filter((item): item is ParsedRetryLine => item != null);
+  const retries = parsed.filter((item) => !item.failed);
+  const withAttempt = [...retries].reverse().find((item) => item.attempt != null);
+  const withStatus = [...parsed].reverse().find((item) => item.status != null);
+  return {
+    status: withStatus?.status,
+    attempt: withAttempt?.attempt ?? (retries.length > 0 ? retries.length : undefined),
+    maxRetries: withAttempt?.maxRetries,
+    count: retries.length,
+    failed: parsed.some((item) => item.failed),
+  };
+}
 
 export function classifyLine(text: string): SessionLineKind {
   const line = text.trimStart();
   if (line.startsWith("[USER_INPUT]") || line.startsWith("[用户输入]")) return "user";
+  if (isRetryLine(line)) return "system";
   if (line.startsWith("[ERROR]")) return "error";
   if (line.startsWith("[工具结果]")) return "tool_result";
   if (line.startsWith("[子 Agent")) return "tool";
@@ -421,6 +531,7 @@ export function groupSessionLines(lines: RawSessionLine[]): GroupedSessionItem[]
 
 function segmentKey(item: GroupedSessionItem): TurnSegmentKind | "skip" | "file_change" {
   if (item.kind === "user") return "skip";
+  if (isRetryLine(item.text)) return "retry";
   if (isThinkingItem(item)) return "thinking";
   if (isUsageItem(item)) return "usage";
   if (isCommandTool(item)) return "terminal";
@@ -463,7 +574,8 @@ export function buildTurnSegments(items: GroupedSessionItem[]): TurnSegment[] {
   };
 
   for (const item of items) {
-    const key = segmentKey(item);
+    let key = segmentKey(item);
+    if (currentKey === "retry" && isRetryFailureLine(item.text)) key = "retry";
     if (key === "skip") continue;
     const mergeable = key !== "terminal" && key !== "todo";
     if (currentKey !== key || !mergeable) {

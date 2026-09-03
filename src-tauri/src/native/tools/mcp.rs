@@ -40,7 +40,7 @@ struct McpListedTool {
 
 enum McpTransport {
     Local {
-        child: Child,
+        child: Box<Child>,
         stdin: ChildStdin,
         stdout: BufReader<ChildStdout>,
     },
@@ -662,7 +662,7 @@ async fn spawn_local(server: &McpServerConfig) -> Result<McpLiveServer, String> 
         name: server.name.clone(),
         tools: Vec::new(),
         transport: McpTransport::Local {
-            child,
+            child: Box::new(child),
             stdin,
             stdout: BufReader::new(stdout),
         },
