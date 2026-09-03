@@ -20,7 +20,7 @@ pub(crate) async fn list_agent_sessions_with(
         r#"
         SELECT * FROM agent_sessions
         WHERE ($1 IS NULL OR workspace_id = $1)
-        ORDER BY started_at DESC
+        ORDER BY pinned DESC, started_at DESC
         LIMIT $2
         "#,
     )
@@ -108,6 +108,23 @@ pub(crate) async fn prepare_agent_session_resume_with(
     })
 }
 
+pub(crate) async fn set_agent_session_pinned_with(
+    pool: &SqlitePool,
+    session_id: &str,
+    pinned: bool,
+) -> Result<(), String> {
+    let result = sqlx::query("UPDATE agent_sessions SET pinned = $1 WHERE id = $2")
+        .bind(if pinned { 1i32 } else { 0 })
+        .bind(session_id)
+        .execute(pool)
+        .await
+        .map_err(|error| format!("更新会话置顶失败: {error}"))?;
+    if result.rows_affected() == 0 {
+        return Err(format!("会话不存在: {session_id}"));
+    }
+    Ok(())
+}
+
 pub(crate) async fn delete_agent_session_row(
     pool: &SqlitePool,
     session_id: &str,
@@ -151,6 +168,16 @@ pub async fn prepare_agent_session_resume<R: Runtime>(
 ) -> Result<AgentSessionResumeInfo, String> {
     let pool = sqlite_pool(&app).await?;
     prepare_agent_session_resume_with(&pool, &session_id).await
+}
+
+#[tauri::command]
+pub async fn set_agent_session_pinned<R: Runtime>(
+    app: AppHandle<R>,
+    session_id: String,
+    pinned: bool,
+) -> Result<(), String> {
+    let pool = sqlite_pool(&app).await?;
+    set_agent_session_pinned_with(&pool, &session_id, pinned).await
 }
 
 #[tauri::command]
@@ -220,5 +247,79 @@ mod tests {
             .expect("empty")
             .is_empty());
         let _ = new_id();
+    }
+
+    #[tokio::test]
+    async fn pins_session_and_lists_pinned_first() {
+        let pool = setup_migrated_pool().await;
+        sqlx::query(
+            "INSERT INTO workspaces (id, name, workspace_type) VALUES ('ws-1', 'ws', 'local')",
+        )
+        .execute(&pool)
+        .await
+        .expect("ws");
+        let older = "2026-01-01 00:00:00";
+        let newer = "2026-02-01 00:00:00";
+        sqlx::query(
+            "INSERT INTO agent_sessions (id, workspace_id, status, started_at, created_at) VALUES ('sess-old', 'ws-1', 'exited', $1, $1)",
+        )
+        .bind(older)
+        .execute(&pool)
+        .await
+        .expect("old session");
+        sqlx::query(
+            "INSERT INTO agent_sessions (id, workspace_id, status, started_at, created_at) VALUES ('sess-new', 'ws-1', 'exited', $1, $1)",
+        )
+        .bind(newer)
+        .execute(&pool)
+        .await
+        .expect("new session");
+
+        let listed = list_agent_sessions_with(&pool, Some("ws-1"), Some(10))
+            .await
+            .expect("list");
+        assert_eq!(
+            listed
+                .iter()
+                .map(|session| session.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["sess-new", "sess-old"]
+        );
+        assert_eq!(listed[0].pinned, 0);
+
+        set_agent_session_pinned_with(&pool, "sess-old", true)
+            .await
+            .expect("pin");
+        let pinned_first = list_agent_sessions_with(&pool, Some("ws-1"), Some(10))
+            .await
+            .expect("list pinned");
+        assert_eq!(
+            pinned_first
+                .iter()
+                .map(|session| (session.id.as_str(), session.pinned))
+                .collect::<Vec<_>>(),
+            vec![("sess-old", 1), ("sess-new", 0)]
+        );
+
+        set_agent_session_pinned_with(&pool, "sess-old", false)
+            .await
+            .expect("unpin");
+        let unpinned = list_agent_sessions_with(&pool, Some("ws-1"), Some(10))
+            .await
+            .expect("list unpinned");
+        assert_eq!(
+            unpinned
+                .iter()
+                .map(|session| (session.id.as_str(), session.pinned))
+                .collect::<Vec<_>>(),
+            vec![("sess-new", 0), ("sess-old", 0)]
+        );
+
+        let missing = set_agent_session_pinned_with(&pool, "missing", true).await;
+        assert!(
+            missing
+                .expect_err("missing session")
+                .contains("会话不存在: missing")
+        );
     }
 }

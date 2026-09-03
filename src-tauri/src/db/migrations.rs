@@ -304,6 +304,14 @@ pub fn get_all_migrations() -> Vec<Migration> {
             "#,
             kind: tauri_plugin_sql::MigrationKind::Up,
         },
+        Migration {
+            version: 4,
+            description: "agent_sessions.pinned for sidebar pin",
+            sql: r#"
+                ALTER TABLE agent_sessions ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0;
+            "#,
+            kind: tauri_plugin_sql::MigrationKind::Up,
+        },
     ]
 }
 
@@ -349,7 +357,7 @@ mod tests {
         for (index, migration) in get_all_migrations().iter().enumerate() {
             assert_eq!(migration.version, index as i64 + 1);
         }
-        assert_eq!(latest_migration_version(), 3);
+        assert_eq!(latest_migration_version(), 4);
         assert_eq!(
             get_all_migrations()
                 .last()
@@ -372,6 +380,23 @@ mod tests {
             .map(|row| row.get::<String, _>("name"))
             .collect();
             assert_eq!(columns, vec!["title"]);
+        });
+    }
+
+    #[test]
+    fn agent_sessions_has_pinned_column() {
+        tauri::async_runtime::block_on(async {
+            let pool = setup_test_pool().await;
+            let columns: Vec<String> = sqlx::query(
+                "SELECT name FROM pragma_table_info('agent_sessions') WHERE name = 'pinned'",
+            )
+            .fetch_all(&pool)
+            .await
+            .expect("read pinned column")
+            .into_iter()
+            .map(|row| row.get::<String, _>("name"))
+            .collect();
+            assert_eq!(columns, vec!["pinned"]);
         });
     }
 

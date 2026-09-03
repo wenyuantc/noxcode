@@ -25,6 +25,7 @@ import { ToolSummaryRow } from "./ToolSummaryRow";
 import { TurnActionBar } from "./TurnActionBar";
 import { TurnFilesChanged } from "./TurnFilesChanged";
 import { UsageRow } from "./UsageRow";
+import { UserBubble } from "./UserBubble";
 import { WorkSummaryBar } from "./WorkSummaryBar";
 
 const EMPTY_LINES: RawSessionLine[] = [];
@@ -139,6 +140,7 @@ export function EventStream({ sessionId }: { sessionId: string }) {
   const turnState = useSessionStore((state) => state.turnState[sessionId]);
   const items = groupSessionLines(lines);
   const blocks = buildTurnBlocks(items);
+  const lastUserBlockId = [...blocks].reverse().find((block) => block.user)?.id;
   const working = turnState === "working";
   const [nowMs, setNowMs] = useState(() => Date.now());
   const [showLatest, setShowLatest] = useState(false);
@@ -223,6 +225,7 @@ export function EventStream({ sessionId }: { sessionId: string }) {
                   sessionId={sessionId}
                   working={isLast && working}
                   nowMs={nowMs}
+                  editableUser={block.id === lastUserBlockId}
                 />
               </div>
             );
@@ -249,22 +252,29 @@ function TurnBlockView({
   sessionId,
   working,
   nowMs,
+  editableUser,
 }: {
   block: SessionTurnBlock;
   sessionId: string;
   working: boolean;
   nowMs: number;
+  editableUser: boolean;
 }) {
-  const showWork = working || block.segments.length > 0 || block.tools.length > 0;
+  const showWork =
+    (Boolean(block.user) || working) &&
+    (working || block.segments.length > 0 || block.tools.length > 0);
   const assistantText = block.assistant.map((item) => item.text).join("\n\n");
   const changedPaths = changedFilesFromItems(block.tools);
 
   return (
     <div className="space-y-2">
       {block.user ? (
-        <div className="ml-auto max-w-[80%] rounded-2xl bg-secondary px-4 py-2 text-sm">
-          {block.user.text}
-        </div>
+        <UserBubble
+          text={block.user.text}
+          sessionId={sessionId}
+          editable={editableUser}
+          working={working}
+        />
       ) : null}
       {showWork ? (
         <WorkSummaryBar block={block} tools={block.tools} working={working} nowMs={nowMs} />

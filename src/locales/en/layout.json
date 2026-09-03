@@ -10,6 +10,9 @@
   "sessions": "Sessions",
   "workspaces": "Workspaces",
   "moreSessions": "Show more",
+  "pinnedSection": "Pinned",
+  "pinSession": "Pin",
+  "unpinSession": "Unpin",
   "command": {
     "placeholder": "Search actions, sessions, or files",
     "all": "All",

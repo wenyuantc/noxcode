@@ -39,6 +39,7 @@
   "filesChanged": "{{count}} 个文件已更改",
   "review": "审查",
   "copy": "复制",
+  "edit": "编辑",
   "retry": "重试",
   "like": "有帮助",
   "dislike": "没帮助",

@@ -335,6 +335,10 @@ export function prepareAgentSessionResume(sessionId: string): Promise<AgentSessi
   return invoke("prepare_agent_session_resume", { sessionId });
 }
 
+export function setAgentSessionPinned(sessionId: string, pinned: boolean): Promise<void> {
+  return invoke("set_agent_session_pinned", { sessionId, pinned });
+}
+
 export function deleteAgentSession(sessionId: string): Promise<void> {
   return invoke("delete_agent_session", { sessionId });
 }

@@ -1,5 +1,5 @@
-import { Copy, RotateCcw, ThumbsDown, ThumbsUp } from "lucide-react";
-import { useState } from "react";
+import { Check, Copy, RotateCcw, ThumbsDown, ThumbsUp } from "lucide-react";
+import { useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 
 import { sendNativeInput, startNativeSession } from "@/lib/backend";
@@ -8,6 +8,8 @@ import { useChannelStore } from "@/stores/channelStore";
 import { useSessionStore } from "@/stores/sessionStore";
 import { useUiStore } from "@/stores/uiStore";
 import { useWorkspaceStore } from "@/stores/workspaceStore";
+
+const COPIED_MS = 2000;
 
 function formatClock(iso: string): string {
   const date = new Date(iso);
@@ -32,13 +34,26 @@ export function TurnActionBar({
   endedAt: string;
   working?: boolean;
 }) {
-  const { t } = useTranslation("sessions");
+  const { t } = useTranslation(["sessions", "common"]);
   const [vote, setVote] = useState<"up" | "down" | null>(null);
+  const [copied, setCopied] = useState(false);
+  const copiedTimer = useRef<number>(0);
   const workspaceId = useWorkspaceStore((state) => state.activeWorkspaceId);
   const channelId = useChannelStore((state) => state.activeChannelId);
   const modelId = useChannelStore((state) => state.activeModelId);
   const planMode = useUiStore((state) => state.composerPlanMode);
   const live = useSessionStore((state) => state.liveBySession[sessionId]);
+
+  useEffect(() => {
+    return () => window.clearTimeout(copiedTimer.current);
+  }, []);
+
+  const copy = async () => {
+    await navigator.clipboard.writeText(assistantText);
+    setCopied(true);
+    window.clearTimeout(copiedTimer.current);
+    copiedTimer.current = window.setTimeout(() => setCopied(false), COPIED_MS);
+  };
 
   const retry = () => {
     const prompt = userText?.trim();
@@ -62,10 +77,11 @@ export function TurnActionBar({
       <button
         type="button"
         className="rounded p-1 hover:bg-muted"
-        title={t("copy")}
-        onClick={() => void navigator.clipboard.writeText(assistantText)}
+        title={copied ? t("common:copied") : t("sessions:copy")}
+        aria-label={copied ? t("common:copied") : t("sessions:copy")}
+        onClick={() => void copy()}
       >
-        <Copy className="size-3.5" />
+        {copied ? <Check className="size-3.5 text-emerald-500" /> : <Copy className="size-3.5" />}
       </button>
       <button
         type="button"

@@ -11,6 +11,7 @@ import type {
   NativePlanQuestionRequest,
   NativeTextDelta,
 } from "@/lib/types";
+import { useWorkspaceStore } from "@/stores/workspaceStore";
 
 interface SessionState {
   selectedSessionId: string | null;
@@ -57,6 +58,13 @@ export const useSessionStore = create<SessionState>((set, get) => ({
         })),
       },
     });
+    const workspace = useWorkspaceStore.getState();
+    const workspaceId = workspace.sessions.find(
+      (session) => session.id === sessionId,
+    )?.workspace_id;
+    if (workspaceId && workspaceId !== workspace.activeWorkspaceId) {
+      void workspace.setActive(workspaceId);
+    }
   },
   onStarted: (session) => {
     set({

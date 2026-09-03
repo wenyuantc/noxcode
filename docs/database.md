@@ -10,7 +10,7 @@ React (UI) → Tauri IPC commands → Rust service layer → SQLite
 
 | 路径 | 职责 |
 | --- | --- |
-| [`src-tauri/src/db/migrations.rs`](../src-tauri/src/db/migrations.rs) | 迁移清单（version 1 baseline + version 2 去掉档案 + version 3 `agent_sessions.title`） |
+| [`src-tauri/src/db/migrations.rs`](../src-tauri/src/db/migrations.rs) | 迁移清单（version 1 baseline + version 2 去掉档案 + version 3 `agent_sessions.title` + version 4 `agent_sessions.pinned`） |
 | [`src-tauri/src/db/models.rs`](../src-tauri/src/db/models.rs) | 行模型与 IPC DTO |
 | [`src-tauri/src/app/shared.rs`](../src-tauri/src/app/shared.rs) | `sqlite_pool` / `database_path` / `now_sqlite` / `new_id` |
 | [`src-tauri/src/app/database.rs`](../src-tauri/src/app/database.rs) | 健康检查、备份、恢复 |
@@ -31,9 +31,9 @@ React (UI) → Tauri IPC commands → Rust service layer → SQLite
 
 ## 迁移
 
-`tauri-plugin-sql` 在启动时按 `get_all_migrations()` 升级。版本号必须连续 `1..N`，由 `migration_versions_are_contiguous` 强制。当前最新版本是 **2**（去掉 `agent_profiles`，会话改存 `ai_channel_id`），跑完后共 8 张业务表。
+`tauri-plugin-sql` 在启动时按 `get_all_migrations()` 升级。版本号必须连续 `1..N`，由 `migration_versions_are_contiguous` 强制。当前最新版本是 **4**（`agent_sessions.pinned`），跑完后共 8 张业务表。
 
-后续只能追加 `version: 3`……，禁止改已发布的 SQL，禁止插队。
+后续只能追加 `version: 5`……，禁止改已发布的 SQL，禁止插队。
 
 应用的 `_sqlx_migrations` 表记录已应用版本。debug 启动会打印：
 
@@ -119,6 +119,7 @@ SSH 连接配置。密码与密钥口令只存 keyring 引用（`password_ref` /
 | `started_at` / `ended_at` / `exit_code` | 生命周期 |
 | `resume_session_id` | 续聊来源 |
 | `title` | 会话标题。新建取首句最多 30 个 Unicode 字；续聊继承来源会话，不覆盖。version 3 从最早一条 `[USER_INPUT]` / `[用户输入]` 回填 |
+| `pinned` | 侧栏置顶。`0` 未置顶，`1` 已置顶。version 4 新增，默认 `0`。取消置顶后仍按 `workspace_id` 归队 |
 | `input_tokens` / `output_tokens` / `total_tokens` / `reasoning_tokens` / `cached_tokens` | 用量 |
 
 ### `agent_session_events`

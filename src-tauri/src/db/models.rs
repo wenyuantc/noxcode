@@ -251,6 +251,7 @@ pub struct AgentSessionRecord {
     pub cached_tokens: Option<i64>,
     pub created_at: String,
     pub title: Option<String>,
+    pub pinned: i32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, FromRow)]

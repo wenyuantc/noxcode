@@ -53,11 +53,11 @@ Composer：只看**当前选中会话**是否 live。首页或非 live 会话走
 
 `@` 调 `list_git_files` 插入 `@path`。`/` 列出全局技能，插入「使用技能：name」。
 
-事件流按时序渲染 `TurnSegment`（思考 / 查阅汇总 / 终端 / 写入或更改 / 待办摘要 / 用量芯片 / 助手 markdown / 其它系统行），不再把工具、思考、正文拆成三个乱序数组。启动行 `[PERMISSION]` / `[内置 Agent]` / `[MCP]` 收成带图标的状态提示，不改后端原文。查阅展开后直接出 cyan 路径 + 行号卡片，不再二次折叠。`[用量]` 解析成输入/输出/缓存芯片。工作头显示「已工作 / 工作中 N 秒」。可解析的 `[待办]` 只在流里一行摘要，完整清单叠在会话列右上角 `TodoProcessPanel`（宽卡 / 窄窗胶囊）。已结束回合若本回合有 Write/Edit/ApplyPatch 路径，底部「N 个文件已更改」卡片只列这些路径；点文件或「审查」打开 Git 抽屉，用现有 `DiffView` 预览。会话标题来自 `agent_sessions.title`（侧栏 / 命令面板 / SessionHeader），空则仍显示「会话」或 `Plan`。侧栏每个工作区默认 5 条会话，「显示更多」每次 +10。`@tanstack/react-virtual` + `measureElement` 动态高度。
+事件流按时序渲染 `TurnSegment`（思考 / 查阅汇总 / 终端 / 写入或更改 / 待办摘要 / 用量芯片 / 助手 markdown / 其它系统行），不再把工具、思考、正文拆成三个乱序数组。用户气泡悬停复制（成功打钩约 2 秒）；助手回合底栏复制同样打钩后约 2 秒恢复。仅最后一条用户消息可原位编辑并重发（live 走 `sendNativeInput`，否则 `startNativeSession`），不改历史行。会话开头的 `[PERMISSION]` / `[内置 Agent]` / `[MCP]` 并入第一条用户回合，不单独占一轮「已工作 0 秒」。启动行收成带图标的状态提示，不改后端原文。查阅展开后直接出 cyan 路径 + 行号卡片，不再二次折叠。`[用量]` 解析成输入/输出/缓存芯片。工作头显示「已工作 / 工作中 N 秒」。可解析的 `[待办]` 只在流里一行摘要，完整清单叠在会话列右上角 `TodoProcessPanel`（宽卡 / 窄窗胶囊）。已结束回合若本回合有 Write/Edit/ApplyPatch 路径，底部「N 个文件已更改」卡片只列这些路径；点文件或「审查」打开 Git 抽屉，用现有 `DiffView` 预览。会话标题来自 `agent_sessions.title`（侧栏 / 命令面板 / SessionHeader），空则仍显示「会话」或 `Plan`。侧栏顶部「已置顶」列出 `pinned != 0` 的会话；悬停未置顶行显示图钉，点击 `set_agent_session_pinned` 后从工作区分组抽到顶部，再点取消回原工作区。每个工作区默认 5 条未置顶会话，「显示更多」每次 +10。`@tanstack/react-virtual` + `measureElement` 动态高度。
 
 ## 工作区 / 分支 / 命令面板
 
-工作区选择器五条路径：搜索切换、打开文件夹（`plugin-dialog` `open({directory:true})` 后 `createWorkspace` local）、远程连接（选或建 SSH 配置 + 远端路径）、不在项目中工作（`ensureScratchWorkspace` → `$APPCONFIG/scratch` + 「临时工作区」）。
+工作区选择器五条路径：搜索切换、打开文件夹（`plugin-dialog` `open({directory:true})` 后 `createWorkspace` local）、远程连接（选或建 SSH 配置 + 远端路径）、不在项目中工作（`ensureScratchWorkspace` → `$APPCONFIG/scratch` + 「临时工作区」）。打开历史会话时，若该会话有 `workspace_id` 且与当前不同，则把 `activeWorkspaceId` 同步到该工作区。
 
 分支选择器：`listGitBranches` 搜索切换已有分支（`checkoutGitBranch` / `git switch`），以及「创建并检出」。点外或 Escape 关闭菜单。
 

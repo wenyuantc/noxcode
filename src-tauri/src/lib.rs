@@ -129,6 +129,7 @@ pub fn run() {
             app::sessions::list_agent_sessions,
             app::sessions::get_agent_session_log_lines,
             app::sessions::prepare_agent_session_resume,
+            app::sessions::set_agent_session_pinned,
             app::sessions::delete_agent_session,
         ])
         .build(tauri::generate_context!())

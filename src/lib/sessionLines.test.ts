@@ -55,6 +55,21 @@ describe("sessionLines", () => {
     expect(stripUserPrefix("[USER_INPUT]  a")).toBe("a");
   });
 
+  it("attaches leading status lines to the first user turn", () => {
+    const blocks = buildTurnBlocks(
+      groupSessionLines([
+        line("1", "[PERMISSION] 已在设置中关闭高风险确认", "2026-01-01T00:00:00Z"),
+        line("2", "[MCP] 未启用服务器", "2026-01-01T00:00:00Z"),
+        line("3", "[USER_INPUT] 分析项目", "2026-01-01T00:00:01Z"),
+        line("4", "好了", "2026-01-01T00:00:35Z"),
+      ]),
+    );
+    expect(blocks).toHaveLength(1);
+    expect(blocks[0]?.user?.text).toBe("分析项目");
+    expect(blocks[0]?.startedAt).toBe("2026-01-01T00:00:01Z");
+    expect(blocks[0]?.segments.map((segment) => segment.kind)).toEqual(["system", "assistant"]);
+  });
+
   it("groups a turn around the user line", () => {
     const blocks = buildTurnBlocks(
       groupSessionLines([

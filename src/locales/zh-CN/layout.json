@@ -10,6 +10,9 @@
   "sessions": "会话",
   "workspaces": "工作区",
   "moreSessions": "显示更多",
+  "pinnedSection": "已置顶",
+  "pinSession": "置顶",
+  "unpinSession": "取消置顶",
   "command": {
     "placeholder": "搜索操作、会话或文件",
     "all": "全部",

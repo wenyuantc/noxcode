@@ -466,18 +466,30 @@ export function buildTurnBlocks(items: GroupedSessionItem[]): SessionTurnBlock[]
     return block;
   };
 
+  const append = (block: SessionTurnBlock, item: GroupedSessionItem) => {
+    block.endedAt = item.createdAt;
+    currentItems.push(item);
+    if (item.kind === "user") block.user = item;
+    else if (item.kind === "tool") block.tools.push(item);
+    else if (item.kind === "assistant") block.assistant.push(item);
+    else block.system.push(item);
+  };
+
   for (const item of items) {
-    if (item.kind === "user" || !current) {
+    const startUserTurn = item.kind === "user" && current?.user;
+    if (startUserTurn || !current) {
       if (current) finish(current, currentItems);
       current = startBlock(item);
       currentItems = [];
     }
-    current.endedAt = item.createdAt;
-    currentItems.push(item);
-    if (item.kind === "user") current.user = item;
-    else if (item.kind === "tool") current.tools.push(item);
-    else if (item.kind === "assistant") current.assistant.push(item);
-    else current.system.push(item);
+    if (item.kind === "user" && currentItems.length > 0) {
+      current.user = item;
+      current.id = item.id;
+      current.startedAt = item.createdAt;
+      currentItems = [item, ...currentItems];
+      continue;
+    }
+    append(current, item);
   }
   if (current) finish(current, currentItems);
   return blocks;

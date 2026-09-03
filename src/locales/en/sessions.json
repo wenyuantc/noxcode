@@ -39,6 +39,7 @@
   "filesChanged": "{{count}} files changed",
   "review": "Review",
   "copy": "Copy",
+  "edit": "Edit",
   "retry": "Retry",
   "like": "Helpful",
   "dislike": "Not helpful",
