@@ -22,8 +22,8 @@ use crate::engine::context::resolve_workspace_execution_context_with_pool;
 
 use self::checkpoint::{list_checkpoints, preview_restore, restore_checkpoint, sweep_orphan_refs};
 use self::commit::{
-    commit_changes, create_branch, list_branches, push_branch, GitBranch, GitCommitResult,
-    GitPushResult,
+    checkout_branch, commit_changes, create_branch, list_branches, push_branch, GitBranch,
+    GitCommitResult, GitPushResult,
 };
 use self::diff::{
     get_file_diff, get_numstat, GitFileDiff, GitFileDiffScope, GitNumstatEntry, GitNumstatScope,
@@ -193,6 +193,16 @@ pub(crate) async fn create_git_branch<R: Runtime>(
     create_branch(&target, &name, checkout)
         .await
         .map_err(Into::into)
+}
+
+#[tauri::command]
+pub(crate) async fn checkout_git_branch<R: Runtime>(
+    app: AppHandle<R>,
+    workspace_id: String,
+    name: String,
+) -> Result<GitBranch, String> {
+    let target = resolve_git_target(&app, &workspace_id).await?;
+    checkout_branch(&target, &name).await.map_err(Into::into)
 }
 
 #[tauri::command]

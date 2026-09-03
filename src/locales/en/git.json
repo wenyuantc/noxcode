@@ -28,7 +28,7 @@
   "searchBranch": "Search branches",
   "createBranch": "Create and check out…",
   "branchName": "Branch name",
-  "switchHint": "v1 can create and check out a new branch, but cannot switch existing ones",
+  "switchHint": "Click a branch to switch",
   "searchWorkspace": "Search workspaces",
   "openFolder": "Open folder",
   "remoteConnect": "Remote connection",

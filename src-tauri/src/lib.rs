@@ -79,6 +79,7 @@ pub fn run() {
             git::push_git_branch,
             git::list_git_branches,
             git::create_git_branch,
+            git::checkout_git_branch,
             git::list_git_files,
             git::create_git_checkpoint,
             git::list_git_checkpoints,

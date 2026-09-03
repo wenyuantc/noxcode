@@ -83,13 +83,13 @@ ref：`refs/noxcode/checkpoints/<session_id>/<seq>`。author / committer 固定 
 | `restore_git_paths` | 丢弃工作区改动 |
 | `commit_git_changes` | `commit -m [-- paths]` |
 | `push_git_branch` | 含 `--set-upstream`，超时 300s |
-| `list_git_branches` / `create_git_branch` | `for-each-ref` / `check-ref-format` + `switch -c` |
+| `list_git_branches` / `create_git_branch` / `checkout_git_branch` | `for-each-ref` / `check-ref-format` + `switch -c` / `switch` |
 | `list_git_files` | `ls-files --cached --others --exclude-standard -z`，供 ⌘K / `@` |
 | `create_git_checkpoint` / `list_git_checkpoints` | 打点；列表带 `ref_valid` |
 | `preview_git_checkpoint_restore` / `restore_git_checkpoint` | 预览 / 回滚 |
 | `clear_git_checkpoints` | 清本仓库全部检查点 |
 
-前端对应函数在 `backend.ts`：`getGitRepoInfo`、`getGitStatus`、`getGitFileDiff`、`getGitNumstat`、`stageGitPaths`、`unstageGitPaths`、`restoreGitPaths`、`commitGitChanges`、`pushGitBranch`、`listGitBranches`、`createGitBranch`、`listGitFiles`、`createGitCheckpoint`、`listGitCheckpoints`、`previewGitCheckpointRestore`、`restoreGitCheckpoint`、`clearGitCheckpoints`。
+前端对应函数在 `backend.ts`：`getGitRepoInfo`、`getGitStatus`、`getGitFileDiff`、`getGitNumstat`、`stageGitPaths`、`unstageGitPaths`、`restoreGitPaths`、`commitGitChanges`、`pushGitBranch`、`listGitBranches`、`createGitBranch`、`checkoutGitBranch`、`listGitFiles`、`createGitCheckpoint`、`listGitCheckpoints`、`previewGitCheckpointRestore`、`restoreGitCheckpoint`、`clearGitCheckpoints`。
 
 ## 测试
 
@@ -104,4 +104,3 @@ ref：`refs/noxcode/checkpoints/<session_id>/<seq>`。author / committer 固定 
 ## 暂不做
 
 - `ScratchIndex::from_head`（本阶段无 AI 触发的选中路径提交）
-- 切换已有分支（后端无 `switch` 命令；第一版只能创建并检出）

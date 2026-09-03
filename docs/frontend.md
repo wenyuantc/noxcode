@@ -59,7 +59,7 @@ Composer：无 live 会话走 `startNativeSession`（`ai_channel_id` + 模型）
 
 工作区选择器五条路径：搜索切换、打开文件夹（`plugin-dialog` `open({directory:true})` 后 `createWorkspace` local）、远程连接（选或建 SSH 配置 + 远端路径）、不在项目中工作（`ensureScratchWorkspace` → `$APPCONFIG/scratch` + 「临时工作区」）。
 
-分支选择器：`listGitBranches` + 「创建并检出」。第一版不能切换已有分支（后端无 switch）。
+分支选择器：`listGitBranches` 搜索切换已有分支（`checkoutGitBranch` / `git switch`），以及「创建并检出」。点外或 Escape 关闭菜单。
 
 命令面板：`Dialog` + 键盘导航，三类过滤（操作 / 最近会话 / `list_git_files`）。
 

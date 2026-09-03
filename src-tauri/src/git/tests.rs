@@ -12,7 +12,7 @@ use super::checkpoint::{
     create_checkpoint, delete_checkpoints_for_session, list_checkpoints, preview_restore,
     restore_checkpoint,
 };
-use super::commit::{commit_changes, create_branch, list_branches, push_branch};
+use super::commit::{checkout_branch, commit_changes, create_branch, list_branches, push_branch};
 use super::diff::{get_file_diff, get_numstat, GitFileDiffScope, GitNumstatScope};
 use super::repo::{list_repo_files, load_repo_info};
 use super::runner::{fixture_git, git, GitTarget, IndexMode};
@@ -215,8 +215,16 @@ async fn repo_status_stage_commit_push_and_branch() {
             .expect("branch");
         assert_eq!(created.name, "feature");
         assert!(created.is_current);
+        let switched = checkout_branch(&target, "main").await.expect("switch");
+        assert_eq!(switched.name, "main");
+        assert!(switched.is_current);
         let branches = list_branches(&target).await.expect("list");
         assert!(branches.iter().any(|branch| branch.name == "main"));
+        assert!(
+            branches
+                .iter()
+                .any(|branch| branch.name == "feature" && !branch.is_current)
+        );
 
         let remote_dir = tempfile::tempdir().expect("remote");
         let remote = GitTarget::Local(remote_dir.path().to_path_buf());

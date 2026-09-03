@@ -181,3 +181,31 @@ pub(crate) async fn create_branch(
         .find(|branch| branch.name == name)
         .ok_or_else(|| GitError::Parse(format!("已创建分支但无法读取: {name}")))
 }
+
+pub(crate) async fn checkout_branch(target: &GitTarget, name: &str) -> Result<GitBranch, GitError> {
+    let name = name.trim();
+    if name.is_empty() {
+        return Err(GitError::Parse("分支名不能为空".to_string()));
+    }
+    git(
+        target,
+        &["check-ref-format", "--branch", name],
+        &IndexMode::ReadOnly,
+    )
+    .await?
+    .require_success(&["check-ref-format", "--branch", name])?;
+
+    with_repo_lock(target, || async {
+        git(target, &["switch", name], &IndexMode::user())
+            .await?
+            .require_success(&["switch", name])?;
+        Ok(())
+    })
+    .await?;
+
+    list_branches(target)
+        .await?
+        .into_iter()
+        .find(|branch| branch.name == name && branch.is_current)
+        .ok_or_else(|| GitError::Parse(format!("已切换分支但无法读取: {name}")))
+}

@@ -1,12 +1,17 @@
 import { Check, GitBranch, Plus, Search } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 
-import { createGitBranch, listGitBranches } from "@/lib/backend";
+import { checkoutGitBranch, createGitBranch, listGitBranches } from "@/lib/backend";
 import type { GitBranch as GitBranchType } from "@/lib/types";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { useDismissible } from "@/hooks/useDismissible";
 import { useWorkspaceStore } from "@/stores/workspaceStore";
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
 
 export function BranchPicker() {
   const { t } = useTranslation(["git", "common"]);
@@ -16,10 +21,15 @@ export function BranchPicker() {
   const [query, setQuery] = useState("");
   const [creating, setCreating] = useState(false);
   const [name, setName] = useState("");
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const rootRef = useRef<HTMLDivElement>(null);
+  const closeMenu = useCallback(() => setOpen(false), []);
+  useDismissible(open, closeMenu, rootRef);
 
   const current = branches.find((item) => item.is_current);
 
-  useEffect(() => {
+  const loadBranches = useCallback(() => {
     if (!workspaceId) {
       setBranches([]);
       return;
@@ -29,16 +39,46 @@ export function BranchPicker() {
       .catch(() => setBranches([]));
   }, [workspaceId]);
 
+  useEffect(() => {
+    loadBranches();
+  }, [loadBranches]);
+
   const filtered = useMemo(
     () => branches.filter((item) => item.name.toLowerCase().includes(query.trim().toLowerCase())),
     [branches, query],
   );
 
+  const toggleOpen = () => {
+    setOpen((value) => {
+      const next = !value;
+      if (next) {
+        setError(null);
+        loadBranches();
+      }
+      return next;
+    });
+  };
+
+  const selectBranch = (branch: GitBranchType) => {
+    if (!workspaceId || busy) return;
+    if (branch.is_current) {
+      setOpen(false);
+      return;
+    }
+    setError(null);
+    setBusy(true);
+    void checkoutGitBranch(workspaceId, branch.name)
+      .then(() => listGitBranches(workspaceId).then(setBranches))
+      .then(() => setOpen(false))
+      .catch((err: unknown) => setError(errorMessage(err)))
+      .finally(() => setBusy(false));
+  };
+
   if (!workspaceId) return null;
 
   return (
-    <div className="relative">
-      <Button type="button" variant="outline" size="sm" onClick={() => setOpen((value) => !value)}>
+    <div ref={rootRef} className="relative">
+      <Button type="button" variant="outline" size="sm" onClick={toggleOpen}>
         <GitBranch className="size-3.5" />
         <span className="max-w-32 truncate">{current?.name ?? "—"}</span>
       </Button>
@@ -54,15 +94,19 @@ export function BranchPicker() {
             />
           </div>
           <p className="px-2 pb-1 text-[11px] text-muted-foreground">{t("git:switchHint")}</p>
+          {error ? <p className="px-2 pb-1 text-[11px] text-destructive">{error}</p> : null}
           <div className="max-h-48 overflow-y-auto">
             {filtered.map((branch) => (
-              <div
+              <button
                 key={branch.name}
-                className="flex items-center gap-2 rounded-md px-2 py-1.5 text-sm"
+                type="button"
+                disabled={busy}
+                className="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-sm hover:bg-accent disabled:opacity-50"
+                onClick={() => selectBranch(branch)}
               >
                 <span className="flex-1 truncate">{branch.name}</span>
                 {branch.is_current ? <Check className="size-3.5" /> : null}
-              </div>
+              </button>
             ))}
           </div>
           <div className="mt-2 border-t pt-2">
@@ -76,13 +120,19 @@ export function BranchPicker() {
                 />
                 <Button
                   size="sm"
-                  disabled={!name.trim()}
+                  disabled={!name.trim() || busy}
                   onClick={() => {
-                    void createGitBranch(workspaceId, name.trim(), true).then(() =>
-                      listGitBranches(workspaceId).then(setBranches),
-                    );
-                    setCreating(false);
-                    setName("");
+                    setError(null);
+                    setBusy(true);
+                    void createGitBranch(workspaceId, name.trim(), true)
+                      .then(() => listGitBranches(workspaceId).then(setBranches))
+                      .then(() => {
+                        setCreating(false);
+                        setName("");
+                        setOpen(false);
+                      })
+                      .catch((err: unknown) => setError(errorMessage(err)))
+                      .finally(() => setBusy(false));
                   }}
                 >
                   {t("common:create")}

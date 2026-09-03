@@ -202,6 +202,10 @@ export function createGitBranch(
   return invoke("create_git_branch", { workspaceId, name, checkout });
 }
 
+export function checkoutGitBranch(workspaceId: string, name: string): Promise<GitBranch> {
+  return invoke("checkout_git_branch", { workspaceId, name });
+}
+
 export function listGitFiles(
   workspaceId: string,
   query?: string,

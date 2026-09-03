@@ -1,12 +1,13 @@
 import { open } from "@tauri-apps/plugin-dialog";
 import { Check, Cloud, FolderOpen, Search, X } from "lucide-react";
-import { useMemo, useState } from "react";
+import { useCallback, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 
 import { ensureScratchWorkspace } from "@/lib/backend";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { RemoteConnectDialog } from "@/components/workspace/RemoteConnectDialog";
+import { useDismissible } from "@/hooks/useDismissible";
 import { useWorkspaceStore } from "@/stores/workspaceStore";
 
 export function WorkspacePicker({ onRequestOpen }: { onRequestOpen?: () => void }) {
@@ -19,6 +20,9 @@ export function WorkspacePicker({ onRequestOpen }: { onRequestOpen?: () => void 
   const [openMenu, setOpenMenu] = useState(false);
   const [query, setQuery] = useState("");
   const [remoteOpen, setRemoteOpen] = useState(false);
+  const rootRef = useRef<HTMLDivElement>(null);
+  const closeMenu = useCallback(() => setOpenMenu(false), []);
+  useDismissible(openMenu, closeMenu, rootRef);
 
   const filtered = useMemo(
     () => workspaces.filter((item) => item.name.toLowerCase().includes(query.trim().toLowerCase())),
@@ -34,7 +38,7 @@ export function WorkspacePicker({ onRequestOpen }: { onRequestOpen?: () => void 
   };
 
   return (
-    <div className="relative">
+    <div ref={rootRef} className="relative">
       <Button
         type="button"
         variant="outline"

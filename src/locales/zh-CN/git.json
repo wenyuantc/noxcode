@@ -28,7 +28,7 @@
   "searchBranch": "搜索分支",
   "createBranch": "创建并检出新分支…",
   "branchName": "分支名",
-  "switchHint": "第一版只能创建并检出新分支，不能切换已有分支",
+  "switchHint": "点击已有分支即可切换",
   "searchWorkspace": "搜索工作区",
   "openFolder": "打开文件夹",
   "remoteConnect": "远程连接",

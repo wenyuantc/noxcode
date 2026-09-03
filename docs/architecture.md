@@ -55,7 +55,7 @@ flowchart LR
 | `app/ssh/` + `app/secret_store` | P2 + P5 设置页 / 信任对话框，见 [`ssh.md`](ssh.md) | 保持 |
 | `app/workspaces` | CRUD + 健康检查 + scratch 工作区 | 保持 |
 | `app/sessions` | 历史列表 / 续聊判定 / 删会话清 checkpoint | 保持 |
-| `git/` | P2.5 + P4.4 自动打点 + P5 Git 抽屉 | 分支切换留 backlog |
+| `git/` | P2.5 + P4.4 自动打点 + P5 Git 抽屉 + 分支切换 | 保持 |
 | `engine/` | `ExecutionContext`（local \| ssh） | 继续用 |
 | `native/` | P4 运行时 + P5 会话流 / 设置页 | 保持 |
 
@@ -81,7 +81,7 @@ flowchart LR
 | `resolve_ssh_host_trust` | `app::ssh`（`ask` 模式确认回传） |
 | `get_git_repo_info` / `get_git_status` / `get_git_file_diff` / `get_git_numstat` | `git` |
 | `stage_git_paths` / `unstage_git_paths` / `restore_git_paths` | `git` |
-| `commit_git_changes` / `push_git_branch` / `list_git_branches` / `create_git_branch` / `list_git_files` | `git` |
+| `commit_git_changes` / `push_git_branch` / `list_git_branches` / `create_git_branch` / `checkout_git_branch` / `list_git_files` | `git` |
 | `create_git_checkpoint` / `list_git_checkpoints` / `preview_git_checkpoint_restore` / `restore_git_checkpoint` / `clear_git_checkpoints` | `git` |
 | `get_quick_prompts` / `update_quick_prompts` | `app::quick_prompts` |
 | `list_ai_channels` / `create_ai_channel` / `update_ai_channel` / `delete_ai_channel` | `native::channels` |
