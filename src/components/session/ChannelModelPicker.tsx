@@ -1,4 +1,4 @@
-import { Check, ChevronsUpDown } from "lucide-react";
+import { Check, ChevronDown } from "lucide-react";
 import { useNavigate } from "react-router-dom";
 import { useTranslation } from "react-i18next";
 
@@ -31,7 +31,7 @@ export function ChannelModelPicker() {
     <DropdownMenu>
       <DropdownMenuTrigger className="inline-flex h-7 max-w-48 items-center justify-between gap-1 rounded-md border bg-background px-2 text-xs outline-none">
         <span className="truncate">{label}</span>
-        <ChevronsUpDown className="size-3.5 shrink-0 text-muted-foreground" />
+        <ChevronDown className="size-3.5 shrink-0 text-muted-foreground" />
       </DropdownMenuTrigger>
       <DropdownMenuContent align="start" className="min-w-48">
         {enabled.length === 0 ? (

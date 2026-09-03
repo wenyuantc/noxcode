@@ -39,6 +39,40 @@
       "description": "Reduce confirmation frequency."
     }
   },
+  "effortLevels": {
+    "none": {
+      "title": "None",
+      "description": "Do not use thinking."
+    },
+    "no_think": {
+      "title": "No think",
+      "description": "Turn reasoning off."
+    },
+    "minimal": {
+      "title": "Minimal",
+      "description": "Almost no extra reasoning."
+    },
+    "low": {
+      "title": "Low",
+      "description": "Faster replies, less thinking."
+    },
+    "medium": {
+      "title": "Medium",
+      "description": "Balance speed and reasoning depth."
+    },
+    "high": {
+      "title": "High",
+      "description": "Deeper reasoning, slower replies."
+    },
+    "xhigh": {
+      "title": "Very high",
+      "description": "Analyze harder problems more thoroughly."
+    },
+    "max": {
+      "title": "Max",
+      "description": "Deepest reasoning, slowest replies."
+    }
+  },
   "contextUsage": "{{used}} / {{limit}}",
   "atContext": "Add context",
   "slashSkill": "Choose a skill",

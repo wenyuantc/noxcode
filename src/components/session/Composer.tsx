@@ -10,6 +10,7 @@ import {
   startNativeSession,
   stopNativeSession,
 } from "@/lib/backend";
+import { FALLBACK_THINKING_LEVELS } from "@/lib/modelCatalog";
 import { formatTokenCount } from "@/lib/utils";
 import type { NativeSkill } from "@/lib/types";
 import { useChannelStore } from "@/stores/channelStore";
@@ -19,6 +20,7 @@ import { useWorkspaceStore } from "@/stores/workspaceStore";
 import { BranchPicker } from "./BranchPicker";
 import { ChannelModelPicker } from "./ChannelModelPicker";
 import { PermissionModePicker } from "./PermissionModePicker";
+import { ThinkingLevelPicker } from "./ThinkingLevelPicker";
 import { WorkspacePicker } from "./WorkspacePicker";
 
 export function Composer({ compact = false }: { compact?: boolean }) {
@@ -51,7 +53,7 @@ export function Composer({ compact = false }: { compact?: boolean }) {
   const selectedModel = channel?.models.find((item) => item.id === model);
   const efforts = selectedModel?.thinking_levels?.length
     ? selectedModel.thinking_levels
-    : ["low", "medium", "high"];
+    : FALLBACK_THINKING_LEVELS;
   const resolvedEffort = efforts.includes(effort)
     ? effort
     : (efforts.find((level) => level === "medium") ?? efforts[0] ?? "medium");
@@ -192,17 +194,7 @@ export function Composer({ compact = false }: { compact?: boolean }) {
         <div className="flex flex-wrap items-center gap-2 border-t px-3 py-2 text-xs">
           <PermissionModePicker />
           <ChannelModelPicker />
-          <select
-            className="h-7 rounded-md border bg-background px-2"
-            value={resolvedEffort}
-            onChange={(event) => setEffort(event.target.value)}
-          >
-            {efforts.map((level) => (
-              <option key={level} value={level}>
-                {level}
-              </option>
-            ))}
-          </select>
+          <ThinkingLevelPicker value={resolvedEffort} levels={efforts} onChange={setEffort} />
           {usageLabel ? <span className="text-muted-foreground">{usageLabel}</span> : null}
           <span className="flex-1" />
           {live ? (

@@ -39,6 +39,40 @@
       "description": "减少确认次数。"
     }
   },
+  "effortLevels": {
+    "none": {
+      "title": "无",
+      "description": "不使用思考。"
+    },
+    "no_think": {
+      "title": "不思考",
+      "description": "关闭推理。"
+    },
+    "minimal": {
+      "title": "最低",
+      "description": "几乎不额外思考。"
+    },
+    "low": {
+      "title": "低",
+      "description": "更快响应，少思考。"
+    },
+    "medium": {
+      "title": "中",
+      "description": "平衡速度和推理深度。"
+    },
+    "high": {
+      "title": "高",
+      "description": "更深推理，更慢。"
+    },
+    "xhigh": {
+      "title": "最高",
+      "description": "更充分分析复杂问题。"
+    },
+    "max": {
+      "title": "极高",
+      "description": "最深推理，最慢。"
+    }
+  },
   "contextUsage": "{{used}} / {{limit}}",
   "atContext": "添加上下文",
   "slashSkill": "选择技能",
