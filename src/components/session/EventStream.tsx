@@ -1,13 +1,20 @@
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { useEffect, useRef } from "react";
 
-import { buildTurnBlocks, groupSessionLines, lineToneClass } from "@/lib/sessionLines";
+import {
+  buildTurnBlocks,
+  groupSessionLines,
+  lineToneClass,
+  type RawSessionLine,
+} from "@/lib/sessionLines";
 import { cn } from "@/lib/utils";
 import { useSessionStore } from "@/stores/sessionStore";
 import { WorkSummaryBar } from "./WorkSummaryBar";
 
+const EMPTY_LINES: RawSessionLine[] = [];
+
 export function EventStream({ sessionId }: { sessionId: string }) {
-  const lines = useSessionStore((state) => state.lines[sessionId] ?? []);
+  const lines = useSessionStore((state) => state.lines[sessionId]) ?? EMPTY_LINES;
   const stream = useSessionStore((state) => state.stream[sessionId]);
   const items = groupSessionLines(lines);
   const blocks = buildTurnBlocks(items);
