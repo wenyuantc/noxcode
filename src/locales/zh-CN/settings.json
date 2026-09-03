@@ -115,14 +115,88 @@
   },
   "ssh": {
     "title": "SSH 连接",
-    "hint": "管理远端工作区使用的 SSH 配置。",
-    "new": "新建配置",
-    "import": "从 ~/.ssh/config 导入",
-    "importHint": "选择 Host 别名后填充表单。ProxyJump 暂不支持。",
-    "proxyJumpUnsupported": "该 Host 带有 ProxyJump，第一版不支持跳板，请手动配置直连参数。",
-    "test": "测试连接",
-    "probe": "探测密码认证",
-    "deleteConfirm": "确定删除该 SSH 配置？"
+    "description": "管理远端工作区使用的 SSH 配置。",
+    "actions": {
+      "new": "新建配置",
+      "choose": "选择",
+      "save": "保存",
+      "cancel": "取消",
+      "testConnection": "测试连接",
+      "probePassword": "探测密码认证",
+      "delete": "删除"
+    },
+    "list": {
+      "loading": "正在读取 SSH 配置…",
+      "empty": "还没有 SSH 配置，请点击新建。",
+      "checkedAt": "检测于 {{date}}"
+    },
+    "badges": {
+      "passwordLogin": "密码登录",
+      "keyLogin": "密钥登录",
+      "passwordAuth": "密码认证",
+      "keyAuth": "密钥认证"
+    },
+    "form": {
+      "createTitle": "新建 SSH 配置",
+      "editTitle": "编辑 SSH 配置",
+      "createDescription": "保存后可用于远端工作区。",
+      "editDescription": "更新后会保留当前配置引用。",
+      "configName": "配置名称 *",
+      "host": "主机 *",
+      "port": "端口",
+      "username": "用户名 *",
+      "authType": "认证方式",
+      "knownHostsPolicy": "Known Hosts 策略",
+      "privateKeyPath": "私钥路径 *",
+      "password": "密码",
+      "passphrase": "Passphrase（可选）",
+      "placeholders": {
+        "configName": "生产主机",
+        "host": "10.0.0.12",
+        "port": "22",
+        "username": "deploy",
+        "privateKeyPath": "~/.ssh/id_ed25519",
+        "passphraseKeepExisting": "留空表示保持现有 passphrase",
+        "passphraseOptional": "可选",
+        "passwordKeepExisting": "留空表示保持现有密码",
+        "passwordEnter": "输入登录密码"
+      }
+    },
+    "knownHosts": {
+      "acceptNew": "首次连接自动接受",
+      "strict": "严格校验",
+      "ask": "询问确认",
+      "off": "关闭校验（不推荐）"
+    },
+    "status": {
+      "title": "当前配置状态",
+      "host": "主机",
+      "connectionTest": "连接测试",
+      "notTested": "未检测"
+    },
+    "import": {
+      "title": "从 ~/.ssh/config 导入",
+      "hint": "选择 Host 别名后填充表单。ProxyJump 暂不支持。",
+      "empty": "未找到可导入的 Host。",
+      "proxyJump": "ProxyJump",
+      "proxyJumpUnsupported": "该 Host 带有 ProxyJump，第一版不支持跳板，请手动配置直连参数。"
+    },
+    "desktop": {
+      "selectPrivateKeyTitle": "选择私钥文件"
+    },
+    "dialogs": {
+      "createTitle": "新建 SSH 配置",
+      "editTitle": "编辑 SSH 配置",
+      "deleteTitle": "删除 SSH 配置",
+      "deleteConfirm": "确定删除 SSH 配置「{{name}}」？"
+    },
+    "messages": {
+      "created": "SSH 配置已创建",
+      "updated": "SSH 配置已更新",
+      "deleted": "SSH 配置已删除",
+      "requiredFields": "请填写配置名称、主机和用户名",
+      "privateKeyRequired": "密钥登录需要填写私钥路径"
+    }
   },
   "runtime": {
     "title": "内置 Agent 运行时",
@@ -190,7 +264,24 @@
   },
   "hooks": {
     "title": "钩子",
-    "hint": "Pre 钩子退出码 2 阻断；Post 失败仅警告。"
+    "hint": "工具调用前退出码 2 会阻断本次调用；调用后失败只记警告。",
+    "fields": {
+      "event": "钩子类型",
+      "matcher": "匹配工具",
+      "command": "命令"
+    },
+    "events": {
+      "preToolUse": "工具调用前（可阻断）",
+      "postToolUse": "工具调用后（仅警告）"
+    },
+    "placeholders": {
+      "matcher": "* 或 Bash, Write",
+      "command": "要执行的命令"
+    },
+    "fieldHints": {
+      "matcher": "* 匹配全部工具；多个工具用英文逗号分隔。",
+      "command": "在工作区执行的 shell 命令。留空保存时会被丢弃。"
+    }
   },
   "subagents": {
     "title": "子智能体",

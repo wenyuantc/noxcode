@@ -115,14 +115,88 @@
   },
   "ssh": {
     "title": "SSH connections",
-    "hint": "SSH configs used by remote workspaces.",
-    "new": "New config",
-    "import": "Import from ~/.ssh/config",
-    "importHint": "Pick a Host alias to fill the form. ProxyJump is not supported.",
-    "proxyJumpUnsupported": "This Host has ProxyJump. v1 does not support jump hosts — configure a direct connection.",
-    "test": "Test connection",
-    "probe": "Probe password auth",
-    "deleteConfirm": "Delete this SSH config?"
+    "description": "SSH configs used by remote workspaces.",
+    "actions": {
+      "new": "New config",
+      "choose": "Choose",
+      "save": "Save",
+      "cancel": "Cancel",
+      "testConnection": "Test connection",
+      "probePassword": "Probe password auth",
+      "delete": "Delete"
+    },
+    "list": {
+      "loading": "Loading SSH configs…",
+      "empty": "No SSH configs yet. Create one to get started.",
+      "checkedAt": "Checked {{date}}"
+    },
+    "badges": {
+      "passwordLogin": "Password login",
+      "keyLogin": "Key login",
+      "passwordAuth": "Password auth",
+      "keyAuth": "Key auth"
+    },
+    "form": {
+      "createTitle": "New SSH config",
+      "editTitle": "Edit SSH config",
+      "createDescription": "After saving, this config can be used by remote workspaces.",
+      "editDescription": "Updates keep the current config reference.",
+      "configName": "Config name *",
+      "host": "Host *",
+      "port": "Port",
+      "username": "Username *",
+      "authType": "Auth method",
+      "knownHostsPolicy": "Known Hosts policy",
+      "privateKeyPath": "Private key path *",
+      "password": "Password",
+      "passphrase": "Passphrase (optional)",
+      "placeholders": {
+        "configName": "production host",
+        "host": "10.0.0.12",
+        "port": "22",
+        "username": "deploy",
+        "privateKeyPath": "~/.ssh/id_ed25519",
+        "passphraseKeepExisting": "Leave empty to keep the current passphrase",
+        "passphraseOptional": "Optional",
+        "passwordKeepExisting": "Leave empty to keep the current password",
+        "passwordEnter": "Enter the login password"
+      }
+    },
+    "knownHosts": {
+      "acceptNew": "Accept new hosts on first connect",
+      "strict": "Strict verification",
+      "ask": "Ask before accepting",
+      "off": "Disable verification (not recommended)"
+    },
+    "status": {
+      "title": "Current config status",
+      "host": "Host",
+      "connectionTest": "Connection test",
+      "notTested": "Not tested"
+    },
+    "import": {
+      "title": "Import from ~/.ssh/config",
+      "hint": "Pick a Host alias to fill the form. ProxyJump is not supported.",
+      "empty": "No importable Host aliases found.",
+      "proxyJump": "ProxyJump",
+      "proxyJumpUnsupported": "This Host has ProxyJump. v1 does not support jump hosts — configure a direct connection."
+    },
+    "desktop": {
+      "selectPrivateKeyTitle": "Choose a private key file"
+    },
+    "dialogs": {
+      "createTitle": "New SSH config",
+      "editTitle": "Edit SSH config",
+      "deleteTitle": "Delete SSH config",
+      "deleteConfirm": "Delete SSH config “{{name}}”?"
+    },
+    "messages": {
+      "created": "SSH config created",
+      "updated": "SSH config updated",
+      "deleted": "SSH config deleted",
+      "requiredFields": "Name, host, and username are required",
+      "privateKeyRequired": "Key login requires a private key path"
+    }
   },
   "runtime": {
     "title": "Native agent runtime",
