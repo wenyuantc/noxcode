@@ -4,6 +4,7 @@ import { applyTheme, cycleTheme, getThemePreference, type ThemeMode } from "@/li
 
 const WIDTH_KEY = "noxcode:sidebar-width";
 const COLLAPSED_KEY = "noxcode:sidebar-collapsed";
+const PLAN_MODE_KEY = "noxcode:composer-plan-mode";
 
 function readNumber(key: string, fallback: number) {
   const raw = typeof window === "undefined" ? null : window.localStorage.getItem(key);
@@ -17,12 +18,14 @@ interface UiState {
   commandOpen: boolean;
   gitOpen: boolean;
   composerDraft: string;
+  composerPlanMode: boolean;
   theme: ThemeMode;
   setSidebarWidth: (width: number) => void;
   toggleSidebar: () => void;
   setCommandOpen: (open: boolean) => void;
   toggleGit: () => void;
   setComposerDraft: (value: string) => void;
+  setComposerPlanMode: (value: boolean) => void;
   setTheme: (mode: ThemeMode) => void;
   cycleTheme: () => void;
 }
@@ -33,6 +36,7 @@ export const useUiStore = create<UiState>((set, get) => ({
   commandOpen: false,
   gitOpen: false,
   composerDraft: "",
+  composerPlanMode: typeof window !== "undefined" && localStorage.getItem(PLAN_MODE_KEY) === "1",
   theme: getThemePreference(),
   setSidebarWidth: (width) => {
     const next = Math.min(480, Math.max(200, width));
@@ -47,6 +51,10 @@ export const useUiStore = create<UiState>((set, get) => ({
   setCommandOpen: (open) => set({ commandOpen: open }),
   toggleGit: () => set({ gitOpen: !get().gitOpen }),
   setComposerDraft: (value) => set({ composerDraft: value }),
+  setComposerPlanMode: (value) => {
+    localStorage.setItem(PLAN_MODE_KEY, value ? "1" : "0");
+    set({ composerPlanMode: value });
+  },
   setTheme: (mode) => {
     applyTheme(mode);
     set({ theme: mode });

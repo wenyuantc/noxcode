@@ -2,7 +2,7 @@
   "newSession": "新建会话",
   "search": "搜索",
   "settings": "设置",
-  "apiLogs": "模型调用日志",
+  "apiLogs": "API 调用记录",
   "backToWorkspace": "返回工作区",
   "shortcuts": {
     "newSession": "新建会话",

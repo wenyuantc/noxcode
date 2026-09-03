@@ -44,7 +44,11 @@ SELECT
     COALESCE(SUM(CASE WHEN l.status = 'failed' THEN 1 ELSE 0 END), 0) AS failed,
     COALESCE(SUM(CASE WHEN l.status = 'cancelled' THEN 1 ELSE 0 END), 0) AS cancelled,
     COALESCE(SUM(l.input_tokens), 0) AS input_tokens,
-    COALESCE(SUM(l.output_tokens), 0) AS output_tokens
+    COALESCE(SUM(l.output_tokens), 0) AS output_tokens,
+    SUM(l.cached_tokens) AS cached_tokens_sum,
+    SUM(l.total_tokens) AS total_tokens_sum,
+    AVG(l.first_token_ms) AS avg_first_token_ms,
+    AVG(l.duration_ms) AS avg_duration_ms
 FROM native_api_call_logs l
 LEFT JOIN workspaces w ON w.id = l.workspace_id
 "#;
@@ -435,6 +439,10 @@ mod tests {
         assert_eq!(page.items.len(), 1);
         assert_eq!(page.items[0].id, "log-1");
         assert_eq!(page.stats.success, 1);
+        assert_eq!(page.stats.cached_tokens_sum, Some(3));
+        assert_eq!(page.stats.total_tokens_sum, Some(14));
+        assert_eq!(page.stats.avg_first_token_ms, Some(12.0));
+        assert_eq!(page.stats.avg_duration_ms, Some(40.0));
         let detail = get_native_api_call_log_with_pool(&pool, "log-1")
             .await
             .expect("detail");

@@ -9,17 +9,16 @@ import {
   sendNativeInput,
   startNativeSession,
   stopNativeSession,
-  updateNativeSettings,
 } from "@/lib/backend";
 import { formatTokenCount } from "@/lib/utils";
 import type { NativeSkill } from "@/lib/types";
 import { useChannelStore } from "@/stores/channelStore";
 import { useSessionStore } from "@/stores/sessionStore";
-import { useSettingsStore } from "@/stores/settingsStore";
 import { useUiStore } from "@/stores/uiStore";
 import { useWorkspaceStore } from "@/stores/workspaceStore";
 import { BranchPicker } from "./BranchPicker";
 import { ChannelModelPicker } from "./ChannelModelPicker";
+import { PermissionModePicker } from "./PermissionModePicker";
 import { WorkspacePicker } from "./WorkspacePicker";
 
 export function Composer({ compact = false }: { compact?: boolean }) {
@@ -30,8 +29,7 @@ export function Composer({ compact = false }: { compact?: boolean }) {
   const channels = useChannelStore((state) => state.channels);
   const channelId = useChannelStore((state) => state.activeChannelId);
   const activeModelId = useChannelStore((state) => state.activeModelId);
-  const native = useSettingsStore((state) => state.native);
-  const setNative = useSettingsStore((state) => state.setNative);
+  const composerPlanMode = useUiStore((state) => state.composerPlanMode);
   const live = useSessionStore((state) =>
     workspaceId ? state.liveByWorkspace[workspaceId] : undefined,
   );
@@ -112,6 +110,7 @@ export function Composer({ compact = false }: { compact?: boolean }) {
           prompt,
           model: model || null,
           reasoning_effort: resolvedEffort || null,
+          plan_mode: composerPlanMode,
         });
       }
       setDraft("");
@@ -119,8 +118,6 @@ export function Composer({ compact = false }: { compact?: boolean }) {
       setError(err instanceof Error ? err.message : String(err));
     }
   };
-
-  const confirmHighRisk = native?.confirm_high_risk ?? true;
 
   const insertToken = (token: string) => {
     const parts = draft.split(/\s/);
@@ -193,17 +190,7 @@ export function Composer({ compact = false }: { compact?: boolean }) {
           </div>
         ) : null}
         <div className="flex flex-wrap items-center gap-2 border-t px-3 py-2 text-xs">
-          <select
-            className="h-7 rounded-md border bg-background px-2"
-            value={confirmHighRisk ? "confirm" : "full"}
-            onChange={(event) => {
-              const next = event.target.value !== "full";
-              void updateNativeSettings({ confirm_high_risk: next }).then(setNative);
-            }}
-          >
-            <option value="confirm">⚠ {t("sessions:confirmEach")}</option>
-            <option value="full">⚠ {t("sessions:fullAccess")}</option>
-          </select>
+          <PermissionModePicker />
           <ChannelModelPicker />
           <select
             className="h-7 rounded-md border bg-background px-2"

@@ -11,7 +11,7 @@ P5 落地单主界面 + 全屏设置。布局学 ZCode：左侧两级树、输�
 | `/` | `WorkspacePage`：`AppShell`（空态或会话流） |
 | `/settings` | 重定向到 `/settings/general` |
 | `/settings/:section` | 全屏设置，左导航三组 |
-| `/api-logs` | 模型调用日志 |
+| `/api-logs` | API 调用记录 |
 
 ## 目录
 
@@ -19,6 +19,7 @@ P5 落地单主界面 + 全屏设置。布局学 ZCode：左侧两级树、输�
 src/main.tsx             i18n init → applyTheme → App
 src/App.tsx              四条路由 + 权限 / 计划提问 / SSH 信任对话框
 src/lib/backend.ts       唯一 IPC 出口
+src/lib/apiLogs.ts       API 调用记录格式化 / 分页
 src/lib/sessionLines.ts  行前缀解析、工具/结果配对、回合折叠
 src/lib/gitHelpers.ts    暂存分组、diff 行着色
 src/locales/{zh-CN,en}   九个命名空间
@@ -28,6 +29,7 @@ src/components/ui/       17 个 shadcn 底座
 src/components/layout/   AppShell · Sidebar*
 src/components/session/  Composer · EventStream · pickers · 权限对话框
 src/components/settings/ SettingsLayout + 分节
+src/components/apiLogs/  调用详情弹层
 src/components/git/      GitPanel · DiffView · CheckpointTimeline
 ```
 
@@ -35,7 +37,7 @@ src/components/git/      GitPanel · DiffView · CheckpointTimeline
 
 | Store | 持久化键 | 职责 |
 | --- | --- | --- |
-| `uiStore` | `noxcode:sidebar-width`（200–480）、`noxcode:sidebar-collapsed`、`theme` / `theme-mode` | 侧栏、命令面板、Git 抽屉、Composer 草稿、主题 |
+| `uiStore` | `noxcode:sidebar-width`（200–480）、`noxcode:sidebar-collapsed`、`noxcode:composer-plan-mode`、`theme` / `theme-mode` | 侧栏、命令面板、Git 抽屉、Composer 草稿、计划模式、主题 |
 | `workspaceStore` | `noxcode:active-workspace` | 工作区列表、会话树、健康检查 |
 | `channelStore` | `noxcode:active-model` | 渠道列表、当前渠道/模型 |
 | `sessionStore` | — | live 会话、事件行、turn-state、权限/提问 |
@@ -47,7 +49,7 @@ src/components/git/      GitPanel · DiffView · CheckpointTimeline
 
 `native-session` / `native-stdout` / `native-text-delta` / `native-context-usage` / `native-turn-state` / `native-exit` / `native-permission-request` / `native-plan-question`。
 
-Composer：无 live 会话走 `startNativeSession`（`ai_channel_id` + 模型）；有 live 走 `sendNativeInput`；停止走 `stopNativeSession`。模型控件是渠道→模型级联菜单，底部「管理模型」进 `/settings/channels`。历史会话点「继续对话」先 `prepareAgentSessionResume`，可续则 `resumeNativeSession`。`native-turn-state` 的 `waiting_input` / `working` 驱动发送按钮，不靠猜前缀。
+Composer：无 live 会话走 `startNativeSession`（`ai_channel_id` + 模型）；有 live 走 `sendNativeInput`；停止走 `stopNativeSession`。权限菜单四项：变更前确认 / 自动编辑 / 计划模式 / 完全访问。前两项与完全访问写入 `permission_mode`；计划模式存在 `uiStore.composerPlanMode`，新会话传 `plan_mode`。模型控件是渠道→模型级联菜单，底部「管理模型」进 `/settings/channels`。历史会话点「继续对话」先 `prepareAgentSessionResume`，可续则 `resumeNativeSession`。`native-turn-state` 的 `waiting_input` / `working` 驱动发送按钮，不靠猜前缀。
 
 `@` 调 `list_git_files` 插入 `@path`。`/` 列出全局技能，插入「使用技能：name」。
 

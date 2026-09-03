@@ -309,7 +309,7 @@ pub struct DatabaseRestoreResult {
 pub struct NativeSettings {
     pub max_turns: i32,
     pub max_subagent_turns: i32,
-    pub confirm_high_risk: bool,
+    pub permission_mode: String,
     pub max_concurrent_subagents: i32,
     pub subagent_policy: String,
     pub context_window_tokens: i32,
@@ -337,7 +337,7 @@ pub struct NativeHook {
 pub struct UpdateNativeSettings {
     pub max_turns: Option<i32>,
     pub max_subagent_turns: Option<i32>,
-    pub confirm_high_risk: Option<bool>,
+    pub permission_mode: Option<String>,
     pub max_concurrent_subagents: Option<i32>,
     pub subagent_policy: Option<String>,
     pub context_window_tokens: Option<i32>,
@@ -573,6 +573,10 @@ pub struct NativeApiCallLogStats {
     pub cancelled: i64,
     pub input_tokens: i64,
     pub output_tokens: i64,
+    pub cached_tokens_sum: Option<i64>,
+    pub total_tokens_sum: Option<i64>,
+    pub avg_first_token_ms: Option<f64>,
+    pub avg_duration_ms: Option<f64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

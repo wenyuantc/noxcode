@@ -522,10 +522,12 @@ export interface NativeHook {
   enabled: boolean;
 }
 
+export type NativePermissionMode = "confirm" | "auto_edit" | "full";
+
 export interface NativeSettings {
   max_turns: number;
   max_subagent_turns: number;
-  confirm_high_risk: boolean;
+  permission_mode: NativePermissionMode;
   max_concurrent_subagents: number;
   subagent_policy: string;
   context_window_tokens: number;
@@ -540,7 +542,7 @@ export interface NativeSettings {
 export interface UpdateNativeSettingsInput {
   max_turns?: number;
   max_subagent_turns?: number;
-  confirm_high_risk?: boolean;
+  permission_mode?: NativePermissionMode;
   max_concurrent_subagents?: number;
   subagent_policy?: string;
   context_window_tokens?: number;
@@ -692,6 +694,10 @@ export interface NativeApiCallLogStats {
   cancelled: number;
   input_tokens: number;
   output_tokens: number;
+  cached_tokens_sum: number | null;
+  total_tokens_sum: number | null;
+  avg_first_token_ms: number | null;
+  avg_duration_ms: number | null;
 }
 
 export interface NativeApiCallLogPage {

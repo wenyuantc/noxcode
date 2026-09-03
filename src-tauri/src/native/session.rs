@@ -1014,8 +1014,10 @@ async fn start_native_with_manager(
 
     let (followup_tx, followup_rx) = mpsc::channel(8);
     let cancel = crate::native::tools::CancelFlag::new();
-    let confirm_high_risk = crate::native::settings::confirm_high_risk_enabled(&app);
-    let allow_all_high_risk = Arc::new(AtomicBool::new(!confirm_high_risk));
+    let permission_mode = crate::native::settings::effective_permission_mode(&app);
+    let allow_all_high_risk = Arc::new(AtomicBool::new(
+        permission_mode == crate::native::settings::PERMISSION_MODE_FULL,
+    ));
     let (loop_ready_tx, loop_ready_rx) = tokio::sync::oneshot::channel();
     let manager_spawn = manager_state.clone();
     let app_spawn = app.clone();
@@ -1104,8 +1106,10 @@ async fn run_native_loop(
         workspace_id.clone(),
         session_record_id.clone(),
     );
-    let confirm_high_risk = crate::native::settings::confirm_high_risk_enabled(&app);
-    if !confirm_high_risk {
+    let permission_mode = crate::native::settings::effective_permission_mode(&app);
+    runner.ctx.auto_approve_overwrite =
+        permission_mode == crate::native::settings::PERMISSION_MODE_AUTO_EDIT;
+    if permission_mode == crate::native::settings::PERMISSION_MODE_FULL {
         emit_native_line(
             &app,
             &session_record_id,
@@ -1116,7 +1120,18 @@ async fn run_native_loop(
         )
         .await;
     }
-    if confirm_high_risk {
+    if permission_mode == crate::native::settings::PERMISSION_MODE_AUTO_EDIT {
+        emit_native_line(
+            &app,
+            &session_record_id,
+            &profile_id,
+            Some(&workspace_id),
+            &kind,
+            "[PERMISSION] 已开启自动编辑：覆盖文件直接执行，删除 / 推送 / 强制 Git / 不透明命令 / MCP 仍需确认".to_string(),
+        )
+        .await;
+    }
+    if permission_mode != crate::native::settings::PERMISSION_MODE_FULL {
         let app_perm = app.clone();
         let manager_perm = manager_state.clone();
         let session_perm = session_record_id.clone();

@@ -27,7 +27,9 @@ P4 把进程内编程 Agent 接到渠道 + 工作区外壳。数据流仍是 `Re
 8. `Write` / `Edit` / `ApplyPatch` 成功后异步 `create_checkpoint(kind=after_tool_call)`，同一会话同时只允许一个在途打点。
 9. `run_native_loop` 转发 stdout / delta / context usage / 权限 / 计划提问；退出时写 tokens、status、`native-exit`，并从 manager 移除。
 
-`session_kind` 只有 `execution` 与 `plan`。`plan_mode=true` 时先只读规划，本轮结束后自动放开写工具并继续实施。
+`session_kind` 只有 `execution` 与 `plan`。`plan_mode=true` 时先只读规划，本轮结束后自动放开写工具并继续实施。计划模式由启动参数决定，不写入 `native-settings.json`。
+
+权限模式（`permission_mode`）三档：`confirm` 变更前确认；`auto_edit` 自动编辑（只放行 `Overwrite`，删除 / 推送 / 强制 Git / 不透明命令 / MCP 仍弹确认）；`full` 完全访问（`allow_all_high_risk=true`）。旧文件的 `confirm_high_risk: false` 读成 `full`。
 
 并发门控按工作区。`send_native_input` / `finish_native_input` 按 `session_record_id` 寻址。
 
@@ -60,7 +62,7 @@ P4 把进程内编程 Agent 接到渠道 + 工作区外壳。数据流仍是 `Re
 
 都在 `$APPCONFIG`：
 
-- `native-settings.json`：轮次、权限超时、子 Agent 策略、`global_prompt_template`
+- `native-settings.json`：轮次、`permission_mode`、权限超时、子 Agent 策略、`global_prompt_template`
 - `native-subagents.json`：自定义子智能体（`scope=all|workspaces`）
 - `mcp-servers.json`：全局 MCP；会话只连接 `enabled=true` 的服务器（工作区绑定留 v2）
 - `native-skills/`：全局技能；工作区另读 `.agents/skills` 与 `.claude/skills`

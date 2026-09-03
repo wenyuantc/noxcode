@@ -36,6 +36,10 @@ pub const SUBAGENT_POLICY_CONSERVATIVE: &str = "conservative";
 pub const SUBAGENT_POLICY_BALANCED: &str = "balanced";
 pub const SUBAGENT_POLICY_AGGRESSIVE: &str = "aggressive";
 pub const DEFAULT_NATIVE_SUBAGENT_POLICY: &str = SUBAGENT_POLICY_CONSERVATIVE;
+pub const PERMISSION_MODE_CONFIRM: &str = "confirm";
+pub const PERMISSION_MODE_AUTO_EDIT: &str = "auto_edit";
+pub const PERMISSION_MODE_FULL: &str = "full";
+pub const DEFAULT_NATIVE_PERMISSION_MODE: &str = PERMISSION_MODE_CONFIRM;
 const MAX_NATIVE_HOOKS: usize = 32;
 const DEFAULT_NATIVE_HOOK_TIMEOUT_SECS: i32 = 30;
 const MAX_NATIVE_HOOK_TIMEOUT_SECS: i32 = 120;
@@ -49,6 +53,8 @@ struct RawNativeSettings {
     #[serde(default)]
     max_subagent_turns: Option<i32>,
     #[serde(default)]
+    permission_mode: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     confirm_high_risk: Option<bool>,
     #[serde(default)]
     max_concurrent_subagents: Option<i32>,
@@ -159,6 +165,39 @@ pub fn subagent_policy_label_zh(policy: &str) -> &'static str {
     }
 }
 
+pub fn normalize_permission_mode(value: Option<&str>) -> String {
+    match value.map(str::trim).unwrap_or("") {
+        PERMISSION_MODE_AUTO_EDIT => PERMISSION_MODE_AUTO_EDIT.to_string(),
+        PERMISSION_MODE_FULL => PERMISSION_MODE_FULL.to_string(),
+        PERMISSION_MODE_CONFIRM => PERMISSION_MODE_CONFIRM.to_string(),
+        _ => DEFAULT_NATIVE_PERMISSION_MODE.to_string(),
+    }
+}
+
+pub fn permission_mode_label_zh(mode: &str) -> &'static str {
+    match mode {
+        PERMISSION_MODE_AUTO_EDIT => "自动编辑",
+        PERMISSION_MODE_FULL => "完全访问",
+        _ => "变更前确认",
+    }
+}
+
+fn resolve_permission_mode(
+    permission_mode: Option<String>,
+    confirm_high_risk: Option<bool>,
+) -> String {
+    if let Some(mode) = permission_mode {
+        let trimmed = mode.trim();
+        if !trimmed.is_empty() {
+            return normalize_permission_mode(Some(trimmed));
+        }
+    }
+    match confirm_high_risk {
+        Some(false) => PERMISSION_MODE_FULL.to_string(),
+        _ => DEFAULT_NATIVE_PERMISSION_MODE.to_string(),
+    }
+}
+
 fn app_config_dir<R: Runtime>(app: &AppHandle<R>) -> Result<PathBuf, String> {
     app.path()
         .app_config_dir()
@@ -173,7 +212,7 @@ fn default_settings() -> NativeSettings {
     NativeSettings {
         max_turns: DEFAULT_NATIVE_MAX_TURNS,
         max_subagent_turns: DEFAULT_NATIVE_MAX_SUBAGENT_TURNS,
-        confirm_high_risk: true,
+        permission_mode: DEFAULT_NATIVE_PERMISSION_MODE.to_string(),
         max_concurrent_subagents: DEFAULT_NATIVE_MAX_CONCURRENT_SUBAGENTS,
         subagent_policy: DEFAULT_NATIVE_SUBAGENT_POLICY.to_string(),
         context_window_tokens: DEFAULT_NATIVE_CONTEXT_WINDOW_TOKENS,
@@ -190,7 +229,7 @@ fn normalize_settings(raw: RawNativeSettings) -> NativeSettings {
     NativeSettings {
         max_turns: normalize_native_max_turns(raw.max_turns),
         max_subagent_turns: normalize_native_max_subagent_turns(raw.max_subagent_turns),
-        confirm_high_risk: raw.confirm_high_risk.unwrap_or(true),
+        permission_mode: resolve_permission_mode(raw.permission_mode, raw.confirm_high_risk),
         max_concurrent_subagents: normalize_native_max_concurrent_subagents(
             raw.max_concurrent_subagents,
         ),
@@ -250,7 +289,10 @@ fn save_native_settings<R: Runtime>(
         max_subagent_turns: Some(normalize_native_max_subagent_turns(Some(
             settings.max_subagent_turns,
         ))),
-        confirm_high_risk: Some(settings.confirm_high_risk),
+        permission_mode: Some(normalize_permission_mode(Some(
+            settings.permission_mode.as_str(),
+        ))),
+        confirm_high_risk: None,
         max_concurrent_subagents: Some(normalize_native_max_concurrent_subagents(Some(
             settings.max_concurrent_subagents,
         ))),
@@ -308,8 +350,8 @@ async fn merge_native_settings<R: Runtime>(
     if let Some(max_subagent_turns) = updates.max_subagent_turns {
         next.max_subagent_turns = normalize_native_max_subagent_turns(Some(max_subagent_turns));
     }
-    if let Some(confirm_high_risk) = updates.confirm_high_risk {
-        next.confirm_high_risk = confirm_high_risk;
+    if let Some(permission_mode) = updates.permission_mode {
+        next.permission_mode = normalize_permission_mode(Some(permission_mode.as_str()));
     }
     if let Some(max_concurrent_subagents) = updates.max_concurrent_subagents {
         next.max_concurrent_subagents =
@@ -350,14 +392,10 @@ async fn merge_native_settings<R: Runtime>(
 
 fn native_settings_activity_details(settings: &NativeSettings) -> String {
     format!(
-        "{}；{}；高风险确认：{}；确认超时：{}；同轮子 Agent 上限：{}；子 Agent 策略：{}；子 Agent 预算占比：{}%；上下文窗口：{} token；会话预算：{}；单条工具结果：{} token；钩子：{} 条",
+        "{}；{}；权限模式：{}；确认超时：{}；同轮子 Agent 上限：{}；子 Agent 策略：{}；子 Agent 预算占比：{}%；上下文窗口：{} token；会话预算：{}；单条工具结果：{} token；钩子：{} 条",
         max_turns_activity_details(settings.max_turns),
         max_subagent_turns_activity_details(settings.max_subagent_turns),
-        if settings.confirm_high_risk {
-            "开启"
-        } else {
-            "关闭"
-        },
+        permission_mode_label_zh(&settings.permission_mode),
         if settings.permission_timeout_secs == 0 {
             "不超时".to_string()
         } else {
@@ -432,10 +470,10 @@ pub fn effective_subagent_budget_share_percent<R: Runtime>(app: &AppHandle<R>) -
         .unwrap_or(DEFAULT_NATIVE_SUBAGENT_BUDGET_SHARE_PERCENT as u32)
 }
 
-pub fn confirm_high_risk_enabled<R: Runtime>(app: &AppHandle<R>) -> bool {
+pub fn effective_permission_mode<R: Runtime>(app: &AppHandle<R>) -> String {
     load_native_settings(app)
-        .map(|settings| settings.confirm_high_risk)
-        .unwrap_or(true)
+        .map(|settings| normalize_permission_mode(Some(settings.permission_mode.as_str())))
+        .unwrap_or_else(|_| DEFAULT_NATIVE_PERMISSION_MODE.to_string())
 }
 
 pub fn hook_matches(matcher: &str, tool_name: &str) -> bool {
@@ -528,6 +566,7 @@ mod tests {
         let settings = normalize_settings(RawNativeSettings {
             max_turns: Some(40),
             max_subagent_turns: None,
+            permission_mode: None,
             confirm_high_risk: None,
             max_concurrent_subagents: None,
             subagent_policy: None,
@@ -539,7 +578,7 @@ mod tests {
             hooks: None,
             global_prompt_template: None,
         });
-        assert!(settings.confirm_high_risk);
+        assert_eq!(settings.permission_mode, DEFAULT_NATIVE_PERMISSION_MODE);
         assert!(settings.hooks.is_empty());
         assert!(settings.global_prompt_template.is_empty());
         assert_eq!(
@@ -571,6 +610,64 @@ mod tests {
             settings.subagent_budget_share_percent,
             DEFAULT_NATIVE_SUBAGENT_BUDGET_SHARE_PERCENT
         );
+    }
+
+    #[test]
+    fn legacy_confirm_flag_maps_to_permission_mode() {
+        let from_false = normalize_settings(RawNativeSettings {
+            confirm_high_risk: Some(false),
+            ..RawNativeSettings::default()
+        });
+        assert_eq!(from_false.permission_mode, PERMISSION_MODE_FULL);
+
+        let from_true = normalize_settings(RawNativeSettings {
+            confirm_high_risk: Some(true),
+            ..RawNativeSettings::default()
+        });
+        assert_eq!(from_true.permission_mode, PERMISSION_MODE_CONFIRM);
+
+        let from_none = normalize_settings(RawNativeSettings::default());
+        assert_eq!(from_none.permission_mode, PERMISSION_MODE_CONFIRM);
+
+        let explicit = normalize_settings(RawNativeSettings {
+            permission_mode: Some(PERMISSION_MODE_AUTO_EDIT.to_string()),
+            confirm_high_risk: Some(false),
+            ..RawNativeSettings::default()
+        });
+        assert_eq!(explicit.permission_mode, PERMISSION_MODE_AUTO_EDIT);
+    }
+
+    #[test]
+    fn normalize_permission_mode_values() {
+        assert_eq!(
+            normalize_permission_mode(None),
+            DEFAULT_NATIVE_PERMISSION_MODE
+        );
+        assert_eq!(
+            normalize_permission_mode(Some("confirm")),
+            PERMISSION_MODE_CONFIRM
+        );
+        assert_eq!(
+            normalize_permission_mode(Some("auto_edit")),
+            PERMISSION_MODE_AUTO_EDIT
+        );
+        assert_eq!(
+            normalize_permission_mode(Some("full")),
+            PERMISSION_MODE_FULL
+        );
+        assert_eq!(
+            normalize_permission_mode(Some("yolo")),
+            DEFAULT_NATIVE_PERMISSION_MODE
+        );
+        assert_eq!(
+            permission_mode_label_zh(PERMISSION_MODE_CONFIRM),
+            "变更前确认"
+        );
+        assert_eq!(
+            permission_mode_label_zh(PERMISSION_MODE_AUTO_EDIT),
+            "自动编辑"
+        );
+        assert_eq!(permission_mode_label_zh(PERMISSION_MODE_FULL), "完全访问");
     }
 
     #[test]

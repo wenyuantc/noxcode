@@ -59,6 +59,7 @@ pub struct ToolCtx {
     pub todos: Vec<TodoItem>,
     pub mcp: SharedMcp,
     pub allow_all_high_risk: Arc<std::sync::atomic::AtomicBool>,
+    pub auto_approve_overwrite: bool,
     pub allowed_mcp_servers: Arc<Mutex<HashSet<String>>>,
     pub request_permission: Option<PermissionRequester>,
     pub expire_permission: Option<PermissionExpirer>,
@@ -219,6 +220,9 @@ async fn request_permission(
             .allow_all_high_risk
             .load(std::sync::atomic::Ordering::SeqCst)
     {
+        return Ok(());
+    }
+    if kind == NativeToolRiskKind::Overwrite && ctx.auto_approve_overwrite {
         return Ok(());
     }
     if kind == NativeToolRiskKind::Mcp {
@@ -604,6 +608,7 @@ mod tests {
             todos: Vec::new(),
             mcp: SharedMcp::empty(),
             allow_all_high_risk: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            auto_approve_overwrite: false,
             allowed_mcp_servers: Arc::new(Mutex::new(HashSet::new())),
             expire_permission: None,
             permission_timeout: Duration::ZERO,
@@ -650,6 +655,7 @@ mod tests {
             todos: Vec::new(),
             mcp: SharedMcp::empty(),
             allow_all_high_risk: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+            auto_approve_overwrite: false,
             allowed_mcp_servers: Arc::new(Mutex::new(HashSet::new())),
             expire_permission: None,
             permission_timeout: Duration::ZERO,
@@ -684,6 +690,7 @@ mod tests {
             todos: Vec::new(),
             mcp: SharedMcp::empty(),
             allow_all_high_risk: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+            auto_approve_overwrite: false,
             allowed_mcp_servers: Arc::new(Mutex::new(HashSet::new())),
             expire_permission: None,
             permission_timeout: Duration::ZERO,
@@ -717,6 +724,7 @@ mod tests {
             todos: Vec::new(),
             mcp: SharedMcp::empty(),
             allow_all_high_risk: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+            auto_approve_overwrite: false,
             allowed_mcp_servers: Arc::new(Mutex::new(HashSet::new())),
             expire_permission: None,
             permission_timeout: Duration::ZERO,
@@ -760,6 +768,7 @@ mod tests {
             todos: Vec::new(),
             mcp: SharedMcp::empty(),
             allow_all_high_risk: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+            auto_approve_overwrite: false,
             allowed_mcp_servers: Arc::new(Mutex::new(HashSet::new())),
             expire_permission: None,
             permission_timeout: Duration::ZERO,
@@ -816,6 +825,7 @@ mod tests {
             todos: Vec::new(),
             mcp: SharedMcp::empty(),
             allow_all_high_risk: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+            auto_approve_overwrite: false,
             allowed_mcp_servers: Arc::new(Mutex::new(HashSet::new())),
             expire_permission: None,
             permission_timeout: Duration::ZERO,
@@ -851,6 +861,60 @@ mod tests {
         .await
         .expect_err("plan");
         assert!(blocked.contains("只读"));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn auto_edit_allows_overwrite_but_still_prompts_delete() {
+        let root = std::env::temp_dir().join(format!(
+            "codex-ai-auto-edit-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("time")
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).expect("mkdir");
+        let path = root.join("keep.txt");
+        std::fs::write(&path, "original").expect("write");
+        let mut ctx = ToolCtx {
+            workspace: LocalWorkspace::new(root.clone()),
+            ssh: None,
+            cancel: CancelFlag::new(),
+            read_files: HashSet::new(),
+            todos: Vec::new(),
+            mcp: SharedMcp::empty(),
+            allow_all_high_risk: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            auto_approve_overwrite: true,
+            allowed_mcp_servers: Arc::new(Mutex::new(HashSet::new())),
+            expire_permission: None,
+            permission_timeout: Duration::ZERO,
+            request_permission: Some(Arc::new(
+                |_prompt, tx: oneshot::Sender<NativePermissionDecision>| {
+                    let _ = tx.send(NativePermissionDecision::Deny);
+                },
+            )),
+            request_question: None,
+            read_only: false,
+            skills: Vec::new(),
+            hooks: Vec::new(),
+            on_mutation: None,
+        };
+        execute_tool(&mut ctx, "Read", r#"{"file_path":"keep.txt"}"#)
+            .await
+            .expect("read");
+        execute_tool(
+            &mut ctx,
+            "Write",
+            r#"{"file_path":"keep.txt","content":"changed"}"#,
+        )
+        .await
+        .expect("overwrite allowed");
+        assert_eq!(std::fs::read_to_string(&path).expect("read"), "changed");
+        let err = execute_tool(&mut ctx, "Bash", r#"{"command":"rm keep.txt"}"#)
+            .await
+            .expect_err("delete still confirmed");
+        assert!(err.contains("不允许"));
+        assert_eq!(std::fs::read_to_string(&path).expect("read"), "changed");
         let _ = std::fs::remove_dir_all(root);
     }
 }

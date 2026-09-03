@@ -21,8 +21,24 @@
   "model": "模型",
   "effort": "思考等级",
   "permissionMode": "权限",
-  "confirmEach": "每次确认",
-  "fullAccess": "完全访问",
+  "permission": {
+    "confirm": {
+      "title": "变更前确认",
+      "description": "改文件前先问我。"
+    },
+    "auto_edit": {
+      "title": "自动编辑",
+      "description": "自动编辑文件。"
+    },
+    "plan": {
+      "title": "计划模式",
+      "description": "编辑前先出计划。"
+    },
+    "full": {
+      "title": "完全访问",
+      "description": "减少确认次数。"
+    }
+  },
   "contextUsage": "{{used}} / {{limit}}",
   "atContext": "添加上下文",
   "slashSkill": "选择技能",

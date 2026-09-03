@@ -21,8 +21,24 @@
   "model": "Model",
   "effort": "Reasoning",
   "permissionMode": "Permission",
-  "confirmEach": "Ask each time",
-  "fullAccess": "Full access",
+  "permission": {
+    "confirm": {
+      "title": "Confirm before change",
+      "description": "Ask me before changing files."
+    },
+    "auto_edit": {
+      "title": "Automatic editing",
+      "description": "Automatically edit files."
+    },
+    "plan": {
+      "title": "Plan mode",
+      "description": "Make a plan before editing."
+    },
+    "full": {
+      "title": "Full access",
+      "description": "Reduce confirmation frequency."
+    }
+  },
   "contextUsage": "{{used}} / {{limit}}",
   "atContext": "Add context",
   "slashSkill": "Choose a skill",

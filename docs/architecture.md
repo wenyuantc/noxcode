@@ -140,7 +140,7 @@ HTTP 代理 / 不代理地址 / 自定义 CA 存在 `$APPCONFIG/network-settings
 /                      WorkspacePage     左树 + 空态 / 会话流
 /settings              SettingsPage      全屏页，左导航三组 + 右卡片
 /settings/:section     SettingsPage      深链到分节
-/api-logs              ApiCallLogsPage   模型调用日志
+/api-logs              ApiCallLogsPage   API 调用记录
 ```
 
 设置不是 Dialog。SSH 有两个入口：工作区选择器里的「远程连接」，以及设置页集中管理。
