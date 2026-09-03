@@ -221,7 +221,11 @@ export const EventStream = memo(function EventStream({
 
   return (
     <div className="relative h-full min-h-0">
-      <div ref={parentRef} className="h-full overflow-auto px-6 py-4" onScroll={syncScrollState}>
+      <div
+        ref={parentRef}
+        className="h-full overflow-auto overscroll-y-contain px-6 py-4"
+        onScroll={syncScrollState}
+      >
         <div className="relative mx-auto max-w-3xl" style={{ height: virtualizer.getTotalSize() }}>
           {virtualizer.getVirtualItems().map((virtual) => {
             const isLast = virtual.index === blocks.length - 1;

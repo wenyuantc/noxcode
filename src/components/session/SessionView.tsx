@@ -38,7 +38,7 @@ export function SessionView() {
   if (!sessionId) return null;
   return (
     <div className="flex h-full min-h-0">
-      <div className="flex min-w-0 flex-1 flex-col">
+      <div className="flex min-h-0 min-w-0 flex-1 flex-col">
         <SessionHeader />
         <div ref={streamRef} className="relative min-h-0 flex-1">
           {mountedIds.map((id) => (

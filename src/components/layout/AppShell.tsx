@@ -40,7 +40,7 @@ export function AppShell() {
   useAppHotkeys(newSession, openWorkspace);
 
   return (
-    <div className="flex h-screen overflow-hidden bg-background">
+    <div className="flex h-full overflow-hidden bg-background">
       {!collapsed ? (
         <aside
           className="flex shrink-0 flex-col border-r border-sidebar-border bg-sidebar"
@@ -69,7 +69,9 @@ export function AppShell() {
           }}
         />
       ) : null}
-      <main className="min-w-0 flex-1">{selected ? <SessionView /> : <HomeEmptyState />}</main>
+      <main className="min-h-0 min-w-0 flex-1 overflow-hidden">
+        {selected ? <SessionView /> : <HomeEmptyState />}
+      </main>
       <CommandPalette onNewSession={newSession} onOpenWorkspace={openWorkspace} />
     </div>
   );
