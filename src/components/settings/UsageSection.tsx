@@ -23,6 +23,7 @@ import {
   formatUsageTokenCount,
   formatUsageTokenExact,
   resolveUsageDateRange,
+  usageAnalyticsLoadError,
   usageCacheHitRatio,
   usageTotalTokens,
   type UsageRangePreset,
@@ -93,7 +94,7 @@ export function UsageSection() {
           return;
         }
         setAnalytics(emptyUsageAnalytics());
-        setErrorMessage(error instanceof Error ? error.message : t("usage.loadFailed"));
+        setErrorMessage(usageAnalyticsLoadError(error, t("usage.loadFailed")));
       })
       .finally(() => {
         if (!cancelled) {
@@ -250,7 +251,7 @@ export function UsageSection() {
                 tone="cache"
               />
             </div>
-          ) : !loading && range.ok ? (
+          ) : !loading && range.ok && !errorMessage ? (
             <p className="text-center text-xs text-muted-foreground">{t("usage.emptyRange")}</p>
           ) : null}
         </div>

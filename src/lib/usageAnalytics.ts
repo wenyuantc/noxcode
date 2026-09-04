@@ -333,3 +333,14 @@ export function formatUsageDayLabel(date: string): string {
   }
   return `${parsed.getUTCMonth() + 1}/${parsed.getUTCDate()}`;
 }
+
+export function usageAnalyticsLoadError(error: unknown, fallback: string): string {
+  if (!(error instanceof Error)) {
+    return fallback;
+  }
+  const message = error.message.trim();
+  if (!message || /invoke|tauri|undefined|not allowed|ipc/i.test(message)) {
+    return fallback;
+  }
+  return message;
+}

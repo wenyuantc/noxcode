@@ -14,6 +14,7 @@ import {
   mergeUsageModels,
   resolveUsageDateRange,
   shiftUtcDateKey,
+  usageAnalyticsLoadError,
   usageCacheHitRatio,
   usageTotalTokens,
   usageTrendLabelIndexes,
@@ -199,5 +200,20 @@ describe("trend helpers", () => {
     expect(utcDateKey(new Date("2026-09-04T01:00:00.000Z"))).toBe("2026-09-04");
     expect(inclusiveDayCount("2026-09-01", "2026-09-03")).toBe(3);
     expect(formatUsageDayLabel("2026-09-04")).toBe("9/4");
+  });
+});
+
+describe("usageAnalyticsLoadError", () => {
+  it("hides Tauri invoke noise and keeps backend messages", () => {
+    expect(
+      usageAnalyticsLoadError(
+        new Error("Cannot read properties of undefined (reading 'invoke')"),
+        "加载失败",
+      ),
+    ).toBe("加载失败");
+    expect(usageAnalyticsLoadError(new Error("统计使用数据失败: db locked"), "加载失败")).toBe(
+      "统计使用数据失败: db locked",
+    );
+    expect(usageAnalyticsLoadError("nope", "加载失败")).toBe("加载失败");
   });
 });
