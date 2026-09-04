@@ -865,3 +865,40 @@ pub struct NativeApiCallLogPage {
     pub total: i64,
     pub stats: NativeApiCallLogStats,
 }
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct GetNativeUsageAnalyticsPayload {
+    pub start_date: Option<String>,
+    pub end_date: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, FromRow)]
+pub struct NativeUsageDailyBucket {
+    #[serde(rename = "date")]
+    pub day: String,
+    pub calls: i64,
+    pub success: i64,
+    pub failed: i64,
+    pub cancelled: i64,
+    pub input_tokens: i64,
+    pub output_tokens: i64,
+    pub cached_tokens: i64,
+    pub total_tokens: i64,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, FromRow)]
+pub struct NativeUsageModelBucket {
+    pub model: String,
+    pub calls: i64,
+    pub input_tokens: i64,
+    pub output_tokens: i64,
+    pub cached_tokens: i64,
+    pub total_tokens: i64,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct NativeUsageAnalytics {
+    pub stats: NativeApiCallLogStats,
+    pub daily: Vec<NativeUsageDailyBucket>,
+    pub models: Vec<NativeUsageModelBucket>,
+}

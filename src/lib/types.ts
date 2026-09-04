@@ -1150,3 +1150,35 @@ export interface NativeApiCallLogPage {
   total: number;
   stats: NativeApiCallLogStats;
 }
+
+export interface GetNativeUsageAnalyticsInput {
+  start_date?: string | null;
+  end_date?: string | null;
+}
+
+export interface NativeUsageDailyBucket {
+  date: string;
+  calls: number;
+  success: number;
+  failed: number;
+  cancelled: number;
+  input_tokens: number;
+  output_tokens: number;
+  cached_tokens: number;
+  total_tokens: number;
+}
+
+export interface NativeUsageModelBucket {
+  model: string;
+  calls: number;
+  input_tokens: number;
+  output_tokens: number;
+  cached_tokens: number;
+  total_tokens: number;
+}
+
+export interface NativeUsageAnalytics {
+  stats: NativeApiCallLogStats;
+  daily: NativeUsageDailyBucket[];
+  models: NativeUsageModelBucket[];
+}
