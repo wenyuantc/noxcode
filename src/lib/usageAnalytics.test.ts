@@ -191,9 +191,10 @@ describe("heatmap and model merge", () => {
 describe("trend helpers", () => {
   it("keeps short series labels and samples longer ones", () => {
     expect(usageTrendLabelIndexes(4)).toEqual([0, 1, 2, 3]);
-    expect(usageTrendLabelIndexes(30)[0]).toBe(0);
-    expect(usageTrendLabelIndexes(30).at(-1)).toBe(29);
-    expect(usageTrendLabelIndexes(30).length).toBeLessThanOrEqual(8);
+    const longIndexes = usageTrendLabelIndexes(30);
+    expect(longIndexes[0]).toBe(0);
+    expect(longIndexes[longIndexes.length - 1]).toBe(29);
+    expect(longIndexes.length).toBeLessThanOrEqual(8);
   });
 
   it("formats UTC day labels without shifting the calendar date", () => {
