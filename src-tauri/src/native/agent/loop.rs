@@ -636,17 +636,34 @@ impl AgentRunner {
     }
 
     fn send_tool(&self, line: String, event: NativeToolEvent, images: Vec<NativeImage>) {
+        self.send_tool_prefixed(&self.event_prefix, line, event, images);
+    }
+
+    fn send_tool_prefixed(
+        &self,
+        prefix: &str,
+        line: String,
+        event: NativeToolEvent,
+        images: Vec<NativeImage>,
+    ) {
         if let Some(tx) = &self.on_event {
-            let line = if self.event_prefix.is_empty() {
+            let line = if prefix.is_empty() {
                 line
             } else {
-                format!("{}{line}", self.event_prefix)
+                format!("{prefix}{line}")
             };
             let _ = tx.send(NativeEvent::Tool {
                 line,
                 event,
                 images,
             });
+        }
+    }
+
+    fn tool_event_prefix(&self, tag_override: Option<&str>) -> (String, Option<String>) {
+        match tag_override.map(str::trim).filter(|tag| !tag.is_empty()) {
+            Some(tag) => (format!("{tag} "), Some(tag.to_string())),
+            None => (self.event_prefix.clone(), self.subagent_tag()),
         }
     }
 
@@ -658,6 +675,10 @@ impl AgentRunner {
     }
 
     async fn emit_tool_start(&mut self, call: &ToolCall) {
+        self.emit_tool_start_with_tag(call, None).await;
+    }
+
+    async fn emit_tool_start_with_tag(&mut self, call: &ToolCall, tag_override: Option<&str>) {
         if self.started_tool_ids.contains(&call.id) {
             return;
         }
@@ -670,9 +691,11 @@ impl AgentRunner {
         );
         let title = tool_event_title(&line);
         let args_summary = tool_args_summary(&call.name, &call.arguments);
+        let (prefix, subagent_tag) = self.tool_event_prefix(tag_override);
         self.started_tool_ids.insert(call.id.clone());
         self.tool_started_ms.insert(call.id.clone(), unix_now_ms());
-        self.send_tool(
+        self.send_tool_prefixed(
+            &prefix,
             line,
             NativeToolEvent {
                 phase: NativeToolPhase::Start,
@@ -683,7 +706,7 @@ impl AgentRunner {
                 ok: None,
                 duration_ms: None,
                 result_preview: None,
-                subagent_tag: self.subagent_tag(),
+                subagent_tag,
                 mcp_server,
                 mcp_tool,
                 image_names: Vec::new(),
@@ -693,8 +716,17 @@ impl AgentRunner {
     }
 
     async fn emit_tool_result(&mut self, call: &ToolCall, output: &ToolOutput) {
+        self.emit_tool_result_with_tag(call, output, None).await;
+    }
+
+    async fn emit_tool_result_with_tag(
+        &mut self,
+        call: &ToolCall,
+        output: &ToolOutput,
+        tag_override: Option<&str>,
+    ) {
         if !self.started_tool_ids.contains(&call.id) {
-            self.emit_tool_start(call).await;
+            self.emit_tool_start_with_tag(call, tag_override).await;
         }
         let duration_ms = self
             .tool_started_ms
@@ -708,7 +740,9 @@ impl AgentRunner {
             mcp_tool.as_deref(),
         );
         let line = tool_result_line(&call.name, &output.text);
-        self.send_tool(
+        let (prefix, subagent_tag) = self.tool_event_prefix(tag_override);
+        self.send_tool_prefixed(
+            &prefix,
             line,
             NativeToolEvent {
                 phase: NativeToolPhase::Result,
@@ -719,7 +753,7 @@ impl AgentRunner {
                 ok: Some(output.ok),
                 duration_ms,
                 result_preview: Some(cap_tool_result_display(&output.text)),
-                subagent_tag: self.subagent_tag(),
+                subagent_tag,
                 mcp_server,
                 mcp_tool,
                 image_names: output
@@ -1901,13 +1935,12 @@ impl AgentRunner {
         let model_turn = self.model_turn.clone();
         let client_owned = client.cloned();
         let batch_quota = self.child_quota_for_share();
+        let mut tags: HashMap<String, String> = HashMap::new();
         for (pos, job) in jobs {
-            self.emit_tool_start(&job.call).await;
-            self.emit(format!(
-                "{} 启动（{}）",
-                format_subagent_log_tag(job.index, &job.spec.kind, &job.spec.description),
-                job.spec.kind.as_str()
-            ));
+            let tag = format_subagent_log_tag(job.index, &job.spec.kind, &job.spec.description);
+            tags.insert(job.call.id.clone(), tag.clone());
+            self.emit_tool_start_with_tag(&job.call, Some(&tag)).await;
+            self.emit(format!("{} 启动（{}）", tag, job.spec.kind.as_str()));
             self.emit_activity(
                 "native_subagent_started",
                 &format!("{}（{}）", job.spec.description, job.spec.kind.as_str()),
@@ -1940,7 +1973,6 @@ impl AgentRunner {
                 let task_id = task.id.clone();
                 let on_event = self.on_event.clone();
                 let prefix = self.event_prefix.clone();
-                let tag = format_subagent_log_tag(job.index, &job.spec.kind, &job.spec.description);
                 let spec = job.spec.clone();
                 let run = run_child_job(
                     child,
@@ -2023,14 +2055,24 @@ impl AgentRunner {
             slot[pos] = Some((job.call, output));
         }
         for item in slot.into_iter().flatten() {
-            self.push_tool_output(&item.0, ToolOutput::text(item.1))
+            let tag = tags.get(&item.0.id).map(String::as_str);
+            self.push_tool_output_with_tag(&item.0, ToolOutput::text(item.1), tag)
                 .await;
         }
         Ok(())
     }
 
     async fn push_tool_output(&mut self, call: &ToolCall, output: ToolOutput) {
-        self.emit_tool_result(call, &output).await;
+        self.push_tool_output_with_tag(call, output, None).await;
+    }
+
+    async fn push_tool_output_with_tag(
+        &mut self,
+        call: &ToolCall,
+        output: ToolOutput,
+        tag: Option<&str>,
+    ) {
+        self.emit_tool_result_with_tag(call, &output, tag).await;
         self.append_tool_message(call, output);
     }
 
@@ -2658,14 +2700,21 @@ mod tests {
             .await
             .expect("run");
         let lines = drain_events(&mut rx);
+        let tag = "[子 Agent 1(general) - bg]";
         let starts = lines
             .iter()
-            .filter(|line| line.starts_with("[子 Agent]"))
+            .filter(|line| line.contains("[子 Agent] bg"))
             .count();
         assert_eq!(starts, 1, "{lines:?}");
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.starts_with(&format!("{tag} [子 Agent] bg"))),
+            "{lines:?}"
+        );
         let results = lines
             .iter()
-            .filter(|line| line.starts_with("[工具结果]"))
+            .filter(|line| line.contains("[工具结果]") && line.starts_with(tag))
             .count();
         assert_eq!(results, 1, "{lines:?}");
         let _ = fs::remove_dir_all(root);
@@ -3690,6 +3739,18 @@ mod tests {
         assert!(lines
             .iter()
             .any(|line| line.contains("[子 Agent 2(general) - two] 启动")));
+        assert!(lines
+            .iter()
+            .any(|line| line.starts_with("[子 Agent 1(general) - one] [子 Agent] one")));
+        assert!(lines
+            .iter()
+            .any(|line| line.starts_with("[子 Agent 2(general) - two] [子 Agent] two")));
+        assert!(lines
+            .iter()
+            .any(|line| line.starts_with("[子 Agent 1(general) - one] [工具结果]")));
+        assert!(lines
+            .iter()
+            .any(|line| line.starts_with("[子 Agent 2(general) - two] [工具结果]")));
         assert!(runner
             .messages
             .iter()

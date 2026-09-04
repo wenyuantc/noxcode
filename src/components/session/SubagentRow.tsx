@@ -1,11 +1,12 @@
 import { AlertCircle, Bot, CheckCircle2, ChevronRight, FileText } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
+import { useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 
 import type { TurnSegment } from "@/lib/sessionLines";
 import {
   aggregateUsages,
   formatSessionDuration,
+  isParentAgentSpawn,
   isThinkingItem,
   isUsageItem,
   parseSubagentResult,
@@ -48,19 +49,14 @@ export function SubagentRow({ segment, running, nowMs }: SubagentRowProps) {
   const isFailed = endItem ? sessionLineBody(endItem.text).includes("失败") : false;
   const isRunning = Boolean(running && !isCompleted);
 
-  // Auto expand when running, collapse when completed, but respect user clicks
-  const [userToggled, setUserToggled] = useState(false);
-  const [open, setOpen] = useState(isRunning);
-
-  useEffect(() => {
-    if (!userToggled) {
-      setOpen(isRunning);
-    }
-  }, [isRunning, userToggled]);
+  const [open, setOpen] = useState(false);
 
   // Partition items: thinking, tools, process text, report, usage
   const thinkingItems = useMemo(() => items.filter(isThinkingItem), [items]);
-  const toolItems = useMemo(() => items.filter((item) => item.kind === "tool"), [items]);
+  const toolItems = useMemo(
+    () => items.filter((item) => item.kind === "tool" && !isParentAgentSpawn(item)),
+    [items],
+  );
   const usageItems = useMemo(() => items.filter(isUsageItem), [items]);
 
   const totalUsage = useMemo(() => {
@@ -138,7 +134,6 @@ export function SubagentRow({ segment, running, nowMs }: SubagentRowProps) {
   }, [deliveryReport, processItems, toolItems.length, t]);
 
   const toggleOpen = () => {
-    setUserToggled(true);
     setOpen((prev) => !prev);
   };
 

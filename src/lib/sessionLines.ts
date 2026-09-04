@@ -314,6 +314,55 @@ export function subagentSegmentIdentity(item: { subagentTag?: string }): string 
   return `tag:${tag}`;
 }
 
+const PARENT_AGENT_SPAWN_RE = /^\[子 Agent\]\s*(.*)$/;
+const SUBAGENT_LABEL_CHARS = 32;
+
+/** 与 Rust `sanitize_subagent_label` 对齐：压空白、去掉括号，超长截断。 */
+export function sanitizeSubagentLabel(description: string): string {
+  const collapsed = description
+    .trim()
+    .split(/\s+/)
+    .filter(Boolean)
+    .join(" ")
+    .replace(/[[\]()]/g, "");
+  const cleaned = collapsed || "子任务";
+  const chars = Array.from(cleaned);
+  if (chars.length <= SUBAGENT_LABEL_CHARS) return cleaned;
+  return `${chars.slice(0, SUBAGENT_LABEL_CHARS - 1).join("")}…`;
+}
+
+/** 父会话委派行：`[子 Agent] 描述` 或 structured `name === "Agent"`，不是编号 tag。 */
+export function isParentAgentSpawn(item: {
+  text: string;
+  tool?: { name?: string } | null;
+}): boolean {
+  if (item.tool?.name === "Agent") return true;
+  return PARENT_AGENT_SPAWN_RE.test(sessionLineBody(item.text).trim());
+}
+
+function attachOrphanAgentCalls(items: GroupedSessionItem[]): GroupedSessionItem[] {
+  const claimed = new Set<string>();
+  for (let index = 0; index < items.length; index += 1) {
+    const item = items[index];
+    if (!item || item.subagentTag || !isParentAgentSpawn(item)) continue;
+    const rawDesc = (
+      sessionLineBody(item.text).trim().match(PARENT_AGENT_SPAWN_RE)?.[1] ?? ""
+    ).trim();
+    const sanitized = sanitizeSubagentLabel(rawDesc);
+    for (let next = index + 1; next < items.length; next += 1) {
+      const parsed = parseSubagentTag(items[next]?.subagentTag);
+      if (!parsed) continue;
+      const identity = subagentSegmentIdentity(items[next] ?? {});
+      if (!identity || claimed.has(identity)) continue;
+      if (parsed.description !== sanitized && parsed.description !== rawDesc) continue;
+      item.subagentTag = parsed.raw;
+      claimed.add(identity);
+      break;
+    }
+  }
+  return items;
+}
+
 export interface ParsedSubagentResult {
   description: string;
   kind: string;
@@ -936,7 +985,7 @@ export function groupSessionLines(lines: RawSessionLine[]): GroupedSessionItem[]
       subagentTag: tag ?? undefined,
     });
   }
-  return grouped;
+  return attachOrphanAgentCalls(grouped);
 }
 
 function segmentKey(item: GroupedSessionItem): TurnSegmentKind | "skip" | "file_change" {
