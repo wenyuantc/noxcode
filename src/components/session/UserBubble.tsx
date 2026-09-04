@@ -3,8 +3,10 @@ import { useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 
 import { submitSessionPrompt } from "@/lib/sessionSubmission";
+import { resolveComposerPlanMode } from "@/lib/planMode";
 import { cn } from "@/lib/utils";
 import { useChannelStore } from "@/stores/channelStore";
+import { useSessionStore } from "@/stores/sessionStore";
 import { useUiStore } from "@/stores/uiStore";
 import { useWorkspaceStore } from "@/stores/workspaceStore";
 
@@ -30,7 +32,9 @@ export function UserBubble({
   const workspaceId = useWorkspaceStore((state) => state.activeWorkspaceId);
   const channelId = useChannelStore((state) => state.activeChannelId);
   const modelId = useChannelStore((state) => state.activeModelId);
-  const planMode = useUiStore((state) => state.composerPlanMode);
+  const defaultPlanMode = useUiStore((state) => state.composerPlanMode);
+  const planModeBySession = useSessionStore((state) => state.planModeBySession);
+  const planMode = resolveComposerPlanMode(sessionId, planModeBySession, defaultPlanMode);
 
   useEffect(() => {
     setDraft(text);

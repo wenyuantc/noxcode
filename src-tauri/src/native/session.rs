@@ -14,8 +14,8 @@ use crate::app::shared::{new_id, now_sqlite, sqlite_pool, EXECUTION_TARGET_SSH};
 use crate::app::ssh::configs::fetch_ssh_config_record_by_id;
 use crate::db::models::{
     AgentSessionExit, AgentSessionOutput, AgentSessionRecord, AgentSessionStarted,
-    NativeContextUsage, NativeTextDelta, NativeToolEvent, NativeToolImage, NativeTurnState,
-    StartNativeSessionInput,
+    NativeContextUsage, NativePlanModeChanged, NativeTextDelta, NativeToolEvent, NativeToolImage,
+    NativeTurnState, StartNativeSessionInput,
 };
 use crate::engine::context::resolve_workspace_execution_context_with_pool;
 use crate::engine::UsageDelta;
@@ -550,6 +550,16 @@ fn emit_turn_state(app: &AppHandle, session_record_id: &str, working: &AtomicBoo
         NativeTurnState {
             session_record_id: session_record_id.to_string(),
             state: state.to_string(),
+        },
+    );
+}
+
+fn emit_plan_mode(app: &AppHandle, session_record_id: &str, plan_mode: bool) {
+    let _ = app.emit(
+        "native-plan-mode",
+        NativePlanModeChanged {
+            session_record_id: session_record_id.to_string(),
+            plan_mode,
         },
     );
 }
@@ -1723,6 +1733,15 @@ async fn run_native_loop(
         runner.set_read_only(true);
         runner.set_plan_mode(true);
     }
+    let plan_mode_app = app.clone();
+    let plan_mode_session = session_record_id.clone();
+    runner.ctx.on_plan_mode_change = Some(Arc::new(move |value| {
+        emit_plan_mode(&plan_mode_app, &plan_mode_session, value);
+    }));
+    // The initial event also covers callers that start a session without the
+    // Composer (for example, scheduled runs); the frontend has a session_kind
+    // fallback when this event races listener registration.
+    emit_plan_mode(&app, &session_record_id, runner.is_plan_mode());
     attach_mutation_checkpoint(
         &app,
         &mut runner,
@@ -2368,8 +2387,10 @@ async fn run_native_loop(
             last_transcript_fingerprint.as_ref(),
         )
         .await;
-        // 模型若已通过 ExitPlanMode 获批并在本轮实施，就不再自动追加「开始执行」。
-        if plan_pending && !runner.is_plan_mode() {
+        // 初始计划只有在没有显式提交 ExitPlanMode 时才自动进入执行；被退回的
+        // 计划必须继续等待用户输入。获批时 runner 已经切出计划模式，同样不追加。
+        let plan_exit_requested = runner.take_plan_exit_requested();
+        if plan_pending && (plan_exit_requested || !runner.is_plan_mode()) {
             plan_pending = false;
         }
         match next_loop_step(

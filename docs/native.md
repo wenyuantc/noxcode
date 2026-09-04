@@ -27,9 +27,9 @@ P4 把进程内编程 Agent 接到渠道 + 工作区外壳。数据流仍是 `Re
 7. 若工作区是 git 仓：`create_checkpoint(kind=session_start)`，失败只打日志。
 8. `auto_checkpoint_after_tool_call=true` 时，`Write` / `Edit` / `ApplyPatch` 成功后异步 `create_checkpoint(kind=after_tool_call)`，同一会话同时只允许一个在途打点；关闭开关不影响会话开始或回滚前检查点。
 9. 按当前 `workspace_id` 筛选并连接 `enabled=true` 且 `scope=all` 或命中 `scope=workspaces` / `workspace_ids` 的 MCP server。
-10. `run_native_loop` 转发 stdout / delta / context usage / 权限 / 计划提问；退出时写 tokens、status、`native-exit`，并从 manager 移除。主窗口未聚焦且 `desktop_notifications=true` 时，会话结束 / 失败、权限确认和计划问题会发桌面通知。托盘 / 进程退出走 `shutdown_all_sessions`：拒绝待确认、cancel、`Finish`、await join，再关 SSH pool。
+10. `run_native_loop` 转发 stdout / delta / context usage / 权限 / 计划提问 / 计划模式变化；退出时写 tokens、status、`native-exit`，并从 manager 移除。主窗口未聚焦且 `desktop_notifications=true` 时，会话结束 / 失败、权限确认和计划问题会发桌面通知。托盘 / 进程退出走 `shutdown_all_sessions`：拒绝待确认、cancel、`Finish`、await join，再关 SSH pool。
 
-`session_kind` 只有 `execution` 与 `plan`。`plan_mode=true` 时先只读规划，本轮结束后自动放开写工具并继续实施。计划模式由启动参数决定，不写入 `native-settings.json`。
+`session_kind` 只有 `execution` 与 `plan`。`plan_mode=true` 时先只读规划；未显式提交 `ExitPlanMode` 时本轮结束后自动放开写工具并继续实施，显式提交后则按用户批准结果决定。计划模式由启动参数决定，不写入 `native-settings.json`。运行中 `EnterPlanMode` / `ExitPlanMode` 会实际切换 runner 的共享状态，并发送 `native-plan-mode`；`ExitPlanMode` 只有在用户批准后才发送 `false`，等待审批或退回计划时保持 `true`。子 Agent 的切换不会广播到父会话。
 
 权限模式（`permission_mode`）四档，对齐 ZCode：`default` 变更前确认；`edit` 自动放行 `Overwrite`（删除 / 推送 / 强制 Git / 不透明命令 / MCP 仍弹确认）；`build` 再放行不透明 shell 与带 `readOnlyHint` 的 MCP；`yolo` 完全访问（`allow_all_high_risk=true`，只有 ask 规则仍会确认）。旧文件的 `confirm / auto_edit / full` 与 Claude Code 的 `acceptEdits / auto / bypassPermissions / dontAsk` 读入时映射到新名；`confirm_high_risk: false` 读成 `yolo`。`plan` 是会话态：既可由 Composer 选择在启动时进入，也可由模型调用 `EnterPlanMode` 进入；`ExitPlanMode` 提交计划触发 `native-plan-approval-request`，用户批准后恢复执行模式，退回则连同反馈交回模型继续修改。
 
@@ -147,12 +147,13 @@ P4 把进程内编程 Agent 接到渠道 + 工作区外壳。数据流仍是 `Re
 | `native-text-delta` | `NativeTextDelta`（仅展示，不落库） |
 | `native-context-usage` | `NativeContextUsage`（`used` = 工具 schema + 消息；分类字段 + 上次调用 `prompt_tokens` / `cached_tokens`；仅父 Agent；同时写入 `agent_sessions.context_usage_json`） |
 | `native-turn-state` | `NativeTurnState`（`waiting_input` / `working`，不落库） |
+| `native-plan-mode` | `NativePlanModeChanged`（`session_record_id` + 当前 `plan_mode`，不落库） |
 | `native-permission-request` | 高风险工具确认（含 `suggested_rule`） |
 | `native-plan-question` | `AskUserQuestion` 提问（所有模式可用） |
 | `native-plan-approval-request` | `ExitPlanMode` 提交的计划，等待批准 / 退回 |
 | `native-exit` | `AgentSessionExit` |
 
-前端监听：`onNativeStdout` / `onNativeExit` / `onNativeSession` / `onNativeTextDelta` / `onNativePermissionRequest` / `onNativePlanQuestion` / `onNativeContextUsage` / `onNativeTurnState`。接线见 [`frontend.md`](frontend.md)。
+前端监听：`onNativeStdout` / `onNativeExit` / `onNativeSession` / `onNativeTextDelta` / `onNativePermissionRequest` / `onNativePlanQuestion` / `onNativeContextUsage` / `onNativeTurnState` / `onNativePlanMode`。接线见 [`frontend.md`](frontend.md)。
 
 ## 设置文件
 

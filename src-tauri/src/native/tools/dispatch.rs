@@ -95,6 +95,9 @@ pub type PermissionExpirer =
 
 pub type MutationHook = Arc<dyn Fn(&str) + Send + Sync>;
 
+/// 会话计划模式发生实际变化时通知宿主（Enter/ExitPlanMode）。
+pub type PlanModeChangeHook = Arc<dyn Fn(bool) + Send + Sync>;
+
 /// 已读文件登记：key 是本地解析后的绝对路径或 SSH 侧的原始路径；
 /// value 是读取时的指纹（SSH 无法取到时为 `None`）。
 pub type ReadFileRegistry = Arc<Mutex<HashMap<String, Option<FileFingerprint>>>>;
@@ -122,6 +125,9 @@ pub struct ToolCtx {
     pub read_only: Arc<AtomicBool>,
     /// 是否处于计划模式（决定 ExitPlanMode 是否可见、会话层是否等待自动实施）。
     pub plan_mode: Arc<AtomicBool>,
+    /// 本回合是否明确提交过 ExitPlanMode；即使用户退回，也不能被初始计划的
+    /// 自动执行分支强行切出计划模式。
+    pub plan_exit_requested: Arc<AtomicBool>,
     /// build 模式：不透明 shell 命令免确认。
     pub auto_approve_opaque_bash: bool,
     /// build 模式：带 `readOnlyHint` 的 MCP 工具免确认。
@@ -134,6 +140,8 @@ pub struct ToolCtx {
     /// 钩子载荷里的会话 id。
     pub session_record_id: String,
     pub on_mutation: Option<MutationHook>,
+    /// 计划模式变化通知；子 Agent 不应向父会话广播该事件。
+    pub on_plan_mode_change: Option<PlanModeChangeHook>,
     /// 父 Agent 的后台任务注册表（TaskOutput / TaskStop / SendMessage）。
     pub background: Option<Arc<crate::native::agent::background::BackgroundTaskRegistry>>,
     /// 后台子 Agent：父注册表 + 自己的 task_id（RespondToCoordinator）。
@@ -165,6 +173,7 @@ impl ToolCtx {
             request_plan_approval: None,
             read_only: Arc::new(AtomicBool::new(false)),
             plan_mode: Arc::new(AtomicBool::new(false)),
+            plan_exit_requested: Arc::new(AtomicBool::new(false)),
             auto_approve_opaque_bash: false,
             auto_approve_readonly_mcp: false,
             permission_rules: Arc::new(RwLock::new(PermissionRules::default())),
@@ -173,6 +182,7 @@ impl ToolCtx {
             hook_agent: None,
             session_record_id: String::new(),
             on_mutation: None,
+            on_plan_mode_change: None,
             background: None,
             coordinator: None,
             session_scope: None,
@@ -204,7 +214,20 @@ impl ToolCtx {
     }
 
     pub fn set_plan_mode(&self, value: bool) {
-        self.plan_mode.store(value, Ordering::SeqCst);
+        if self.plan_mode.swap(value, Ordering::SeqCst) == value {
+            return;
+        }
+        if let Some(callback) = self.on_plan_mode_change.as_ref() {
+            callback(value);
+        }
+    }
+
+    pub fn mark_plan_exit_requested(&self) {
+        self.plan_exit_requested.store(true, Ordering::SeqCst);
+    }
+
+    pub fn take_plan_exit_requested(&self) -> bool {
+        self.plan_exit_requested.swap(false, Ordering::SeqCst)
     }
 
     /// 规则匹配用的工作区根：SSH 用远端路径，本地用工作区目录。
@@ -258,9 +281,11 @@ impl ToolCtx {
         child.mcp = SharedMcp::empty();
         child.read_only = Arc::new(AtomicBool::new(false));
         child.plan_mode = Arc::new(AtomicBool::new(false));
+        child.plan_exit_requested = Arc::new(AtomicBool::new(false));
         child.request_question = None;
         child.request_plan_approval = None;
         child.on_mutation = None;
+        child.on_plan_mode_change = None;
         child.background = None;
         child.coordinator = None;
         child
@@ -707,6 +732,9 @@ async fn call_exit_plan_mode(ctx: &ToolCtx, arguments: &str) -> Result<String, S
     }
     let args = parse_args(arguments)?;
     let plan = string_arg(&args, "plan")?;
+    // A rejected submission is still an explicit hand-off attempt. The session
+    // loop uses this marker to avoid its initial-plan auto-transition.
+    ctx.mark_plan_exit_requested();
     let Some(requester) = ctx.request_plan_approval.clone() else {
         // 无交互通道（无头会话）时视为自动批准。
         ctx.set_read_only(false);
@@ -1636,18 +1664,27 @@ mod tests {
     async fn plan_mode_tools_toggle_read_only_and_auto_approve_headless() {
         let root = temp_root("codex-ai-plan-tools");
         std::fs::write(root.join("a.txt"), "x").expect("write");
-        let ctx = ctx_for(&root);
+        let mut ctx = ctx_for(&root);
+        let mode_changes = Arc::new(Mutex::new(Vec::<bool>::new()));
+        let mode_sink = mode_changes.clone();
+        ctx.on_plan_mode_change = Some(Arc::new(move |value| {
+            mode_sink.lock().expect("lock").push(value);
+        }));
         ctx.allow_all_high_risk
             .store(true, std::sync::atomic::Ordering::SeqCst);
         let err = execute_tool(&ctx, "ExitPlanMode", r#"{"plan":"p"}"#)
             .await
             .expect_err("not in plan mode");
         assert!(err.contains("不在计划模式"));
+        assert!(!ctx.take_plan_exit_requested());
         let entered = execute_tool(&ctx, "EnterPlanMode", "{}")
             .await
             .expect("enter");
         assert!(entered.contains("计划模式"));
         assert!(ctx.is_read_only() && ctx.is_plan_mode());
+        // Repeating the same state must not produce another transition.
+        ctx.set_plan_mode(true);
+        assert_eq!(mode_changes.lock().expect("lock").as_slice(), &[true]);
         let blocked = execute_tool(&ctx, "Write", r#"{"file_path":"a.txt","content":"y"}"#)
             .await
             .expect_err("blocked in plan mode");
@@ -1658,6 +1695,12 @@ mod tests {
             .expect("exit");
         assert!(exited.contains("进入实施"));
         assert!(!ctx.is_read_only() && !ctx.is_plan_mode());
+        assert!(ctx.take_plan_exit_requested());
+        assert!(!ctx.take_plan_exit_requested());
+        assert_eq!(
+            mode_changes.lock().expect("lock").as_slice(),
+            &[true, false]
+        );
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -1665,6 +1708,11 @@ mod tests {
     async fn exit_plan_mode_waits_for_user_and_honors_rejection() {
         let root = temp_root("codex-ai-plan-approval");
         let mut ctx = ctx_for(&root);
+        let mode_changes = Arc::new(Mutex::new(Vec::<bool>::new()));
+        let mode_sink = mode_changes.clone();
+        ctx.on_plan_mode_change = Some(Arc::new(move |value| {
+            mode_sink.lock().expect("lock").push(value);
+        }));
         ctx.set_read_only(true);
         ctx.set_plan_mode(true);
         let seen = Arc::new(Mutex::new(Vec::<String>::new()));
@@ -1687,12 +1735,34 @@ mod tests {
         assert!(rejected.contains("未批准"));
         assert!(rejected.contains("先补测试"));
         assert!(ctx.is_plan_mode());
+        assert!(ctx.take_plan_exit_requested());
+        assert_eq!(mode_changes.lock().expect("lock").as_slice(), &[true]);
         let approved = execute_tool(&ctx, "ExitPlanMode", r#"{"plan":"v2"}"#)
             .await
             .expect("approved");
         assert!(approved.contains("已批准"));
         assert!(!ctx.is_plan_mode() && !ctx.is_read_only());
+        assert!(ctx.take_plan_exit_requested());
+        assert_eq!(
+            mode_changes.lock().expect("lock").as_slice(),
+            &[true, false]
+        );
         assert_eq!(seen.lock().expect("lock").len(), 2);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn child_context_does_not_forward_plan_mode_changes() {
+        let root = temp_root("codex-ai-plan-child");
+        let mut ctx = ctx_for(&root);
+        let mode_changes = Arc::new(Mutex::new(Vec::<bool>::new()));
+        let mode_sink = mode_changes.clone();
+        ctx.on_plan_mode_change = Some(Arc::new(move |value| {
+            mode_sink.lock().expect("lock").push(value);
+        }));
+        let child = ctx.fork_for_child();
+        child.set_plan_mode(true);
+        assert!(mode_changes.lock().expect("lock").is_empty());
         let _ = std::fs::remove_dir_all(root);
     }
 

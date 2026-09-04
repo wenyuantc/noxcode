@@ -9,9 +9,11 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { updateNativeSettings } from "@/lib/backend";
+import { resolveComposerPlanMode } from "@/lib/planMode";
 import { isNativePermissionMode, type NativePermissionMode } from "@/lib/types";
 import { cn } from "@/lib/utils";
 import { useSettingsStore } from "@/stores/settingsStore";
+import { useSessionStore } from "@/stores/sessionStore";
 import { useUiStore } from "@/stores/uiStore";
 
 type ComposerPermissionChoice = NativePermissionMode | "plan";
@@ -38,8 +40,11 @@ export function PermissionModePicker() {
   const { t } = useTranslation("sessions");
   const native = useSettingsStore((state) => state.native);
   const setNative = useSettingsStore((state) => state.setNative);
-  const planMode = useUiStore((state) => state.composerPlanMode);
+  const defaultPlanMode = useUiStore((state) => state.composerPlanMode);
   const setPlanMode = useUiStore((state) => state.setComposerPlanMode);
+  const selectedSessionId = useSessionStore((state) => state.selectedSessionId);
+  const planModeBySession = useSessionStore((state) => state.planModeBySession);
+  const planMode = resolveComposerPlanMode(selectedSessionId, planModeBySession, defaultPlanMode);
   const persisted: NativePermissionMode = isNativePermissionMode(native?.permission_mode)
     ? native.permission_mode
     : "default";

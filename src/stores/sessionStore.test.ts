@@ -1,6 +1,12 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-import type { AgentSession, AgentSessionEvent, AgentSessionOutput } from "@/lib/types";
+import type {
+  AgentSession,
+  AgentSessionEvent,
+  AgentSessionOutput,
+  AgentSessionStarted,
+} from "@/lib/types";
+import { resolveComposerPlanMode } from "@/lib/planMode";
 
 vi.mock("@/lib/backend", () => ({
   getAgentSessionLogLines: vi.fn(),
@@ -34,12 +40,22 @@ function stdout(sessionId: string, eventId: string): AgentSessionOutput {
   };
 }
 
+function started(sessionId: string, sessionKind: string): AgentSessionStarted {
+  return {
+    profile_id: "p",
+    workspace_id: "ws-1",
+    session_kind: sessionKind,
+    session_record_id: sessionId,
+  };
+}
+
 describe("sessionStore history", () => {
   beforeEach(() => {
     getLines.mockReset();
     useSessionStore.setState({
       selectedSessionId: null,
       liveBySession: {},
+      planModeBySession: {},
       lines: {},
       turnState: {},
       usage: {},
@@ -70,6 +86,56 @@ describe("sessionStore history", () => {
     resolve?.([event("e1")]);
     await pending;
     expect(useSessionStore.getState().lines.s1?.map((line) => line.id)).toEqual(["e1"]);
+  });
+
+  it("tracks runtime plan mode per session and preserves false values", () => {
+    useSessionStore.getState().onPlanMode("s1", false);
+    useSessionStore.getState().onStarted(started("s1", "plan"));
+    expect(useSessionStore.getState().planModeBySession.s1).toBe(false);
+
+    useSessionStore.getState().onPlanMode("s2", true);
+    expect(useSessionStore.getState().planModeBySession).toEqual({ s1: false, s2: true });
+  });
+
+  it("keeps background session mode changes isolated from the active session", () => {
+    useSessionStore.getState().onStarted(started("active", "execution"));
+    useSessionStore.getState().onPlanMode("background", true);
+    const modes = useSessionStore.getState().planModeBySession;
+
+    expect(resolveComposerPlanMode("active", modes, true)).toBe(false);
+    expect(resolveComposerPlanMode("background", modes, false)).toBe(true);
+  });
+
+  it("initializes a selected historical session from its session kind", () => {
+    useWorkspaceStore.setState({
+      sessions: [
+        {
+          id: "s-plan",
+          ai_channel_id: null,
+          workspace_id: null,
+          working_dir: null,
+          execution_target: "local",
+          ssh_config_id: null,
+          target_host_label: null,
+          session_kind: "plan",
+          status: "exited",
+          started_at: "t",
+          ended_at: null,
+          exit_code: null,
+          resume_session_id: null,
+          pinned: 0,
+          input_tokens: null,
+          output_tokens: null,
+          total_tokens: null,
+          reasoning_tokens: null,
+          cached_tokens: null,
+          created_at: "t",
+        } satisfies AgentSession,
+      ],
+    });
+
+    useSessionStore.getState().selectSession("s-plan");
+    expect(useSessionStore.getState().planModeBySession["s-plan"]).toBe(true);
   });
 
   it("unwraps persisted tool envelopes when loading history", async () => {

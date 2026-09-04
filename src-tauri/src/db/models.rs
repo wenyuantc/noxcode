@@ -746,6 +746,12 @@ pub struct NativeTurnState {
     pub state: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NativePlanModeChanged {
+    pub session_record_id: String,
+    pub plan_mode: bool,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
 pub struct NativeApiCallLogListItem {
     pub id: String,

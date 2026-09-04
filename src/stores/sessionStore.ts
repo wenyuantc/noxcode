@@ -42,6 +42,7 @@ function hydrateUsage(sessionId: string) {
 interface SessionState {
   selectedSessionId: string | null;
   liveBySession: Record<string, AgentSessionStarted>;
+  planModeBySession: Record<string, boolean>;
   lines: Record<string, RawSessionLine[]>;
   turnState: Record<string, string>;
   usage: Record<string, NativeContextUsage>;
@@ -57,6 +58,7 @@ interface SessionState {
   onDelta: (delta: NativeTextDelta) => void;
   onUsage: (usage: NativeContextUsage) => void;
   onTurnState: (sessionId: string, state: string) => void;
+  onPlanMode: (sessionId: string, planMode: boolean) => void;
   onExit: (exit: AgentSessionExit) => void;
   setPermission: (request: NativePermissionRequest | null) => void;
   setPlanQuestion: (request: NativePlanQuestionRequest | null) => void;
@@ -66,6 +68,7 @@ interface SessionState {
 export const useSessionStore = create<SessionState>((set, get) => ({
   selectedSessionId: null,
   liveBySession: {},
+  planModeBySession: {},
   lines: {},
   turnState: {},
   usage: {},
@@ -73,7 +76,25 @@ export const useSessionStore = create<SessionState>((set, get) => ({
   permission: null,
   planQuestion: null,
   planApproval: null,
-  selectSession: (id) => set({ selectedSessionId: id }),
+  selectSession: (id) => {
+    const session = id
+      ? useWorkspaceStore.getState().sessions.find((item) => item.id === id)
+      : undefined;
+    const fallback = session ? session.session_kind === "plan" : undefined;
+    set((state) => {
+      if (
+        !id ||
+        fallback === undefined ||
+        Object.prototype.hasOwnProperty.call(state.planModeBySession, id)
+      ) {
+        return { selectedSessionId: id };
+      }
+      return {
+        selectedSessionId: id,
+        planModeBySession: { ...state.planModeBySession, [id]: fallback },
+      };
+    });
+  },
   ensureHistory: async (sessionId) => {
     if (!get().lines[sessionId]) {
       const events = await getAgentSessionLogLines(sessionId);
@@ -96,7 +117,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
     hydrateUsage(sessionId);
   },
   loadHistory: async (sessionId) => {
-    set({ selectedSessionId: sessionId });
+    get().selectSession(sessionId);
     const workspace = useWorkspaceStore.getState();
     const workspaceId = workspace.sessions.find(
       (session) => session.id === sessionId,
@@ -107,13 +128,16 @@ export const useSessionStore = create<SessionState>((set, get) => ({
     await get().ensureHistory(sessionId);
   },
   onStarted: (session) => {
+    const id = session.session_record_id;
+    const current = get();
+    const planModeBySession = Object.prototype.hasOwnProperty.call(current.planModeBySession, id)
+      ? current.planModeBySession
+      : { ...current.planModeBySession, [id]: session.session_kind === "plan" };
     set({
-      selectedSessionId: session.session_record_id,
-      liveBySession: {
-        ...get().liveBySession,
-        [session.session_record_id]: session,
-      },
-      turnState: { ...get().turnState, [session.session_record_id]: "working" },
+      selectedSessionId: id,
+      liveBySession: { ...current.liveBySession, [id]: session },
+      planModeBySession,
+      turnState: { ...current.turnState, [id]: "working" },
     });
   },
   onStdout: (output) => {
@@ -155,6 +179,10 @@ export const useSessionStore = create<SessionState>((set, get) => ({
   },
   onUsage: (usage) => set({ usage: { ...get().usage, [usage.session_record_id]: usage } }),
   onTurnState: (sessionId, state) => set({ turnState: { ...get().turnState, [sessionId]: state } }),
+  onPlanMode: (sessionId, planMode) =>
+    set({
+      planModeBySession: { ...get().planModeBySession, [sessionId]: planMode },
+    }),
   onExit: (exit) => {
     const liveBySession = { ...get().liveBySession };
     delete liveBySession[exit.session_record_id];

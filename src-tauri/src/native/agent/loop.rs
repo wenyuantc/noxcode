@@ -342,6 +342,12 @@ impl AgentRunner {
         self.ctx.is_plan_mode()
     }
 
+    /// Consume the current turn's explicit ExitPlanMode marker. A rejected
+    /// approval must leave an initially planned session in plan mode.
+    pub fn take_plan_exit_requested(&self) -> bool {
+        self.ctx.take_plan_exit_requested()
+    }
+
     pub fn take_steer_finish(&mut self) -> bool {
         std::mem::take(&mut self.pending_steer_finish)
     }

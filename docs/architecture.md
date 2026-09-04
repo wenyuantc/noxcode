@@ -104,7 +104,7 @@ flowchart LR
 | `get/update/reset_mcp_servers` / `export_mcp_servers_snippet` | `native::mcp_servers` |
 | `show_main_window` | `tray` |
 
-事件：`ssh-host-trust-request`、`ssh-host-key-changed`、`native-session`、`native-stdout`、`native-text-delta`、`native-context-usage`、`native-turn-state`、`native-permission-request`、`native-plan-question`、`native-exit`。Git 细节见 [`git.md`](git.md)。会话细节见 [`native.md`](native.md)。前端接线见 [`frontend.md`](frontend.md)。
+事件：`ssh-host-trust-request`、`ssh-host-key-changed`、`native-session`、`native-stdout`、`native-text-delta`、`native-context-usage`、`native-turn-state`、`native-plan-mode`、`native-permission-request`、`native-plan-question`、`native-exit`。Git 细节见 [`git.md`](git.md)。会话细节见 [`native.md`](native.md)。前端接线见 [`frontend.md`](frontend.md)。
 
 ## SSH
 

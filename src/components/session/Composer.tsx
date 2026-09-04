@@ -10,6 +10,7 @@ import {
   listNativeGlobalSkills,
   stopNativeSession,
 } from "@/lib/backend";
+import { resolveComposerPlanMode } from "@/lib/planMode";
 import { submitSessionPrompt } from "@/lib/sessionSubmission";
 import { composerThinkingLevels, resolveComposerThinkingLevel } from "@/lib/modelCatalog";
 import type { NativeSkill } from "@/lib/types";
@@ -44,10 +45,16 @@ export function Composer({ compact = false }: { compact?: boolean }) {
   const channels = useChannelStore((state) => state.channels);
   const channelId = useChannelStore((state) => state.activeChannelId);
   const activeModelId = useChannelStore((state) => state.activeModelId);
-  const composerPlanMode = useUiStore((state) => state.composerPlanMode);
+  const defaultPlanMode = useUiStore((state) => state.composerPlanMode);
   const effort = useUiStore((state) => state.composerThinkingLevel);
   const setEffort = useUiStore((state) => state.setComposerThinkingLevel);
   const selectedSessionId = useSessionStore((state) => state.selectedSessionId);
+  const planModeBySession = useSessionStore((state) => state.planModeBySession);
+  const composerPlanMode = resolveComposerPlanMode(
+    selectedSessionId,
+    planModeBySession,
+    defaultPlanMode,
+  );
   const live = useSessionStore((state) =>
     selectedSessionId ? state.liveBySession[selectedSessionId] : undefined,
   );

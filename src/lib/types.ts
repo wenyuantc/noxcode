@@ -682,6 +682,11 @@ export interface NativeTurnState {
   state: NativeTurnStateKind | string;
 }
 
+export interface NativePlanModeChanged {
+  session_record_id: string;
+  plan_mode: boolean;
+}
+
 export interface QuickPrompt {
   id: string;
   label: string;

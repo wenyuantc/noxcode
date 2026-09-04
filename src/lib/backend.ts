@@ -52,6 +52,7 @@ import type {
   NativePermissionDecision,
   NativePermissionRequest,
   NativePermissionRulesView,
+  NativePlanModeChanged,
   NativePlanApprovalRequest,
   NativePlanQuestionRequest,
   NativeSettings,
@@ -742,6 +743,14 @@ export function onNativeContextUsage(
 
 export function onNativeTurnState(callback: (state: NativeTurnState) => void): Promise<UnlistenFn> {
   return listen<NativeTurnState>("native-turn-state", (event) => {
+    callback(event.payload);
+  });
+}
+
+export function onNativePlanMode(
+  callback: (state: NativePlanModeChanged) => void,
+): Promise<UnlistenFn> {
+  return listen<NativePlanModeChanged>("native-plan-mode", (event) => {
     callback(event.payload);
   });
 }

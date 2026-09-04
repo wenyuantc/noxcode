@@ -4,6 +4,7 @@ import {
   onNativeContextUsage,
   onNativeExit,
   onNativePermissionRequest,
+  onNativePlanMode,
   onNativePlanApprovalRequest,
   onNativePlanQuestion,
   onNativeSession,
@@ -39,6 +40,11 @@ export function useNativeEvents() {
     track(
       onNativeTurnState((payload) =>
         useSessionStore.getState().onTurnState(payload.session_record_id, payload.state),
+      ),
+    );
+    track(
+      onNativePlanMode((payload) =>
+        useSessionStore.getState().onPlanMode(payload.session_record_id, payload.plan_mode),
       ),
     );
     track(
