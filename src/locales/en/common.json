@@ -23,5 +23,7 @@
   "no": "No",
   "none": "None",
   "copy": "Copy",
-  "copied": "Copied"
+  "copied": "Copied",
+  "saved": "Saved successfully",
+  "deleted": "Deleted successfully"
 }

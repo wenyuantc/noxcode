@@ -1,12 +1,71 @@
+import * as React from "react";
 import { Select as SelectPrimitive } from "@base-ui/react/select";
 import { CheckIcon, ChevronDownIcon } from "lucide-react";
 
 import { cn } from "@/lib/utils";
 
+function extractItemsFromChildren(
+  children: React.ReactNode,
+): Record<string, React.ReactNode> | undefined {
+  const items: Record<string, React.ReactNode> = {};
+  let count = 0;
+
+  function traverse(node: React.ReactNode) {
+    React.Children.forEach(node, (child) => {
+      if (!React.isValidElement(child)) return;
+      const props = child.props as Record<string, unknown> | null;
+      if (
+        props &&
+        "value" in props &&
+        props.value !== undefined &&
+        "children" in props &&
+        props.children !== undefined
+      ) {
+        items[String(props.value)] = props.children as React.ReactNode;
+        count++;
+      }
+      if (props && props.children) {
+        traverse(props.children as React.ReactNode);
+      }
+    });
+  }
+
+  traverse(children);
+  return count > 0 ? items : undefined;
+}
+
 function Select<Value, Multiple extends boolean | undefined = false>({
+  items,
+  children,
   ...props
 }: SelectPrimitive.Root.Props<Value, Multiple>) {
-  return <SelectPrimitive.Root data-slot="select" {...props} />;
+  const previousItemsRef = React.useRef<Record<string, React.ReactNode> | undefined>(undefined);
+
+  const derivedItems = React.useMemo(() => {
+    if (items !== undefined) return items;
+    const extracted = extractItemsFromChildren(children);
+    if (!extracted) return undefined;
+
+    const prev = previousItemsRef.current;
+    if (prev) {
+      const prevKeys = Object.keys(prev);
+      const nextKeys = Object.keys(extracted);
+      if (
+        prevKeys.length === nextKeys.length &&
+        prevKeys.every((key) => prev[key] === extracted[key])
+      ) {
+        return prev;
+      }
+    }
+    previousItemsRef.current = extracted;
+    return extracted;
+  }, [items, children]);
+
+  return (
+    <SelectPrimitive.Root data-slot="select" items={derivedItems} {...props}>
+      {children}
+    </SelectPrimitive.Root>
+  );
 }
 
 function SelectTrigger({ className, children, ...props }: SelectPrimitive.Trigger.Props) {
