@@ -5,8 +5,9 @@ use tauri::{AppHandle, Runtime};
 
 use crate::app::shared::{new_id, sqlite_pool};
 use crate::db::models::{
-    ListNativeApiCallLogsPayload, NativeApiCallLogDetail, NativeApiCallLogListItem,
-    NativeApiCallLogPage, NativeApiCallLogStats,
+    GetNativeUsageAnalyticsPayload, ListNativeApiCallLogsPayload, NativeApiCallLogDetail,
+    NativeApiCallLogListItem, NativeApiCallLogPage, NativeApiCallLogStats, NativeUsageAnalytics,
+    NativeUsageDailyBucket, NativeUsageModelBucket,
 };
 use crate::native::model::call_log::{redact_and_truncate_text, NativeApiCallLogInsert};
 
@@ -49,6 +50,33 @@ SELECT
     SUM(l.total_tokens) AS total_tokens_sum,
     AVG(l.first_token_ms) AS avg_first_token_ms,
     AVG(l.duration_ms) AS avg_duration_ms
+FROM native_api_call_logs l
+LEFT JOIN workspaces w ON w.id = l.workspace_id
+"#;
+
+const DAILY_SELECT: &str = r#"
+SELECT
+    date(l.created_at) AS day,
+    COUNT(*) AS calls,
+    COALESCE(SUM(CASE WHEN l.status = 'success' THEN 1 ELSE 0 END), 0) AS success,
+    COALESCE(SUM(CASE WHEN l.status = 'failed' THEN 1 ELSE 0 END), 0) AS failed,
+    COALESCE(SUM(CASE WHEN l.status = 'cancelled' THEN 1 ELSE 0 END), 0) AS cancelled,
+    COALESCE(SUM(l.input_tokens), 0) AS input_tokens,
+    COALESCE(SUM(l.output_tokens), 0) AS output_tokens,
+    COALESCE(SUM(l.cached_tokens), 0) AS cached_tokens,
+    COALESCE(SUM(l.total_tokens), 0) AS total_tokens
+FROM native_api_call_logs l
+LEFT JOIN workspaces w ON w.id = l.workspace_id
+"#;
+
+const MODEL_SELECT: &str = r#"
+SELECT
+    COALESCE(NULLIF(trim(l.model), ''), '') AS model,
+    COUNT(*) AS calls,
+    COALESCE(SUM(l.input_tokens), 0) AS input_tokens,
+    COALESCE(SUM(l.output_tokens), 0) AS output_tokens,
+    COALESCE(SUM(l.cached_tokens), 0) AS cached_tokens,
+    COALESCE(SUM(l.total_tokens), 0) AS total_tokens
 FROM native_api_call_logs l
 LEFT JOIN workspaces w ON w.id = l.workspace_id
 "#;
@@ -157,6 +185,24 @@ fn empty_page() -> NativeApiCallLogPage {
         items: Vec::new(),
         total: 0,
         stats: empty_stats(),
+    }
+}
+
+fn empty_analytics() -> NativeUsageAnalytics {
+    NativeUsageAnalytics {
+        stats: empty_stats(),
+        daily: Vec::new(),
+        models: Vec::new(),
+    }
+}
+
+fn analytics_list_payload(
+    payload: &GetNativeUsageAnalyticsPayload,
+) -> ListNativeApiCallLogsPayload {
+    ListNativeApiCallLogsPayload {
+        start_date: payload.start_date.clone(),
+        end_date: payload.end_date.clone(),
+        ..ListNativeApiCallLogsPayload::default()
     }
 }
 
@@ -335,6 +381,50 @@ pub(crate) async fn get_native_api_call_log_with_pool(
         .ok_or_else(|| "API 调用记录不存在".to_string())
 }
 
+pub(crate) async fn get_native_usage_analytics_with_pool(
+    pool: &SqlitePool,
+    payload: &GetNativeUsageAnalyticsPayload,
+) -> Result<NativeUsageAnalytics, String> {
+    let filters = analytics_list_payload(payload);
+    if date_range_invalid(&filters) {
+        return Ok(empty_analytics());
+    }
+
+    let mut stats_q = QueryBuilder::<Sqlite>::new(STATS_SELECT);
+    push_filters(&mut stats_q, &filters);
+    let stats: NativeApiCallLogStats = stats_q
+        .build_query_as::<NativeApiCallLogStats>()
+        .fetch_one(pool)
+        .await
+        .map_err(|error| format!("统计使用数据失败: {error}"))?;
+
+    let mut daily_q = QueryBuilder::<Sqlite>::new(DAILY_SELECT);
+    push_filters(&mut daily_q, &filters);
+    daily_q.push(" GROUP BY date(l.created_at) ORDER BY date(l.created_at) ASC");
+    let daily: Vec<NativeUsageDailyBucket> = daily_q
+        .build_query_as::<NativeUsageDailyBucket>()
+        .fetch_all(pool)
+        .await
+        .map_err(|error| format!("统计每日用量失败: {error}"))?;
+
+    let mut models_q = QueryBuilder::<Sqlite>::new(MODEL_SELECT);
+    push_filters(&mut models_q, &filters);
+    models_q.push(
+        " GROUP BY COALESCE(NULLIF(trim(l.model), ''), '') ORDER BY total_tokens DESC, calls DESC, model ASC",
+    );
+    let models: Vec<NativeUsageModelBucket> = models_q
+        .build_query_as::<NativeUsageModelBucket>()
+        .fetch_all(pool)
+        .await
+        .map_err(|error| format!("统计模型用量失败: {error}"))?;
+
+    Ok(NativeUsageAnalytics {
+        stats,
+        daily,
+        models,
+    })
+}
+
 #[tauri::command]
 pub async fn list_native_api_call_logs<R: Runtime>(
     app: AppHandle<R>,
@@ -354,11 +444,21 @@ pub async fn get_native_api_call_log<R: Runtime>(
     get_native_api_call_log_with_pool(&pool, &id).await
 }
 
+#[tauri::command]
+pub async fn get_native_usage_analytics<R: Runtime>(
+    app: AppHandle<R>,
+    payload: Option<GetNativeUsageAnalyticsPayload>,
+) -> Result<NativeUsageAnalytics, String> {
+    let pool = sqlite_pool(&app).await?;
+    let payload = payload.unwrap_or_default();
+    get_native_usage_analytics_with_pool(&pool, &payload).await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::db::test_support::setup_migrated_pool;
-    use crate::native::model::call_log::{CALL_KIND_CHAT, CALL_STATUS_SUCCESS};
+    use crate::native::model::call_log::{CALL_KIND_CHAT, CALL_STATUS_FAILED, CALL_STATUS_SUCCESS};
 
     fn sample_record() -> NativeApiCallLogInsert {
         NativeApiCallLogInsert {
@@ -459,5 +559,154 @@ mod tests {
         let end = parse_activity_date_bound("2026-09-02", true).expect("end");
         assert!(end > start);
         assert!(parse_activity_date_bound("not-a-date", false).is_none());
+    }
+
+    async fn set_created_at(pool: &SqlitePool, id: &str, created_at: &str) {
+        sqlx::query("UPDATE native_api_call_logs SET created_at = $1 WHERE id = $2")
+            .bind(created_at)
+            .bind(id)
+            .execute(pool)
+            .await
+            .expect("update created_at");
+    }
+
+    async fn insert_dated(
+        pool: &SqlitePool,
+        record: NativeApiCallLogInsert,
+        created_at: &str,
+    ) -> String {
+        let id = insert_native_api_call_log(pool, &record)
+            .await
+            .expect("insert");
+        set_created_at(pool, &id, created_at).await;
+        id
+    }
+
+    #[tokio::test]
+    async fn usage_analytics_groups_daily_and_models() {
+        let pool = setup_migrated_pool().await;
+
+        let mut day1_main = sample_record();
+        day1_main.id = "log-d1-main".to_string();
+        day1_main.call_id = "call-d1-main".to_string();
+        insert_dated(&pool, day1_main, "2026-09-01 10:00:00").await;
+
+        let mut day1_failed = sample_record();
+        day1_failed.id = "log-d1-fail".to_string();
+        day1_failed.call_id = "call-d1-fail".to_string();
+        day1_failed.model = Some("claude-4".to_string());
+        day1_failed.status = CALL_STATUS_FAILED.to_string();
+        day1_failed.input_tokens = Some(20);
+        day1_failed.output_tokens = Some(0);
+        day1_failed.cached_tokens = None;
+        day1_failed.total_tokens = Some(20);
+        insert_dated(&pool, day1_failed, "2026-09-01 18:00:00").await;
+
+        let mut day2 = sample_record();
+        day2.id = "log-d2".to_string();
+        day2.call_id = "call-d2".to_string();
+        day2.input_tokens = Some(100);
+        day2.output_tokens = Some(40);
+        day2.cached_tokens = Some(25);
+        day2.total_tokens = Some(140);
+        insert_dated(&pool, day2, "2026-09-02 09:00:00").await;
+
+        let mut outside = sample_record();
+        outside.id = "log-out".to_string();
+        outside.call_id = "call-out".to_string();
+        outside.model = Some("outside".to_string());
+        insert_dated(&pool, outside, "2026-08-01 09:00:00").await;
+
+        let mut unnamed = sample_record();
+        unnamed.id = "log-blank".to_string();
+        unnamed.call_id = "call-blank".to_string();
+        unnamed.model = Some("   ".to_string());
+        unnamed.input_tokens = Some(5);
+        unnamed.output_tokens = Some(1);
+        unnamed.cached_tokens = Some(0);
+        unnamed.total_tokens = Some(6);
+        insert_dated(&pool, unnamed, "2026-09-02 22:00:00").await;
+
+        let analytics = get_native_usage_analytics_with_pool(
+            &pool,
+            &GetNativeUsageAnalyticsPayload {
+                start_date: Some("2026-09-01".to_string()),
+                end_date: Some("2026-09-02".to_string()),
+            },
+        )
+        .await
+        .expect("analytics");
+
+        assert_eq!(analytics.stats.total, 4);
+        assert_eq!(analytics.stats.success, 3);
+        assert_eq!(analytics.stats.failed, 1);
+        assert_eq!(analytics.stats.input_tokens, 135);
+        assert_eq!(analytics.stats.output_tokens, 45);
+        assert_eq!(analytics.stats.cached_tokens_sum, Some(28));
+        assert_eq!(analytics.stats.total_tokens_sum, Some(180));
+
+        assert_eq!(analytics.daily.len(), 2);
+        assert_eq!(analytics.daily[0].day, "2026-09-01");
+        assert_eq!(analytics.daily[0].calls, 2);
+        assert_eq!(analytics.daily[0].success, 1);
+        assert_eq!(analytics.daily[0].failed, 1);
+        assert_eq!(analytics.daily[0].input_tokens, 30);
+        assert_eq!(analytics.daily[0].output_tokens, 4);
+        assert_eq!(analytics.daily[0].cached_tokens, 3);
+        assert_eq!(analytics.daily[0].total_tokens, 34);
+        assert_eq!(analytics.daily[1].day, "2026-09-02");
+        assert_eq!(analytics.daily[1].calls, 2);
+        assert_eq!(analytics.daily[1].total_tokens, 146);
+
+        assert_eq!(analytics.models.len(), 3);
+        assert_eq!(analytics.models[0].model, "gpt-4o");
+        assert_eq!(analytics.models[0].calls, 2);
+        assert_eq!(analytics.models[0].total_tokens, 154);
+        assert_eq!(analytics.models[1].model, "claude-4");
+        assert_eq!(analytics.models[1].calls, 1);
+        assert_eq!(analytics.models[1].total_tokens, 20);
+        assert_eq!(analytics.models[2].model, "");
+        assert_eq!(analytics.models[2].calls, 1);
+        assert_eq!(analytics.models[2].total_tokens, 6);
+    }
+
+    #[tokio::test]
+    async fn usage_analytics_empty_when_no_rows_in_range() {
+        let pool = setup_migrated_pool().await;
+        insert_dated(&pool, sample_record(), "2026-08-01 10:00:00").await;
+
+        let analytics = get_native_usage_analytics_with_pool(
+            &pool,
+            &GetNativeUsageAnalyticsPayload {
+                start_date: Some("2026-09-01".to_string()),
+                end_date: Some("2026-09-02".to_string()),
+            },
+        )
+        .await
+        .expect("analytics");
+
+        assert_eq!(analytics.stats.total, 0);
+        assert!(analytics.daily.is_empty());
+        assert!(analytics.models.is_empty());
+    }
+
+    #[tokio::test]
+    async fn usage_analytics_returns_empty_for_inverted_range() {
+        let pool = setup_migrated_pool().await;
+        insert_dated(&pool, sample_record(), "2026-09-01 10:00:00").await;
+
+        let analytics = get_native_usage_analytics_with_pool(
+            &pool,
+            &GetNativeUsageAnalyticsPayload {
+                start_date: Some("2026-09-03".to_string()),
+                end_date: Some("2026-09-01".to_string()),
+            },
+        )
+        .await
+        .expect("analytics");
+
+        assert_eq!(analytics.stats.total, 0);
+        assert!(analytics.daily.is_empty());
+        assert!(analytics.models.is_empty());
     }
 }

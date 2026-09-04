@@ -72,7 +72,7 @@ Composer / 编辑重发 / 重试走 `submitSessionPrompt`：有选中会话则 `
 
 ## 设置
 
-左导航三组：基础设置（general / appearance / channels / ssh）、Agent 能力（runtime / subagents / mcp / skills / hooks）、数据与统计（usage / database / about）。开关即时生效，文本输入配「保存」。通用设置提供桌面通知开关；Native runtime 提供工具后自动 checkpoint 开关和保留天数（`0` 不清理）；SSH 编辑弹窗提供 KEX / Host Key / Cipher / MAC 高级算法区，以及旧服务器预设 / 恢复默认；MCP 卡片可在全部工作区和指定工作区之间切换并勾选绑定工作区。
+左导航三组：基础设置（general / appearance / channels / ssh）、Agent 能力（runtime / subagents / mcp / skills / hooks）、数据与统计（usage / database / about）。使用统计顶部提供 7 天 / 30 天 / 自定义筛选，概览展示总 Token（k/M）与缓存率，并有活跃热力图、按天 Token 趋势、模型用量三张卡，数据来自 `get_native_usage_analytics`。开关即时生效，文本输入配「保存」。通用设置提供桌面通知开关；Native runtime 提供工具后自动 checkpoint 开关和保留天数（`0` 不清理）；SSH 编辑弹窗提供 KEX / Host Key / Cipher / MAC 高级算法区，以及旧服务器预设 / 恢复默认；MCP 卡片可在全部工作区和指定工作区之间切换并勾选绑定工作区。
 
 渠道删除时若有 live session 则后端拒绝，错误原文展示。子智能体是列表 + 弹窗 CRUD，可配模型、工具与工作区作用域。MCP 还支持备注、删除、Playwright 预设和导出片段。数据库维护展示路径与迁移版本、备份范围（SQL 本体 vs 配置目录/密钥环），并提供导出 / 导入 SQL 与打开数据库目录。关于页用 `getVersion()` 显示真实版本；进入该页会自动检查更新，也可手动再检查 / 下载 / 重启。开发模式会提示无法检查。应用启动后静默检查；有新版本时首页侧栏底部显示「更新 / 下载中 / 重启更新」，与关于页共用 `updateStore`。
 

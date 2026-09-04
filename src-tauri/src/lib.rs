@@ -158,6 +158,7 @@ pub fn run() {
             native::subagents::delete_native_subagent,
             native::api_logs::list_native_api_call_logs,
             native::api_logs::get_native_api_call_log,
+            native::api_logs::get_native_usage_analytics,
             native::mcp_servers::get_mcp_servers,
             native::mcp_servers::update_mcp_servers,
             native::mcp_servers::reset_mcp_servers,

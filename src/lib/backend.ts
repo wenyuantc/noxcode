@@ -32,6 +32,7 @@ import type {
   GitRestoreResult,
   GitStatus,
   ListAiChannelModelsResult,
+  GetNativeUsageAnalyticsInput,
   ListNativeApiCallLogsInput,
   McpServersDocument,
   McpOAuthEvent,
@@ -44,6 +45,7 @@ import type {
   ModelCatalogEntry,
   NativeApiCallLogDetail,
   NativeApiCallLogPage,
+  NativeUsageAnalytics,
   NativeAutomation,
   NativeContextUsage,
   CreateNativeSkillInput,
@@ -652,6 +654,12 @@ export function listNativeApiCallLogs(
 
 export function getNativeApiCallLog(id: string): Promise<NativeApiCallLogDetail> {
   return invoke("get_native_api_call_log", { id });
+}
+
+export function getNativeUsageAnalytics(
+  payload?: GetNativeUsageAnalyticsInput,
+): Promise<NativeUsageAnalytics> {
+  return invoke("get_native_usage_analytics", { payload });
 }
 
 export function getMcpServers(): Promise<McpServersDocument> {
