@@ -1,5 +1,5 @@
 import { confirm, open } from "@tauri-apps/plugin-dialog";
-import { FolderOpen, Loader2, Plus, Trash2 } from "lucide-react";
+import { Download, FolderOpen, Loader2, Pencil, Plus, Terminal, Trash2 } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 
@@ -42,6 +42,8 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
+import { SettingCard } from "./SettingCard";
+import { SettingFeedbackCallout } from "./SettingFeedbackCallout";
 
 interface SshConfigFormState {
   name: string;
@@ -381,86 +383,136 @@ export function SshSettingsSection() {
 
   return (
     <div className="space-y-6">
-      <div className="space-y-4 rounded-lg border border-border bg-card p-4">
-        <div className="flex items-center justify-between gap-4">
-          <div>
-            <h3 className="text-sm font-medium">{t("ssh.title")}</h3>
-            <p className="text-xs text-muted-foreground">{t("ssh.description")}</p>
-          </div>
-          <Button variant="outline" onClick={openCreate}>
-            <Plus className="mr-1 h-4 w-4" />
+      {!dialogOpen && message ? (
+        <SettingFeedbackCallout
+          variant="success"
+          message={message}
+          onClose={() => setMessage(null)}
+        />
+      ) : null}
+      {!dialogOpen && error ? (
+        <SettingFeedbackCallout variant="error" message={error} onClose={() => setError(null)} />
+      ) : null}
+
+      {/* SSH 连接列表卡片 */}
+      <SettingCard
+        icon={Terminal}
+        title={t("ssh.title")}
+        description={t("ssh.description")}
+        badge={`${configs.length} 个配置`}
+        headerAction={
+          <Button size="sm" onClick={openCreate} className="h-7 gap-1 text-xs">
+            <Plus className="size-3.5" />
             {t("ssh.actions.new")}
           </Button>
-        </div>
-
-        {!dialogOpen && message ? <p className="text-sm text-muted-foreground">{message}</p> : null}
-        {!dialogOpen && error ? <p className="text-sm text-destructive">{error}</p> : null}
-
-        <div className="rounded-md border border-border">
-          {loading ? (
-            <div className="flex h-28 items-center justify-center text-sm text-muted-foreground">
-              <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-              {t("ssh.list.loading")}
+        }
+      >
+        {loading ? (
+          <div className="flex h-32 items-center justify-center text-xs text-muted-foreground">
+            <Loader2 className="mr-2 size-4 animate-spin text-primary" />
+            {t("ssh.list.loading")}
+          </div>
+        ) : configs.length === 0 ? (
+          <div className="flex flex-col items-center justify-center py-10 text-center">
+            <div className="flex size-10 items-center justify-center rounded-xl border border-border/70 bg-muted/30 text-muted-foreground">
+              <Terminal className="size-5" />
             </div>
-          ) : configs.length === 0 ? (
-            <div className="px-3 py-6 text-sm text-muted-foreground">{t("ssh.list.empty")}</div>
-          ) : (
-            configs.map((config) => (
-              <button
-                key={config.id}
-                type="button"
-                onClick={() => openEdit(config)}
-                className={`w-full border-b border-border px-3 py-3 text-left last:border-b-0 ${
-                  selectedId === config.id ? "bg-primary/5" : "hover:bg-muted/40"
-                }`}
-              >
-                <div className="text-sm font-medium">{config.name}</div>
-                <div className="mt-1 text-xs text-muted-foreground">
-                  {config.username}@{config.host}:{config.port}
-                </div>
-                <div className="mt-2 flex flex-wrap gap-2 text-[11px]">
-                  <span className="rounded bg-secondary px-1.5 py-0.5 text-secondary-foreground">
-                    {t(
-                      config.auth_type === "password"
-                        ? "ssh.badges.passwordLogin"
-                        : "ssh.badges.keyLogin",
-                    )}
-                  </span>
-                  {config.last_checked_at ? (
-                    <span className="rounded border border-border px-1.5 py-0.5 text-muted-foreground">
-                      {t("ssh.list.checkedAt", { date: formatDate(config.last_checked_at) })}
-                    </span>
-                  ) : null}
-                </div>
-              </button>
-            ))
-          )}
-        </div>
-      </div>
-
-      <div className="space-y-4 rounded-lg border border-border bg-card p-4">
-        <div>
-          <h3 className="text-sm font-medium">{t("ssh.import.title")}</h3>
-          <p className="text-xs text-muted-foreground">{t("ssh.import.hint")}</p>
-        </div>
-        {hosts.length === 0 ? (
-          <p className="text-sm text-muted-foreground">{t("ssh.import.empty")}</p>
+            <p className="mt-3 text-xs font-semibold text-foreground">{t("ssh.list.empty")}</p>
+            <p className="mt-1 text-[11px] text-muted-foreground">
+              添加远程 SSH 主机配置，即可支持远端执行与代码同步。
+            </p>
+          </div>
         ) : (
-          <div className="rounded-md border border-border">
-            {hosts.map((host) => (
-              <button
-                key={host.alias}
-                type="button"
-                className="w-full border-b border-border px-3 py-3 text-left text-sm last:border-b-0 hover:bg-muted/40"
-                onClick={() => void handleImport(host.alias)}
+          <div className="grid gap-2.5">
+            {configs.map((config) => (
+              <div
+                key={config.id}
+                className="group flex flex-col sm:flex-row sm:items-center justify-between gap-3 rounded-xl border border-border/70 bg-card p-3.5 shadow-2xs transition-all hover:border-border hover:shadow-xs"
               >
-                {host.alias} · {host.host}:{host.port}
-                {host.has_proxy_jump ? ` · ${t("ssh.import.proxyJump")}` : ""}
-              </button>
+                <div className="flex items-start gap-3 min-w-0">
+                  <div className="mt-0.5 flex size-8 shrink-0 items-center justify-center rounded-lg border border-border/60 bg-muted/40 text-primary">
+                    <Terminal className="size-4" />
+                  </div>
+                  <div className="min-w-0 flex-1 space-y-1">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <span className="text-xs font-semibold tracking-tight text-foreground truncate">
+                        {config.name}
+                      </span>
+                      <span className="rounded-md border border-border/60 bg-muted/40 px-1.5 py-0.2 text-[10px] font-mono text-muted-foreground">
+                        {t(
+                          config.auth_type === "password"
+                            ? "ssh.badges.passwordLogin"
+                            : "ssh.badges.keyLogin",
+                        )}
+                      </span>
+                      {config.last_checked_at ? (
+                        <span className="rounded-md border border-border/40 bg-background px-1.5 py-0.2 text-[10px] font-mono text-muted-foreground">
+                          {t("ssh.list.checkedAt", { date: formatDate(config.last_checked_at) })}
+                        </span>
+                      ) : null}
+                    </div>
+                    <p className="text-[11px] font-mono text-muted-foreground/80 truncate">
+                      {config.username}@{config.host}:{config.port}
+                    </p>
+                  </div>
+                </div>
+
+                <div className="flex items-center gap-1.5 shrink-0 self-end sm:self-center">
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    onClick={() => openEdit(config)}
+                    className="h-7 text-xs gap-1"
+                  >
+                    <Pencil className="size-3" />
+                    {t("common:edit", { defaultValue: "编辑" })}
+                  </Button>
+                </div>
+              </div>
             ))}
           </div>
         )}
-      </div>
+      </SettingCard>
+
+      {/* 导入 ~/.ssh/config 主机卡片 */}
+      <SettingCard
+        icon={FolderOpen}
+        title={t("ssh.import.title")}
+        description={t("ssh.import.hint")}
+        badge={hosts.length > 0 ? `${hosts.length} 可导入` : undefined}
+      >
+        {hosts.length === 0 ? (
+          <p className="py-2 text-center text-xs text-muted-foreground">{t("ssh.import.empty")}</p>
+        ) : (
+          <div className="grid gap-2 sm:grid-cols-2">
+            {hosts.map((host) => (
+              <div
+                key={host.alias}
+                className="flex items-center justify-between gap-2 rounded-xl border border-border/70 bg-card p-2.5 text-xs shadow-2xs transition-all hover:border-border"
+              >
+                <div className="min-w-0 flex-1 space-y-0.5">
+                  <p className="font-semibold text-foreground truncate">{host.alias}</p>
+                  <p className="text-[11px] font-mono text-muted-foreground truncate">
+                    {host.host}:{host.port}
+                    {host.has_proxy_jump ? ` · ${t("ssh.import.proxyJump")}` : ""}
+                  </p>
+                </div>
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  className="h-6 text-xs gap-1 px-2 shrink-0"
+                  onClick={() => void handleImport(host.alias)}
+                >
+                  <Download className="size-3" />
+                  {t("ssh.import.action", { defaultValue: "导入" })}
+                </Button>
+              </div>
+            ))}
+          </div>
+        )}
+      </SettingCard>
 
       <Dialog
         open={dialogOpen}

@@ -1,5 +1,14 @@
 import { confirm, message, open, save } from "@tauri-apps/plugin-dialog";
-import { Download, FolderOpen, Loader2, Upload } from "lucide-react";
+import {
+  Check,
+  Copy,
+  Database,
+  Download,
+  FolderOpen,
+  HardDrive,
+  Loader2,
+  Upload,
+} from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 
@@ -9,6 +18,8 @@ import { Button } from "@/components/ui/button";
 import { useChannelStore } from "@/stores/channelStore";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { useWorkspaceStore } from "@/stores/workspaceStore";
+import { SettingCard, SettingRow } from "./SettingCard";
+import { SettingFeedbackCallout } from "./SettingFeedbackCallout";
 
 function formatBackupTimestamp(date = new Date()) {
   const year = date.getFullYear();
@@ -46,6 +57,8 @@ export function DatabaseSection() {
   );
   const [actionMessage, setActionMessage] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
+  const [copied, setCopied] = useState(false);
+
   const databaseFileFilters = useMemo(
     () => [{ name: t("database.dialogs.fileFilterName"), extensions: ["sql"] }],
     [t],
@@ -72,23 +85,32 @@ export function DatabaseSection() {
     });
   }, [refreshHealth]);
 
+  const copyPath = async () => {
+    if (!health?.database_path) return;
+    await navigator.clipboard.writeText(health.database_path);
+    setCopied(true);
+    setTimeout(() => setCopied(false), 1500);
+  };
+
   async function handleBackup() {
     setActionLoading("backup");
     setActionError(null);
     setActionMessage(null);
 
     try {
-      const destination = await save({
-        title: t("database.dialogs.exportTitle"),
-        defaultPath: buildBackupDefaultPath(health),
+      const defaultPath = buildBackupDefaultPath(health);
+      const selectedPath = await save({
+        defaultPath,
         filters: databaseFileFilters,
+        title: t("database.dialogs.exportTitle"),
       });
 
-      if (!destination) {
+      if (!selectedPath) {
         return;
       }
 
-      const result = await backupDatabase(destination);
+      const result = await backupDatabase(selectedPath);
+      await refreshHealth();
       setActionMessage(result.message);
     } catch (error) {
       setActionError(error instanceof Error ? error.message : t("database.messages.exportFailed"));
@@ -112,25 +134,26 @@ export function DatabaseSection() {
         return;
       }
 
-      const selected = await open({
-        title: t("database.dialogs.selectBackupTitle"),
+      const selectedPath = await open({
         directory: false,
         multiple: false,
         filters: databaseFileFilters,
+        title: t("database.dialogs.selectBackupTitle"),
       });
 
-      if (typeof selected !== "string") {
+      if (!selectedPath || typeof selectedPath !== "string") {
         return;
       }
 
-      const result = await restoreDatabase(selected);
+      const result = await restoreDatabase(selectedPath);
       setActionMessage(result.message);
       await refreshHealth();
       await Promise.all([
+        useWorkspaceStore.getState().load(),
         useChannelStore.getState().load(),
         useSettingsStore.getState().load(),
-        useWorkspaceStore.getState().load(),
       ]);
+
       await message(
         t("database.dialogs.importCompleteMessage", {
           message: result.message,
@@ -165,99 +188,158 @@ export function DatabaseSection() {
   }
 
   return (
-    <div className="space-y-4 rounded-lg border border-border bg-card p-4">
-      <div>
-        <h3 className="text-sm font-medium">{t("database.maintenance.title")}</h3>
-        <p className="text-xs text-muted-foreground">{t("database.maintenance.description")}</p>
-      </div>
+    <div className="space-y-6">
+      {actionMessage ? (
+        <SettingFeedbackCallout
+          variant="success"
+          message={actionMessage}
+          onClose={() => setActionMessage(null)}
+        />
+      ) : null}
+      {actionError ? (
+        <SettingFeedbackCallout
+          variant="error"
+          message={actionError}
+          onClose={() => setActionError(null)}
+        />
+      ) : null}
 
-      <div className="grid gap-2 rounded-md border border-border px-3 py-3 text-xs text-muted-foreground">
-        <p className="break-all">
-          {t("database.maintenance.pathLabel")}:
-          {health?.database_path ?? t("database.maintenance.detecting")}
-        </p>
-        <p>
-          {t("database.maintenance.currentVersionLabel")}:
-          {health?.database_current_version ?? t("database.maintenance.unknown")}
-        </p>
-        <p>
-          {t("database.maintenance.latestVersionLabel")}:
-          {health?.database_latest_version ?? t("database.maintenance.unknown")}
-        </p>
-        {health?.database_current_description ? <p>{health.database_current_description}</p> : null}
-      </div>
-
-      <div className="space-y-2 rounded-md border border-amber-500/30 bg-amber-500/10 px-3 py-3 text-xs text-amber-950 dark:text-amber-100">
-        <p className="font-medium">{t("database.backupScope.title")}</p>
-        <div className="grid gap-2 sm:grid-cols-2">
-          <div>
-            <p className="mb-1 font-medium text-green-800 dark:text-green-200">
-              {t("database.backupScope.included")}
-            </p>
-            <ul className="list-disc space-y-1 pl-4">
-              {includeItems.map((item) => (
-                <li key={item}>{item}</li>
-              ))}
-            </ul>
+      {/* 数据库健康状态卡片 */}
+      <SettingCard
+        icon={Database}
+        title={t("database.maintenance.title")}
+        description={t("database.maintenance.description")}
+        badge={health ? `迁移版本 v${health.database_current_version}` : undefined}
+        headerAction={
+          <div className="flex items-center gap-1.5">
+            <span className="size-2 rounded-full bg-emerald-500 shadow-2xs shadow-emerald-500/50" />
+            <span className="text-xs text-muted-foreground font-medium">运行正常</span>
           </div>
-          <div>
-            <p className="mb-1 font-medium text-amber-900 dark:text-amber-50">
-              {t("database.backupScope.excluded")}
+        }
+        divided
+      >
+        <SettingRow
+          title={t("database.maintenance.pathLabel")}
+          description={
+            <span className="font-mono text-[11px] break-all">
+              {health?.database_path ?? t("database.maintenance.detecting")}
+            </span>
+          }
+        >
+          <div className="flex items-center gap-1.5">
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              disabled={!health?.database_path}
+              onClick={() => void copyPath()}
+              className="h-7 text-xs gap-1"
+            >
+              {copied ? <Check className="size-3 text-emerald-500" /> : <Copy className="size-3" />}
+              {copied ? "已复制" : "复制路径"}
+            </Button>
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              disabled={actionLoading !== null || !health?.database_path}
+              onClick={() => void handleOpenFolder()}
+              title={openDatabaseFolderTitle}
+              className="h-7 text-xs gap-1"
+            >
+              {actionLoading === "open-folder" ? (
+                <Loader2 className="size-3 animate-spin" />
+              ) : (
+                <FolderOpen className="size-3" />
+              )}
+              {t("database.actions.openDirectory")}
+            </Button>
+          </div>
+        </SettingRow>
+
+        <SettingRow title="迁移版本状态" description="数据库当前架构版本与最新目标版本保持一致。">
+          <div className="flex items-center gap-2">
+            <span className="rounded-md border border-border/60 bg-muted/40 px-2 py-0.5 font-mono text-xs text-foreground">
+              当前: v{health?.database_current_version ?? "?"}
+            </span>
+            <span className="rounded-md border border-border/60 bg-muted/40 px-2 py-0.5 font-mono text-xs text-muted-foreground">
+              目标: v{health?.database_latest_version ?? "?"}
+            </span>
+          </div>
+        </SettingRow>
+      </SettingCard>
+
+      {/* 备份与恢复操作卡片 */}
+      <SettingCard
+        icon={HardDrive}
+        title="备份与还原"
+        description="将 SQLite 核心数据导出为 SQL 脚本，或从已有备份还原。"
+      >
+        <div className="space-y-4">
+          <div className="flex flex-wrap gap-2.5">
+            <Button
+              variant="outline"
+              size="sm"
+              className="h-8 text-xs gap-1.5"
+              onClick={() => void handleBackup()}
+              disabled={actionLoading !== null}
+            >
+              {actionLoading === "backup" ? (
+                <Loader2 className="size-3.5 animate-spin" />
+              ) : (
+                <Download className="size-3.5" />
+              )}
+              {t("database.actions.exportSql")}
+            </Button>
+            <Button
+              variant="outline"
+              size="sm"
+              className="h-8 text-xs gap-1.5"
+              onClick={() => void handleRestore()}
+              disabled={actionLoading !== null}
+            >
+              {actionLoading === "restore" ? (
+                <Loader2 className="size-3.5 animate-spin" />
+              ) : (
+                <Upload className="size-3.5" />
+              )}
+              {t("database.actions.importSql")}
+            </Button>
+          </div>
+
+          {/* 范围说明 */}
+          <div className="rounded-xl border border-border/70 bg-muted/20 p-4 text-xs space-y-3">
+            <p className="font-semibold text-foreground tracking-tight">
+              {t("database.backupScope.title")}
             </p>
-            <ul className="list-disc space-y-1 pl-4">
-              {excludeItems.map((item) => (
-                <li key={item}>{item}</li>
-              ))}
-            </ul>
+            <div className="grid gap-3 sm:grid-cols-2">
+              <div className="space-y-1.5">
+                <p className="font-medium text-emerald-600 dark:text-emerald-400">
+                  ✓ {t("database.backupScope.included")}
+                </p>
+                <ul className="list-disc space-y-0.5 pl-4 text-muted-foreground leading-relaxed">
+                  {includeItems.map((item) => (
+                    <li key={item}>{item}</li>
+                  ))}
+                </ul>
+              </div>
+              <div className="space-y-1.5">
+                <p className="font-medium text-amber-600 dark:text-amber-400">
+                  ✗ {t("database.backupScope.excluded")}
+                </p>
+                <ul className="list-disc space-y-0.5 pl-4 text-muted-foreground leading-relaxed">
+                  {excludeItems.map((item) => (
+                    <li key={item}>{item}</li>
+                  ))}
+                </ul>
+              </div>
+            </div>
+            <p className="border-t border-border/40 pt-2 text-[11px] text-muted-foreground leading-relaxed">
+              {t("database.backupScope.restoreWarning")}
+            </p>
           </div>
         </div>
-        <p className="text-[11px] leading-5 opacity-90">
-          {t("database.backupScope.restoreWarning")}
-        </p>
-      </div>
-
-      <div className="flex flex-wrap gap-2">
-        <Button
-          variant="outline"
-          onClick={() => void handleBackup()}
-          disabled={actionLoading !== null}
-        >
-          {actionLoading === "backup" ? (
-            <Loader2 className="h-4 w-4 animate-spin" />
-          ) : (
-            <Download className="h-4 w-4" />
-          )}
-          {t("database.actions.exportSql")}
-        </Button>
-        <Button
-          variant="outline"
-          onClick={() => void handleRestore()}
-          disabled={actionLoading !== null}
-        >
-          {actionLoading === "restore" ? (
-            <Loader2 className="h-4 w-4 animate-spin" />
-          ) : (
-            <Upload className="h-4 w-4" />
-          )}
-          {t("database.actions.importSql")}
-        </Button>
-        <Button
-          variant="ghost"
-          onClick={() => void handleOpenFolder()}
-          disabled={actionLoading !== null || !health?.database_path}
-          title={openDatabaseFolderTitle}
-        >
-          {actionLoading === "open-folder" ? (
-            <Loader2 className="h-4 w-4 animate-spin" />
-          ) : (
-            <FolderOpen className="h-4 w-4" />
-          )}
-          {t("database.actions.openDirectory")}
-        </Button>
-      </div>
-
-      {actionMessage ? <p className="text-xs text-green-700">{actionMessage}</p> : null}
-      {actionError ? <p className="text-xs text-destructive">{actionError}</p> : null}
+      </SettingCard>
     </div>
   );
 }

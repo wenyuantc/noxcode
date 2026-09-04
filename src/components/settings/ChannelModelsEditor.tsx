@@ -42,10 +42,13 @@ export function ChannelModelsEditor({
   };
 
   return (
-    <div className="space-y-2">
+    <div className="space-y-3">
       <div className="flex items-center justify-between">
-        <label className="text-xs font-medium text-muted-foreground">
+        <label className="text-xs font-semibold text-foreground tracking-tight">
           {t("channels.fields.models")}
+          <span className="ml-1.5 font-normal text-muted-foreground font-mono text-[10px]">
+            ({models.length})
+          </span>
         </label>
         <Button
           type="button"
@@ -53,13 +56,17 @@ export function ChannelModelsEditor({
           size="sm"
           disabled={disabled}
           onClick={() => onChange([...models, emptyChannelModel()])}
+          className="h-6 text-xs gap-1 px-2"
         >
-          <Plus className="mr-1 h-3.5 w-3.5" />
+          <Plus className="size-3" />
           {t("channels.actions.addModel")}
         </Button>
       </div>
+
       {models.length === 0 ? (
-        <p className="text-[11px] text-muted-foreground">{t("channels.fields.modelsEmpty")}</p>
+        <p className="rounded-lg border border-dashed border-border/80 py-4 text-center text-xs text-muted-foreground">
+          {t("channels.fields.modelsEmpty")}
+        </p>
       ) : (
         models.map((model, index) => {
           const entry = lookupModelCatalog(catalog, model.id);
@@ -67,13 +74,15 @@ export function ChannelModelsEditor({
           const optionLevels = displayedThinkingLevels(model, catalog);
           const selectedLevels = selectedThinkingLevels(model, entry);
           const emptySelection = thinkingOn && selectedLevels.length === 0;
+
           return (
             <div
               key={`${model.id}-${index}`}
-              className="space-y-2 rounded-md border border-border p-3"
+              className="space-y-3 rounded-xl border border-border/70 bg-card p-3 shadow-2xs transition-all hover:border-border"
             >
-              <div className="flex gap-2">
+              <div className="flex items-center gap-1.5">
                 <Input
+                  className="h-8 text-xs font-mono"
                   value={model.id}
                   disabled={disabled}
                   placeholder={t("channels.fields.modelId")}
@@ -86,30 +95,34 @@ export function ChannelModelsEditor({
                   type="button"
                   variant="outline"
                   size="sm"
+                  className="h-8 px-2"
                   disabled={disabled || !model.id.trim()}
                   title={t("channels.actions.fillFromCatalog")}
                   onClick={() => updateAt(index, applyCatalogToModel(catalog, model, true))}
                 >
-                  <Sparkles className="h-3.5 w-3.5" />
+                  <Sparkles className="size-3.5 text-primary" />
                 </Button>
                 <Button
                   type="button"
-                  variant="outline"
-                  size="sm"
+                  variant="ghost"
+                  size="icon-xs"
+                  className="size-8 text-muted-foreground opacity-70 hover:text-destructive hover:opacity-100"
                   disabled={disabled}
                   onClick={() => onChange(models.filter((_, itemIndex) => itemIndex !== index))}
                 >
-                  <Trash2 className="h-3.5 w-3.5" />
+                  <Trash2 className="size-3.5" />
                 </Button>
               </div>
-              <div className="grid grid-cols-2 gap-2">
+
+              <div className="grid grid-cols-2 gap-2.5">
                 <div>
-                  <label className="text-[11px] text-muted-foreground">
+                  <label className="text-[10px] font-medium text-muted-foreground uppercase tracking-wider">
                     {t("channels.fields.contextTokens")}
                   </label>
                   <Input
                     type="number"
                     min={1}
+                    className="mt-0.5 h-7 text-xs font-mono"
                     disabled={disabled}
                     value={model.context_tokens ?? ""}
                     placeholder={entry ? String(entry.context_tokens) : "128000"}
@@ -126,12 +139,13 @@ export function ChannelModelsEditor({
                   />
                 </div>
                 <div>
-                  <label className="text-[11px] text-muted-foreground">
+                  <label className="text-[10px] font-medium text-muted-foreground uppercase tracking-wider">
                     {t("channels.fields.maxOutputTokens")}
                   </label>
                   <Input
                     type="number"
                     min={1}
+                    className="mt-0.5 h-7 text-xs font-mono"
                     disabled={disabled}
                     value={model.max_output_tokens ?? ""}
                     placeholder={entry ? String(entry.max_output_tokens) : "8192"}
@@ -148,9 +162,10 @@ export function ChannelModelsEditor({
                   />
                 </div>
               </div>
-              <div className="space-y-2">
-                <div>
-                  <label className="text-[11px] text-muted-foreground">
+
+              <div className="space-y-2 border-t border-border/40 pt-2">
+                <div className="flex items-center justify-between">
+                  <label className="text-xs text-muted-foreground">
                     {t("channels.fields.thinking")}
                   </label>
                   <Select
@@ -168,30 +183,26 @@ export function ChannelModelsEditor({
                       );
                     }}
                   >
-                    <SelectTrigger className="mt-1 bg-background">
-                      <SelectValue>
-                        {(value) =>
-                          value === "on"
-                            ? t("channels.status.thinkingOn")
-                            : t("channels.status.thinkingOff")
-                        }
-                      </SelectValue>
+                    <SelectTrigger className="h-7 w-28 text-xs bg-background">
+                      <SelectValue />
                     </SelectTrigger>
                     <SelectContent>
-                      <SelectItem value="off">{t("channels.status.thinkingOff")}</SelectItem>
-                      <SelectItem value="on">{t("channels.status.thinkingOn")}</SelectItem>
+                      <SelectItem value="off" className="text-xs">
+                        {t("channels.status.thinkingOff")}
+                      </SelectItem>
+                      <SelectItem value="on" className="text-xs">
+                        {t("channels.status.thinkingOn")}
+                      </SelectItem>
                     </SelectContent>
                   </Select>
                 </div>
+
                 <fieldset
                   disabled={disabled || !thinkingOn}
-                  className="min-w-0 space-y-1.5 disabled:opacity-50"
+                  className="min-w-0 space-y-1.5 disabled:opacity-40"
                 >
-                  <legend className="text-[11px] text-muted-foreground">
-                    {t("channels.fields.thinkingLevels")}
-                  </legend>
                   <div
-                    className="flex flex-wrap gap-x-3 gap-y-1.5"
+                    className="flex flex-wrap gap-2 pt-0.5"
                     role="group"
                     aria-label={t("channels.fields.thinkingLevels")}
                   >
@@ -202,7 +213,7 @@ export function ChannelModelsEditor({
                         <label
                           key={level}
                           htmlFor={checkboxId}
-                          className="flex cursor-pointer items-center gap-1.5 text-[11px] text-foreground"
+                          className="flex cursor-pointer items-center gap-1.5 rounded-md border border-border/60 bg-muted/30 px-2 py-1 text-xs text-foreground transition-colors hover:bg-muted/60"
                         >
                           <Checkbox
                             id={checkboxId}
@@ -223,7 +234,7 @@ export function ChannelModelsEditor({
                               );
                             }}
                           />
-                          <span>
+                          <span className="font-mono text-[11px]">
                             {t(`channels.thinkingLevels.${level}`, { defaultValue: level })}
                           </span>
                         </label>
@@ -234,11 +245,7 @@ export function ChannelModelsEditor({
                     <p className="text-[11px] text-destructive">
                       {t("channels.fields.thinkingLevelsEmpty")}
                     </p>
-                  ) : (
-                    <p className="text-[11px] text-muted-foreground">
-                      {t("channels.fields.thinkingLevelsHint")}
-                    </p>
-                  )}
+                  ) : null}
                 </fieldset>
               </div>
             </div>

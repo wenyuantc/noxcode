@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { confirm } from "@tauri-apps/plugin-dialog";
-import { Loader2, Pencil, Plus, Trash2 } from "lucide-react";
+import { Bot, Loader2, Pencil, Plus, Trash2 } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
 import {
@@ -38,6 +38,8 @@ import {
 } from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
 import { useWorkspaceStore } from "@/stores/workspaceStore";
+import { SettingCard } from "./SettingCard";
+import { SettingFeedbackCallout } from "./SettingFeedbackCallout";
 
 type NativeSubagentModelMode = "inherit" | "channel";
 type NativeSubagentToolMode = "all" | "custom";
@@ -524,82 +526,136 @@ export function SubagentsSettingsTab() {
 
   return (
     <div className="space-y-6">
-      <div className="space-y-4 rounded-lg border border-border bg-card p-4">
-        <div className="flex items-center justify-between gap-4">
-          <div>
-            <h3 className="text-sm font-medium">{t("subagents.title")}</h3>
-            <p className="text-xs text-muted-foreground">{t("subagents.description")}</p>
-            <p className="mt-2 text-xs text-muted-foreground">{t("subagents.howToCall")}</p>
-            <p className="mt-1 text-xs text-muted-foreground">{t("subagents.profilesHint")}</p>
-          </div>
-          <Button variant="outline" onClick={openCreate}>
-            <Plus className="mr-1 h-4 w-4" />
+      {!dialogOpen && message ? (
+        <SettingFeedbackCallout
+          variant="success"
+          message={message}
+          onClose={() => setMessage(null)}
+        />
+      ) : null}
+      {!dialogOpen && error ? (
+        <SettingFeedbackCallout variant="error" message={error} onClose={() => setError(null)} />
+      ) : null}
+
+      <SettingCard
+        icon={Bot}
+        title={t("subagents.title")}
+        description={t("subagents.description")}
+        badge={`${items.length + builtinItems.length} 个子代理`}
+        headerAction={
+          <Button size="sm" onClick={openCreate} className="h-7 gap-1 text-xs">
+            <Plus className="size-3.5" />
             {t("subagents.actions.new")}
           </Button>
-        </div>
-
-        {!dialogOpen && message ? <p className="text-sm text-muted-foreground">{message}</p> : null}
-        {!dialogOpen && error ? <p className="text-sm text-destructive">{error}</p> : null}
-
-        <div className="rounded-md border border-border">
-          {builtinItems.map((item) => (
-            <div key={item.id} className="border-b border-border px-3 py-3">
-              <div className="text-sm font-medium">{item.name}</div>
-              <div className="mt-1 text-xs text-muted-foreground">{t(item.hintKey)}</div>
-            </div>
-          ))}
-          {loading ? (
-            <div className="flex h-28 items-center justify-center text-sm text-muted-foreground">
-              <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-              {t("subagents.list.loading")}
-            </div>
-          ) : items.length === 0 ? (
-            <div className="px-3 py-6 text-sm text-muted-foreground">
-              {t("subagents.list.empty")}
-            </div>
-          ) : (
-            items.map((item) => (
-              <div
-                key={item.id}
-                className="flex items-start justify-between gap-3 border-b border-border px-3 py-3 last:border-b-0"
-              >
-                <div className="min-w-0">
-                  <div className="text-sm font-medium">{item.name}</div>
-                  <div className="mt-1 line-clamp-2 text-xs text-muted-foreground">
-                    {item.description}
+        }
+      >
+        <div className="space-y-4">
+          {/* 内置子代理列表 */}
+          <div className="space-y-2">
+            <p className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground/70">
+              系统内置
+            </p>
+            <div className="grid gap-2 sm:grid-cols-2">
+              {builtinItems.map((item) => (
+                <div
+                  key={item.id}
+                  className="flex items-start gap-3 rounded-xl border border-border/70 bg-card/60 p-3 text-xs shadow-2xs"
+                >
+                  <div className="mt-0.5 flex size-7 shrink-0 items-center justify-center rounded-lg border border-border/60 bg-muted/40 text-primary">
+                    <Bot className="size-3.5" />
                   </div>
-                  <div className="mt-1 text-xs text-muted-foreground">
-                    {item.scope === "workspaces"
-                      ? t("subagents.fields.scopeWorkspacesCount", {
-                          count: (item.workspace_ids ?? []).length,
-                        })
-                      : t("subagents.fields.scopeAll")}
+                  <div className="min-w-0 flex-1 space-y-0.5">
+                    <div className="flex items-center gap-1.5">
+                      <span className="font-semibold text-foreground">{item.name}</span>
+                      <span className="rounded-md border border-border/50 bg-muted/50 px-1 py-0.1 font-mono text-[9px] text-muted-foreground">
+                        Builtin
+                      </span>
+                    </div>
+                    <p className="text-[11px] text-muted-foreground leading-relaxed">
+                      {t(item.hintKey)}
+                    </p>
                   </div>
                 </div>
-                {item.source === "file" ? (
-                  <span
-                    className="shrink-0 rounded-md border px-2 py-1 text-xs text-muted-foreground"
-                    title={item.path ?? ""}
-                  >
-                    {t("subagents.fields.fileProfile")}
-                  </span>
-                ) : (
-                  <Button
-                    type="button"
-                    variant="outline"
-                    size="sm"
-                    className="shrink-0"
-                    onClick={() => openEdit(item)}
-                  >
-                    <Pencil className="mr-1 h-3.5 w-3.5" />
-                    {t("subagents.actions.edit")}
-                  </Button>
-                )}
+              ))}
+            </div>
+          </div>
+
+          {/* 自定义子代理列表 */}
+          <div className="space-y-2 pt-2 border-t border-border/50">
+            <p className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground/70">
+              自定义子智能体
+            </p>
+            {loading ? (
+              <div className="flex h-28 items-center justify-center text-xs text-muted-foreground">
+                <Loader2 className="mr-2 size-4 animate-spin text-primary" />
+                {t("subagents.list.loading")}
               </div>
-            ))
-          )}
+            ) : items.length === 0 ? (
+              <div className="rounded-xl border border-dashed border-border/80 py-8 text-center">
+                <p className="text-xs text-muted-foreground">{t("subagents.list.empty")}</p>
+                <p className="mt-1 text-[11px] text-muted-foreground">
+                  可创建特定角色的子代理，并限制其可用工具或指派特定模型。
+                </p>
+              </div>
+            ) : (
+              <div className="grid gap-2.5">
+                {items.map((item) => (
+                  <div
+                    key={item.id}
+                    className="group flex flex-col sm:flex-row sm:items-center justify-between gap-3 rounded-xl border border-border/70 bg-card p-3.5 shadow-2xs transition-all hover:border-border hover:shadow-xs"
+                  >
+                    <div className="flex items-start gap-3 min-w-0">
+                      <div className="mt-0.5 flex size-8 shrink-0 items-center justify-center rounded-lg border border-border/60 bg-muted/40 text-primary">
+                        <Bot className="size-4" />
+                      </div>
+                      <div className="min-w-0 flex-1 space-y-1">
+                        <div className="flex flex-wrap items-center gap-2">
+                          <span className="text-xs font-semibold tracking-tight text-foreground truncate">
+                            {item.name}
+                          </span>
+                          <span className="rounded-md border border-border/60 bg-muted/40 px-1.5 py-0.2 text-[10px] font-mono text-muted-foreground">
+                            {item.scope === "workspaces"
+                              ? t("subagents.fields.scopeWorkspacesCount", {
+                                  count: (item.workspace_ids ?? []).length,
+                                })
+                              : t("subagents.fields.scopeAll")}
+                          </span>
+                          {item.source === "file" ? (
+                            <span
+                              className="rounded-md border border-border/50 bg-background px-1.5 py-0.2 text-[10px] font-mono text-muted-foreground"
+                              title={item.path ?? ""}
+                            >
+                              {t("subagents.fields.fileProfile")}
+                            </span>
+                          ) : null}
+                        </div>
+                        <p className="line-clamp-2 text-[11px] text-muted-foreground leading-relaxed">
+                          {item.description}
+                        </p>
+                      </div>
+                    </div>
+
+                    {item.source !== "file" ? (
+                      <div className="flex items-center gap-1.5 shrink-0 self-end sm:self-center">
+                        <Button
+                          type="button"
+                          variant="outline"
+                          size="sm"
+                          className="h-7 text-xs gap-1"
+                          onClick={() => openEdit(item)}
+                        >
+                          <Pencil className="size-3" />
+                          {t("subagents.actions.edit")}
+                        </Button>
+                      </div>
+                    ) : null}
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
         </div>
-      </div>
+      </SettingCard>
 
       <Dialog
         open={dialogOpen}

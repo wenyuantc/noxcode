@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { KeyRound, Loader2, Plus, RefreshCw, Save, Trash2 } from "lucide-react";
+import { Blocks, Download, KeyRound, Loader2, Plus, RefreshCw, Save, Trash2 } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
 import {
@@ -22,8 +22,11 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
+import { Switch } from "@/components/ui/switch";
 import { Textarea } from "@/components/ui/textarea";
 import { useWorkspaceStore } from "@/stores/workspaceStore";
+import { SettingCard } from "./SettingCard";
+import { SettingFeedbackCallout } from "./SettingFeedbackCallout";
 
 const EXAMPLE_FILESYSTEM_ID = "example-filesystem";
 
@@ -357,216 +360,264 @@ export function McpSettingsTab() {
   }
 
   return (
-    <div className="space-y-4">
-      <div className="space-y-2 rounded-lg border border-border bg-card p-4">
-        <h3 className="text-sm font-medium">{t("mcp.title")}</h3>
-        <p className="text-xs text-muted-foreground">{t("mcp.description")}</p>
-        <p className="text-xs text-muted-foreground">{t("mcp.browserCapability")}</p>
-        <div className="flex flex-wrap gap-2">
-          <Button
-            size="sm"
-            onClick={() => setServers((current) => [...current, createEmptyServer()])}
-          >
-            <Plus className="h-4 w-4" />
-            {t("mcp.actions.addServer")}
-          </Button>
-          <Button size="sm" variant="outline" onClick={() => addPlaywrightPreset()}>
-            {t("mcp.actions.addPlaywright")}
-          </Button>
-          <Button size="sm" variant="outline" onClick={() => void handleSave()} disabled={saving}>
-            {saving ? <Loader2 className="h-4 w-4 animate-spin" /> : <Save className="h-4 w-4" />}
-            {t("mcp.actions.save")}
-          </Button>
-          <Button size="sm" variant="outline" onClick={() => void handleExport()}>
-            {t("mcp.actions.exportSnippet")}
-          </Button>
-          <Button size="sm" variant="ghost" onClick={() => void handleReset()} disabled={saving}>
-            <RefreshCw className="h-4 w-4" />
-            {t("mcp.actions.resetExample")}
-          </Button>
-        </div>
-        {message ? <p className="text-xs text-green-700 dark:text-green-300">{message}</p> : null}
-        {error ? <p className="text-xs text-destructive">{error}</p> : null}
-      </div>
+    <div className="space-y-6">
+      {message ? (
+        <SettingFeedbackCallout
+          variant="success"
+          message={message}
+          onClose={() => setMessage(null)}
+        />
+      ) : null}
+      {error ? (
+        <SettingFeedbackCallout variant="error" message={error} onClose={() => setError(null)} />
+      ) : null}
 
-      <div className="space-y-3">
-        {servers.length === 0 ? (
-          <p className="text-sm text-muted-foreground">{t("mcp.states.empty")}</p>
-        ) : null}
-        {servers.map((server) => (
-          <div key={server.id} className="space-y-3 rounded-lg border border-border bg-card p-4">
-            <div className="flex flex-wrap items-center justify-between gap-2">
-              <label className="flex items-center gap-2 text-sm">
-                <input
-                  type="checkbox"
-                  checked={server.enabled}
-                  onChange={(event) => updateServer(server.id, { enabled: event.target.checked })}
-                />
-                {t("mcp.fields.enabled")}
-              </label>
-              <Button
-                size="sm"
-                variant="ghost"
-                onClick={() =>
-                  setServers((current) => current.filter((item) => item.id !== server.id))
-                }
-              >
-                <Trash2 className="h-4 w-4" />
-                {t("mcp.actions.delete")}
-              </Button>
+      <SettingCard
+        icon={Blocks}
+        title={t("mcp.title")}
+        description={t("mcp.description")}
+        badge={`${servers.length} 个服务`}
+        headerAction={
+          <div className="flex flex-wrap items-center gap-1.5">
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={() => addPlaywrightPreset()}
+              className="h-7 text-xs gap-1"
+            >
+              + Playwright
+            </Button>
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={() => void handleExport()}
+              className="h-7 text-xs gap-1"
+            >
+              <Download className="size-3" />
+              {t("mcp.actions.exportSnippet")}
+            </Button>
+            <Button
+              size="sm"
+              variant="ghost"
+              onClick={() => void handleReset()}
+              disabled={saving}
+              className="h-7 text-xs gap-1"
+            >
+              <RefreshCw className="size-3" />
+              {t("mcp.actions.resetExample")}
+            </Button>
+            <Button
+              size="sm"
+              onClick={() => void handleSave()}
+              disabled={saving}
+              className="h-7 text-xs gap-1"
+            >
+              {saving ? <Loader2 className="size-3 animate-spin" /> : <Save className="size-3" />}
+              {t("mcp.actions.save")}
+            </Button>
+            <Button
+              size="sm"
+              onClick={() => setServers((current) => [...current, createEmptyServer()])}
+              className="h-7 text-xs gap-1"
+            >
+              <Plus className="size-3" />
+              {t("mcp.actions.addServer")}
+            </Button>
+          </div>
+        }
+      >
+        <div className="space-y-3">
+          {servers.length === 0 ? (
+            <div className="rounded-xl border border-dashed border-border/80 py-8 text-center text-xs text-muted-foreground">
+              {t("mcp.states.empty")}
             </div>
-            <div className="grid gap-2 sm:grid-cols-2">
-              <Input
-                placeholder={t("mcp.fields.namePlaceholder")}
-                value={server.name}
-                onChange={(event) => updateServer(server.id, { name: event.target.value })}
-              />
-              <Select
-                value={server.transport ?? "stdio"}
-                disabled={saving}
-                onValueChange={(value) => {
-                  if (TRANSPORTS.includes(value as McpTransport)) {
-                    updateServer(server.id, { transport: value as McpTransport });
+          ) : null}
+          {servers.map((server) => (
+            <div
+              key={server.id}
+              className="space-y-3 rounded-xl border border-border/70 bg-card p-4 shadow-2xs transition-all hover:border-border"
+            >
+              <div className="flex flex-wrap items-center justify-between gap-2 border-b border-border/40 pb-3">
+                <div className="flex items-center gap-2.5">
+                  <Switch
+                    id={`mcp-switch-${server.id}`}
+                    checked={server.enabled}
+                    onCheckedChange={(checked) => updateServer(server.id, { enabled: checked })}
+                  />
+                  <span className="text-xs font-semibold text-foreground tracking-tight">
+                    {server.name || t("mcp.fields.namePlaceholder")}
+                  </span>
+                  <span className="rounded-md border border-border/60 bg-muted/40 px-1.5 py-0.2 text-[10px] font-mono text-muted-foreground uppercase">
+                    {server.transport ?? "stdio"}
+                  </span>
+                </div>
+                <Button
+                  size="icon-xs"
+                  variant="ghost"
+                  className="text-muted-foreground opacity-60 hover:text-destructive hover:opacity-100"
+                  onClick={() =>
+                    setServers((current) => current.filter((item) => item.id !== server.id))
                   }
-                }}
-              >
-                <SelectTrigger className="bg-background">
-                  <SelectValue>
-                    {(value) => t(`mcp.transport.${String(value || "stdio")}`)}
-                  </SelectValue>
-                </SelectTrigger>
-                <SelectContent>
-                  {TRANSPORTS.map((transport) => (
-                    <SelectItem key={transport} value={transport}>
-                      {t(`mcp.transport.${transport}`)}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            </div>
-            {server.transport === "http" || server.transport === "sse" ? (
-              <>
+                  title={t("mcp.actions.delete")}
+                >
+                  <Trash2 className="size-3.5" />
+                </Button>
+              </div>
+              <div className="grid gap-2 sm:grid-cols-2">
                 <Input
-                  placeholder={t("mcp.fields.urlPlaceholder")}
-                  value={server.url ?? ""}
-                  onChange={(event) => updateServer(server.id, { url: event.target.value || null })}
+                  placeholder={t("mcp.fields.namePlaceholder")}
+                  value={server.name}
+                  onChange={(event) => updateServer(server.id, { name: event.target.value })}
                 />
-                <Textarea
-                  placeholder={t("mcp.fields.headersPlaceholder")}
-                  value={formatKeyValueLines(server.headers ?? [])}
-                  onChange={(event) =>
-                    updateServer(server.id, { headers: parseKeyValueLines(event.target.value) })
-                  }
-                  rows={2}
-                />
-                <McpOAuthPanel
-                  server={server}
-                  saving={saving}
-                  onChange={(oauth) => updateServer(server.id, { oauth })}
-                />
-              </>
-            ) : (
-              <>
-                <Input
-                  placeholder={t("mcp.fields.commandPlaceholder")}
-                  value={server.command}
-                  onChange={(event) => updateServer(server.id, { command: event.target.value })}
-                />
-                <Input
-                  placeholder={t("mcp.fields.argsPlaceholder")}
-                  value={server.args.join(" ")}
-                  onChange={(event) =>
-                    updateServer(server.id, {
-                      args: event.target.value
-                        .split(/\s+/)
-                        .map((part) => part.trim())
-                        .filter(Boolean),
-                    })
-                  }
-                />
-              </>
-            )}
-            <div>
-              <label className="text-xs font-medium text-muted-foreground">
-                {t("mcp.fields.scope")}
-              </label>
-              <Select
-                value={server.scope}
-                disabled={saving}
-                onValueChange={(value) => {
-                  if (value === "all" || value === "workspaces") {
-                    updateServer(server.id, {
-                      scope: value,
-                      workspace_ids: value === "all" ? [] : server.workspace_ids,
-                    });
-                  }
-                }}
-              >
-                <SelectTrigger className="mt-1 bg-background">
-                  <SelectValue>
-                    {(value) =>
-                      value === "workspaces"
-                        ? t("mcp.fields.scopeWorkspaces")
-                        : t("mcp.fields.scopeAll")
+                <Select
+                  value={server.transport ?? "stdio"}
+                  disabled={saving}
+                  onValueChange={(value) => {
+                    if (TRANSPORTS.includes(value as McpTransport)) {
+                      updateServer(server.id, { transport: value as McpTransport });
                     }
-                  </SelectValue>
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="all">{t("mcp.fields.scopeAll")}</SelectItem>
-                  <SelectItem value="workspaces">{t("mcp.fields.scopeWorkspaces")}</SelectItem>
-                </SelectContent>
-              </Select>
-              <p className="mt-1 text-xs text-muted-foreground">{t("mcp.fields.scopeHint")}</p>
-            </div>
-            {server.scope === "workspaces" ? (
+                  }}
+                >
+                  <SelectTrigger className="bg-background">
+                    <SelectValue>
+                      {(value) => t(`mcp.transport.${String(value || "stdio")}`)}
+                    </SelectValue>
+                  </SelectTrigger>
+                  <SelectContent>
+                    {TRANSPORTS.map((transport) => (
+                      <SelectItem key={transport} value={transport}>
+                        {t(`mcp.transport.${transport}`)}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
+              {server.transport === "http" || server.transport === "sse" ? (
+                <>
+                  <Input
+                    placeholder={t("mcp.fields.urlPlaceholder")}
+                    value={server.url ?? ""}
+                    onChange={(event) =>
+                      updateServer(server.id, { url: event.target.value || null })
+                    }
+                  />
+                  <Textarea
+                    placeholder={t("mcp.fields.headersPlaceholder")}
+                    value={formatKeyValueLines(server.headers ?? [])}
+                    onChange={(event) =>
+                      updateServer(server.id, { headers: parseKeyValueLines(event.target.value) })
+                    }
+                    rows={2}
+                  />
+                  <McpOAuthPanel
+                    server={server}
+                    saving={saving}
+                    onChange={(oauth) => updateServer(server.id, { oauth })}
+                  />
+                </>
+              ) : (
+                <>
+                  <Input
+                    placeholder={t("mcp.fields.commandPlaceholder")}
+                    value={server.command}
+                    onChange={(event) => updateServer(server.id, { command: event.target.value })}
+                  />
+                  <Input
+                    placeholder={t("mcp.fields.argsPlaceholder")}
+                    value={server.args.join(" ")}
+                    onChange={(event) =>
+                      updateServer(server.id, {
+                        args: event.target.value
+                          .split(/\s+/)
+                          .map((part) => part.trim())
+                          .filter(Boolean),
+                      })
+                    }
+                  />
+                </>
+              )}
               <div>
                 <label className="text-xs font-medium text-muted-foreground">
-                  {t("mcp.fields.scopePickWorkspaces")}
+                  {t("mcp.fields.scope")}
                 </label>
-                <div className="mt-1 max-h-48 space-y-2 overflow-y-auto rounded-md border border-border p-3">
-                  {workspaces.length === 0 ? (
-                    <p className="text-xs text-muted-foreground">
-                      {t("mcp.fields.scopeWorkspacesEmpty")}
-                    </p>
-                  ) : (
-                    workspaces.map((workspace) => (
-                      <label key={workspace.id} className="flex items-center gap-2 text-sm">
-                        <input
-                          type="checkbox"
-                          className="h-4 w-4 rounded border-input"
-                          checked={server.workspace_ids.includes(workspace.id)}
-                          disabled={saving}
-                          onChange={(event) => {
-                            const workspace_ids = event.target.checked
-                              ? [
-                                  ...server.workspace_ids.filter((id) => id !== workspace.id),
-                                  workspace.id,
-                                ]
-                              : server.workspace_ids.filter((id) => id !== workspace.id);
-                            updateServer(server.id, { workspace_ids });
-                          }}
-                        />
-                        {workspace.name}
-                      </label>
-                    ))
-                  )}
-                </div>
+                <Select
+                  value={server.scope}
+                  disabled={saving}
+                  onValueChange={(value) => {
+                    if (value === "all" || value === "workspaces") {
+                      updateServer(server.id, {
+                        scope: value,
+                        workspace_ids: value === "all" ? [] : server.workspace_ids,
+                      });
+                    }
+                  }}
+                >
+                  <SelectTrigger className="mt-1 bg-background">
+                    <SelectValue>
+                      {(value) =>
+                        value === "workspaces"
+                          ? t("mcp.fields.scopeWorkspaces")
+                          : t("mcp.fields.scopeAll")
+                      }
+                    </SelectValue>
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="all">{t("mcp.fields.scopeAll")}</SelectItem>
+                    <SelectItem value="workspaces">{t("mcp.fields.scopeWorkspaces")}</SelectItem>
+                  </SelectContent>
+                </Select>
+                <p className="mt-1 text-xs text-muted-foreground">{t("mcp.fields.scopeHint")}</p>
               </div>
-            ) : null}
-            <Textarea
-              placeholder={t("mcp.fields.notesPlaceholder")}
-              value={server.notes ?? ""}
-              onChange={(event) => updateServer(server.id, { notes: event.target.value })}
-              rows={2}
-            />
-          </div>
-        ))}
-      </div>
+              {server.scope === "workspaces" ? (
+                <div>
+                  <label className="text-xs font-medium text-muted-foreground">
+                    {t("mcp.fields.scopePickWorkspaces")}
+                  </label>
+                  <div className="mt-1 max-h-48 space-y-2 overflow-y-auto rounded-md border border-border p-3">
+                    {workspaces.length === 0 ? (
+                      <p className="text-xs text-muted-foreground">
+                        {t("mcp.fields.scopeWorkspacesEmpty")}
+                      </p>
+                    ) : (
+                      workspaces.map((workspace) => (
+                        <label key={workspace.id} className="flex items-center gap-2 text-sm">
+                          <input
+                            type="checkbox"
+                            className="h-4 w-4 rounded border-input"
+                            checked={server.workspace_ids.includes(workspace.id)}
+                            disabled={saving}
+                            onChange={(event) => {
+                              const workspace_ids = event.target.checked
+                                ? [
+                                    ...server.workspace_ids.filter((id) => id !== workspace.id),
+                                    workspace.id,
+                                  ]
+                                : server.workspace_ids.filter((id) => id !== workspace.id);
+                              updateServer(server.id, { workspace_ids });
+                            }}
+                          />
+                          {workspace.name}
+                        </label>
+                      ))
+                    )}
+                  </div>
+                </div>
+              ) : null}
+              <Textarea
+                placeholder={t("mcp.fields.notesPlaceholder")}
+                value={server.notes ?? ""}
+                onChange={(event) => updateServer(server.id, { notes: event.target.value })}
+                rows={2}
+              />
+            </div>
+          ))}
+        </div>
+      </SettingCard>
 
       {snippet ? (
-        <div className="rounded-lg border border-border bg-muted/30 p-3">
-          <p className="mb-2 text-xs font-medium">{t("mcp.preview.title")}</p>
-          <pre className="max-h-64 overflow-auto whitespace-pre-wrap font-mono text-[11px]">
+        <div className="rounded-xl border border-border/70 bg-muted/20 p-4 shadow-2xs">
+          <p className="mb-2 text-xs font-semibold text-foreground">{t("mcp.preview.title")}</p>
+          <pre className="max-h-64 overflow-auto whitespace-pre-wrap font-mono text-[11px] leading-relaxed text-muted-foreground">
             {snippet}
           </pre>
         </div>

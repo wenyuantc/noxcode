@@ -1,6 +1,18 @@
 import { useEffect, useMemo, useState } from "react";
 import { confirm } from "@tauri-apps/plugin-dialog";
-import { Eye, EyeOff, Loader2, Plus, Trash2 } from "lucide-react";
+import {
+  Bot,
+  Cpu,
+  Eye,
+  EyeOff,
+  Loader2,
+  Pencil,
+  Plus,
+  RefreshCw,
+  Sparkles,
+  Trash2,
+  Zap,
+} from "lucide-react";
 import { useTranslation } from "react-i18next";
 
 import {
@@ -40,6 +52,8 @@ import {
 } from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
 import { useChannelStore } from "@/stores/channelStore";
+import { SettingCard } from "./SettingCard";
+import { SettingFeedbackCallout } from "./SettingFeedbackCallout";
 
 interface ChannelFormState {
   name: string;
@@ -81,6 +95,7 @@ export function AiChannelsSettingsTab() {
   const [channels, setChannels] = useState<AiChannel[]>([]);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState<"save" | "delete" | "test" | "models" | null>(null);
+  const [testingId, setTestingId] = useState<string | null>(null);
   const [deleteConfirming, setDeleteConfirming] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [message, setMessage] = useState<string | null>(null);
@@ -98,11 +113,11 @@ export function AiChannelsSettingsTab() {
 
   const load = async () => {
     setLoading(true);
-    setError(null);
     try {
-      const [items, catalogItems] = await Promise.all([listAiChannels(), listModelCatalog()]);
-      setChannels(items);
-      setCatalog(catalogItems);
+      const [data, catalogData] = await Promise.all([listAiChannels(), listModelCatalog()]);
+      setChannels(data);
+      setCatalog(catalogData);
+      setError(null);
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
@@ -122,8 +137,8 @@ export function AiChannelsSettingsTab() {
     setSelectedId(null);
     setForm(EMPTY_FORM);
     setShowApiKey(false);
-    setMessage(null);
     setError(null);
+    setMessage(null);
     setDialogOpen(true);
   };
 
@@ -131,61 +146,81 @@ export function AiChannelsSettingsTab() {
     setSelectedId(channel.id);
     setForm(channelToForm(channel));
     setShowApiKey(false);
-    setMessage(null);
     setError(null);
+    setMessage(null);
     setDialogOpen(true);
   };
 
   const closeDialog = () => {
-    if (saving !== null || deleteConfirming) {
-      return;
-    }
+    if (saving !== null || deleteConfirming) return;
     setDialogOpen(false);
-    setMessage(null);
-    setError(null);
+    setSelectedId(null);
+    setForm(EMPTY_FORM);
+    setShowApiKey(false);
   };
 
-  const patchForm = (updates: Partial<ChannelFormState>) => {
-    setForm((current) => ({ ...current, ...updates }));
+  const patchForm = (patch: Partial<ChannelFormState>) => {
+    setForm((current) => ({ ...current, ...patch }));
   };
 
   const handleSave = async () => {
-    setError(null);
-    setMessage(null);
-    const models = form.models
-      .map((item) => materializeThinkingLevels(catalog, item))
-      .filter((item) => item.id.trim().length > 0);
-    if (!canSaveChannelModels(models, catalog)) {
-      setError(t("channels.fields.thinkingLevelsEmpty"));
+    if (!form.name.trim()) {
+      setError(t("channels.validation.nameRequired"));
       return;
     }
+    if (!form.baseUrl.trim()) {
+      setError(t("channels.validation.baseUrlRequired"));
+      return;
+    }
+    if (form.models.length > 0 && !canSaveChannelModels(form.models)) {
+      setError(t("channels.validation.modelIdsRequired"));
+      return;
+    }
+    if (form.extraHeaders.trim().length > 0) {
+      try {
+        const parsed: unknown = JSON.parse(form.extraHeaders);
+        if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+          setError(t("channels.validation.extraHeadersJsonObject"));
+          return;
+        }
+      } catch {
+        setError(t("channels.validation.extraHeadersJsonInvalid"));
+        return;
+      }
+    }
+
     setSaving("save");
-    const extraHeaders = form.extraHeaders.trim() || null;
+    setError(null);
+    setMessage(null);
+
+    const materializedModels = form.models.map((m) => materializeThinkingLevels(catalog, m));
+
     try {
-      if (selectedId) {
-        const updated = await updateAiChannel(selectedId, {
+      if (selected) {
+        const updated = await updateAiChannel(selected.id, {
           name: form.name,
           protocol: form.protocol,
           base_url: form.baseUrl,
-          api_key: form.apiKey.trim() || undefined,
-          extra_headers_json: extraHeaders,
-          models,
+          api_key: form.apiKey.trim() ? form.apiKey.trim() : null,
+          models: materializedModels,
+          extra_headers_json: form.extraHeaders.trim() || null,
           lite_model: form.liteModel.trim() || null,
           enabled: form.enabled,
         });
         setChannels((current) =>
           current.map((channel) => (channel.id === updated.id ? updated : channel)),
         );
+        setSelectedId(updated.id);
         setDialogOpen(false);
-        setMessage(t("channels.messages.updated"));
+        setMessage(t("channels.messages.saved"));
       } else {
         const created = await createAiChannel({
           name: form.name,
           protocol: form.protocol,
           base_url: form.baseUrl,
           api_key: form.apiKey.trim() || null,
-          extra_headers_json: extraHeaders,
-          models,
+          models: materializedModels,
+          extra_headers_json: form.extraHeaders.trim() || null,
           lite_model: form.liteModel.trim() || null,
           enabled: form.enabled,
         });
@@ -249,15 +284,9 @@ export function AiChannelsSettingsTab() {
         patchForm({
           models: result.models.map((id) => applyCatalogToModel(catalog, emptyChannelModel(id))),
         });
-      }
-      if (result.models.length === 0) {
-        setError(result.message);
+        setMessage(t("channels.messages.modelsFetched", { count: result.models.length }));
       } else {
-        setMessage(
-          result.truncated
-            ? t("channels.messages.modelsFetchedTruncated", { count: result.models.length })
-            : t("channels.messages.modelsFetched", { count: result.models.length }),
-        );
+        setMessage(t("channels.messages.noModelsFetched"));
       }
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
@@ -287,6 +316,31 @@ export function AiChannelsSettingsTab() {
     }
   };
 
+  const handleQuickTest = async (channel: AiChannel) => {
+    setTestingId(channel.id);
+    setError(null);
+    setMessage(null);
+    try {
+      const result = await testAiChannel({
+        id: channel.id,
+        protocol: channel.protocol,
+        base_url: channel.base_url,
+        api_key: channel.api_key?.trim() || null,
+        extra_headers_json: channel.extra_headers_json?.trim() || null,
+        model: channel.models.find((item) => item.id.trim())?.id ?? null,
+      });
+      if (result.ok) {
+        setMessage(`[${channel.name}] 测通成功: ${result.message}`);
+      } else {
+        setError(`[${channel.name}] 测通失败: ${result.message}`);
+      }
+    } catch (err) {
+      setError(`[${channel.name}] 测通异常: ${String(err)}`);
+    } finally {
+      setTestingId(null);
+    }
+  };
+
   const protocolOptions: Array<{ value: AiChannelProtocol; label: string }> = [
     { value: "openai", label: t("channels.protocols.openai") },
     { value: "anthropic", label: t("channels.protocols.anthropic") },
@@ -295,258 +349,413 @@ export function AiChannelsSettingsTab() {
   const busy = saving !== null;
   const formLocked = busy || deleteConfirming;
 
+  const getProtocolIcon = (proto: AiChannelProtocol) => {
+    if (proto === "anthropic") return Bot;
+    if (proto === "codex") return Cpu;
+    return Sparkles;
+  };
+
   return (
     <div className="space-y-6">
-      <div className="space-y-4 rounded-lg border border-border bg-card p-4">
-        <div className="flex items-center justify-between gap-4">
-          <div>
-            <h3 className="text-sm font-medium">{t("channels.title")}</h3>
-            <p className="text-xs text-muted-foreground">{t("channels.description")}</p>
-          </div>
-          <Button variant="outline" onClick={openCreate}>
-            <Plus className="mr-1 h-4 w-4" />
+      {/* 外部反馈提示 */}
+      {!dialogOpen && message ? (
+        <SettingFeedbackCallout
+          variant="success"
+          message={message}
+          onClose={() => setMessage(null)}
+        />
+      ) : null}
+      {!dialogOpen && error ? (
+        <SettingFeedbackCallout variant="error" message={error} onClose={() => setError(null)} />
+      ) : null}
+
+      <SettingCard
+        icon={Sparkles}
+        title={t("channels.title")}
+        description={t("channels.description")}
+        badge={`${channels.length} 个渠道`}
+        headerAction={
+          <Button size="sm" onClick={openCreate} className="h-7 gap-1 text-xs">
+            <Plus className="size-3.5" />
             {t("channels.actions.new")}
           </Button>
-        </div>
-
-        {!dialogOpen && message ? <p className="text-sm text-muted-foreground">{message}</p> : null}
-        {!dialogOpen && error ? <p className="text-sm text-destructive">{error}</p> : null}
-
-        <div className="rounded-md border border-border">
-          {loading ? (
-            <div className="flex h-28 items-center justify-center text-sm text-muted-foreground">
-              <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-              {t("channels.list.loading")}
+        }
+      >
+        {loading ? (
+          <div className="flex h-36 items-center justify-center text-xs text-muted-foreground">
+            <Loader2 className="mr-2 size-4 animate-spin text-primary" />
+            {t("channels.list.loading")}
+          </div>
+        ) : channels.length === 0 ? (
+          <div className="flex flex-col items-center justify-center py-12 text-center">
+            <div className="flex size-12 items-center justify-center rounded-2xl border border-border/70 bg-muted/30 text-muted-foreground shadow-2xs">
+              <Sparkles className="size-6" />
             </div>
-          ) : channels.length === 0 ? (
-            <div className="px-3 py-6 text-sm text-muted-foreground">
-              {t("channels.list.empty")}
-            </div>
-          ) : (
-            channels.map((channel) => (
-              <button
-                key={channel.id}
-                type="button"
-                onClick={() => openEdit(channel)}
-                className={`w-full border-b border-border px-3 py-3 text-left last:border-b-0 ${
-                  selectedId === channel.id ? "bg-primary/5" : "hover:bg-muted/40"
-                }`}
-              >
-                <div className="text-sm font-medium">{channel.name}</div>
-                <div className="mt-1 text-xs text-muted-foreground">
-                  {protocolOptions.find((option) => option.value === channel.protocol)?.label ??
-                    channel.protocol}{" "}
-                  · {channel.enabled ? t("channels.status.enabled") : t("channels.status.disabled")}
+            <p className="mt-3 text-xs font-semibold text-foreground">{t("channels.list.empty")}</p>
+            <p className="mt-1 text-[11px] text-muted-foreground max-w-sm">
+              添加 OpenAI、Anthropic 或自定义网关，即可开始使用多模型能力。
+            </p>
+            <Button size="sm" onClick={openCreate} className="mt-4 h-7 gap-1 text-xs">
+              <Plus className="size-3.5" />
+              {t("channels.actions.new")}
+            </Button>
+          </div>
+        ) : (
+          <div className="grid gap-3 sm:grid-cols-1">
+            {channels.map((channel) => {
+              const ProtoIcon = getProtocolIcon(channel.protocol);
+              const isTesting = testingId === channel.id;
+
+              return (
+                <div
+                  key={channel.id}
+                  className="group relative flex flex-col sm:flex-row sm:items-center justify-between gap-3 rounded-xl border border-border/70 bg-card p-3.5 shadow-2xs transition-all duration-150 hover:border-border hover:shadow-xs"
+                >
+                  <div className="flex items-start gap-3 min-w-0">
+                    <div className="mt-0.5 flex size-8 shrink-0 items-center justify-center rounded-lg border border-border/60 bg-muted/40 text-primary">
+                      <ProtoIcon className="size-4" />
+                    </div>
+                    <div className="min-w-0 flex-1 space-y-1">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <span className="text-xs font-semibold tracking-tight text-foreground truncate">
+                          {channel.name}
+                        </span>
+                        {/* 状态指示灯 */}
+                        <div className="inline-flex items-center gap-1 rounded-full border border-border/60 bg-muted/40 px-2 py-0.5 text-[10px] font-mono">
+                          <span
+                            className={`size-1.5 rounded-full ${
+                              channel.enabled
+                                ? "bg-emerald-500 shadow-2xs shadow-emerald-500/50"
+                                : "bg-muted-foreground/40"
+                            }`}
+                          />
+                          <span className="text-muted-foreground">
+                            {channel.enabled
+                              ? t("channels.status.enabled")
+                              : t("channels.status.disabled")}
+                          </span>
+                        </div>
+                        {/* 协议 Badge */}
+                        <span className="rounded-md border border-border/50 bg-background px-1.5 py-0.2 text-[10px] font-mono text-muted-foreground uppercase">
+                          {channel.protocol}
+                        </span>
+                        {/* 模型数 Badge */}
+                        <span className="rounded-md bg-muted px-1.5 py-0.2 text-[10px] font-mono text-muted-foreground">
+                          {channel.models.length} 模型
+                        </span>
+                        {channel.lite_model ? (
+                          <span className="rounded-md bg-primary/10 px-1.5 py-0.2 text-[10px] font-mono text-primary truncate max-w-36">
+                            ⚡ {channel.lite_model}
+                          </span>
+                        ) : null}
+                      </div>
+                      <p className="text-[11px] font-mono text-muted-foreground/80 truncate max-w-md">
+                        {channel.base_url}
+                      </p>
+                    </div>
+                  </div>
+
+                  {/* 快捷操作 */}
+                  <div className="flex items-center gap-1.5 shrink-0 self-end sm:self-center">
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      disabled={isTesting}
+                      onClick={() => void handleQuickTest(channel)}
+                      className="h-7 text-xs gap-1"
+                    >
+                      {isTesting ? (
+                        <Loader2 className="size-3 animate-spin" />
+                      ) : (
+                        <Zap className="size-3" />
+                      )}
+                      {t("channels.actions.test")}
+                    </Button>
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      onClick={() => openEdit(channel)}
+                      className="h-7 text-xs gap-1"
+                    >
+                      <Pencil className="size-3" />
+                      {t("channels.actions.edit", { defaultValue: "编辑" })}
+                    </Button>
+                  </div>
                 </div>
-              </button>
-            ))
-          )}
-        </div>
-      </div>
+              );
+            })}
+          </div>
+        )}
+      </SettingCard>
 
+      {/* 编辑/新建渠道 Dialog */}
       <Dialog
         open={dialogOpen}
         onOpenChange={(open) => {
-          if (!open) {
-            closeDialog();
-          }
+          if (!open) closeDialog();
         }}
       >
         <DialogContent
-          className="flex max-h-[90vh] w-full flex-col gap-0 overflow-hidden sm:max-w-2xl"
+          className="flex max-h-[90vh] w-full flex-col gap-0 overflow-hidden sm:max-w-2xl rounded-2xl p-0"
           showCloseButton={!formLocked}
         >
-          <DialogHeader className="shrink-0 pb-3">
-            <DialogTitle>
+          <DialogHeader className="shrink-0 border-b border-border/50 px-6 py-4">
+            <DialogTitle className="text-base font-semibold tracking-tight">
               {isCreate ? t("channels.dialogs.createTitle") : t("channels.dialogs.editTitle")}
             </DialogTitle>
-            <DialogDescription>{t("channels.description")}</DialogDescription>
+            <DialogDescription className="text-xs text-muted-foreground">
+              {t("channels.description")}
+            </DialogDescription>
           </DialogHeader>
-          <div className="min-h-0 flex-1 overflow-y-auto pr-1">
-            <div className="space-y-3">
-              <Input
-                value={form.name}
-                onChange={(event) => patchForm({ name: event.target.value })}
-                placeholder={t("channels.fields.name")}
-                disabled={formLocked}
-              />
+
+          <div className="min-h-0 flex-1 overflow-y-auto px-6 py-4">
+            <div className="space-y-4">
+              {error ? <SettingFeedbackCallout variant="error" message={error} /> : null}
+              {message ? <SettingFeedbackCallout variant="success" message={message} /> : null}
+
+              <div className="grid gap-3 sm:grid-cols-2">
+                <div>
+                  <label className="text-xs font-medium text-muted-foreground">
+                    {t("channels.fields.name")}
+                  </label>
+                  <Input
+                    className="mt-1 h-8 text-xs"
+                    value={form.name}
+                    onChange={(event) => patchForm({ name: event.target.value })}
+                    placeholder="如：OpenAI Official"
+                    disabled={formLocked}
+                  />
+                </div>
+                <div>
+                  <label className="text-xs font-medium text-muted-foreground">
+                    {t("channels.fields.protocol")}
+                  </label>
+                  <Select
+                    value={form.protocol}
+                    disabled={formLocked}
+                    onValueChange={(value) => {
+                      if (value === "openai" || value === "anthropic" || value === "codex") {
+                        patchForm({ protocol: value });
+                      }
+                    }}
+                  >
+                    <SelectTrigger className="mt-1 h-8 text-xs bg-background">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {protocolOptions.map((option) => (
+                        <SelectItem key={option.value} value={option.value} className="text-xs">
+                          {option.label}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
+              </div>
+
               <div>
                 <label className="text-xs font-medium text-muted-foreground">
-                  {t("channels.fields.protocol")}
+                  {t("channels.fields.baseUrl")}
                 </label>
-                <Select
-                  value={form.protocol}
-                  disabled={formLocked}
-                  onValueChange={(value) => {
-                    if (value === "openai" || value === "anthropic" || value === "codex") {
-                      patchForm({ protocol: value });
-                    }
-                  }}
-                >
-                  <SelectTrigger className="mt-1 bg-background">
-                    <SelectValue>
-                      {(value) =>
-                        typeof value === "string"
-                          ? (protocolOptions.find((option) => option.value === value)?.label ??
-                            value)
-                          : t("channels.fields.protocol")
-                      }
-                    </SelectValue>
-                  </SelectTrigger>
-                  <SelectContent>
-                    {protocolOptions.map((option) => (
-                      <SelectItem key={option.value} value={option.value}>
-                        {option.label}
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-              </div>
-              <Input
-                value={form.baseUrl}
-                onChange={(event) => patchForm({ baseUrl: event.target.value })}
-                placeholder={t("channels.fields.baseUrl")}
-                disabled={formLocked}
-              />
-              <div className="relative">
                 <Input
-                  type={showApiKey ? "text" : "password"}
-                  className="pr-9"
-                  value={form.apiKey}
-                  onChange={(event) => patchForm({ apiKey: event.target.value })}
-                  placeholder={
-                    selected?.api_key_configured && !form.apiKey.trim()
-                      ? t("channels.fields.apiKeyConfigured")
-                      : t("channels.fields.apiKey")
-                  }
-                  autoComplete="off"
+                  className="mt-1 h-8 text-xs font-mono"
+                  value={form.baseUrl}
+                  onChange={(event) => patchForm({ baseUrl: event.target.value })}
+                  placeholder="https://api.openai.com/v1"
                   disabled={formLocked}
                 />
-                <Button
-                  type="button"
-                  variant="ghost"
-                  size="icon-xs"
-                  className="absolute top-1/2 right-1 -translate-y-1/2 text-muted-foreground"
-                  onClick={() => setShowApiKey((current) => !current)}
-                  disabled={formLocked}
-                  aria-label={
-                    showApiKey ? t("channels.fields.hideApiKey") : t("channels.fields.showApiKey")
-                  }
-                >
-                  {showApiKey ? <EyeOff /> : <Eye />}
-                </Button>
               </div>
-              <ChannelModelsEditor
-                models={form.models}
-                catalog={catalog}
-                disabled={formLocked}
-                onChange={(models) => patchForm({ models })}
-              />
-              <Textarea
-                value={form.extraHeaders}
-                onChange={(event) => patchForm({ extraHeaders: event.target.value })}
-                placeholder={t("channels.fields.extraHeaders")}
-                rows={3}
-                disabled={formLocked}
-              />
-              <div>
-                <label
-                  className="text-xs font-medium text-muted-foreground"
-                  htmlFor="channel-lite-model"
-                >
-                  {t("channels.fields.liteModel")}
-                </label>
-                <select
-                  id="channel-lite-model"
-                  className="mt-1 h-8 w-full rounded-md border bg-background px-2 text-sm"
-                  value={form.liteModel}
-                  disabled={formLocked}
-                  onChange={(event) => patchForm({ liteModel: event.target.value })}
-                >
-                  <option value="">{t("channels.fields.liteModelNone")}</option>
-                  {form.models
-                    .filter((item) => item.id.trim().length > 0)
-                    .map((item) => (
-                      <option key={item.id} value={item.id}>
-                        {item.id}
-                      </option>
-                    ))}
-                </select>
-                <p className="mt-1 text-xs text-muted-foreground">
-                  {t("channels.fields.liteModelHint")}
-                </p>
-              </div>
+
               <div>
                 <label className="text-xs font-medium text-muted-foreground">
-                  {t("channels.fields.enabled")}
+                  {t("channels.fields.apiKey")}
                 </label>
-                <Select
-                  value={form.enabled ? "enabled" : "disabled"}
-                  disabled={formLocked}
-                  onValueChange={(value) => {
-                    if (value === "enabled" || value === "disabled") {
-                      patchForm({ enabled: value === "enabled" });
+                <div className="relative mt-1">
+                  <Input
+                    type={showApiKey ? "text" : "password"}
+                    className="h-8 pr-9 text-xs font-mono"
+                    value={form.apiKey}
+                    onChange={(event) => patchForm({ apiKey: event.target.value })}
+                    placeholder={
+                      selected?.api_key_configured && !form.apiKey.trim()
+                        ? t("channels.fields.apiKeyConfigured")
+                        : "sk-..."
                     }
-                  }}
-                >
-                  <SelectTrigger className="mt-1 bg-background">
-                    <SelectValue>
-                      {(value) =>
-                        value === "enabled"
-                          ? t("channels.status.enabled")
-                          : value === "disabled"
-                            ? t("channels.status.disabled")
-                            : t("channels.fields.enabled")
-                      }
-                    </SelectValue>
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="enabled">{t("channels.status.enabled")}</SelectItem>
-                    <SelectItem value="disabled">{t("channels.status.disabled")}</SelectItem>
-                  </SelectContent>
-                </Select>
+                    autoComplete="off"
+                    disabled={formLocked}
+                  />
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="icon-xs"
+                    className="absolute top-1/2 right-1 -translate-y-1/2 text-muted-foreground"
+                    onClick={() => setShowApiKey((current) => !current)}
+                    disabled={formLocked}
+                  >
+                    {showApiKey ? <EyeOff className="size-3.5" /> : <Eye className="size-3.5" />}
+                  </Button>
+                </div>
               </div>
+
+              <div className="rounded-xl border border-border/70 bg-muted/20 p-3">
+                <ChannelModelsEditor
+                  models={form.models}
+                  catalog={catalog}
+                  disabled={formLocked}
+                  onChange={(models) => patchForm({ models })}
+                />
+              </div>
+
+              <div className="grid gap-3 sm:grid-cols-2">
+                <div>
+                  <label
+                    className="text-xs font-medium text-muted-foreground"
+                    htmlFor="channel-lite-model"
+                  >
+                    {t("channels.fields.liteModel")}
+                  </label>
+                  <Select
+                    value={form.liteModel || "none"}
+                    disabled={formLocked}
+                    onValueChange={(val) =>
+                      patchForm({ liteModel: !val || val === "none" ? "" : val })
+                    }
+                  >
+                    <SelectTrigger
+                      id="channel-lite-model"
+                      className="mt-1 h-8 text-xs bg-background"
+                    >
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="none" className="text-xs">
+                        {t("channels.fields.liteModelNone")}
+                      </SelectItem>
+                      {form.models
+                        .filter((item) => item.id.trim().length > 0)
+                        .map((item) => (
+                          <SelectItem key={item.id} value={item.id} className="text-xs font-mono">
+                            {item.id}
+                          </SelectItem>
+                        ))}
+                    </SelectContent>
+                  </Select>
+                </div>
+
+                <div>
+                  <label className="text-xs font-medium text-muted-foreground">
+                    {t("channels.fields.enabled")}
+                  </label>
+                  <Select
+                    value={form.enabled ? "enabled" : "disabled"}
+                    disabled={formLocked}
+                    onValueChange={(value) => patchForm({ enabled: value === "enabled" })}
+                  >
+                    <SelectTrigger className="mt-1 h-8 text-xs bg-background">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="enabled" className="text-xs">
+                        {t("channels.status.enabled")}
+                      </SelectItem>
+                      <SelectItem value="disabled" className="text-xs">
+                        {t("channels.status.disabled")}
+                      </SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
+              </div>
+
+              <div>
+                <label className="text-xs font-medium text-muted-foreground">
+                  {t("channels.fields.extraHeaders")}
+                </label>
+                <Textarea
+                  className="mt-1 resize-none font-mono text-xs leading-relaxed"
+                  value={form.extraHeaders}
+                  onChange={(event) => patchForm({ extraHeaders: event.target.value })}
+                  placeholder='{"HTTP-Referer": "https://..."}'
+                  rows={2}
+                  disabled={formLocked}
+                />
+              </div>
+
               {selected ? (
-                <p className="text-xs text-muted-foreground">
+                <p className="text-[11px] font-mono text-muted-foreground">
                   {t("channels.updatedAt", { date: formatDate(selected.updated_at) })}
                 </p>
               ) : null}
-              <div className="flex flex-wrap gap-2">
+
+              <div className="flex flex-wrap gap-2 pt-1">
                 <Button
+                  type="button"
                   variant="outline"
+                  size="sm"
+                  className="h-7 text-xs gap-1"
                   onClick={() => void handleFetchModels()}
                   disabled={formLocked}
                 >
-                  {saving === "models" ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : null}
+                  {saving === "models" ? (
+                    <Loader2 className="size-3 animate-spin" />
+                  ) : (
+                    <RefreshCw className="size-3" />
+                  )}
                   {t("channels.actions.fetchModels")}
                 </Button>
-                <Button variant="outline" onClick={() => void handleTest()} disabled={formLocked}>
-                  {saving === "test" ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : null}
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  className="h-7 text-xs gap-1"
+                  onClick={() => void handleTest()}
+                  disabled={formLocked}
+                >
+                  {saving === "test" ? (
+                    <Loader2 className="size-3 animate-spin" />
+                  ) : (
+                    <Zap className="size-3" />
+                  )}
                   {t("channels.actions.test")}
                 </Button>
               </div>
-              {error ? <p className="text-sm text-destructive">{error}</p> : null}
-              {message ? <p className="text-sm text-muted-foreground">{message}</p> : null}
             </div>
           </div>
-          <DialogFooter className="mt-4 shrink-0">
+
+          <DialogFooter className="shrink-0 border-t border-border/50 px-6 py-3 bg-muted/10">
             {!isCreate ? (
               <Button
                 variant="destructive"
-                className="sm:mr-auto"
+                size="sm"
+                className="sm:mr-auto h-8 text-xs"
                 onClick={() => void handleDelete()}
                 disabled={formLocked}
               >
-                {saving === "delete" ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : null}
-                <Trash2 className="mr-1 h-4 w-4" />
+                {saving === "delete" ? (
+                  <Loader2 className="mr-1 size-3.5 animate-spin" />
+                ) : (
+                  <Trash2 className="mr-1 size-3.5" />
+                )}
                 {t("channels.actions.delete")}
               </Button>
             ) : null}
-            <Button variant="outline" onClick={closeDialog} disabled={formLocked}>
+            <Button
+              variant="outline"
+              size="sm"
+              className="h-8 text-xs"
+              onClick={closeDialog}
+              disabled={formLocked}
+            >
               {t("channels.actions.cancel")}
             </Button>
-            <Button onClick={() => void handleSave()} disabled={formLocked}>
-              {saving === "save" ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : null}
+            <Button
+              size="sm"
+              className="h-8 text-xs"
+              onClick={() => void handleSave()}
+              disabled={formLocked}
+            >
+              {saving === "save" ? <Loader2 className="mr-1 size-3.5 animate-spin" /> : null}
               {t("channels.actions.save")}
             </Button>
           </DialogFooter>

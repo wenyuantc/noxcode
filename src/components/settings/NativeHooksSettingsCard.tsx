@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { Loader2, Plus, Save, Workflow } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
 import { updateNativeSettings } from "@/lib/backend";
@@ -21,6 +22,7 @@ import {
 import { Textarea } from "@/components/ui/textarea";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { SettingCard } from "./SettingCard";
+import { SettingFeedbackCallout } from "./SettingFeedbackCallout";
 
 const HOOK_MATCHER_ALL = "*";
 const HOOK_MATCHER_TOOLS = [
@@ -103,6 +105,11 @@ export function NativeHooksSettingsCard() {
   const native = useSettingsStore((state) => state.native);
   const setNative = useSettingsStore((state) => state.setNative);
   const [hooks, setHooks] = useState<NativeHook[]>(native?.hooks ?? []);
+  const [saving, setSaving] = useState(false);
+  const [feedback, setFeedback] = useState<{
+    variant: "success" | "error";
+    message: string;
+  } | null>(null);
 
   useEffect(() => {
     if (native) setHooks(native.hooks);
@@ -116,242 +123,293 @@ export function NativeHooksSettingsCard() {
     setHooks(next);
   };
 
+  const saveHooks = async () => {
+    setSaving(true);
+    setFeedback(null);
+    try {
+      const updated = await updateNativeSettings({
+        hooks: hooks.map((hook) => ({
+          ...hook,
+          event: normalizeHookEvent(hook.event),
+          handler_type: normalizeHandlerType(hook.handler_type),
+        })),
+      });
+      setNative(updated);
+      setFeedback({ variant: "success", message: t("common:saved") ?? "保存成功" });
+    } catch (err) {
+      setFeedback({ variant: "error", message: String(err) });
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const addHook = () => {
+    setHooks([
+      ...hooks,
+      {
+        id: crypto.randomUUID(),
+        event: "pre_tool_use",
+        matcher: "*",
+        command: "",
+        timeout_secs: 30,
+        enabled: true,
+        handler_type: "command",
+        url: null,
+        agent_prompt: null,
+        source: "global",
+      },
+    ]);
+  };
+
   const eventLabel = (event: NativeHookEvent) => t(`settings:hooks.events.${event}`);
   const handlerLabel = (handler: NativeHookHandlerType) => t(`settings:hooks.handlers.${handler}`);
 
   return (
-    <SettingCard title={t("settings:hooks.title")} description={t("settings:hooks.hint")}>
-      <div className="space-y-3">
-        {hooks.map((hook, index) => {
-          const event = normalizeHookEvent(hook.event);
-          const handler = normalizeHandlerType(hook.handler_type);
-          const needsMatcher = TOOL_EVENTS.includes(event);
-          return (
-            <div key={hook.id} className="space-y-3 rounded-md border p-3">
-              <div className="grid grid-cols-2 gap-2">
-                <div>
-                  <label
-                    className="text-xs font-medium text-muted-foreground"
-                    htmlFor={`hook-event-${hook.id}`}
-                  >
-                    {t("settings:hooks.fields.event")}
-                  </label>
-                  <Select
-                    value={event}
-                    onValueChange={(value) => {
-                      const found = NATIVE_HOOK_EVENTS.find((item) => item === value);
-                      if (found) patchHook(index, { event: found });
-                    }}
-                  >
-                    <SelectTrigger id={`hook-event-${hook.id}`} className="mt-1 bg-background">
-                      <SelectValue>
-                        {(value) => eventLabel(normalizeHookEvent(String(value)))}
-                      </SelectValue>
-                    </SelectTrigger>
-                    <SelectContent>
-                      {NATIVE_HOOK_EVENTS.map((item) => (
-                        <SelectItem key={item} value={item}>
-                          {eventLabel(item)}
-                        </SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
-                </div>
-                <div>
-                  <label
-                    className="text-xs font-medium text-muted-foreground"
-                    htmlFor={`hook-handler-${hook.id}`}
-                  >
-                    {t("settings:hooks.fields.handler")}
-                  </label>
-                  <Select
-                    value={handler}
-                    onValueChange={(value) => {
-                      const next = normalizeHandlerType(String(value));
-                      patchHook(index, { handler_type: next });
-                    }}
-                  >
-                    <SelectTrigger id={`hook-handler-${hook.id}`} className="mt-1 bg-background">
-                      <SelectValue>
-                        {(value) => handlerLabel(normalizeHandlerType(String(value)))}
-                      </SelectValue>
-                    </SelectTrigger>
-                    <SelectContent>
-                      {NATIVE_HOOK_HANDLER_TYPES.map((item) => (
-                        <SelectItem key={item} value={item}>
-                          {handlerLabel(item)}
-                        </SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
-                </div>
-                {needsMatcher ? (
-                  <div className="col-span-2 min-w-0">
+    <div className="space-y-6">
+      {feedback ? (
+        <SettingFeedbackCallout
+          variant={feedback.variant}
+          message={feedback.message}
+          onClose={() => setFeedback(null)}
+        />
+      ) : null}
+
+      <SettingCard
+        icon={Workflow}
+        title={t("settings:hooks.title")}
+        description={t("settings:hooks.hint")}
+        badge={`${hooks.length} 个钩子`}
+        headerAction={
+          <div className="flex items-center gap-1.5">
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              className="h-7 text-xs gap-1"
+              onClick={addHook}
+            >
+              <Plus className="size-3" />
+              {t("common:create")}
+            </Button>
+            <Button
+              type="button"
+              size="sm"
+              className="h-7 text-xs gap-1"
+              disabled={saving}
+              onClick={() => void saveHooks()}
+            >
+              {saving ? <Loader2 className="size-3 animate-spin" /> : <Save className="size-3" />}
+              {t("common:save")}
+            </Button>
+          </div>
+        }
+      >
+        <div className="space-y-3">
+          {hooks.length === 0 ? (
+            <div className="rounded-xl border border-dashed border-border/80 py-8 text-center text-xs text-muted-foreground">
+              暂无已配置钩子，点击右上角新建
+            </div>
+          ) : null}
+          {hooks.map((hook, index) => {
+            const event = normalizeHookEvent(hook.event);
+            const handler = normalizeHandlerType(hook.handler_type);
+            const needsMatcher = TOOL_EVENTS.includes(event);
+            return (
+              <div
+                key={hook.id}
+                className="space-y-3 rounded-xl border border-border/70 bg-card p-4 shadow-2xs transition-all hover:border-border"
+              >
+                <div className="grid grid-cols-2 gap-2">
+                  <div>
                     <label
                       className="text-xs font-medium text-muted-foreground"
-                      htmlFor={`hook-matcher-${hook.id}`}
+                      htmlFor={`hook-event-${hook.id}`}
                     >
-                      {t("settings:hooks.fields.matcher")}
+                      {t("settings:hooks.fields.event")}
                     </label>
                     <Select
-                      multiple
-                      value={parseMatcher(hook.matcher)}
+                      value={event}
                       onValueChange={(value) => {
-                        if (!Array.isArray(value)) return;
-                        patchHook(index, {
-                          matcher: nextMatcher(parseMatcher(hook.matcher), value),
-                        });
+                        const found = NATIVE_HOOK_EVENTS.find((item) => item === value);
+                        if (found) patchHook(index, { event: found });
                       }}
                     >
-                      <SelectTrigger id={`hook-matcher-${hook.id}`} className="mt-1 bg-background">
+                      <SelectTrigger id={`hook-event-${hook.id}`} className="mt-1 bg-background">
                         <SelectValue>
-                          {(value) =>
-                            formatMatcherValue(
-                              Array.isArray(value) ? value : parseMatcher(hook.matcher),
-                              t("settings:hooks.matchers.all"),
-                            )
-                          }
+                          {(value) => eventLabel(normalizeHookEvent(String(value)))}
                         </SelectValue>
                       </SelectTrigger>
                       <SelectContent>
-                        {matcherChoices(hook.matcher).map((tool) => (
-                          <SelectItem key={tool} value={tool}>
-                            {tool === HOOK_MATCHER_ALL ? t("settings:hooks.matchers.all") : tool}
+                        {NATIVE_HOOK_EVENTS.map((item) => (
+                          <SelectItem key={item} value={item}>
+                            {eventLabel(item)}
                           </SelectItem>
                         ))}
                       </SelectContent>
                     </Select>
+                  </div>
+                  <div>
+                    <label
+                      className="text-xs font-medium text-muted-foreground"
+                      htmlFor={`hook-handler-${hook.id}`}
+                    >
+                      {t("settings:hooks.fields.handler")}
+                    </label>
+                    <Select
+                      value={handler}
+                      onValueChange={(value) => {
+                        const next = normalizeHandlerType(String(value));
+                        patchHook(index, { handler_type: next });
+                      }}
+                    >
+                      <SelectTrigger id={`hook-handler-${hook.id}`} className="mt-1 bg-background">
+                        <SelectValue>
+                          {(value) => handlerLabel(normalizeHandlerType(String(value)))}
+                        </SelectValue>
+                      </SelectTrigger>
+                      <SelectContent>
+                        {NATIVE_HOOK_HANDLER_TYPES.map((item) => (
+                          <SelectItem key={item} value={item}>
+                            {handlerLabel(item)}
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                  </div>
+                  {needsMatcher ? (
+                    <div className="col-span-2 min-w-0">
+                      <label
+                        className="text-xs font-medium text-muted-foreground"
+                        htmlFor={`hook-matcher-${hook.id}`}
+                      >
+                        {t("settings:hooks.fields.matcher")}
+                      </label>
+                      <Select
+                        multiple
+                        value={parseMatcher(hook.matcher)}
+                        onValueChange={(value) => {
+                          if (!Array.isArray(value)) return;
+                          patchHook(index, {
+                            matcher: nextMatcher(parseMatcher(hook.matcher), value),
+                          });
+                        }}
+                      >
+                        <SelectTrigger
+                          id={`hook-matcher-${hook.id}`}
+                          className="mt-1 bg-background"
+                        >
+                          <SelectValue>
+                            {(value) =>
+                              formatMatcherValue(
+                                Array.isArray(value) ? value : parseMatcher(hook.matcher),
+                                t("settings:hooks.matchers.all"),
+                              )
+                            }
+                          </SelectValue>
+                        </SelectTrigger>
+                        <SelectContent>
+                          {matcherChoices(hook.matcher).map((tool) => (
+                            <SelectItem key={tool} value={tool}>
+                              {tool === HOOK_MATCHER_ALL ? t("settings:hooks.matchers.all") : tool}
+                            </SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                      <p className="mt-1 text-xs text-muted-foreground">
+                        {t("settings:hooks.fieldHints.matcher")}
+                      </p>
+                    </div>
+                  ) : null}
+                </div>
+                {handler === "command" ? (
+                  <div>
+                    <label
+                      className="text-xs font-medium text-muted-foreground"
+                      htmlFor={`hook-command-${hook.id}`}
+                    >
+                      {t("settings:hooks.fields.command")}
+                    </label>
+                    <Input
+                      id={`hook-command-${hook.id}`}
+                      className="mt-1"
+                      value={hook.command}
+                      placeholder={t("settings:hooks.placeholders.command")}
+                      onChange={(e) => patchHook(index, { command: e.target.value })}
+                    />
                     <p className="mt-1 text-xs text-muted-foreground">
-                      {t("settings:hooks.fieldHints.matcher")}
+                      {t("settings:hooks.fieldHints.command")}
                     </p>
                   </div>
                 ) : null}
+                {handler === "http" ? (
+                  <div>
+                    <label
+                      className="text-xs font-medium text-muted-foreground"
+                      htmlFor={`hook-url-${hook.id}`}
+                    >
+                      {t("settings:hooks.fields.url")}
+                    </label>
+                    <Input
+                      id={`hook-url-${hook.id}`}
+                      className="mt-1"
+                      value={hook.url ?? ""}
+                      placeholder="https://"
+                      onChange={(e) => patchHook(index, { url: e.target.value })}
+                    />
+                    <p className="mt-1 text-xs text-muted-foreground">
+                      {t("settings:hooks.fieldHints.url")}
+                    </p>
+                  </div>
+                ) : null}
+                {handler === "agent" ? (
+                  <div>
+                    <label
+                      className="text-xs font-medium text-muted-foreground"
+                      htmlFor={`hook-agent-${hook.id}`}
+                    >
+                      {t("settings:hooks.fields.agentPrompt")}
+                    </label>
+                    <Textarea
+                      id={`hook-agent-${hook.id}`}
+                      className="mt-1"
+                      value={hook.agent_prompt ?? ""}
+                      placeholder={t("settings:hooks.placeholders.agentPrompt")}
+                      onChange={(e) => patchHook(index, { agent_prompt: e.target.value })}
+                    />
+                    <p className="mt-1 text-xs text-muted-foreground">
+                      {t("settings:hooks.fieldHints.agentPrompt")}
+                    </p>
+                  </div>
+                ) : null}
+                <div className="flex items-center justify-between gap-3">
+                  <label
+                    className="text-xs text-muted-foreground"
+                    htmlFor={`hook-timeout-${hook.id}`}
+                  >
+                    {t("settings:hooks.fields.timeout")}
+                    <Input
+                      id={`hook-timeout-${hook.id}`}
+                      className="mt-1 w-28"
+                      type="number"
+                      min={1}
+                      max={120}
+                      value={hook.timeout_secs}
+                      onChange={(e) => patchHook(index, { timeout_secs: Number(e.target.value) })}
+                    />
+                  </label>
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    onClick={() => setHooks(hooks.filter((_, i) => i !== index))}
+                  >
+                    {t("common:delete")}
+                  </Button>
+                </div>
               </div>
-              {handler === "command" ? (
-                <div>
-                  <label
-                    className="text-xs font-medium text-muted-foreground"
-                    htmlFor={`hook-command-${hook.id}`}
-                  >
-                    {t("settings:hooks.fields.command")}
-                  </label>
-                  <Input
-                    id={`hook-command-${hook.id}`}
-                    className="mt-1"
-                    value={hook.command}
-                    placeholder={t("settings:hooks.placeholders.command")}
-                    onChange={(e) => patchHook(index, { command: e.target.value })}
-                  />
-                  <p className="mt-1 text-xs text-muted-foreground">
-                    {t("settings:hooks.fieldHints.command")}
-                  </p>
-                </div>
-              ) : null}
-              {handler === "http" ? (
-                <div>
-                  <label
-                    className="text-xs font-medium text-muted-foreground"
-                    htmlFor={`hook-url-${hook.id}`}
-                  >
-                    {t("settings:hooks.fields.url")}
-                  </label>
-                  <Input
-                    id={`hook-url-${hook.id}`}
-                    className="mt-1"
-                    value={hook.url ?? ""}
-                    placeholder="https://"
-                    onChange={(e) => patchHook(index, { url: e.target.value })}
-                  />
-                  <p className="mt-1 text-xs text-muted-foreground">
-                    {t("settings:hooks.fieldHints.url")}
-                  </p>
-                </div>
-              ) : null}
-              {handler === "agent" ? (
-                <div>
-                  <label
-                    className="text-xs font-medium text-muted-foreground"
-                    htmlFor={`hook-agent-${hook.id}`}
-                  >
-                    {t("settings:hooks.fields.agentPrompt")}
-                  </label>
-                  <Textarea
-                    id={`hook-agent-${hook.id}`}
-                    className="mt-1"
-                    value={hook.agent_prompt ?? ""}
-                    placeholder={t("settings:hooks.placeholders.agentPrompt")}
-                    onChange={(e) => patchHook(index, { agent_prompt: e.target.value })}
-                  />
-                  <p className="mt-1 text-xs text-muted-foreground">
-                    {t("settings:hooks.fieldHints.agentPrompt")}
-                  </p>
-                </div>
-              ) : null}
-              <div className="flex items-center justify-between gap-3">
-                <label
-                  className="text-xs text-muted-foreground"
-                  htmlFor={`hook-timeout-${hook.id}`}
-                >
-                  {t("settings:hooks.fields.timeout")}
-                  <Input
-                    id={`hook-timeout-${hook.id}`}
-                    className="mt-1 w-28"
-                    type="number"
-                    min={1}
-                    max={120}
-                    value={hook.timeout_secs}
-                    onChange={(e) => patchHook(index, { timeout_secs: Number(e.target.value) })}
-                  />
-                </label>
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  onClick={() => setHooks(hooks.filter((_, i) => i !== index))}
-                >
-                  {t("common:delete")}
-                </Button>
-              </div>
-            </div>
-          );
-        })}
-        <div className="flex gap-2">
-          <Button
-            variant="outline"
-            onClick={() =>
-              setHooks([
-                ...hooks,
-                {
-                  id: crypto.randomUUID(),
-                  event: "pre_tool_use",
-                  matcher: "*",
-                  command: "",
-                  timeout_secs: 30,
-                  enabled: true,
-                  handler_type: "command",
-                  url: null,
-                  agent_prompt: null,
-                  source: "global",
-                },
-              ])
-            }
-          >
-            {t("common:create")}
-          </Button>
-          <Button
-            onClick={() =>
-              void updateNativeSettings({
-                hooks: hooks.map((hook) => ({
-                  ...hook,
-                  event: normalizeHookEvent(hook.event),
-                  handler_type: normalizeHandlerType(hook.handler_type),
-                })),
-              }).then(setNative)
-            }
-          >
-            {t("common:save")}
-          </Button>
+            );
+          })}
         </div>
-      </div>
-    </SettingCard>
+      </SettingCard>
+    </div>
   );
 }
