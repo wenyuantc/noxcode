@@ -213,5 +213,12 @@
   "goalStatus": {
     "active": "in progress",
     "completed": "completed"
-  }
+  },
+  "subagentTag": "Subagent",
+  "subagentRunning": "Running",
+  "subagentCompleted": "Completed",
+  "subagentFailed": "Failed",
+  "subagentReport": "Final Report",
+  "subagentOperations": "{{count}} operations",
+  "subagentDuration": "Took {{duration}}"
 }

@@ -1,28 +1,34 @@
 import { useTranslation } from "react-i18next";
 
-import type { GroupedSessionItem } from "@/lib/sessionLines";
+import type { GroupedSessionItem, ParsedUsage } from "@/lib/sessionLines";
 import { parseUsageLine } from "@/lib/sessionLines";
-import { formatTokenCount } from "@/lib/utils";
+import { cn, formatTokenCount } from "@/lib/utils";
 
-export function UsageRow({ item }: { item: GroupedSessionItem }) {
+export function UsageChips({
+  usage,
+  className,
+}: {
+  usage: ParsedUsage;
+  className?: string;
+}) {
   const { t } = useTranslation("sessions");
-  const parsed = parseUsageLine(item.text);
-  if (!parsed) return null;
 
   const items = [
-    parsed.input != null ? { label: t("usageInput"), count: formatTokenCount(parsed.input) } : null,
-    parsed.output != null
-      ? { label: t("usageOutput"), count: formatTokenCount(parsed.output) }
+    usage.input != null ? { label: t("usageInput"), count: formatTokenCount(usage.input) } : null,
+    usage.output != null
+      ? { label: t("usageOutput"), count: formatTokenCount(usage.output) }
       : null,
-    parsed.reasoning != null
-      ? { label: t("usageReasoning"), count: formatTokenCount(parsed.reasoning) }
+    usage.reasoning != null
+      ? { label: t("usageReasoning"), count: formatTokenCount(usage.reasoning) }
       : null,
-    parsed.cache != null ? { label: t("usageCache"), count: formatTokenCount(parsed.cache) } : null,
-    parsed.total != null ? { label: t("usageTotal"), count: formatTokenCount(parsed.total) } : null,
+    usage.cache != null ? { label: t("usageCache"), count: formatTokenCount(usage.cache) } : null,
+    usage.total != null ? { label: t("usageTotal"), count: formatTokenCount(usage.total) } : null,
   ].filter(Boolean) as { label: string; count: string }[];
 
+  if (items.length === 0) return null;
+
   return (
-    <div className="flex flex-wrap items-center gap-1.5 py-1">
+    <div className={cn("flex flex-wrap items-center gap-1.5 py-1", className)}>
       {items.map((entry) => (
         <span
           key={entry.label}
@@ -34,4 +40,16 @@ export function UsageRow({ item }: { item: GroupedSessionItem }) {
       ))}
     </div>
   );
+}
+
+export function UsageRow({
+  item,
+  className,
+}: {
+  item: GroupedSessionItem;
+  className?: string;
+}) {
+  const parsed = parseUsageLine(item.text);
+  if (!parsed) return null;
+  return <UsageChips usage={parsed} className={className} />;
 }

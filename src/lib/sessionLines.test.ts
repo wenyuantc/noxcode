@@ -26,6 +26,9 @@ import {
   parseThinkingDurationSeconds,
   parseRetryLine,
   parsePlanLine,
+  parseSubagentResult,
+  parseSubagentTag,
+  aggregateUsages,
   summarizeRetry,
   thinkingDurationSeconds,
   thinkingText,
@@ -749,5 +752,92 @@ describe("sessionLines", () => {
       ]),
     );
     expect(blocks[0]?.segments.map((segment) => segment.kind)).toEqual(["system", "assistant"]);
+  });
+
+  it("parses subagent tag and result", () => {
+    const parsedTag = parseSubagentTag("[子 Agent 1(explore) - 摸底项目整体结构与构建配置]");
+    expect(parsedTag).toEqual({
+      raw: "[子 Agent 1(explore) - 摸底项目整体结构与构建配置]",
+      index: 1,
+      kind: "explore",
+      description: "摸底项目整体结构与构建配置",
+    });
+
+    const parsedOk = parseSubagentResult(
+      "子 Agent（摸底整体 / explore）完成。\n\n摸底报告如下：已完成架构梳理。",
+    );
+    expect(parsedOk).toEqual({
+      description: "摸底整体",
+      kind: "explore",
+      success: true,
+      report: "摸底报告如下：已完成架构梳理。",
+    });
+
+    const parsedErr = parseSubagentResult("子 Agent（改文件 / general）失败：网络超时");
+    expect(parsedErr).toEqual({
+      description: "改文件",
+      kind: "general",
+      success: false,
+      error: "网络超时",
+    });
+  });
+
+  it("groups subagent lines into dedicated subagent segments", () => {
+    const blocks = buildTurnBlocks(
+      groupSessionLines([
+        line("1", "[USER_INPUT] 帮我分析项目", "2026-01-01T00:00:00Z"),
+        line("2", "[思考] 先委派探索子 Agent", "2026-01-01T00:00:01Z"),
+        line(
+          "3",
+          "[子 Agent 1(explore) - 摸底项目整体结构] 启动（explore）",
+          "2026-01-01T00:00:02Z",
+        ),
+        line(
+          "4",
+          "[子 Agent 1(explore) - 摸底项目整体结构] 继续摸底其余模块的包结构。",
+          "2026-01-01T00:00:03Z",
+        ),
+        line(
+          "5",
+          "[子 Agent 1(explore) - 摸底项目整体结构] [读取] pom.xml",
+          "2026-01-01T00:00:04Z",
+        ),
+        line(
+          "6",
+          "[子 Agent 1(explore) - 摸底项目整体结构] [工具结果]\n<project>...</project>",
+          "2026-01-01T00:00:05Z",
+        ),
+        line("7", "[子 Agent 1(explore) - 摸底项目整体结构] 结束 成功", "2026-01-01T00:00:06Z"),
+        line("8", "主 Agent 汇总完成", "2026-01-01T00:00:07Z"),
+      ]),
+    );
+    expect(blocks).toHaveLength(1);
+    expect(blocks[0]?.segments.map((s) => s.kind)).toEqual(["thinking", "subagent", "assistant"]);
+    expect(blocks[0]?.segments[1]?.items).toHaveLength(4); // lines 3, 4, 5 (paired with 6), 7
+  });
+
+  it("parses subagent usage line and aggregates usages", () => {
+    const usageLine =
+      "[子 Agent 4(explore) - 摸底: 框架集成] [用量] in=4784 out=269 cache=100 total=5053";
+    const parsed1 = parseUsageLine(usageLine);
+    expect(parsed1).toEqual({
+      input: 4784,
+      output: 269,
+      cache: 100,
+      total: 5053,
+    });
+
+    const parsed2 = parseUsageLine("[用量] in=2000 out=100 total=2100");
+    const aggregated = aggregateUsages([parsed1, parsed2]);
+    expect(aggregated).toEqual({
+      input: 6784,
+      output: 369,
+      cache: 100,
+      reasoning: undefined,
+      total: 7153,
+    });
+
+    expect(aggregateUsages([])).toBeNull();
+    expect(aggregateUsages([null, undefined])).toBeNull();
   });
 });

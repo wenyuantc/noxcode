@@ -213,5 +213,12 @@
   "goalStatus": {
     "active": "进行中",
     "completed": "已完成"
-  }
+  },
+  "subagentTag": "子智能体",
+  "subagentRunning": "正在执行",
+  "subagentCompleted": "已完成",
+  "subagentFailed": "执行失败",
+  "subagentReport": "交付报告",
+  "subagentOperations": "{{count}} 项操作",
+  "subagentDuration": "耗时 {{duration}}"
 }

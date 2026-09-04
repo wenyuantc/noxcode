@@ -26,6 +26,7 @@ import { RetryRow } from "./RetryRow";
 import { AgentStatusRow, McpStatusRow, PermissionStatusRow } from "./SessionStatusRows";
 import { PlanAskCard } from "./PlanAskCard";
 import { PlanRow } from "./PlanRow";
+import { SubagentRow } from "./SubagentRow";
 import { TerminalRow } from "./TerminalRow";
 import { ThinkingRow } from "./ThinkingRow";
 import { ToolSummaryRow } from "./ToolSummaryRow";
@@ -109,6 +110,8 @@ function renderSegment(
         </p>
       );
     }
+    case "subagent":
+      return <SubagentRow segment={segment} running={running} nowMs={nowMs} />;
     case "assistant":
       return <AssistantMarkdown text={segment.items.map((item) => item.text).join("\n\n")} />;
     case "usage":

@@ -96,7 +96,7 @@ describe("merge and selection", () => {
     ];
     const merged = mergeComposerImageItems(existing, incoming);
     expect(merged.items).toHaveLength(MAX_COMPOSER_IMAGES);
-    expect(merged.items.at(-1)?.id).toBe("n1");
+    expect(merged.items[merged.items.length - 1]?.id).toBe("n1");
     expect(merged.skipped).toEqual([{ name: "image", reason: "limit" }]);
 
     const toggled = toggleComposerImageSelected(merged.items, "e0");

@@ -11,6 +11,7 @@ export type TurnSegmentKind =
   | "file"
   | "changes"
   | "todo"
+  | "subagent"
   | "assistant"
   | "system"
   | "usage"
@@ -280,6 +281,63 @@ export function stripSubagentPrefix(text: string): { prefix: string | null; body
 
 export function sessionLineBody(text: string): string {
   return stripSubagentPrefix(text).body;
+}
+
+export interface ParsedSubagentTag {
+  raw: string;
+  index: number;
+  kind: string;
+  description: string;
+}
+
+const SUBAGENT_PARSE_RE = /^\[子 Agent (\d+)\(([^)]+)\) - ([^\]]*)\]/;
+
+export function parseSubagentTag(tag: string | null | undefined): ParsedSubagentTag | null {
+  if (!tag) return null;
+  const trimmed = tag.trim();
+  const match = trimmed.match(SUBAGENT_PARSE_RE);
+  if (!match) return null;
+  return {
+    raw: match[0],
+    index: Number(match[1]),
+    kind: match[2] ?? "general",
+    description: (match[3] ?? "").trim(),
+  };
+}
+
+export interface ParsedSubagentResult {
+  description: string;
+  kind: string;
+  success: boolean;
+  report?: string;
+  error?: string;
+}
+
+const SUBAGENT_RESULT_OK_RE =
+  /^子 Agent[（(](.+?)\s*[/／]\s*(.+?)[）)]完成[。.]?\s*(?:\n\n([\s\S]*))?$/;
+const SUBAGENT_RESULT_ERR_RE = /^子 Agent[（(](.+?)\s*[/／]\s*(.+?)[）)]失败[：:]\s*([\s\S]*)$/;
+
+export function parseSubagentResult(text: string): ParsedSubagentResult | null {
+  const trimmed = text.trim();
+  const matchOk = trimmed.match(SUBAGENT_RESULT_OK_RE);
+  if (matchOk) {
+    return {
+      description: (matchOk[1] ?? "").trim(),
+      kind: (matchOk[2] ?? "").trim(),
+      success: true,
+      report: (matchOk[3] ?? "").trim(),
+    };
+  }
+  const matchErr = trimmed.match(SUBAGENT_RESULT_ERR_RE);
+  if (matchErr) {
+    return {
+      description: (matchErr[1] ?? "").trim(),
+      kind: (matchErr[2] ?? "").trim(),
+      success: false,
+      error: (matchErr[3] ?? "").trim(),
+    };
+  }
+  return null;
 }
 
 function parseEnvelopeImages(value: unknown): NativeToolImage[] | undefined {
@@ -589,6 +647,54 @@ export function isUsageItem(item: GroupedSessionItem): boolean {
   return sessionLineBody(item.text).startsWith("[用量]");
 }
 
+export function aggregateUsages(usages: (ParsedUsage | null | undefined)[]): ParsedUsage | null {
+  let hasAny = false;
+  let input = 0;
+  let output = 0;
+  let cache = 0;
+  let reasoning = 0;
+  let total = 0;
+  let hasInput = false;
+  let hasOutput = false;
+  let hasCache = false;
+  let hasReasoning = false;
+  let hasTotal = false;
+
+  for (const u of usages) {
+    if (!u) continue;
+    hasAny = true;
+    if (u.input != null) {
+      input += u.input;
+      hasInput = true;
+    }
+    if (u.output != null) {
+      output += u.output;
+      hasOutput = true;
+    }
+    if (u.cache != null) {
+      cache += u.cache;
+      hasCache = true;
+    }
+    if (u.reasoning != null) {
+      reasoning += u.reasoning;
+      hasReasoning = true;
+    }
+    if (u.total != null) {
+      total += u.total;
+      hasTotal = true;
+    }
+  }
+
+  if (!hasAny) return null;
+  return {
+    input: hasInput ? input : undefined,
+    output: hasOutput ? output : undefined,
+    cache: hasCache ? cache : undefined,
+    reasoning: hasReasoning ? reasoning : undefined,
+    total: hasTotal ? total : hasInput && hasOutput ? input + output : undefined,
+  };
+}
+
 const PATCH_PLACEHOLDER = "应用多文件补丁";
 
 export function changedFilesFromItems(items: GroupedSessionItem[]): string[] {
@@ -826,6 +932,7 @@ export function groupSessionLines(lines: RawSessionLine[]): GroupedSessionItem[]
 
 function segmentKey(item: GroupedSessionItem): TurnSegmentKind | "skip" | "file_change" {
   if (item.kind === "user") return "skip";
+  if (item.subagentTag) return "subagent";
   const body = sessionLineBody(item.text);
   if (isCompactBoundaryLine(body)) return "compact";
   if (isGoalLine(body)) return "goal";
@@ -885,7 +992,11 @@ export function buildTurnSegments(items: GroupedSessionItem[]): TurnSegment[] {
     if (key === "skip") continue;
     const mergeable =
       key !== "terminal" && key !== "todo" && key !== "compact" && key !== "goal" && key !== "plan";
-    if (currentKey !== key || !mergeable) {
+    const subagentMatch =
+      currentKey === "subagent" && key === "subagent"
+        ? currentItems[0]?.subagentTag === item.subagentTag
+        : true;
+    if (currentKey !== key || !mergeable || !subagentMatch) {
       flush();
       currentKey = key;
     }
