@@ -14,6 +14,7 @@ import {
   type SessionTurnBlock,
   type TurnSegment,
 } from "@/lib/sessionLines";
+import { isNearBottom, pinAfterUserScroll } from "@/lib/sessionScroll";
 import { cn } from "@/lib/utils";
 import { useSessionStore } from "@/stores/sessionStore";
 import { AssistantMarkdown } from "./AssistantMarkdown";
@@ -34,7 +35,6 @@ import { UserBubble } from "./UserBubble";
 import { WorkSummaryBar } from "./WorkSummaryBar";
 
 const EMPTY_LINES: RawSessionLine[] = [];
-const BOTTOM_THRESHOLD = 80;
 const VIRTUALIZE_AFTER = 24;
 
 function attachLiveStream(
@@ -149,10 +149,6 @@ function TodoLineText({ todos }: { todos: NonNullable<ReturnType<typeof parseTod
   );
 }
 
-function isNearBottom(node: HTMLElement) {
-  return node.scrollHeight - node.scrollTop - node.clientHeight <= BOTTOM_THRESHOLD;
-}
-
 export const EventStream = memo(function EventStream({
   sessionId,
   active = true,
@@ -182,6 +178,8 @@ export const EventStream = memo(function EventStream({
   const [nowMs, setNowMs] = useState(() => Date.now());
   const [showLatest, setShowLatest] = useState(false);
   const pinnedRef = useRef(true);
+  const programmaticRef = useRef(false);
+  const followFrameRef = useRef<number | null>(null);
   const parentRef = useRef<HTMLDivElement>(null);
   const prevWorkingRef = useRef(working);
   const prevHasStreamRef = useRef(Boolean(stream?.text));
@@ -198,31 +196,48 @@ export const EventStream = memo(function EventStream({
       return (element as HTMLElement).getBoundingClientRect().height;
     },
   });
+  const totalSize = virtualizer.getTotalSize();
 
-  const syncScrollState = useCallback(() => {
-    const node = parentRef.current;
-    if (!node) return;
-    const nearBottom = isNearBottom(node);
-    pinnedRef.current = nearBottom;
-    setShowLatest(!nearBottom);
+  const applyScrollToLatest = useCallback(() => {
+    const snap = () => {
+      const node = parentRef.current;
+      if (!node || node.clientHeight === 0 || !pinnedRef.current) return;
+      programmaticRef.current = true;
+      node.scrollTop = node.scrollHeight;
+    };
+    snap();
+    if (followFrameRef.current != null) window.cancelAnimationFrame(followFrameRef.current);
+    followFrameRef.current = window.requestAnimationFrame(() => {
+      followFrameRef.current = null;
+      snap();
+      programmaticRef.current = false;
+    });
   }, []);
 
-  const scrollToLatest = () => {
-    if (blocks.length === 0) return;
-    pinnedRef.current = true;
-    setShowLatest(false);
-    if (!virtualize) {
-      const node = parentRef.current;
-      if (node) node.scrollTop = node.scrollHeight;
-      return;
-    }
-    virtualizer.scrollToIndex(blocks.length - 1, { align: "end" });
-  };
+  const syncScrollState = useCallback(() => {
+    if (!active) return;
+    const node = parentRef.current;
+    if (!node) return;
+    const metrics = {
+      scrollHeight: node.scrollHeight,
+      scrollTop: node.scrollTop,
+      clientHeight: node.clientHeight,
+    };
+    const next = pinAfterUserScroll({
+      programmatic: programmaticRef.current,
+      clientHeight: metrics.clientHeight,
+      nearBottom: isNearBottom(metrics),
+      previous: pinnedRef.current,
+    });
+    pinnedRef.current = next;
+    setShowLatest(!next);
+  }, [active]);
 
-  useEffect(() => {
+  const scrollToLatest = useCallback(() => {
     pinnedRef.current = true;
     setShowLatest(false);
-  }, [sessionId]);
+    applyScrollToLatest();
+  }, [applyScrollToLatest]);
 
   useEffect(() => {
     if (!active || !working) return;
@@ -244,21 +259,53 @@ export const EventStream = memo(function EventStream({
     if (virtualize && (streamGone || workingEnded)) virtualizer.measure();
   }, [stream?.text, virtualize, working, virtualizer]);
 
-  useEffect(() => {
-    if (blocks.length === 0 || !pinnedRef.current) return;
-    if (!virtualize) {
-      const node = parentRef.current;
-      if (node) node.scrollTop = node.scrollHeight;
-      return;
-    }
-    virtualizer.scrollToIndex(blocks.length - 1, { align: "end" });
-  }, [blocks.length, hasAsk, stream?.text, virtualize, virtualizer]);
+  useLayoutEffect(() => {
+    if (!active) return;
+    pinnedRef.current = true;
+    setShowLatest(false);
+    applyScrollToLatest();
+  }, [active, sessionId, applyScrollToLatest]);
 
-  const totalSize = virtualizer.getTotalSize();
+  useLayoutEffect(() => {
+    if (!active || !pinnedRef.current) return;
+    applyScrollToLatest();
+  }, [
+    active,
+    layoutSignature,
+    stream?.text,
+    blocks.length,
+    hasAsk,
+    totalSize,
+    applyScrollToLatest,
+  ]);
+
   useEffect(() => {
-    const frame = window.requestAnimationFrame(syncScrollState);
-    return () => window.cancelAnimationFrame(frame);
-  }, [blocks.length, syncScrollState, virtualize, totalSize]);
+    if (!active) return;
+    const node = parentRef.current;
+    const content = node?.firstElementChild;
+    if (!node || !content) return;
+    const observer = new ResizeObserver(() => {
+      if (pinnedRef.current) {
+        applyScrollToLatest();
+        return;
+      }
+      setShowLatest(
+        !isNearBottom({
+          scrollHeight: node.scrollHeight,
+          scrollTop: node.scrollTop,
+          clientHeight: node.clientHeight,
+        }),
+      );
+    });
+    observer.observe(content);
+    return () => observer.disconnect();
+  }, [active, applyScrollToLatest, sessionId, virtualize]);
+
+  useEffect(() => {
+    return () => {
+      if (followFrameRef.current != null) window.cancelAnimationFrame(followFrameRef.current);
+    };
+  }, []);
 
   const renderBlock = (block: SessionTurnBlock, index: number) => {
     const isLast = index === blocks.length - 1;
@@ -281,6 +328,9 @@ export const EventStream = memo(function EventStream({
         ref={parentRef}
         className="h-full overflow-auto overscroll-y-contain px-6 py-4"
         onScroll={syncScrollState}
+        onWheel={() => {
+          programmaticRef.current = false;
+        }}
       >
         {virtualize ? (
           <div
