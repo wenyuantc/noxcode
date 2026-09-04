@@ -382,6 +382,18 @@ export function startNativeSession(payload: StartNativeSessionInput): Promise<Ag
   return invoke("start_native_session", { payload });
 }
 
+export function stageComposerImage(name: string, dataBase64: string): Promise<string> {
+  return invoke("stage_composer_image", { name, dataBase64 });
+}
+
+export function stageComposerImageFromPath(sourcePath: string): Promise<string> {
+  return invoke("stage_composer_image_from_path", { sourcePath });
+}
+
+export function deleteComposerImages(paths: string[]): Promise<void> {
+  return invoke("delete_composer_images", { paths });
+}
+
 export function stopNativeSession(sessionRecordId: string): Promise<void> {
   return invoke("stop_native_session", { sessionRecordId });
 }

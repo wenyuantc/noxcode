@@ -197,7 +197,7 @@ impl BackgroundTaskRegistry {
             ));
         }
         task.steer_tx
-            .send(NativeFollowup::Input(message.to_string()))
+            .send(NativeFollowup::input(message))
             .await
             .map_err(|_| format!("任务 {task_id} 的消息通道已关闭"))
     }
@@ -323,7 +323,10 @@ mod tests {
             .await
             .expect("send");
         match steer_rx.recv().await {
-            Some(NativeFollowup::Input(text)) => assert_eq!(text, "顺便看下 lint"),
+            Some(NativeFollowup::Input { text, images }) => {
+                assert_eq!(text, "顺便看下 lint");
+                assert!(images.is_empty());
+            }
             _ => panic!("expected input"),
         }
         registry.push_inbox("task-1", "需要确认范围");

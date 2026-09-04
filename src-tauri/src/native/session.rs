@@ -1212,9 +1212,12 @@ async fn enqueue_live_input(
     manager: &Mutex<NativeAgentManager>,
     session_record_id: &str,
     input: &str,
+    image_paths: Option<&[String]>,
 ) -> Result<Option<NativeSessionInfo>, String> {
     let trimmed = input.trim();
-    if trimmed.is_empty() {
+    let loaded = crate::native::images::load_native_images(image_paths);
+    crate::native::images::cleanup_staged_loaded_images(&loaded);
+    if trimmed.is_empty() && loaded.images.is_empty() {
         return Err("输入内容不能为空".to_string());
     }
     let live = {
@@ -1226,9 +1229,12 @@ async fn enqueue_live_input(
     let Some((info, tx)) = live else {
         return Ok(None);
     };
-    tx.send(NativeFollowup::Input(trimmed.to_string()))
-        .await
-        .map_err(|_| "内置 Agent 会话已结束，无法发送输入".to_string())?;
+    tx.send(NativeFollowup::input_with_images(
+        trimmed.to_string(),
+        loaded.images,
+    ))
+    .await
+    .map_err(|_| "内置 Agent 会话已结束，无法发送输入".to_string())?;
     Ok(Some(info))
 }
 
@@ -1471,7 +1477,13 @@ pub(crate) async fn start_native_with_manager(
         .map(ToOwned::to_owned);
     if let Some(resume_id) = resume_id.as_deref() {
         if let Some(info) =
-            enqueue_live_input(manager_state.as_ref(), resume_id, &payload.prompt).await?
+            enqueue_live_input(
+                manager_state.as_ref(),
+                resume_id,
+                &payload.prompt,
+                payload.image_paths.as_deref(),
+            )
+            .await?
         {
             let started = AgentSessionStarted {
                 profile_id: info.profile_id,
@@ -2307,6 +2319,7 @@ async fn run_native_loop(
     });
 
     let loaded_images = crate::native::images::load_native_images(image_paths.as_deref());
+    crate::native::images::cleanup_staged_loaded_images(&loaded_images);
     for line in crate::native::images::image_log_lines(&loaded_images) {
         emit_native_line(
             &app,
@@ -2481,11 +2494,12 @@ async fn run_native_loop(
                     }
                 };
                 match followup {
-                    Some(NativeFollowup::Input(input)) => {
+                    Some(NativeFollowup::Input { text, images }) => {
                         match next_loop_step(await_followups, NativeLoopEvent::FollowupInput) {
                             NativeLoopAction::RunFollowup => {
                                 emit_turn_state(&app, &session_record_id, &working, "working");
-                                next = Some(input);
+                                pending_images = images;
+                                next = Some(text);
                             }
                             _ => break,
                         }
@@ -2981,7 +2995,7 @@ pub async fn send_native_input(
     session_record_id: String,
     input: String,
 ) -> Result<(), String> {
-    if enqueue_live_input(state.inner().as_ref(), &session_record_id, &input)
+    if enqueue_live_input(state.inner().as_ref(), &session_record_id, &input, None)
         .await?
         .is_none()
     {
@@ -3410,22 +3424,79 @@ mod tests {
         });
         let manager = tokio::sync::Mutex::new(manager);
 
-        let info = super::enqueue_live_input(&manager, "sess-1", "  下一条  ")
+        let info = super::enqueue_live_input(&manager, "sess-1", "  下一条  ", None)
             .await
             .expect("enqueue")
             .expect("live");
         assert_eq!(info.session_record_id, "sess-1");
         match rx.recv().await {
-            Some(NativeFollowup::Input(text)) => assert_eq!(text, "下一条"),
+            Some(NativeFollowup::Input { text, images }) => {
+                assert_eq!(text, "下一条");
+                assert!(images.is_empty());
+            }
             Some(NativeFollowup::Finish) | Some(NativeFollowup::Compact(_)) => {
                 panic!("unexpected finish")
             }
             None => panic!("channel closed"),
         }
-        assert!(super::enqueue_live_input(&manager, "missing", "x")
+        assert!(super::enqueue_live_input(&manager, "missing", "x", None)
             .await
             .expect("missing")
             .is_none());
+    }
+
+    #[tokio::test]
+    async fn enqueue_live_input_allows_images_without_text() {
+        use crate::native::manager::{NativeAgentManager, NativeFollowup, NativeLiveSession};
+        use crate::native::tools::CancelFlag;
+        use std::collections::VecDeque;
+        use std::sync::atomic::AtomicBool;
+        use std::sync::Arc;
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time")
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!("noxcode-followup-img-{stamp}.png"));
+        std::fs::write(&path, b"\x89PNG\r\n").expect("png");
+
+        let mut manager = NativeAgentManager::new();
+        let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+        manager.add_session(NativeLiveSession {
+            info: crate::native::manager::NativeSessionInfo {
+                profile_id: String::new(),
+                channel_id: "ch-1".to_string(),
+                workspace_id: Some("ws-1".to_string()),
+                session_kind: "execution".to_string(),
+                session_record_id: "sess-1".to_string(),
+            },
+            cancel: CancelFlag::new(),
+            followup_tx: tx,
+            join: tokio::spawn(async {}),
+            allow_all_high_risk: Arc::new(AtomicBool::new(false)),
+            working: Arc::new(AtomicBool::new(false)),
+            pending_permission: VecDeque::new(),
+            pending_question: VecDeque::new(),
+            permission_rules: crate::native::permission_rules::shared_rules(Default::default()),
+            workspace_root: None,
+            pending_plan_approval: VecDeque::new(),
+        });
+        let manager = tokio::sync::Mutex::new(manager);
+        let paths = [path.to_string_lossy().into_owned()];
+        super::enqueue_live_input(&manager, "sess-1", "   ", Some(paths.as_slice()))
+            .await
+            .expect("enqueue")
+            .expect("live");
+        match rx.recv().await {
+            Some(NativeFollowup::Input { text, images }) => {
+                assert!(text.is_empty());
+                assert_eq!(images.len(), 1);
+                assert_eq!(images[0].name, path.file_name().unwrap().to_string_lossy());
+            }
+            other => panic!("unexpected followup: {other:?}"),
+        }
+        let _ = std::fs::remove_file(path);
     }
 
     #[tokio::test]

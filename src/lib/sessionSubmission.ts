@@ -9,6 +9,7 @@ export interface SessionSubmissionInput {
   model?: string | null;
   reasoningEffort?: string | null;
   planMode?: boolean | null;
+  imagePaths?: string[] | null;
 }
 
 export interface SessionSubmissionApi {
@@ -26,6 +27,9 @@ const defaultApi: SessionSubmissionApi = {
 
 export function sessionSubmissionPayload(input: SessionSubmissionInput): StartNativeSessionInput {
   const sessionId = input.sessionId?.trim() || null;
+  const imagePaths = (input.imagePaths ?? [])
+    .map((path) => path.trim())
+    .filter((path) => path.length > 0);
   return {
     ai_channel_id: input.channelId,
     workspace_id: input.workspaceId,
@@ -34,6 +38,7 @@ export function sessionSubmissionPayload(input: SessionSubmissionInput): StartNa
     reasoning_effort: input.reasoningEffort ?? null,
     plan_mode: input.planMode ?? null,
     resume_session_id: sessionId,
+    image_paths: imagePaths.length > 0 ? imagePaths : null,
   };
 }
 

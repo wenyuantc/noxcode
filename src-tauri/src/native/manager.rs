@@ -7,6 +7,7 @@ use std::sync::Arc;
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 
+use crate::native::model::types::NativeImage;
 use crate::native::permission_rules::SharedPermissionRules;
 use crate::native::tools::dispatch::PlanApprovalAnswer;
 use crate::native::tools::permission::{
@@ -24,11 +25,31 @@ pub struct NativeSessionInfo {
     pub session_record_id: String,
 }
 
+#[derive(Debug)]
 pub enum NativeFollowup {
-    Input(String),
+    Input {
+        text: String,
+        images: Vec<NativeImage>,
+    },
     /// `/compact [指令]`：在等待输入或下一次模型调用前压缩上下文。
     Compact(Option<String>),
     Finish,
+}
+
+impl NativeFollowup {
+    pub fn input(text: impl Into<String>) -> Self {
+        Self::Input {
+            text: text.into(),
+            images: Vec::new(),
+        }
+    }
+
+    pub fn input_with_images(text: impl Into<String>, images: Vec<NativeImage>) -> Self {
+        Self::Input {
+            text: text.into(),
+            images,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -507,7 +528,7 @@ mod tests {
         let join = tokio::spawn(async move {
             match rx.recv().await {
                 Some(NativeFollowup::Finish) => {}
-                Some(NativeFollowup::Input(_)) | Some(NativeFollowup::Compact(_)) => {
+                Some(NativeFollowup::Input { .. }) | Some(NativeFollowup::Compact(_)) => {
                     panic!("unexpected input")
                 }
                 None => panic!("channel closed"),

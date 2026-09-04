@@ -362,9 +362,9 @@ impl AgentRunner {
         let mut injected = false;
         while let Ok(item) = guard.try_recv() {
             match item {
-                NativeFollowup::Input(text) => {
+                NativeFollowup::Input { text, images } => {
                     self.emit(format!("[USER_INPUT] {text}"));
-                    self.messages.push(Message::user(text));
+                    self.messages.push(Message::user_with_images(text, images));
                     injected = true;
                 }
                 NativeFollowup::Compact(instructions) => {
@@ -2778,7 +2778,7 @@ mod tests {
         let (steer_tx, steer_rx) = mpsc::channel(1);
         runner.steer_rx = Some(Arc::new(Mutex::new(steer_rx)));
         steer_tx
-            .send(NativeFollowup::Input("补充约束".to_string()))
+            .send(NativeFollowup::input("补充约束"))
             .await
             .expect("steer");
         let snapshots = capture_checkpoints(&mut runner);

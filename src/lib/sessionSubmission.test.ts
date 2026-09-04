@@ -44,4 +44,23 @@ describe("submitSessionPrompt", () => {
     expect(backend.startNativeSession).toHaveBeenCalledTimes(1);
     expect(backend.resumeNativeSession).not.toHaveBeenCalled();
   });
+
+  it("forwards image paths on start and resume", async () => {
+    const backend = api();
+    const imagePaths = ["/tmp/a.png", "  /tmp/b.webp  ", ""];
+    await submitSessionPrompt({ ...base, imagePaths }, backend);
+    expect(backend.startNativeSession).toHaveBeenCalledWith({
+      ...sessionSubmissionPayload(base),
+      image_paths: ["/tmp/a.png", "/tmp/b.webp"],
+    });
+
+    await submitSessionPrompt({ ...base, sessionId: "sess-1", imagePaths }, backend);
+    expect(backend.resumeNativeSession).toHaveBeenCalledWith(
+      {
+        ...sessionSubmissionPayload({ ...base, sessionId: "sess-1" }),
+        image_paths: ["/tmp/a.png", "/tmp/b.webp"],
+      },
+      "sess-1",
+    );
+  });
 });

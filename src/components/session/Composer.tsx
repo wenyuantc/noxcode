@@ -1,18 +1,38 @@
+import { convertFileSrc, isTauri } from "@tauri-apps/api/core";
+import { open } from "@tauri-apps/plugin-dialog";
 import { ArrowUp, Loader2, Square } from "lucide-react";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type ClipboardEvent, type DragEvent } from "react";
 import { useTranslation } from "react-i18next";
 
 import { Button } from "@/components/ui/button";
 import {
   compactNativeSession,
+  deleteComposerImages,
   expandNativeSlashCommand,
   forkNativeSession,
   listGitFiles,
   listNativeSkills,
   listNativeSlashCommands,
   listNativeSubagents,
+  stageComposerImage,
+  stageComposerImageFromPath,
   stopNativeSession,
 } from "@/lib/backend";
+import {
+  appendComposerTrigger,
+  collectFilesFromDataTransfer,
+  fileNameFromPath,
+  filterComposerImageFiles,
+  filterComposerImagePaths,
+  mergeComposerImageItems,
+  removeComposerImagesByIds,
+  selectedComposerImageIds,
+  toggleComposerImageSelected,
+  type ComposerImageFileLike,
+  type ComposerImageItem,
+  type ComposerImageSkip,
+  type ComposerTriggerChar,
+} from "@/lib/composerImages";
 import { clampMentionIndex, resolveComposerMentionKey } from "@/lib/composerMention";
 import {
   builtinSlashCommands,
@@ -36,10 +56,29 @@ import { useUiStore } from "@/stores/uiStore";
 import { useWorkspaceStore } from "@/stores/workspaceStore";
 import { BranchPicker } from "./BranchPicker";
 import { ChannelModelPicker } from "./ChannelModelPicker";
+import { ComposerImageStrip } from "./ComposerImageStrip";
+import { ComposerPlusMenu } from "./ComposerPlusMenu";
 import { ContextCapacity } from "./ContextCapacity";
 import { PermissionModePicker } from "./PermissionModePicker";
 import { ThinkingLevelPicker } from "./ThinkingLevelPicker";
 import { WorkspacePicker } from "./WorkspacePicker";
+
+const IMAGE_DIALOG_FILTERS = [
+  { name: "Images", extensions: ["png", "jpg", "jpeg", "gif", "webp"] },
+];
+
+async function readFileAsBase64(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      const result = String(reader.result ?? "");
+      const comma = result.indexOf(",");
+      resolve(comma >= 0 ? result.slice(comma + 1) : result);
+    };
+    reader.onerror = () => reject(reader.error ?? new Error("read failed"));
+    reader.readAsDataURL(file);
+  });
+}
 
 /** `/init [补充要求]` 展开成的提示词：Agent 摸底仓库后生成或补充 AGENTS.md。 */
 export function buildInitPrompt(extra?: string): string {
@@ -88,8 +127,16 @@ export function Composer({ compact = false }: { compact?: boolean }) {
   const [mentionOpen, setMentionOpen] = useState<"@" | "/" | "$" | null>(null);
   const [mentionIndex, setMentionIndex] = useState(0);
   const [sending, setSending] = useState(false);
+  const [attachments, setAttachments] = useState<ComposerImageItem[]>([]);
+  const [dragging, setDragging] = useState(false);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const mentionListRef = useRef<HTMLDivElement>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const attachmentsRef = useRef<ComposerImageItem[]>([]);
+  const dragDepthRef = useRef(0);
+  const sendingRef = useRef(false);
+  const applyDroppedPathsRef = useRef<(paths: string[]) => void>(() => undefined);
+  attachmentsRef.current = attachments;
 
   const selectedModel = channel?.models.find((item) => item.id === model);
   const efforts = composerThinkingLevels(selectedModel);
@@ -102,6 +149,25 @@ export function Composer({ compact = false }: { compact?: boolean }) {
   useEffect(() => {
     setModel(activeModelId ?? "");
   }, [activeModelId]);
+
+  useEffect(() => {
+    if (sendingRef.current) return;
+    const stale = attachmentsRef.current;
+    if (stale.length > 0) {
+      void deleteComposerImages(stale.map((item) => item.path)).catch(() => undefined);
+    }
+    setAttachments([]);
+  }, [selectedSessionId]);
+
+  useEffect(() => {
+    return () => {
+      if (sendingRef.current) return;
+      const leftover = attachmentsRef.current;
+      if (leftover.length > 0) {
+        void deleteComposerImages(leftover.map((item) => item.path)).catch(() => undefined);
+      }
+    };
+  }, []);
 
   const trigger = parseComposerTrigger(draft);
 
@@ -202,9 +268,134 @@ export function Composer({ compact = false }: { compact?: boolean }) {
   const working = Boolean(live) && turnState !== "waiting_input" && turnState !== "ended";
   const sendBusy = sending || working;
 
+  const skipMessage = (skip: ComposerImageSkip) => {
+    if (skip.reason === "size") return t("sessions:imageTooLarge", { name: skip.name });
+    if (skip.reason === "limit") return t("sessions:imageLimit");
+    return t("sessions:imageTypeUnsupported", { name: skip.name });
+  };
+
+  const applyIncomingAttachments = (incoming: ComposerImageItem[]) => {
+    const merged = mergeComposerImageItems(attachmentsRef.current, incoming);
+    const kept = new Set(merged.items.map((item) => item.path));
+    const unused = incoming.filter((item) => !kept.has(item.path)).map((item) => item.path);
+    if (unused.length > 0) {
+      void deleteComposerImages(unused).catch(() => undefined);
+    }
+    if (merged.skipped.length > 0) setError(skipMessage(merged.skipped[0]));
+    else if (incoming.length > 0) setError(null);
+    setAttachments(merged.items);
+  };
+
+  const addImageFiles = async (files: ComposerImageFileLike[]) => {
+    const { accepted, skipped } = filterComposerImageFiles(files);
+    if (skipped.length > 0) setError(skipMessage(skipped[0]));
+    const incoming: ComposerImageItem[] = [];
+    for (const file of accepted) {
+      if (!(file instanceof File)) continue;
+      try {
+        const dataBase64 = await readFileAsBase64(file);
+        const path = await stageComposerImage(file.name || "image.png", dataBase64);
+        incoming.push({
+          id: crypto.randomUUID(),
+          name: file.name || "image.png",
+          path,
+          previewUrl: convertFileSrc(path),
+          selected: false,
+        });
+      } catch (err) {
+        setError(err instanceof Error ? err.message : String(err));
+      }
+    }
+    if (incoming.length > 0) applyIncomingAttachments(incoming);
+  };
+
+  const addImagePaths = async (paths: string[]) => {
+    const incoming: ComposerImageItem[] = [];
+    for (const source of paths) {
+      try {
+        const path = await stageComposerImageFromPath(source);
+        incoming.push({
+          id: crypto.randomUUID(),
+          name: fileNameFromPath(source),
+          path,
+          previewUrl: convertFileSrc(path),
+          selected: false,
+        });
+      } catch (err) {
+        setError(err instanceof Error ? err.message : String(err));
+      }
+    }
+    if (incoming.length > 0) applyIncomingAttachments(incoming);
+  };
+
+  const applyDroppedPaths = (paths: string[]) => {
+    const { accepted, skipped } = filterComposerImagePaths(paths);
+    if (skipped.length > 0) setError(skipMessage(skipped[0]));
+    if (accepted.length > 0) void addImagePaths(accepted);
+  };
+  applyDroppedPathsRef.current = applyDroppedPaths;
+
+  useEffect(() => {
+    if (!isTauri()) return;
+    let cancelled = false;
+    let unlisten: (() => void) | undefined;
+    void import("@tauri-apps/api/webview")
+      .then(({ getCurrentWebview }) => {
+        if (cancelled) return undefined;
+        return getCurrentWebview().onDragDropEvent((event) => {
+          const payload = event.payload;
+          if (payload.type === "enter" || payload.type === "over") {
+            setDragging(true);
+            return;
+          }
+          if (payload.type === "leave") {
+            setDragging(false);
+            return;
+          }
+          if (payload.type === "drop") {
+            setDragging(false);
+            applyDroppedPathsRef.current(payload.paths);
+          }
+        });
+      })
+      .then((stop) => {
+        if (!stop) return;
+        if (cancelled) stop();
+        else unlisten = stop;
+      });
+    return () => {
+      cancelled = true;
+      unlisten?.();
+    };
+  }, []);
+
+  const pickAttachments = async () => {
+    try {
+      if (isTauri()) {
+        const selected = await open({
+          multiple: true,
+          filters: IMAGE_DIALOG_FILTERS,
+        });
+        const paths = selected == null ? [] : Array.isArray(selected) ? selected : [selected];
+        if (paths.length > 0) await addImagePaths(paths);
+        return;
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+      return;
+    }
+    fileInputRef.current?.click();
+  };
+
+  const deleteStaged = (items: ComposerImageItem[]) => {
+    if (items.length > 0) {
+      void deleteComposerImages(items.map((item) => item.path)).catch(() => undefined);
+    }
+  };
+
   const send = async () => {
     const prompt = draft.trim();
-    if (!prompt) {
+    if (!prompt && attachments.length === 0) {
       setError(t("sessions:emptyPrompt"));
       return;
     }
@@ -281,8 +472,10 @@ export function Composer({ compact = false }: { compact?: boolean }) {
     }
     setError(null);
     setSending(true);
+    sendingRef.current = true;
     setEffort(resolvedEffort);
     try {
+      const imagePaths = attachments.map((item) => item.path);
       await submitSessionPrompt({
         sessionId: selectedSessionId,
         workspaceId,
@@ -291,11 +484,15 @@ export function Composer({ compact = false }: { compact?: boolean }) {
         model: model || null,
         reasoningEffort: resolvedEffort || null,
         planMode: composerPlanMode,
+        imagePaths,
       });
+      attachmentsRef.current = [];
       setDraft("");
+      setAttachments([]);
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
+      sendingRef.current = false;
       setSending(false);
     }
   };
@@ -307,6 +504,23 @@ export function Composer({ compact = false }: { compact?: boolean }) {
     setMentionOpen(null);
     textareaRef.current?.focus();
   };
+
+  const insertTrigger = (trigger: ComposerTriggerChar) => {
+    setDraft(appendComposerTrigger(draft, trigger));
+    textareaRef.current?.focus();
+  };
+
+  const handlePaste = (event: ClipboardEvent<HTMLDivElement>) => {
+    const files = collectFilesFromDataTransfer(event.clipboardData);
+    const { accepted } = filterComposerImageFiles(files);
+    if (accepted.length === 0) return;
+    const text = event.clipboardData.getData("text/plain");
+    if (!text) event.preventDefault();
+    void addImageFiles(accepted);
+  };
+
+  const dataTransferHasFiles = (event: DragEvent<HTMLDivElement>) =>
+    Array.from(event.dataTransfer.types).includes("Files");
 
   const togglePlanMode = () => {
     applyComposerPlanMode({
@@ -325,7 +539,66 @@ export function Composer({ compact = false }: { compact?: boolean }) {
           <BranchPicker />
         </div>
       ) : null}
-      <div className="rounded-2xl border border-border/70 bg-card/95 shadow-sm transition-all duration-150 focus-within:border-ring/60 focus-within:ring-2 focus-within:ring-ring/10">
+      <div
+        className={cn(
+          "rounded-2xl border border-border/70 bg-card/95 shadow-sm transition-all duration-150 focus-within:border-ring/60 focus-within:ring-2 focus-within:ring-ring/10",
+          dragging && "border-ring ring-2 ring-ring/20",
+        )}
+        onPaste={handlePaste}
+        onDragEnter={(event) => {
+          if (!dataTransferHasFiles(event)) return;
+          event.preventDefault();
+          dragDepthRef.current += 1;
+          setDragging(true);
+        }}
+        onDragOver={(event) => {
+          if (!dataTransferHasFiles(event)) return;
+          event.preventDefault();
+          event.dataTransfer.dropEffect = "copy";
+        }}
+        onDragLeave={(event) => {
+          if (!dataTransferHasFiles(event)) return;
+          event.preventDefault();
+          dragDepthRef.current -= 1;
+          if (dragDepthRef.current <= 0) {
+            dragDepthRef.current = 0;
+            setDragging(false);
+          }
+        }}
+        onDrop={(event) => {
+          if (!dataTransferHasFiles(event)) return;
+          event.preventDefault();
+          dragDepthRef.current = 0;
+          setDragging(false);
+          void addImageFiles(collectFilesFromDataTransfer(event.dataTransfer));
+        }}
+      >
+        <input
+          ref={fileInputRef}
+          type="file"
+          accept="image/png,image/jpeg,image/gif,image/webp"
+          multiple
+          className="hidden"
+          onChange={(event) => {
+            const files = Array.from(event.target.files ?? []);
+            event.target.value = "";
+            if (files.length > 0) void addImageFiles(files);
+          }}
+        />
+        <ComposerImageStrip
+          images={attachments}
+          onToggle={(id) => setAttachments((items) => toggleComposerImageSelected(items, id))}
+          onRemove={(id) => {
+            const next = removeComposerImagesByIds(attachments, [id]);
+            deleteStaged(attachments.filter((item) => item.id === id));
+            setAttachments(next);
+          }}
+          onRemoveSelected={() => {
+            const ids = selectedComposerImageIds(attachments);
+            deleteStaged(attachments.filter((item) => ids.includes(item.id)));
+            setAttachments(removeComposerImagesByIds(attachments, ids));
+          }}
+        />
         <textarea
           ref={textareaRef}
           value={draft}
@@ -402,6 +675,10 @@ export function Composer({ compact = false }: { compact?: boolean }) {
           />
         ) : null}
         <div className="flex flex-wrap items-center gap-1.5 border-t border-border/50 px-3 py-2 text-xs">
+          <ComposerPlusMenu
+            onAddAttachment={() => void pickAttachments()}
+            onInsertTrigger={insertTrigger}
+          />
           <PermissionModePicker />
           <ChannelModelPicker />
           <ThinkingLevelPicker value={resolvedEffort} levels={efforts} onChange={setEffort} />
