@@ -2,6 +2,10 @@
   "newSession": "New session",
   "search": "Search",
   "settings": "Settings",
+  "update": "Update",
+  "downloading": "Downloading",
+  "restartUpdate": "Restart to update",
+  "updateAvailableTitle": "Update to {{version}}",
   "apiLogs": "API Call Logs",
   "backToWorkspace": "Back to workspace",
   "shortcuts": {

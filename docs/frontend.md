@@ -25,10 +25,10 @@ src/lib/sessionLines.ts  行前缀解析、结构化 tool 信封、call_id / 子
 src/lib/planMode.ts      按会话解析 Composer 的运行时 / 默认计划模式
 src/lib/gitHelpers.ts    暂存分组、diff 行着色
 src/locales/{zh-CN,en}   九个命名空间
-src/stores/              ui / workspace / channel / session / settings
+src/stores/              ui / workspace / channel / session / settings / update
 src/hooks/               useNativeEvents · useSshTrustEvents · useAppHotkeys
 src/components/ui/       17 个 shadcn 底座
-src/components/layout/   AppShell · Sidebar* · StartupUpdateBanner
+src/components/layout/   AppShell · Sidebar*
 src/components/session/  Composer · EventStream · 回合行 / 计划卡 / Ask 卡 · 待办面板 · pickers · 权限对话框
 src/components/settings/ SettingsLayout + 分节
 src/components/apiLogs/  调用详情弹层
@@ -44,6 +44,7 @@ src/components/git/      GitPanel · DiffView · CheckpointTimeline
 | `channelStore` | `noxcode:active-model` | 渠道列表、当前渠道/模型 |
 | `sessionStore` | — | live 会话、事件行、turn-state、按会话计划模式、权限/提问 |
 | `settingsStore` | — | native / network / 快捷提示 |
+| `updateStore` | — | 桌面更新检查 / 下载 / 重启；侧栏按钮与关于页共用 |
 
 ## 会话接线
 
@@ -73,7 +74,7 @@ Composer / 编辑重发 / 重试走 `submitSessionPrompt`：有选中会话则 `
 
 左导航三组：基础设置（general / appearance / channels / ssh）、Agent 能力（runtime / subagents / mcp / skills / hooks）、数据与统计（usage / database / about）。开关即时生效，文本输入配「保存」。通用设置提供桌面通知开关；Native runtime 提供工具后自动 checkpoint 开关和保留天数（`0` 不清理）；SSH 编辑弹窗提供 KEX / Host Key / Cipher / MAC 高级算法区，以及旧服务器预设 / 恢复默认；MCP 卡片可在全部工作区和指定工作区之间切换并勾选绑定工作区。
 
-渠道删除时若有 live session 则后端拒绝，错误原文展示。子智能体是列表 + 弹窗 CRUD，可配模型、工具与工作区作用域。MCP 还支持备注、删除、Playwright 预设和导出片段。数据库维护展示路径与迁移版本、备份范围（SQL 本体 vs 配置目录/密钥环），并提供导出 / 导入 SQL 与打开数据库目录。关于页用 `getVersion()` 显示真实版本，可检查 / 下载 / 重启更新；开发模式会提示无法检查。`AppShell` 顶部挂启动更新横幅（正式包才出现），跳转到 `/settings/about`。
+渠道删除时若有 live session 则后端拒绝，错误原文展示。子智能体是列表 + 弹窗 CRUD，可配模型、工具与工作区作用域。MCP 还支持备注、删除、Playwright 预设和导出片段。数据库维护展示路径与迁移版本、备份范围（SQL 本体 vs 配置目录/密钥环），并提供导出 / 导入 SQL 与打开数据库目录。关于页用 `getVersion()` 显示真实版本；进入该页会自动检查更新，也可手动再检查 / 下载 / 重启。开发模式会提示无法检查。应用启动后静默检查；有新版本时首页侧栏底部显示「更新 / 下载中 / 重启更新」，与关于页共用 `updateStore`。
 
 ## Git 抽屉
 

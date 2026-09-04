@@ -1,12 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import {
-  DISMISSED_UPDATE_VERSION_KEY,
-  dismissStartupUpdate,
-  mapUpdaterError,
-  shouldPromptStartupUpdate,
-  updaterErrorI18nKey,
-} from "@/lib/appUpdate";
+import { mapUpdaterError, updaterErrorI18nKey } from "@/lib/appUpdate";
 
 describe("mapUpdaterError", () => {
   it("maps a missing update to already latest", () => {
@@ -52,24 +46,6 @@ describe("mapUpdaterError", () => {
   it("falls back to unknown for other failures", () => {
     expect(mapUpdaterError("the platform `windows-arm64` was not found")).toBe("unknown");
     expect(mapUpdaterError({ message: 12 })).toBe("unknown");
-  });
-});
-
-describe("startup update prompt", () => {
-  it("prompts when a version has not been dismissed", () => {
-    expect(shouldPromptStartupUpdate("0.6.0")).toBe(true);
-  });
-
-  it("does not prompt again for a dismissed version when localStorage exists", () => {
-    if (typeof window === "undefined") {
-      expect(shouldPromptStartupUpdate("0.6.0")).toBe(true);
-      return;
-    }
-    window.localStorage.removeItem(DISMISSED_UPDATE_VERSION_KEY);
-    dismissStartupUpdate("0.6.0");
-    expect(shouldPromptStartupUpdate("0.6.0")).toBe(false);
-    expect(shouldPromptStartupUpdate("0.6.1")).toBe(true);
-    window.localStorage.removeItem(DISMISSED_UPDATE_VERSION_KEY);
   });
 });
 

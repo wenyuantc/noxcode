@@ -349,9 +349,6 @@
     "installed": "更新已安装。请重启应用以使用新版本。",
     "restart": "立即重启",
     "restartFailed": "重启失败：{{detail}}",
-    "startupAvailable": "发现新版本 {{version}}（当前 {{current}}）。不会自动安装。",
-    "startupOpenSettings": "去更新",
-    "startupDismiss": "稍后提醒",
     "errors": {
       "network": "无法连接更新服务器，请检查网络后重试。",
       "alreadyLatest": "当前已是最新版本。",

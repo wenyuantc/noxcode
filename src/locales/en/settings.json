@@ -349,9 +349,6 @@
     "installed": "The update is installed. Restart the app to use the new version.",
     "restart": "Restart now",
     "restartFailed": "Failed to restart: {{detail}}",
-    "startupAvailable": "Version {{version}} is available (current {{current}}). It will not install automatically.",
-    "startupOpenSettings": "Update",
-    "startupDismiss": "Remind later",
     "errors": {
       "network": "Could not reach the update server. Check your network and try again.",
       "alreadyLatest": "You already have the latest version.",
