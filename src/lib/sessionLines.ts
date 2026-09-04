@@ -282,18 +282,39 @@ export function sessionLineBody(text: string): string {
   return stripSubagentPrefix(text).body;
 }
 
+function parseEnvelopeImages(value: unknown): NativeToolImage[] | undefined {
+  if (!Array.isArray(value) || value.length === 0) return undefined;
+  const images: NativeToolImage[] = [];
+  for (const item of value) {
+    if (!item || typeof item !== "object") continue;
+    const record = item as { name?: unknown; mime_type?: unknown; data_url?: unknown };
+    if (typeof record.name !== "string" || typeof record.data_url !== "string") continue;
+    images.push({
+      name: record.name,
+      mime_type: typeof record.mime_type === "string" ? record.mime_type : "image/png",
+      data_url: record.data_url,
+    });
+  }
+  return images.length > 0 ? images : undefined;
+}
+
 export function parseStdoutEnvelope(
   message: string | null | undefined,
-): { line: string; tool?: NativeToolEvent } | null {
+): { line: string; tool?: NativeToolEvent; images?: NativeToolImage[] } | null {
   if (!message) return null;
   const trimmed = message.trim();
   if (!trimmed.startsWith("{")) return null;
   try {
     const value: unknown = JSON.parse(trimmed);
     if (!value || typeof value !== "object") return null;
-    const record = value as { nox?: unknown; line?: unknown; tool?: NativeToolEvent };
+    const record = value as {
+      nox?: unknown;
+      line?: unknown;
+      tool?: NativeToolEvent;
+      images?: unknown;
+    };
     if (record.nox !== 1 || typeof record.line !== "string") return null;
-    return { line: record.line, tool: record.tool };
+    return { line: record.line, tool: record.tool, images: parseEnvelopeImages(record.images) };
   } catch {
     return null;
   }
@@ -306,6 +327,7 @@ export function hydrateSessionLine(input: RawSessionLine): RawSessionLine {
     ...input,
     text: envelope.line,
     tool: input.tool ?? envelope.tool,
+    images: input.images ?? envelope.images,
   };
 }
 
@@ -717,6 +739,16 @@ export function displaySessionTitle(title: string | null | undefined): string {
 export function isHiddenSessionCeremonyLine(text: string): boolean {
   const line = text.trim();
   if (line.startsWith("[续聊]")) return true;
+  if (
+    line.startsWith("附带图片:") ||
+    line.startsWith("附带图片：") ||
+    line.startsWith("跳过缺失图片:") ||
+    line.startsWith("跳过缺失图片：") ||
+    line.startsWith("跳过图片:") ||
+    line.startsWith("跳过图片：")
+  ) {
+    return true;
+  }
   return (
     line === "内置 Agent 会话已恢复" ||
     line === "内置 Agent 会话已创建" ||

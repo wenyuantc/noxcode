@@ -218,6 +218,10 @@ pub struct ContextUsageSnapshot {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum NativeEvent {
     Line(String),
+    UserInput {
+        text: String,
+        images: Vec<NativeImage>,
+    },
     Delta(StreamDelta),
     ContextUsage(ContextUsageSnapshot),
     Tool {
@@ -363,7 +367,12 @@ impl AgentRunner {
         while let Ok(item) = guard.try_recv() {
             match item {
                 NativeFollowup::Input { text, images } => {
-                    self.emit(format!("[USER_INPUT] {text}"));
+                    if let Some(tx) = &self.on_event {
+                        let _ = tx.send(NativeEvent::UserInput {
+                            text: text.clone(),
+                            images: images.clone(),
+                        });
+                    }
                     self.messages.push(Message::user_with_images(text, images));
                     injected = true;
                 }
@@ -2496,6 +2505,9 @@ mod tests {
         while let Ok(event) = rx.try_recv() {
             match event {
                 NativeEvent::Line(line) | NativeEvent::Tool { line, .. } => lines.push(line),
+                NativeEvent::UserInput { text, .. } => {
+                    lines.push(format!("[USER_INPUT] {text}"));
+                }
                 _ => {}
             }
         }

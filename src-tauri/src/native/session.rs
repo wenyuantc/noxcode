@@ -661,6 +661,20 @@ async fn forward_native_events(
                         )
                         .await;
                     }
+                    NativeEvent::UserInput { text, images } => {
+                        deltas.flush();
+                        emit_native_output(
+                            &app,
+                            &session_record_id,
+                            &profile_id,
+                            workspace_id.as_deref(),
+                            &session_kind,
+                            format!("[USER_INPUT] {text}"),
+                            None,
+                            native_images_for_output(&images),
+                        )
+                        .await;
+                    }
                     NativeEvent::Tool { line, event, images } => {
                         deltas.flush();
                         let live_images = if images.is_empty() {
@@ -769,16 +783,47 @@ async fn emit_native_line(
     .await;
 }
 
-fn persist_stdout_message(line: &str, tool: Option<&NativeToolEvent>) -> String {
-    let Some(tool) = tool else {
+fn persist_stdout_message(
+    line: &str,
+    tool: Option<&NativeToolEvent>,
+    images: Option<&[NativeToolImage]>,
+) -> String {
+    let has_images = images.map(|items| !items.is_empty()).unwrap_or(false);
+    if tool.is_none() && !has_images {
         return line.to_string();
-    };
-    serde_json::json!({
+    }
+    let mut value = serde_json::json!({
         "nox": 1,
         "line": line,
-        "tool": tool,
-    })
-    .to_string()
+    });
+    if let Some(tool) = tool {
+        value["tool"] = serde_json::to_value(tool).unwrap_or(serde_json::Value::Null);
+    }
+    if let Some(images) = images {
+        if !images.is_empty() {
+            value["images"] = serde_json::to_value(images).unwrap_or(serde_json::Value::Null);
+        }
+    }
+    value.to_string()
+}
+
+fn native_images_for_output(
+    images: &[crate::native::model::types::NativeImage],
+) -> Option<Vec<NativeToolImage>> {
+    if images.is_empty() {
+        None
+    } else {
+        Some(
+            images
+                .iter()
+                .map(|image| NativeToolImage {
+                    name: image.name.clone(),
+                    mime_type: image.mime_type.clone(),
+                    data_url: image.data_url(),
+                })
+                .collect(),
+        )
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -796,7 +841,7 @@ async fn emit_native_output(
         Ok(pool) => pool,
         Err(_) => return,
     };
-    let persisted = persist_stdout_message(&line, tool.as_ref());
+    let persisted = persist_stdout_message(&line, tool.as_ref(), images.as_deref());
     let event_id = insert_session_event(&pool, session_record_id, "stdout", Some(&persisted))
         .await
         .ok();
@@ -2339,16 +2384,18 @@ async fn run_native_loop(
     let await_followups = true;
     while let Some(prompt) = next.take() {
         emit_turn_state(&app, &session_record_id, &working, "working");
-        emit_native_line(
+        let images = std::mem::take(&mut pending_images);
+        emit_native_output(
             &app,
             &session_record_id,
             &profile_id,
             Some(&workspace_id),
             &kind,
             format!("[USER_INPUT] {prompt}"),
+            None,
+            native_images_for_output(&images),
         )
         .await;
-        let images = std::mem::take(&mut pending_images);
         // 每回合按关键词回忆相关记忆，附在用户消息后。
         if let Some(dir) = memory_dir.as_deref() {
             let hits = crate::native::memory::recall(dir, &prompt, 3);
@@ -3143,15 +3190,25 @@ mod tests {
             mcp_tool: None,
             image_names: Vec::new(),
         };
-        let raw = super::persist_stdout_message("[读取] a.ts", Some(&tool));
+        let raw = super::persist_stdout_message("[读取] a.ts", Some(&tool), None);
         let value: serde_json::Value = serde_json::from_str(&raw).expect("envelope");
         assert_eq!(value["nox"], 1);
         assert_eq!(value["line"], "[读取] a.ts");
         assert_eq!(value["tool"]["call_id"], "c1");
         assert_eq!(
-            super::persist_stdout_message("[读取] a.ts", None),
+            super::persist_stdout_message("[读取] a.ts", None, None),
             "[读取] a.ts"
         );
+        let images = [crate::db::models::NativeToolImage {
+            name: "a.png".to_string(),
+            mime_type: "image/png".to_string(),
+            data_url: "data:image/png;base64,QQ==".to_string(),
+        }];
+        let with_images =
+            super::persist_stdout_message("[USER_INPUT] 看图", None, Some(images.as_slice()));
+        let image_value: serde_json::Value = serde_json::from_str(&with_images).expect("envelope");
+        assert_eq!(image_value["line"], "[USER_INPUT] 看图");
+        assert_eq!(image_value["images"][0]["name"], "a.png");
     }
 
     #[test]

@@ -404,6 +404,7 @@ const TurnBlockView = memo(function TurnBlockView({
       {block.user ? (
         <UserBubble
           text={block.user.text}
+          images={block.user.images}
           sessionId={sessionId}
           editable={editableUser}
           working={working}

@@ -165,6 +165,15 @@ describe("sessionLines", () => {
     expect(hydrateSessionLine(line("1", envelope)).text).toBe("[读取] a.ts");
     expect(hydrateSessionLine(line("1", envelope)).tool?.call_id).toBe("c1");
     expect(parseStdoutEnvelope("[读取] a.ts")).toBeNull();
+    const withImages = JSON.stringify({
+      nox: 1,
+      line: "[USER_INPUT] 看图",
+      images: [{ name: "a.png", mime_type: "image/png", data_url: "data:image/png;base64,QQ==" }],
+    });
+    expect(hydrateSessionLine(line("2", withImages)).images?.[0]?.name).toBe("a.png");
+    expect(groupSessionLines([line("2", withImages)])[0]?.images?.[0]?.data_url).toBe(
+      "data:image/png;base64,QQ==",
+    );
   });
 
   it("pairs tool results with the previous tool call", () => {
@@ -233,6 +242,8 @@ describe("sessionLines", () => {
     expect(isHiddenSessionCeremonyLine("内置 Agent 会话已恢复")).toBe(true);
     expect(isHiddenSessionCeremonyLine("内置 Agent 会话已创建")).toBe(true);
     expect(isHiddenSessionCeremonyLine("[ERROR] 已取消")).toBe(true);
+    expect(isHiddenSessionCeremonyLine("附带图片: 1 张\n1. a.png")).toBe(true);
+    expect(isHiddenSessionCeremonyLine("跳过缺失图片: /tmp/a.png")).toBe(true);
     expect(isHiddenSessionCeremonyLine("[ERROR] boom")).toBe(false);
     expect(isHiddenSessionCeremonyLine("[MCP] 未启用服务器")).toBe(false);
     const grouped = groupSessionLines([
