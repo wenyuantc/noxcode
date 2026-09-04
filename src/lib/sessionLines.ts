@@ -1,3 +1,7 @@
+import type { NativeToolEvent, NativeToolImage } from "@/lib/types";
+
+export type { NativeToolEvent, NativeToolImage };
+
 export type SessionLineKind = "user" | "assistant" | "tool" | "tool_result" | "system" | "error";
 
 export type TurnSegmentKind =
@@ -184,6 +188,8 @@ export interface RawSessionLine {
   sessionId: string;
   text: string;
   createdAt: string;
+  tool?: NativeToolEvent;
+  images?: NativeToolImage[];
 }
 
 export interface GroupedSessionItem {
@@ -193,6 +199,10 @@ export interface GroupedSessionItem {
   createdAt: string;
   toolName?: string;
   result?: string;
+  ok?: boolean;
+  tool?: NativeToolEvent;
+  images?: NativeToolImage[];
+  subagentTag?: string;
 }
 
 export interface TurnSegment {
@@ -241,6 +251,7 @@ const TOOL_PREFIXES = [
   "[技能]",
   "[待办]",
   "[补丁]",
+  "[MCP工具]",
 ];
 const SYSTEM_PREFIXES = [
   "[思考]",
@@ -255,15 +266,47 @@ const SYSTEM_PREFIXES = [
 
 const TODO_STATUSES: TodoStatus[] = ["pending", "in_progress", "completed"];
 const TODO_LINE_RE = /^- \[(\w+)\] (.+) \(([^)]+)\)\s*$/;
-const SUBAGENT_PREFIX_RE = /^(\[子 Agent[^\]]*\])\s*/;
+const SUBAGENT_TAG_RE = /^(\[子 Agent \d+\([^)]+\) - [^\]]*\])\s*/;
+const SUBAGENT_STATUS_RE = /^(启动（|结束 |后台任务 )/;
 const RETRY_TAIL_RE = /(?:，|,)\s*(\d+)\s*秒后进行第\s*(\d+)\s*\/\s*(\d+)\s*次重试\s*$/;
 const HTTP_STATUS_RE = /HTTP\s*(\d{3})/i;
 
 export function stripSubagentPrefix(text: string): { prefix: string | null; body: string } {
   const line = text.trimStart();
-  const match = line.match(SUBAGENT_PREFIX_RE);
+  const match = line.match(SUBAGENT_TAG_RE);
   if (!match) return { prefix: null, body: line };
   return { prefix: match[1] ?? null, body: line.slice(match[0].length) };
+}
+
+export function sessionLineBody(text: string): string {
+  return stripSubagentPrefix(text).body;
+}
+
+export function parseStdoutEnvelope(
+  message: string | null | undefined,
+): { line: string; tool?: NativeToolEvent } | null {
+  if (!message) return null;
+  const trimmed = message.trim();
+  if (!trimmed.startsWith("{")) return null;
+  try {
+    const value: unknown = JSON.parse(trimmed);
+    if (!value || typeof value !== "object") return null;
+    const record = value as { nox?: unknown; line?: unknown; tool?: NativeToolEvent };
+    if (record.nox !== 1 || typeof record.line !== "string") return null;
+    return { line: record.line, tool: record.tool };
+  } catch {
+    return null;
+  }
+}
+
+export function hydrateSessionLine(input: RawSessionLine): RawSessionLine {
+  const envelope = parseStdoutEnvelope(input.text);
+  if (!envelope) return input;
+  return {
+    ...input,
+    text: envelope.line,
+    tool: input.tool ?? envelope.tool,
+  };
 }
 
 export function isRetryLine(text: string): boolean {
@@ -366,20 +409,26 @@ export function summarizeRetry(items: GroupedSessionItem[]): {
 
 export function classifyLine(text: string): SessionLineKind {
   const line = text.trimStart();
-  if (line.startsWith("[USER_INPUT]") || line.startsWith("[用户输入]")) return "user";
+  const body = sessionLineBody(line);
+  if (body.startsWith("[USER_INPUT]") || body.startsWith("[用户输入]")) return "user";
   if (isRetryLine(line)) return "system";
-  if (line.startsWith("[ERROR]")) return "error";
-  if (line.startsWith("[工具结果]")) return "tool_result";
-  if (line.startsWith("[子 Agent")) return "tool";
-  if (TOOL_PREFIXES.some((prefix) => line.startsWith(prefix))) return "tool";
-  if (SYSTEM_PREFIXES.some((prefix) => line.startsWith(prefix))) return "system";
-  if (line.startsWith("[") && line.includes("]")) return "system";
+  if (body.startsWith("[ERROR]")) return "error";
+  if (body.startsWith("[工具结果]")) return "tool_result";
+  if (SUBAGENT_STATUS_RE.test(body)) return "system";
+  if (body.startsWith("[子 Agent")) return "tool";
+  if (TOOL_PREFIXES.some((prefix) => body.startsWith(prefix))) return "tool";
+  if (SYSTEM_PREFIXES.some((prefix) => body.startsWith(prefix))) return "system";
+  if (body.startsWith("[") && body.includes("]")) return "system";
   return "assistant";
 }
 
 export function toolTitle(text: string): string {
-  const first = text.split("\n")[0] ?? text;
-  return first.replace(/^\[|\]$/g, "").trim() || first;
+  const first = (sessionLineBody(text).split("\n")[0] ?? text).trim();
+  const match = first.match(/^\[([^\]]+)\]\s*(.*)$/);
+  if (!match) return first;
+  const label = (match[1] ?? "").trim();
+  const rest = (match[2] ?? "").trim();
+  return rest ? `${label} ${rest}` : label;
 }
 
 export function stripUserPrefix(text: string): string {
@@ -387,15 +436,27 @@ export function stripUserPrefix(text: string): string {
 }
 
 export function commandText(item: GroupedSessionItem): string {
-  return item.text.replace(/^\[命令\]\s*/, "").split("\n")[0] ?? "";
+  return (
+    sessionLineBody(item.text)
+      .replace(/^\[命令\]\s*/, "")
+      .split("\n")[0] ?? ""
+  );
 }
 
 export function filePathText(item: GroupedSessionItem): string {
-  return item.text.replace(/^\[(?:写入|编辑|补丁)\]\s*/, "").split("\n")[0] ?? "";
+  return (
+    sessionLineBody(item.text)
+      .replace(/^\[(?:写入|编辑|补丁)\]\s*/, "")
+      .split("\n")[0] ?? ""
+  );
 }
 
 export function lookupPathText(item: GroupedSessionItem): string {
-  return item.text.replace(/^\[(?:读取|工具)\]\s*/, "").split("\n")[0] ?? "";
+  return (
+    sessionLineBody(item.text)
+      .replace(/^\[(?:读取|工具)\]\s*/, "")
+      .split("\n")[0] ?? ""
+  );
 }
 
 export function parseReadResultLines(result: string): ReadResultLine[] {
@@ -407,7 +468,7 @@ export function parseReadResultLines(result: string): ReadResultLine[] {
 }
 
 export function permissionHint(text: string): string | null {
-  const line = text.trim();
+  const line = sessionLineBody(text).trim();
   if (!line.startsWith("[PERMISSION]")) return null;
   return line.slice("[PERMISSION]".length).trim();
 }
@@ -450,8 +511,8 @@ const MCP_PENDING_RE = /^将连接 (\d+) 个已启用服务器$/;
 const MCP_CONNECTED_RE = /^已连接：(.+)$/;
 
 export function parseMcpStatus(text: string): ParsedMcpStatus | null {
-  const line = text.trim();
-  if (!line.startsWith("[MCP]")) return null;
+  const line = sessionLineBody(text).trim();
+  if (!line.startsWith("[MCP]") || line.startsWith("[MCP工具]")) return null;
   const detail = line.slice("[MCP]".length).trim();
   if (detail === "未启用服务器") return { kind: "off" };
   const pending = detail.match(MCP_PENDING_RE);
@@ -478,7 +539,7 @@ export function parseMcpStatus(text: string): ParsedMcpStatus | null {
 }
 
 export function parseUsageLine(text: string): ParsedUsage | null {
-  const line = text.trim();
+  const line = sessionLineBody(text).trim();
   if (!line.startsWith("[用量]")) return null;
   const parsed: ParsedUsage = {};
   for (const part of line.slice("[用量]".length).trim().split(/\s+/)) {
@@ -503,7 +564,7 @@ export function parseUsageLine(text: string): ParsedUsage | null {
 }
 
 export function isUsageItem(item: GroupedSessionItem): boolean {
-  return item.text.startsWith("[用量]");
+  return sessionLineBody(item.text).startsWith("[用量]");
 }
 
 const PATCH_PLACEHOLDER = "应用多文件补丁";
@@ -519,11 +580,12 @@ export function changedFilesFromItems(items: GroupedSessionItem[]): string[] {
     paths.push(trimmed);
   };
   for (const item of items) {
-    if (item.text.startsWith("[写入]") || item.text.startsWith("[编辑]")) {
+    const body = sessionLineBody(item.text);
+    if (body.startsWith("[写入]") || body.startsWith("[编辑]")) {
       add(filePathText(item));
       continue;
     }
-    if (!item.text.startsWith("[补丁]")) continue;
+    if (!body.startsWith("[补丁]")) continue;
     const fromLine = filePathText(item);
     if (fromLine !== PATCH_PLACEHOLDER) add(fromLine);
     for (const row of (item.result ?? "").split("\n")) {
@@ -535,19 +597,20 @@ export function changedFilesFromItems(items: GroupedSessionItem[]): string[] {
 }
 
 export function fileActionKey(text: string): "fileWrite" | "fileEdit" | "filePatch" {
-  if (text.startsWith("[编辑]")) return "fileEdit";
-  if (text.startsWith("[补丁]")) return "filePatch";
+  const body = sessionLineBody(text);
+  if (body.startsWith("[编辑]")) return "fileEdit";
+  if (body.startsWith("[补丁]")) return "filePatch";
   return "fileWrite";
 }
 
 export function isThinkingItem(item: GroupedSessionItem): boolean {
-  return item.text.startsWith("[思考]");
+  return sessionLineBody(item.text).startsWith("[思考]");
 }
 
 const THINKING_DURATION_RE = /^\[思考\]\s*(\d+)秒(?:\s|$)/;
 
 export function parseThinkingDurationSeconds(text: string): number | null {
-  const match = text.trim().match(THINKING_DURATION_RE);
+  const match = sessionLineBody(text).trim().match(THINKING_DURATION_RE);
   if (!match) return null;
   const seconds = Number(match[1]);
   return Number.isFinite(seconds) ? seconds : null;
@@ -562,42 +625,49 @@ export function thinkingDurationSeconds(items: GroupedSessionItem[], nowMs?: num
 }
 
 export function thinkingText(items: GroupedSessionItem[]): string {
-  const live = items.find((item) => !item.text.startsWith("[思考]"));
+  const live = items.find((item) => !sessionLineBody(item.text).startsWith("[思考]"));
   if (live) return live.text;
   return items
-    .map((item) => item.text.replace(/^\[思考\](?:\s*\d+秒)?\s*/, "").trim())
+    .map((item) =>
+      sessionLineBody(item.text)
+        .replace(/^\[思考\](?:\s*\d+秒)?\s*/, "")
+        .trim(),
+    )
     .filter((text) => text.length > 0)
     .join("\n\n");
 }
 
 export function isCommandTool(item: GroupedSessionItem): boolean {
-  return item.kind === "tool" && item.text.startsWith("[命令]");
+  return item.kind === "tool" && sessionLineBody(item.text).startsWith("[命令]");
 }
 
 export function isLookupTool(item: GroupedSessionItem): boolean {
   if (item.kind !== "tool") return false;
+  const body = sessionLineBody(item.text);
   return (
-    item.text.startsWith("[读取]") ||
-    item.text.startsWith("[工具] Glob") ||
-    item.text.startsWith("[工具] Grep")
+    body.startsWith("[读取]") ||
+    body.startsWith("[工具] Glob") ||
+    body.startsWith("[工具] Grep") ||
+    body.startsWith("[工具] WebFetch") ||
+    body.startsWith("[工具] WebSearch")
   );
 }
 
 export function isFileChangeTool(item: GroupedSessionItem): boolean {
   if (item.kind !== "tool") return false;
-  return (
-    item.text.startsWith("[写入]") ||
-    item.text.startsWith("[编辑]") ||
-    item.text.startsWith("[补丁]")
-  );
+  const body = sessionLineBody(item.text);
+  return body.startsWith("[写入]") || body.startsWith("[编辑]") || body.startsWith("[补丁]");
 }
 
 export function summarizeTools(items: GroupedSessionItem[]): ToolSummary {
   const summary: ToolSummary = { files: 0, lists: 0, searches: 0 };
   for (const item of items) {
-    if (item.text.startsWith("[读取]")) summary.files += 1;
-    else if (item.text.startsWith("[工具] Glob")) summary.lists += 1;
-    else if (item.text.startsWith("[工具] Grep")) summary.searches += 1;
+    const body = sessionLineBody(item.text);
+    if (body.startsWith("[读取]") || body.startsWith("[工具] WebFetch")) summary.files += 1;
+    else if (body.startsWith("[工具] Glob")) summary.lists += 1;
+    else if (body.startsWith("[工具] Grep") || body.startsWith("[工具] WebSearch")) {
+      summary.searches += 1;
+    }
   }
   return summary;
 }
@@ -654,30 +724,69 @@ export function isHiddenSessionCeremonyLine(text: string): boolean {
   );
 }
 
+function pairingBucket(item: {
+  tool?: NativeToolEvent;
+  text: string;
+  subagentTag?: string;
+}): string {
+  return item.tool?.subagent_tag ?? item.subagentTag ?? stripSubagentPrefix(item.text).prefix ?? "";
+}
+
+function applyToolResult(item: GroupedSessionItem, result: string, line: RawSessionLine): void {
+  item.result = result;
+  if (line.tool) {
+    item.ok = line.tool.ok ?? item.ok;
+    item.tool = item.tool ? { ...item.tool, ...line.tool } : line.tool;
+  }
+  if (line.images?.length) item.images = line.images;
+}
+
+function pairToolResult(
+  grouped: GroupedSessionItem[],
+  line: RawSessionLine,
+  result: string,
+): boolean {
+  const callId = line.tool?.call_id;
+  if (callId) {
+    const hit = grouped.find(
+      (item) => item.kind === "tool" && !item.result && item.tool?.call_id === callId,
+    );
+    if (hit) {
+      applyToolResult(hit, result, line);
+      return true;
+    }
+  }
+  const bucket = pairingBucket({ tool: line.tool, text: line.text });
+  for (const item of grouped) {
+    if (item.kind !== "tool" || item.result) continue;
+    if (pairingBucket(item) !== bucket) continue;
+    applyToolResult(item, result, line);
+    return true;
+  }
+  return false;
+}
+
 export function groupSessionLines(lines: RawSessionLine[]): GroupedSessionItem[] {
   const grouped: GroupedSessionItem[] = [];
-  for (const line of lines) {
+  for (const raw of lines) {
+    const line = hydrateSessionLine(raw);
     if (isHiddenSessionCeremonyLine(line.text)) continue;
     const kind = classifyLine(line.text);
+    const tag = stripSubagentPrefix(line.text).prefix ?? line.tool?.subagent_tag ?? undefined;
     if (kind === "tool_result") {
-      const result = line.text.replace(/^\[工具结果\]\s*/, "");
-      let paired = false;
-      for (let index = grouped.length - 1; index >= 0; index -= 1) {
-        const item = grouped[index];
-        if (item?.kind === "tool" && !item.result) {
-          item.result = result;
-          paired = true;
-          break;
-        }
-      }
-      if (paired) continue;
+      const result = sessionLineBody(line.text).replace(/^\[工具结果\]\s*/, "");
+      if (pairToolResult(grouped, line, result)) continue;
     }
     grouped.push({
       id: line.id,
       kind,
       text: kind === "user" ? stripUserPrefix(line.text) : line.text,
       createdAt: line.createdAt,
-      toolName: kind === "tool" ? toolTitle(line.text) : undefined,
+      toolName: kind === "tool" ? (line.tool?.title ?? toolTitle(line.text)) : undefined,
+      ok: line.tool?.ok ?? undefined,
+      tool: line.tool,
+      images: line.images,
+      subagentTag: tag ?? undefined,
     });
   }
   return grouped;
@@ -685,14 +794,15 @@ export function groupSessionLines(lines: RawSessionLine[]): GroupedSessionItem[]
 
 function segmentKey(item: GroupedSessionItem): TurnSegmentKind | "skip" | "file_change" {
   if (item.kind === "user") return "skip";
-  if (isCompactBoundaryLine(item.text)) return "compact";
-  if (isGoalLine(item.text)) return "goal";
-  if (isPlanLine(item.text)) return "plan";
+  const body = sessionLineBody(item.text);
+  if (isCompactBoundaryLine(body)) return "compact";
+  if (isGoalLine(body)) return "goal";
+  if (isPlanLine(body)) return "plan";
   if (isRetryLine(item.text)) return "retry";
   if (isThinkingItem(item)) return "thinking";
   if (isUsageItem(item)) return "usage";
   if (isCommandTool(item)) return "terminal";
-  if (parseTodoList(item.text)) return "todo";
+  if (parseTodoList(body)) return "todo";
   if (isFileChangeTool(item)) return "file_change";
   if (item.kind === "tool") return "tools";
   if (item.kind === "assistant") return "assistant";
@@ -868,12 +978,15 @@ export function segmentDurationSeconds(items: GroupedSessionItem[], nowMs?: numb
   return Math.max(0, Math.round((end - start) / 1000));
 }
 
-export function lineToneClass(kind: SessionLineKind, text: string): string {
-  if (kind === "error" || text.startsWith("[ERROR]")) return "text-red-600 dark:text-red-400";
+export function lineToneClass(kind: SessionLineKind, text: string, ok?: boolean): string {
+  const body = sessionLineBody(text);
+  if (kind === "error" || body.startsWith("[ERROR]") || ok === false) {
+    return "text-red-600 dark:text-red-400";
+  }
   if (kind === "user") return "text-sky-700 dark:text-sky-300";
   if (kind === "tool" || kind === "tool_result") return "text-cyan-700 dark:text-cyan-400";
-  if (text.startsWith("[思考]")) return "text-muted-foreground";
-  if (text.startsWith("[PLAN]") || text.startsWith("[计划]") || text.startsWith("[待办]")) {
+  if (body.startsWith("[思考]")) return "text-muted-foreground";
+  if (body.startsWith("[PLAN]") || body.startsWith("[计划]") || body.startsWith("[待办]")) {
     return "text-violet-700 dark:text-violet-400";
   }
   if (text.startsWith("[子 Agent")) return "text-teal-700 dark:text-teal-400";

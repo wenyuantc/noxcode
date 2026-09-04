@@ -24,9 +24,7 @@ use tokio::sync::mpsc;
 use crate::app::network_settings::{load_network_settings, proxy_env_vars};
 use crate::app::ssh::exec::{spawn_ssh_command, SshCommandStream, SshStreamEvent};
 use crate::app::ssh::shell::shell_escape_single_quoted;
-use crate::db::models::{
-    McpServerConfig, SshConfigRecord, MCP_TRANSPORT_HTTP, MCP_TRANSPORT_SSE,
-};
+use crate::db::models::{McpServerConfig, SshConfigRecord, MCP_TRANSPORT_HTTP, MCP_TRANSPORT_SSE};
 use crate::native::model::types::ToolSpec;
 use crate::process_spawn::configure_tokio_command;
 
@@ -46,9 +44,8 @@ pub type ElicitHandler = Arc<
         + Sync,
 >;
 /// 服务端 `sampling/createMessage` 的处理：拿到 params，返回 `{role, content, model}`。
-pub type SampleHandler = Arc<
-    dyn Fn(Value) -> Pin<Box<dyn Future<Output = Result<Value, String>> + Send>> + Send + Sync,
->;
+pub type SampleHandler =
+    Arc<dyn Fn(Value) -> Pin<Box<dyn Future<Output = Result<Value, String>> + Send>> + Send + Sync>;
 
 #[derive(Default, Clone)]
 pub struct McpHostHandlers {
@@ -159,6 +156,14 @@ impl SharedMcp {
     pub async fn server_id_for_tool(&self, name: &str) -> Option<String> {
         match &self.inner {
             Some(inner) => inner.lock().await.server_id_for_tool(name),
+            None => None,
+        }
+    }
+
+    /// 还原 MCP 内部名到原始 server id 与 tool / resources / prompt 名。
+    pub async fn display_for_tool(&self, name: &str) -> Option<(String, String)> {
+        match &self.inner {
+            Some(inner) => inner.lock().await.display_for_tool(name),
             None => None,
         }
     }
@@ -302,7 +307,10 @@ impl McpSession {
                         if resource.description.is_empty() {
                             format!("{} ({})", resource.name, resource.uri)
                         } else {
-                            format!("{} ({}) — {}", resource.name, resource.uri, resource.description)
+                            format!(
+                                "{} ({}) — {}",
+                                resource.name, resource.uri, resource.description
+                            )
                         }
                     })
                     .collect();
@@ -419,6 +427,17 @@ impl McpSession {
     pub fn server_id_for_tool(&self, name: &str) -> Option<String> {
         self.locate(name)
             .map(|(index, _)| self.servers[index].id.clone())
+    }
+
+    pub fn display_for_tool(&self, name: &str) -> Option<(String, String)> {
+        let (index, kind) = self.locate(name)?;
+        let server_id = self.servers[index].id.clone();
+        let tool = match kind {
+            McpCallKind::Tool(tool) => tool,
+            McpCallKind::Resources => "resources".to_string(),
+            McpCallKind::Prompt(prompt) => format!("prompt:{prompt}"),
+        };
+        Some((server_id, tool))
     }
 
     pub async fn call(&mut self, name: &str, arguments: &str) -> Result<String, String> {
@@ -566,7 +585,10 @@ fn format_prompt_result(response: &Value) -> Result<String, String> {
         parts.push(format!("({description})"));
     }
     for message in messages {
-        let role = message.get("role").and_then(Value::as_str).unwrap_or("user");
+        let role = message
+            .get("role")
+            .and_then(Value::as_str)
+            .unwrap_or("user");
         let text = match message.get("content") {
             Some(Value::String(text)) => text.clone(),
             Some(Value::Object(map)) => map
@@ -844,11 +866,7 @@ fn classify_message(message: &Value) -> Incoming {
 }
 
 /// 处理服务端发来的请求，返回要回写的 JSON-RPC 响应。
-async fn handle_server_request(
-    method: &str,
-    message: &Value,
-    handlers: &McpHostHandlers,
-) -> Value {
+async fn handle_server_request(method: &str, message: &Value, handlers: &McpHostHandlers) -> Value {
     let id = message.get("id").cloned().unwrap_or(Value::Null);
     let params = message.get("params").cloned().unwrap_or(json!({}));
     let result: Result<Value, String> = match method {
@@ -1386,7 +1404,10 @@ fn http_client() -> Result<reqwest::Client, String> {
         .map_err(|error| format!("创建 HTTP 客户端失败: {error}"))
 }
 
-async fn connect_http(server: &McpServerConfig, bearer: Option<String>) -> Result<McpLiveServer, String> {
+async fn connect_http(
+    server: &McpServerConfig,
+    bearer: Option<String>,
+) -> Result<McpLiveServer, String> {
     let url = server
         .url
         .clone()
@@ -1406,7 +1427,10 @@ async fn connect_http(server: &McpServerConfig, bearer: Option<String>) -> Resul
 
 /// 旧版 SSE：先 GET 事件流，等 `endpoint` 事件拿到 POST 地址，再把后续 `message` 事件
 /// 送进通道。
-async fn connect_sse(server: &McpServerConfig, bearer: Option<String>) -> Result<McpLiveServer, String> {
+async fn connect_sse(
+    server: &McpServerConfig,
+    bearer: Option<String>,
+) -> Result<McpLiveServer, String> {
     let url = server
         .url
         .clone()
@@ -1415,9 +1439,7 @@ async fn connect_sse(server: &McpServerConfig, bearer: Option<String>) -> Result
     let client = reqwest::Client::builder()
         .build()
         .map_err(|error| format!("创建 HTTP 客户端失败: {error}"))?;
-    let mut request = client
-        .get(&url)
-        .header("accept", "text/event-stream");
+    let mut request = client.get(&url).header("accept", "text/event-stream");
     for (key, value) in &headers {
         request = request.header(key.as_str(), value.as_str());
     }
@@ -1462,7 +1484,8 @@ async fn connect_sse(server: &McpServerConfig, bearer: Option<String>) -> Result
                     let post_url = if data.starts_with("http") {
                         data.clone()
                     } else {
-                        match reqwest::Url::parse(&base_url).and_then(|base| base.join(data.trim())) {
+                        match reqwest::Url::parse(&base_url).and_then(|base| base.join(data.trim()))
+                        {
                             Ok(url) => url.to_string(),
                             Err(_) => data.clone(),
                         }
@@ -1525,7 +1548,10 @@ pub async fn connect_mcp_servers<R: Runtime>(
                 let bearer = match crate::native::mcp_oauth::bearer_token_for(app, server).await {
                     Ok(token) => token,
                     Err(error) => {
-                        warnings.push(format!("[MCP] {} 的 OAuth 令牌不可用：{error}", server.name));
+                        warnings.push(format!(
+                            "[MCP] {} 的 OAuth 令牌不可用：{error}",
+                            server.name
+                        ));
                         None
                     }
                 };
@@ -1714,18 +1740,22 @@ mod tests {
     async fn server_requests_are_answered_by_host_handlers() {
         let handlers = McpHostHandlers {
             elicit: Some(Arc::new(|message, _schema| {
-                Box::pin(async move {
-                    Ok(json!({"action": "accept", "content": {"answer": message}}))
-                })
+                Box::pin(
+                    async move { Ok(json!({"action": "accept", "content": {"answer": message}})) },
+                )
             })),
             sample: None,
             roots: vec!["file:///repo".to_string()],
         };
-        let ping = handle_server_request("ping", &json!({"id": 1, "method": "ping"}), &handlers).await;
+        let ping =
+            handle_server_request("ping", &json!({"id": 1, "method": "ping"}), &handlers).await;
         assert_eq!(ping["result"], json!({}));
-        let roots =
-            handle_server_request("roots/list", &json!({"id": 2, "method": "roots/list"}), &handlers)
-                .await;
+        let roots = handle_server_request(
+            "roots/list",
+            &json!({"id": 2, "method": "roots/list"}),
+            &handlers,
+        )
+        .await;
         assert_eq!(roots["result"]["roots"][0]["uri"], "file:///repo");
         let elicited = handle_server_request(
             "elicitation/create",

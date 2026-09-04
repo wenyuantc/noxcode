@@ -9,12 +9,14 @@ import {
   filePathText,
   formatSessionDuration,
   groupSessionLines,
+  hydrateSessionLine,
   isHiddenSessionCeremonyLine,
   latestTodos,
   parseAgentBanner,
   parseCompactBoundary,
   parseMcpStatus,
   parseReadResultLines,
+  parseStdoutEnvelope,
   parseTodoList,
   parseUsageLine,
   permissionHint,
@@ -27,6 +29,7 @@ import {
   summarizeRetry,
   thinkingDurationSeconds,
   thinkingText,
+  toolTitle,
   workDurationSeconds,
 } from "./sessionLines";
 
@@ -52,6 +55,116 @@ describe("sessionLines", () => {
       ),
     ).toBe("system");
     expect(classifyLine("[子 Agent 1(general) - 改文件] [读取] a.ts")).toBe("tool");
+    expect(classifyLine("[子 Agent] 改文件")).toBe("tool");
+    expect(classifyLine("[子 Agent 1(general) - 改文件] 启动（general）")).toBe("system");
+    expect(classifyLine("[子 Agent 1(general) - 改文件] 结束 成功")).toBe("system");
+    expect(classifyLine("[子 Agent 1(general) - 改文件] [工具结果]\nbody")).toBe("tool_result");
+    expect(classifyLine("[子 Agent 1(general) - 改文件] [思考] 3秒\n想")).toBe("system");
+    expect(classifyLine("[子 Agent 1(general) - 改文件] 最终汇报")).toBe("assistant");
+    expect(classifyLine("[MCP工具] context7 / query-docs foo")).toBe("tool");
+  });
+
+  it("strips only the first complete bracket pair in toolTitle", () => {
+    expect(toolTitle("[读取] src/main.ts")).toBe("读取 src/main.ts");
+    expect(toolTitle("[工具] WebFetch https://example.com")).toBe(
+      "工具 WebFetch https://example.com",
+    );
+    expect(toolTitle("[子 Agent 1(general) - 改文件] [读取] a.ts")).toBe("读取 a.ts");
+  });
+
+  it("pairs parallel tool results in emit order (FIFO)", () => {
+    const grouped = groupSessionLines([
+      line("1", "[读取] a.ts"),
+      line("2", "[读取] b.ts"),
+      line("3", "[读取] c.ts"),
+      line("4", "[工具结果]\na-content"),
+      line("5", "[工具结果]\nb-content"),
+      line("6", "[工具结果]\nc-content"),
+    ]);
+    expect(grouped.map((item) => [item.text, item.result])).toEqual([
+      ["[读取] a.ts", "a-content"],
+      ["[读取] b.ts", "b-content"],
+      ["[读取] c.ts", "c-content"],
+    ]);
+  });
+
+  it("does not pair parent and child tool results across subagent buckets", () => {
+    const grouped = groupSessionLines([
+      line("1", "[读取] parent.ts"),
+      line("2", "[工具结果]\nparent-content"),
+      line("3", "[子 Agent] 改文件"),
+      line("4", "[子 Agent 1(general) - 改文件] 启动（general）"),
+      line("5", "[子 Agent 1(general) - 改文件] [读取] child.ts"),
+      line("6", "[子 Agent 1(general) - 改文件] [工具结果]\nchild-content"),
+      line("7", "[子 Agent 1(general) - 改文件] 结束 成功"),
+      line("8", "[工具结果]\n子 Agent（general）完成"),
+    ]);
+    const parentRead = grouped.find((item) => item.text === "[读取] parent.ts");
+    const childRead = grouped.find((item) => item.text.includes("[读取] child.ts"));
+    const agentCall = grouped.find((item) => item.text === "[子 Agent] 改文件");
+    expect(parentRead?.result).toBe("parent-content");
+    expect(childRead?.result).toBe("child-content");
+    expect(agentCall?.result).toBe("子 Agent（general）完成");
+  });
+
+  it("leaves orphan tool results unpaired", () => {
+    const grouped = groupSessionLines([
+      line("1", "[工具结果]\norphan"),
+      line("2", "[读取] a.ts"),
+      line("3", "[工具结果]\nmatched"),
+    ]);
+    expect(grouped[0]?.kind).toBe("tool_result");
+    expect(grouped[0]?.text).toContain("orphan");
+    expect(grouped[1]?.result).toBe("matched");
+  });
+
+  it("pairs structured tool events by call_id regardless of order", () => {
+    const grouped = groupSessionLines([
+      {
+        ...line("1", "[读取] a.ts"),
+        tool: { phase: "start", call_id: "c1", name: "Read", title: "读取 a.ts" },
+      },
+      {
+        ...line("2", "[读取] b.ts"),
+        tool: { phase: "start", call_id: "c2", name: "Read", title: "读取 b.ts" },
+      },
+      {
+        ...line("3", "[工具结果]\nb-content"),
+        tool: {
+          phase: "result",
+          call_id: "c2",
+          name: "Read",
+          title: "读取 b.ts",
+          ok: true,
+        },
+      },
+      {
+        ...line("4", "[工具结果]\na-content"),
+        tool: {
+          phase: "result",
+          call_id: "c1",
+          name: "Read",
+          title: "读取 a.ts",
+          ok: false,
+        },
+      },
+    ]);
+    expect(grouped[0]?.result).toBe("a-content");
+    expect(grouped[0]?.ok).toBe(false);
+    expect(grouped[1]?.result).toBe("b-content");
+    expect(grouped[1]?.ok).toBe(true);
+  });
+
+  it("unwraps persisted stdout envelopes", () => {
+    const envelope = JSON.stringify({
+      nox: 1,
+      line: "[读取] a.ts",
+      tool: { phase: "start", call_id: "c1", name: "Read", title: "读取 a.ts" },
+    });
+    expect(parseStdoutEnvelope(envelope)?.line).toBe("[读取] a.ts");
+    expect(hydrateSessionLine(line("1", envelope)).text).toBe("[读取] a.ts");
+    expect(hydrateSessionLine(line("1", envelope)).tool?.call_id).toBe("c1");
+    expect(parseStdoutEnvelope("[读取] a.ts")).toBeNull();
   });
 
   it("pairs tool results with the previous tool call", () => {
@@ -243,8 +356,10 @@ describe("sessionLines", () => {
       line("4", "[命令] pwd"),
       line("5", "[写入] a.ts"),
       line("6", "[待办]\n- [pending] x (low)"),
+      line("7", "[工具] WebFetch https://example.com"),
+      line("8", "[工具] WebSearch rust tokio"),
     ]);
-    expect(summarizeTools(items)).toEqual({ files: 1, lists: 1, searches: 1 });
+    expect(summarizeTools(items)).toEqual({ files: 2, lists: 1, searches: 2 });
   });
 
   it("splits read / command / read into separate segments", () => {

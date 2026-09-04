@@ -9,6 +9,7 @@ import {
   groupSessionLines,
   lineToneClass,
   parseTodoList,
+  sessionLineBody,
   type GroupedSessionItem,
   type RawSessionLine,
   type SessionTurnBlock,
@@ -116,17 +117,21 @@ function renderSegment(
       return (
         <div className="space-y-1">
           {segment.items.map((item) => {
-            if (item.text.startsWith("[PERMISSION]")) {
+            const body = sessionLineBody(item.text);
+            if (body.startsWith("[PERMISSION]")) {
               return <PermissionStatusRow key={item.id} text={item.text} />;
             }
-            if (item.text.startsWith("[内置 Agent]")) {
+            if (body.startsWith("[内置 Agent]")) {
               return <AgentStatusRow key={item.id} text={item.text} />;
             }
-            if (item.text.startsWith("[MCP]")) {
+            if (body.startsWith("[MCP]")) {
               return <McpStatusRow key={item.id} text={item.text} />;
             }
             return (
-              <p key={item.id} className={cn("text-xs", lineToneClass(item.kind, item.text))}>
+              <p
+                key={item.id}
+                className={cn("text-xs", lineToneClass(item.kind, item.text, item.ok))}
+              >
                 {item.text}
               </p>
             );

@@ -514,6 +514,29 @@ export interface AgentSessionStarted {
   session_record_id: string;
 }
 
+export type NativeToolPhase = "start" | "result";
+
+export interface NativeToolEvent {
+  phase: NativeToolPhase;
+  call_id: string;
+  name: string;
+  title: string;
+  args_summary?: string;
+  ok?: boolean | null;
+  duration_ms?: number | null;
+  result_preview?: string | null;
+  subagent_tag?: string | null;
+  mcp_server?: string | null;
+  mcp_tool?: string | null;
+  image_names?: string[];
+}
+
+export interface NativeToolImage {
+  name: string;
+  mime_type: string;
+  data_url: string;
+}
+
 export interface AgentSessionOutput {
   profile_id: string;
   workspace_id: string | null;
@@ -521,6 +544,8 @@ export interface AgentSessionOutput {
   session_record_id: string;
   session_event_id: string;
   line: string;
+  tool?: NativeToolEvent | null;
+  images?: NativeToolImage[] | null;
 }
 
 export interface AgentSessionExit {

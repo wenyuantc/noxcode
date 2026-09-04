@@ -645,6 +645,44 @@ pub struct AgentSessionStarted {
     pub session_record_id: String,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NativeToolPhase {
+    Start,
+    Result,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NativeToolEvent {
+    pub phase: NativeToolPhase,
+    pub call_id: String,
+    pub name: String,
+    pub title: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub args_summary: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ok: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duration_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub result_preview: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subagent_tag: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mcp_server: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mcp_tool: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub image_names: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NativeToolImage {
+    pub name: String,
+    pub mime_type: String,
+    pub data_url: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentSessionOutput {
     pub profile_id: String,
@@ -653,6 +691,10 @@ pub struct AgentSessionOutput {
     pub session_record_id: String,
     pub session_event_id: String,
     pub line: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool: Option<NativeToolEvent>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub images: Option<Vec<NativeToolImage>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

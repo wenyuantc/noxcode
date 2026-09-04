@@ -143,7 +143,7 @@ P4 把进程内编程 Agent 接到渠道 + 工作区外壳。数据流仍是 `Re
 | 事件 | 载荷 |
 | --- | --- |
 | `native-session` | `AgentSessionStarted` |
-| `native-stdout` | `AgentSessionOutput`（已写入 `agent_session_events`） |
+| `native-stdout` | `AgentSessionOutput`（已写入 `agent_session_events`）。工具 start/result 带可选 `tool`（`call_id` / `name` / `title` / `ok` / `duration_ms` 等）和 live-only `images`；落库 `message` 为 `{"nox":1,"line":"...","tool":{...}}` 信封，旧纯文本行仍可回放。 |
 | `native-text-delta` | `NativeTextDelta`（仅展示，不落库） |
 | `native-context-usage` | `NativeContextUsage`（`used` = 工具 schema + 消息；分类字段 + 上次调用 `prompt_tokens` / `cached_tokens`；仅父 Agent；同时写入 `agent_sessions.context_usage_json`） |
 | `native-turn-state` | `NativeTurnState`（`waiting_input` / `working`，不落库） |

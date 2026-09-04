@@ -279,10 +279,17 @@ impl ToolCtx {
 }
 
 /// 工具结果：文本 + 可选图片（Read 图片文件时返回）。
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ToolOutput {
     pub text: String,
     pub images: Vec<NativeImage>,
+    pub ok: bool,
+}
+
+impl Default for ToolOutput {
+    fn default() -> Self {
+        Self::text(String::new())
+    }
 }
 
 impl ToolOutput {
@@ -290,6 +297,15 @@ impl ToolOutput {
         Self {
             text: text.into(),
             images: Vec::new(),
+            ok: true,
+        }
+    }
+
+    pub fn error(text: impl Into<String>) -> Self {
+        Self {
+            text: text.into(),
+            images: Vec::new(),
+            ok: false,
         }
     }
 }
@@ -1128,6 +1144,7 @@ async fn call_read(ctx: &ToolCtx, arguments: &str) -> Result<ToolOutput, String>
         return Ok(ToolOutput {
             text,
             images: vec![image],
+            ok: true,
         });
     }
     let output = ctx.workspace.read_file(&path, offset, limit)?;

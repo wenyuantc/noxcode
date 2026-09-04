@@ -2,7 +2,7 @@ import { create } from "zustand";
 
 import { getAgentSessionLogLines } from "@/lib/backend";
 import { resolveHistoricalUsage, resolveHistoryLimitTokens } from "@/lib/contextUsage";
-import type { RawSessionLine } from "@/lib/sessionLines";
+import { hydrateSessionLine, type RawSessionLine } from "@/lib/sessionLines";
 import type {
   AgentSessionExit,
   AgentSessionOutput,
@@ -81,12 +81,14 @@ export const useSessionStore = create<SessionState>((set, get) => ({
         set({
           lines: {
             ...get().lines,
-            [sessionId]: events.map((event) => ({
-              id: event.id,
-              sessionId,
-              text: event.message ?? "",
-              createdAt: event.created_at,
-            })),
+            [sessionId]: events.map((event) =>
+              hydrateSessionLine({
+                id: event.id,
+                sessionId,
+                text: event.message ?? "",
+                createdAt: event.created_at,
+              }),
+            ),
           },
         });
       }
@@ -121,12 +123,14 @@ export const useSessionStore = create<SessionState>((set, get) => ({
         ...get().lines,
         [output.session_record_id]: [
           ...current,
-          {
+          hydrateSessionLine({
             id: output.session_event_id,
             sessionId: output.session_record_id,
             text: output.line,
             createdAt: new Date().toISOString(),
-          },
+            tool: output.tool ?? undefined,
+            images: output.images ?? undefined,
+          }),
         ],
       },
     });

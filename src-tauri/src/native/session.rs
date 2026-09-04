@@ -14,7 +14,8 @@ use crate::app::shared::{new_id, now_sqlite, sqlite_pool, EXECUTION_TARGET_SSH};
 use crate::app::ssh::configs::fetch_ssh_config_record_by_id;
 use crate::db::models::{
     AgentSessionExit, AgentSessionOutput, AgentSessionRecord, AgentSessionStarted,
-    NativeContextUsage, NativeTextDelta, NativeTurnState, StartNativeSessionInput,
+    NativeContextUsage, NativeTextDelta, NativeToolEvent, NativeToolImage, NativeTurnState,
+    StartNativeSessionInput,
 };
 use crate::engine::context::resolve_workspace_execution_context_with_pool;
 use crate::engine::UsageDelta;
@@ -40,7 +41,9 @@ use crate::native::model_catalog::{
 };
 use crate::native::protocol::record_to_channel;
 use crate::native::tools::dispatch::PlanApprovalAnswer;
-use crate::native::tools::permission::{NativePermissionDecision, NativeToolRiskKind};
+use crate::native::tools::permission::{
+    NativePermissionDecision, NativeToolRiskKind, PermissionRuleSuggestion,
+};
 use crate::native::tools::question::PlanQuestionAnswer;
 use crate::native::tools::{
     connect_mcp_servers, local::LocalWorkspace, ssh::SshToolRuntime, SharedMcp,
@@ -201,6 +204,7 @@ struct NativePermissionRequestEvent {
     summary: String,
     remote: bool,
     mcp_server_id: Option<String>,
+    suggested_rule: Option<PermissionRuleSuggestion>,
 }
 
 fn session_kind(plan_mode: bool) -> String {
@@ -226,6 +230,7 @@ fn permission_event(
         summary: request.summary.clone(),
         remote: request.remote,
         mcp_server_id: request.mcp_server_id.clone(),
+        suggested_rule: request.suggested_rule.clone(),
     }
 }
 
@@ -646,6 +651,34 @@ async fn forward_native_events(
                         )
                         .await;
                     }
+                    NativeEvent::Tool { line, event, images } => {
+                        deltas.flush();
+                        let live_images = if images.is_empty() {
+                            None
+                        } else {
+                            Some(
+                                images
+                                    .into_iter()
+                                    .map(|image| NativeToolImage {
+                                        name: image.name.clone(),
+                                        mime_type: image.mime_type.clone(),
+                                        data_url: image.data_url(),
+                                    })
+                                    .collect(),
+                            )
+                        };
+                        emit_native_output(
+                            &app,
+                            &session_record_id,
+                            &profile_id,
+                            workspace_id.as_deref(),
+                            &session_kind,
+                            line,
+                            Some(event),
+                            live_images,
+                        )
+                        .await;
+                    }
                     NativeEvent::Delta(StreamDelta::Text(text)) => {
                         deltas.push(DELTA_SEGMENT_TEXT, &text);
                     }
@@ -713,11 +746,48 @@ async fn emit_native_line(
     session_kind: &str,
     line: String,
 ) {
+    emit_native_output(
+        app,
+        session_record_id,
+        profile_id,
+        workspace_id,
+        session_kind,
+        line,
+        None,
+        None,
+    )
+    .await;
+}
+
+fn persist_stdout_message(line: &str, tool: Option<&NativeToolEvent>) -> String {
+    let Some(tool) = tool else {
+        return line.to_string();
+    };
+    serde_json::json!({
+        "nox": 1,
+        "line": line,
+        "tool": tool,
+    })
+    .to_string()
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn emit_native_output(
+    app: &AppHandle,
+    session_record_id: &str,
+    profile_id: &str,
+    workspace_id: Option<&str>,
+    session_kind: &str,
+    line: String,
+    tool: Option<NativeToolEvent>,
+    images: Option<Vec<NativeToolImage>>,
+) {
     let pool = match sqlite_pool(app).await {
         Ok(pool) => pool,
         Err(_) => return,
     };
-    let event_id = insert_session_event(&pool, session_record_id, "stdout", Some(&line))
+    let persisted = persist_stdout_message(&line, tool.as_ref());
+    let event_id = insert_session_event(&pool, session_record_id, "stdout", Some(&persisted))
         .await
         .ok();
     let _ = app.emit(
@@ -729,6 +799,8 @@ async fn emit_native_line(
             session_record_id: session_record_id.to_string(),
             session_event_id: event_id.unwrap_or_default(),
             line,
+            tool,
+            images,
         },
     );
 }
@@ -1759,8 +1831,9 @@ async fn run_native_loop(
                     Some(&workspace_id),
                     &kind,
                     format!(
-                        "[PERMISSION] 等待确认高风险操作（{location} / {:?}）：{}",
-                        prompt.kind, prompt.summary
+                        "[PERMISSION] 等待确认高风险操作（{location} / {}）：{}",
+                        prompt.kind.zh_label(),
+                        prompt.summary
                     ),
                 )
                 .await;
@@ -2986,6 +3059,64 @@ mod tests {
     fn cancelled_run_error_is_not_a_failure() {
         assert!(is_cancelled_run_error("已取消"));
         assert!(!is_cancelled_run_error("模型超时"));
+    }
+
+    #[test]
+    fn permission_event_includes_suggested_rule() {
+        use crate::native::manager::PermissionRequest;
+        use crate::native::tools::contract::{PatternSource, PermissionCapability};
+        use crate::native::tools::permission::{NativeToolRiskKind, PermissionRuleSuggestion};
+
+        let request = PermissionRequest {
+            request_id: "r1".to_string(),
+            profile_id: "p1".to_string(),
+            workspace_id: Some("w1".to_string()),
+            session_kind: "execution".to_string(),
+            tool_name: "Bash".to_string(),
+            kind: NativeToolRiskKind::Opaque,
+            summary: "rm -rf /tmp/x".to_string(),
+            remote: false,
+            mcp_server_id: None,
+            suggested_rule: Some(PermissionRuleSuggestion {
+                capability: PermissionCapability::Bash,
+                pattern: "rm".to_string(),
+                source: PatternSource::Command,
+            }),
+        };
+        let event = super::permission_event("sess-1", &request);
+        assert_eq!(event.suggested_rule.as_ref().unwrap().pattern, "rm");
+        let json = serde_json::to_value(&event).expect("json");
+        assert_eq!(json["suggested_rule"]["pattern"], "rm");
+        assert_eq!(json["suggested_rule"]["capability"], "bash");
+    }
+
+    #[test]
+    fn persist_stdout_message_wraps_tool_events() {
+        use crate::db::models::{NativeToolEvent, NativeToolPhase};
+
+        let tool = NativeToolEvent {
+            phase: NativeToolPhase::Start,
+            call_id: "c1".to_string(),
+            name: "Read".to_string(),
+            title: "读取 a.ts".to_string(),
+            args_summary: "a.ts".to_string(),
+            ok: None,
+            duration_ms: None,
+            result_preview: None,
+            subagent_tag: None,
+            mcp_server: None,
+            mcp_tool: None,
+            image_names: Vec::new(),
+        };
+        let raw = super::persist_stdout_message("[读取] a.ts", Some(&tool));
+        let value: serde_json::Value = serde_json::from_str(&raw).expect("envelope");
+        assert_eq!(value["nox"], 1);
+        assert_eq!(value["line"], "[读取] a.ts");
+        assert_eq!(value["tool"]["call_id"], "c1");
+        assert_eq!(
+            super::persist_stdout_message("[读取] a.ts", None),
+            "[读取] a.ts"
+        );
     }
 
     #[test]

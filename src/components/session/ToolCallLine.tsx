@@ -9,8 +9,11 @@ export function ToolCallLine({ item }: { item: GroupedSessionItem }) {
   const { t } = useTranslation("sessions");
   const [open, setOpen] = useState(false);
   return (
-    <div className={cn("rounded-md px-2 py-1 text-sm", lineToneClass(item.kind, item.text))}>
+    <div
+      className={cn("rounded-md px-2 py-1 text-sm", lineToneClass(item.kind, item.text, item.ok))}
+    >
       <button type="button" className="w-full text-left" onClick={() => setOpen((value) => !value)}>
+        {item.ok === false ? `${t("toolFailed")} · ` : ""}
         {item.toolName ?? item.text.split("\n")[0]}
       </button>
       {open && item.result ? (

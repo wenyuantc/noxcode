@@ -56,6 +56,8 @@
   "expandTools": "展开工具调用",
   "collapseTools": "收起工具调用",
   "toolResult": "工具结果",
+  "toolFailed": "失败",
+  "toolImageAlt": "工具返回的图片 {{name}}",
   "permissionTitle": "需要确认高风险操作",
   "permissionRuleTitle": "权限规则要求确认",
   "permissionAllowOnce": "允许一次",

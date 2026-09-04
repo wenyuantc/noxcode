@@ -22,6 +22,21 @@ pub enum NativeToolRiskKind {
     Automation,
 }
 
+impl NativeToolRiskKind {
+    pub fn zh_label(self) -> &'static str {
+        match self {
+            Self::Overwrite => "覆盖",
+            Self::Delete => "删除",
+            Self::Push => "推送",
+            Self::ForceGit => "强制 Git",
+            Self::Mcp => "MCP",
+            Self::Opaque => "不透明命令",
+            Self::Rule => "权限规则",
+            Self::Automation => "自动化",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum NativeToolRisk {
     Low,

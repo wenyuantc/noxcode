@@ -72,6 +72,26 @@ describe("sessionStore history", () => {
     expect(useSessionStore.getState().lines.s1?.map((line) => line.id)).toEqual(["e1"]);
   });
 
+  it("unwraps persisted tool envelopes when loading history", async () => {
+    getLines.mockResolvedValue([
+      {
+        id: "e1",
+        session_id: "s1",
+        event_type: "stdout",
+        message: JSON.stringify({
+          nox: 1,
+          line: "[读取] a.ts",
+          tool: { phase: "start", call_id: "c1", name: "Read", title: "读取 a.ts" },
+        }),
+        created_at: "t",
+      },
+    ]);
+    await useSessionStore.getState().ensureHistory("s1");
+    const loaded = useSessionStore.getState().lines.s1?.[0];
+    expect(loaded?.text).toBe("[读取] a.ts");
+    expect(loaded?.tool?.call_id).toBe("c1");
+  });
+
   it("skips fetch when history is already cached", async () => {
     useSessionStore.setState({
       lines: { s1: [{ id: "cached", sessionId: "s1", text: "cached", createdAt: "t" }] },

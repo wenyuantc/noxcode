@@ -1,4 +1,4 @@
-use std::collections::{HashSet, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -9,6 +9,7 @@ use serde_json::Value;
 use tokio::sync::{mpsc, Mutex, Semaphore};
 use tokio::task::JoinSet;
 
+use crate::db::models::{NativeToolEvent, NativeToolPhase};
 use crate::engine::UsageDelta;
 use crate::native::artifacts::{bound_with_artifact, ArtifactStore};
 use crate::native::manager::NativeFollowup;
@@ -184,6 +185,9 @@ pub struct AgentRunner {
     streaming: bool,
     call_started_ms: Arc<AtomicU64>,
     reasoning_started_ms: Arc<AtomicU64>,
+    started_tool_ids: HashSet<String>,
+    tool_started_ms: HashMap<String, u64>,
+    tool_seq: u32,
 }
 
 enum TurnControl {
@@ -216,6 +220,11 @@ pub enum NativeEvent {
     Line(String),
     Delta(StreamDelta),
     ContextUsage(ContextUsageSnapshot),
+    Tool {
+        line: String,
+        event: NativeToolEvent,
+        images: Vec<NativeImage>,
+    },
 }
 
 impl AgentRunner {
@@ -282,6 +291,9 @@ impl AgentRunner {
             streaming: false,
             call_started_ms: Arc::new(AtomicU64::new(0)),
             reasoning_started_ms: Arc::new(AtomicU64::new(0)),
+            started_tool_ids: HashSet::new(),
+            tool_started_ms: HashMap::new(),
+            tool_seq: 0,
         }
     }
 
@@ -590,6 +602,119 @@ impl AgentRunner {
                 format!("{prefix}{line}")
             }));
         }
+    }
+
+    fn subagent_tag(&self) -> Option<String> {
+        let tag = self.event_prefix.trim();
+        if tag.is_empty() {
+            None
+        } else {
+            Some(tag.to_string())
+        }
+    }
+
+    fn assign_call_id(&mut self, call: &mut ToolCall) {
+        if call.id.trim().is_empty() {
+            self.tool_seq = self.tool_seq.saturating_add(1);
+            call.id = format!("anon-{}", self.tool_seq);
+        }
+    }
+
+    fn send_tool(&self, line: String, event: NativeToolEvent, images: Vec<NativeImage>) {
+        if let Some(tx) = &self.on_event {
+            let line = if self.event_prefix.is_empty() {
+                line
+            } else {
+                format!("{}{line}", self.event_prefix)
+            };
+            let _ = tx.send(NativeEvent::Tool {
+                line,
+                event,
+                images,
+            });
+        }
+    }
+
+    async fn mcp_display(&self, name: &str) -> (Option<String>, Option<String>) {
+        match self.ctx.mcp.display_for_tool(name).await {
+            Some((server, tool)) => (Some(server), Some(tool)),
+            None => (None, None),
+        }
+    }
+
+    async fn emit_tool_start(&mut self, call: &ToolCall) {
+        if self.started_tool_ids.contains(&call.id) {
+            return;
+        }
+        let (mcp_server, mcp_tool) = self.mcp_display(&call.name).await;
+        let line = tool_start_line_ex(
+            &call.name,
+            &call.arguments,
+            mcp_server.as_deref(),
+            mcp_tool.as_deref(),
+        );
+        let title = tool_event_title(&line);
+        let args_summary = tool_args_summary(&call.name, &call.arguments);
+        self.started_tool_ids.insert(call.id.clone());
+        self.tool_started_ms.insert(call.id.clone(), unix_now_ms());
+        self.send_tool(
+            line,
+            NativeToolEvent {
+                phase: NativeToolPhase::Start,
+                call_id: call.id.clone(),
+                name: call.name.clone(),
+                title,
+                args_summary,
+                ok: None,
+                duration_ms: None,
+                result_preview: None,
+                subagent_tag: self.subagent_tag(),
+                mcp_server,
+                mcp_tool,
+                image_names: Vec::new(),
+            },
+            Vec::new(),
+        );
+    }
+
+    async fn emit_tool_result(&mut self, call: &ToolCall, output: &ToolOutput) {
+        if !self.started_tool_ids.contains(&call.id) {
+            self.emit_tool_start(call).await;
+        }
+        let duration_ms = self
+            .tool_started_ms
+            .get(&call.id)
+            .map(|start| unix_now_ms().saturating_sub(*start));
+        let (mcp_server, mcp_tool) = self.mcp_display(&call.name).await;
+        let start_line = tool_start_line_ex(
+            &call.name,
+            &call.arguments,
+            mcp_server.as_deref(),
+            mcp_tool.as_deref(),
+        );
+        let line = tool_result_line(&call.name, &output.text);
+        self.send_tool(
+            line,
+            NativeToolEvent {
+                phase: NativeToolPhase::Result,
+                call_id: call.id.clone(),
+                name: call.name.clone(),
+                title: tool_event_title(&start_line),
+                args_summary: tool_args_summary(&call.name, &call.arguments),
+                ok: Some(output.ok),
+                duration_ms,
+                result_preview: Some(cap_tool_result_display(&output.text)),
+                subagent_tag: self.subagent_tag(),
+                mcp_server,
+                mcp_tool,
+                image_names: output
+                    .images
+                    .iter()
+                    .map(|image| image.name.clone())
+                    .collect(),
+            },
+            output.images.clone(),
+        );
     }
 
     /// Drop the fragments shown so far: either the complete line is about to
@@ -1459,17 +1584,19 @@ impl AgentRunner {
             };
             return Ok(TurnControl::Stop(text));
         }
-        for call in tool_calls {
+        for mut call in tool_calls {
             if self.ctx.cancel.is_cancelled() {
                 return Err("已取消".to_string());
             }
+            self.assign_call_id(&mut call);
             if call.name == "Agent" {
-                self.push_tool_output(&call, ToolOutput::text("子 Agent 不能再委派子 Agent"));
+                self.push_tool_output(&call, ToolOutput::text("子 Agent 不能再委派子 Agent"))
+                    .await;
                 continue;
             }
-            self.emit(tool_start_line(&call.name, &call.arguments));
+            self.emit_tool_start(&call).await;
             let output = self.execute_logged_tool(&call).await;
-            self.emit(tool_result_line(&call.name, &output.text));
+            self.emit_tool_result(&call, &output).await;
             self.append_tool_message(&call, output);
         }
         Ok(TurnControl::Continue)
@@ -1495,11 +1622,11 @@ impl AgentRunner {
 
     async fn execute_logged_tool(&mut self, call: &ToolCall) -> ToolOutput {
         if let Some(rejection) = self.repeat_guard(call) {
-            return ToolOutput::text(rejection);
+            return ToolOutput::error(rejection);
         }
         match execute_tool_call(&self.ctx, call).await {
             Ok(value) => value,
-            Err(error) => ToolOutput::text(error),
+            Err(error) => ToolOutput::error(error),
         }
     }
 
@@ -1508,9 +1635,12 @@ impl AgentRunner {
     /// 其余按顺序执行。结果始终按模型给出的顺序回填。
     async fn execute_tool_calls(
         &mut self,
-        calls: Vec<ToolCall>,
+        mut calls: Vec<ToolCall>,
         client: Option<&ModelClient>,
     ) -> Result<(), String> {
+        for call in &mut calls {
+            self.assign_call_id(call);
+        }
         let registry = self.contract_registry();
         let mut index = 0;
         while index < calls.len() {
@@ -1544,9 +1674,9 @@ impl AgentRunner {
                 }
             }
             let call = &calls[index];
-            self.emit(tool_start_line(&call.name, &call.arguments));
+            self.emit_tool_start(call).await;
             let output = self.execute_logged_tool(call).await;
-            self.emit(tool_result_line(&call.name, &output.text));
+            self.emit_tool_result(call, &output).await;
             self.append_tool_message(call, output);
             index += 1;
         }
@@ -1558,9 +1688,9 @@ impl AgentRunner {
         let mut slot: Vec<Option<ToolOutput>> = vec![None; calls.len()];
         let mut join_set = JoinSet::new();
         for (pos, call) in calls.iter().enumerate() {
-            self.emit(tool_start_line(&call.name, &call.arguments));
+            self.emit_tool_start(call).await;
             if let Some(rejection) = self.repeat_guard(call) {
-                slot[pos] = Some(ToolOutput::text(rejection));
+                slot[pos] = Some(ToolOutput::error(rejection));
                 continue;
             }
             let ctx = self.ctx.clone();
@@ -1568,7 +1698,7 @@ impl AgentRunner {
             join_set.spawn(async move {
                 let output = match execute_tool_call(&ctx, &call).await {
                     Ok(value) => value,
-                    Err(error) => ToolOutput::text(error),
+                    Err(error) => ToolOutput::error(error),
                 };
                 (pos, output)
             });
@@ -1581,8 +1711,8 @@ impl AgentRunner {
             return Err("已取消".to_string());
         }
         for (call, output) in calls.iter().zip(slot) {
-            let output = output.unwrap_or_else(|| ToolOutput::text("工具未返回结果"));
-            self.emit(tool_result_line(&call.name, &output.text));
+            let output = output.unwrap_or_else(|| ToolOutput::error("工具未返回结果"));
+            self.emit_tool_result(call, &output).await;
             self.append_tool_message(call, output);
         }
         Ok(())
@@ -1719,7 +1849,8 @@ impl AgentRunner {
     ) -> Result<(), String> {
         if self.depth > 0 {
             for call in calls {
-                self.push_tool_output(call, ToolOutput::text("子 Agent 不能再委派子 Agent"));
+                self.push_tool_output(call, ToolOutput::text("子 Agent 不能再委派子 Agent"))
+                    .await;
             }
             return Ok(());
         }
@@ -1756,7 +1887,7 @@ impl AgentRunner {
         let client_owned = client.cloned();
         let batch_quota = self.child_quota_for_share();
         for (pos, job) in jobs {
-            self.emit(tool_start_line("Agent", &job.call.arguments));
+            self.emit_tool_start(&job.call).await;
             self.emit(format!(
                 "{} 启动（{}）",
                 format_subagent_log_tag(job.index, &job.spec.kind, &job.spec.description),
@@ -1877,16 +2008,14 @@ impl AgentRunner {
             slot[pos] = Some((job.call, output));
         }
         for item in slot.into_iter().flatten() {
-            self.push_tool_output(&item.0, ToolOutput::text(item.1));
+            self.push_tool_output(&item.0, ToolOutput::text(item.1))
+                .await;
         }
         Ok(())
     }
 
-    fn push_tool_output(&mut self, call: &ToolCall, output: ToolOutput) {
-        if !output.text.starts_with("子 Agent（") {
-            self.emit(tool_start_line(&call.name, &call.arguments));
-        }
-        self.emit(tool_result_line(&call.name, &output.text));
+    async fn push_tool_output(&mut self, call: &ToolCall, output: ToolOutput) {
+        self.emit_tool_result(call, &output).await;
         self.append_tool_message(call, output);
     }
 
@@ -2044,6 +2173,15 @@ fn thinking_start_line(content: &str, seconds: u32) -> Option<String> {
 }
 
 fn tool_start_line(name: &str, arguments: &str) -> String {
+    tool_start_line_ex(name, arguments, None, None)
+}
+
+fn tool_start_line_ex(
+    name: &str,
+    arguments: &str,
+    mcp_server: Option<&str>,
+    mcp_tool: Option<&str>,
+) -> String {
     let args: Value = serde_json::from_str(arguments).unwrap_or(Value::Null);
     match name {
         "Read" => format!("[读取] {}", json_string(&args, "file_path")),
@@ -2057,7 +2195,137 @@ fn tool_start_line(name: &str, arguments: &str) -> String {
         "ApplyPatch" => "[补丁] 应用多文件补丁".to_string(),
         "Skill" => format!("[技能] {}", json_string(&args, "name")),
         "Agent" => format!("[子 Agent] {}", json_string(&args, "description")),
-        other => format!("[工具] {other}"),
+        "WebFetch" => format!("[工具] WebFetch {}", json_string(&args, "url")),
+        "WebSearch" => format!("[工具] WebSearch {}", json_string(&args, "query")),
+        "AskUserQuestion" | "AskQuestion" => {
+            format!("[工具] 提问 {}", first_question_prompt(&args))
+        }
+        "EnterPlanMode" => "[工具] EnterPlanMode".to_string(),
+        "ExitPlanMode" => "[工具] ExitPlanMode".to_string(),
+        "TaskOutput" => format!("[工具] TaskOutput {}", json_string(&args, "task_id")),
+        "TaskStop" => format!("[工具] TaskStop {}", json_string(&args, "task_id")),
+        "SendMessage" => format!("[工具] SendMessage {}", json_string(&args, "task_id")),
+        "RespondToCoordinator" => "[工具] RespondToCoordinator".to_string(),
+        "CronCreate" => format!(
+            "[工具] CronCreate {}",
+            first_of(&args, &["name", "cron", "expression"])
+        ),
+        "CronList" => "[工具] CronList".to_string(),
+        "CronDelete" => format!("[工具] CronDelete {}", first_of(&args, &["id"])),
+        "Goal" => format!("[工具] Goal {}", first_of(&args, &["title", "action"])),
+        "GoalRead" => "[工具] GoalRead".to_string(),
+        "ReadSessionContext" => format!(
+            "[工具] ReadSessionContext {}",
+            first_of(&args, &["session_id", "query"])
+        ),
+        other => format_generic_tool_line(other, &args, mcp_server, mcp_tool),
+    }
+}
+
+fn format_generic_tool_line(
+    name: &str,
+    args: &Value,
+    mcp_server: Option<&str>,
+    mcp_tool: Option<&str>,
+) -> String {
+    let extra = compact_args(args);
+    if let (Some(server), Some(tool)) = (mcp_server, mcp_tool) {
+        return if extra.is_empty() {
+            format!("[MCP工具] {server} / {tool}")
+        } else {
+            format!("[MCP工具] {server} / {tool} {extra}")
+        };
+    }
+    if name.starts_with("mcp_") {
+        return if extra.is_empty() {
+            format!("[MCP工具] {name}")
+        } else {
+            format!("[MCP工具] {name} {extra}")
+        };
+    }
+    if extra.is_empty() {
+        format!("[工具] {name}")
+    } else {
+        format!("[工具] {name} {extra}")
+    }
+}
+
+fn tool_event_title(line: &str) -> String {
+    let first = line.split('\n').next().unwrap_or(line).trim();
+    let Some(rest) = first.strip_prefix('[') else {
+        return first.to_string();
+    };
+    let Some(end) = rest.find(']') else {
+        return first.to_string();
+    };
+    let label = rest[..end].trim();
+    let after = rest[end + 1..].trim();
+    if after.is_empty() {
+        label.to_string()
+    } else {
+        format!("{label} {after}")
+    }
+}
+
+fn tool_args_summary(name: &str, arguments: &str) -> String {
+    let args: Value = serde_json::from_str(arguments).unwrap_or(Value::Null);
+    match name {
+        "Read" | "Write" | "Edit" => json_opt(&args, "file_path").unwrap_or_default(),
+        "Bash" => json_opt(&args, "command").unwrap_or_default(),
+        "Glob" | "Grep" => json_opt(&args, "pattern").unwrap_or_default(),
+        "Skill" => json_opt(&args, "name").unwrap_or_default(),
+        "Agent" => json_opt(&args, "description").unwrap_or_default(),
+        "WebFetch" => json_opt(&args, "url").unwrap_or_default(),
+        "WebSearch" => json_opt(&args, "query").unwrap_or_default(),
+        "TaskOutput" | "TaskStop" | "SendMessage" => json_opt(&args, "task_id").unwrap_or_default(),
+        _ => compact_args(&args),
+    }
+}
+
+fn first_question_prompt(args: &Value) -> String {
+    args.get("questions")
+        .and_then(Value::as_array)
+        .and_then(|items| items.first())
+        .and_then(|item| item.get("prompt"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| truncate_chars(value, 80))
+        .unwrap_or_else(|| "(unknown)".to_string())
+}
+
+fn first_of(args: &Value, keys: &[&str]) -> String {
+    for key in keys {
+        if let Some(value) = json_opt(args, key) {
+            return value;
+        }
+    }
+    "(unknown)".to_string()
+}
+
+fn json_opt(value: &Value, key: &str) -> Option<String> {
+    value
+        .get(key)
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|item| !item.is_empty())
+        .map(ToOwned::to_owned)
+}
+
+fn compact_args(args: &Value) -> String {
+    match args {
+        Value::Null => String::new(),
+        Value::Object(map) if map.is_empty() => String::new(),
+        Value::Object(map) => {
+            if let Some((_, Value::String(text))) = map
+                .iter()
+                .find(|(_, value)| value.as_str().is_some_and(|item| !item.trim().is_empty()))
+            {
+                return truncate_chars(text.trim(), 120);
+            }
+            truncate_chars(&args.to_string(), 120)
+        }
+        other => truncate_chars(&other.to_string(), 120),
     }
 }
 
@@ -2220,8 +2488,9 @@ mod tests {
     fn drain_events(rx: &mut mpsc::UnboundedReceiver<NativeEvent>) -> Vec<String> {
         let mut lines = Vec::new();
         while let Ok(event) = rx.try_recv() {
-            if let NativeEvent::Line(line) = event {
-                lines.push(line);
+            match event {
+                NativeEvent::Line(line) | NativeEvent::Tool { line, .. } => lines.push(line),
+                _ => {}
             }
         }
         lines
@@ -2347,6 +2616,40 @@ mod tests {
             .messages
             .iter()
             .any(|message| message.content.contains("第三件事")));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn background_agent_does_not_emit_duplicate_start() {
+        let (mut runner, root) = temp_runner();
+        runner.subagent_stub = Some(Arc::new(|spec| format!("stub:{}", spec.description)));
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        runner.on_event = Some(tx);
+        runner
+            .run_scripted(
+                "go",
+                vec![
+                    assistant_tool_call(
+                        "c1",
+                        "Agent",
+                        r#"{"description":"bg","prompt":"do it","run_in_background":true}"#,
+                    ),
+                    Message::assistant_text("done"),
+                ],
+            )
+            .await
+            .expect("run");
+        let lines = drain_events(&mut rx);
+        let starts = lines
+            .iter()
+            .filter(|line| line.starts_with("[子 Agent]"))
+            .count();
+        assert_eq!(starts, 1, "{lines:?}");
+        let results = lines
+            .iter()
+            .filter(|line| line.starts_with("[工具结果]"))
+            .count();
+        assert_eq!(results, 1, "{lines:?}");
         let _ = fs::remove_dir_all(root);
     }
 
@@ -2794,6 +3097,39 @@ mod tests {
     #[test]
     fn todo_read_start_line_is_label() {
         assert_eq!(tool_start_line("TodoRead", "{}"), "[待办] 读取任务清单");
+    }
+
+    #[test]
+    fn tool_start_line_covers_unmatched_builtins_and_mcp() {
+        assert_eq!(
+            tool_start_line("WebFetch", r#"{"url":"https://example.com"}"#),
+            "[工具] WebFetch https://example.com"
+        );
+        assert_eq!(
+            tool_start_line("WebSearch", r#"{"query":"tokio runtime"}"#),
+            "[工具] WebSearch tokio runtime"
+        );
+        assert_eq!(
+            tool_start_line(
+                "AskUserQuestion",
+                r#"{"questions":[{"prompt":"用哪种方案？"}]}"#
+            ),
+            "[工具] 提问 用哪种方案？"
+        );
+        assert_eq!(
+            tool_start_line("mcp_fs_tools_list_files", r#"{"path":"/tmp"}"#),
+            "[MCP工具] mcp_fs_tools_list_files /tmp"
+        );
+        assert_eq!(
+            tool_start_line_ex(
+                "mcp_fs_tools_list_files",
+                r#"{"path":"/tmp"}"#,
+                Some("fs.tools"),
+                Some("list-files"),
+            ),
+            "[MCP工具] fs.tools / list-files /tmp"
+        );
+        assert_eq!(tool_event_title("[读取] src/main.ts"), "读取 src/main.ts");
     }
 
     #[test]
