@@ -1,6 +1,6 @@
 [package]
 name = "noxcode"
-version = "0.2.0"
+version = "0.2.2"
 description = "noxcode"
 authors = ["you"]
 edition = "2021"
