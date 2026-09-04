@@ -47,7 +47,11 @@ import {
 } from "@/lib/composerSlash";
 import { applyComposerPlanMode, resolveComposerPlanMode } from "@/lib/planMode";
 import { submitSessionPrompt } from "@/lib/sessionSubmission";
-import { composerThinkingLevels, resolveComposerThinkingLevel } from "@/lib/modelCatalog";
+import {
+  composerThinkingEnabled,
+  composerThinkingLevels,
+  resolveComposerThinkingLevel,
+} from "@/lib/modelCatalog";
 import { cn } from "@/lib/utils";
 import { ComposerSlashMenu } from "./ComposerSlashMenu";
 import { useChannelStore } from "@/stores/channelStore";
@@ -473,7 +477,8 @@ export function Composer({ compact = false }: { compact?: boolean }) {
     setError(null);
     setSending(true);
     sendingRef.current = true;
-    setEffort(resolvedEffort);
+    const thinkingOn = composerThinkingEnabled(selectedModel);
+    if (thinkingOn) setEffort(resolvedEffort);
     try {
       const imagePaths = attachments.map((item) => item.path);
       await submitSessionPrompt({
@@ -482,7 +487,7 @@ export function Composer({ compact = false }: { compact?: boolean }) {
         channelId,
         prompt: nextPrompt,
         model: model || null,
-        reasoningEffort: resolvedEffort || null,
+        reasoningEffort: thinkingOn ? resolvedEffort || null : null,
         planMode: composerPlanMode,
         imagePaths,
       });
@@ -681,7 +686,9 @@ export function Composer({ compact = false }: { compact?: boolean }) {
           />
           <PermissionModePicker />
           <ChannelModelPicker />
-          <ThinkingLevelPicker value={resolvedEffort} levels={efforts} onChange={setEffort} />
+          {composerThinkingEnabled(selectedModel) && efforts.length > 0 ? (
+            <ThinkingLevelPicker value={resolvedEffort} levels={efforts} onChange={setEffort} />
+          ) : null}
           <ContextCapacity usage={usage} />
           <span className="flex-1" />
           {working && live ? (

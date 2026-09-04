@@ -77,10 +77,20 @@ export function defaultThinkingLevel(levels: string[], preferred?: string | null
   return levels.find((level) => level === "medium") ?? levels[0] ?? null;
 }
 
-/** Composer 可选思考等级：渠道已保存集合，否则回退目录兜底。 */
+/** Composer 是否展示并提交思考等级：仅当模型明确开启思考。 */
+export function composerThinkingEnabled(
+  model?: Pick<AiChannelModel, "thinking_enabled"> | null,
+): boolean {
+  return model?.thinking_enabled === true;
+}
+
+/** Composer 可选思考等级：未开启思考时为空；开启后用渠道已保存集合，否则回退目录兜底。 */
 export function composerThinkingLevels(
-  model?: Pick<AiChannelModel, "thinking_levels"> | null,
+  model?: Pick<AiChannelModel, "thinking_levels" | "thinking_enabled"> | null,
 ): string[] {
+  if (model != null && !composerThinkingEnabled(model)) {
+    return [];
+  }
   return model?.thinking_levels?.length
     ? uniqueThinkingLevels(model.thinking_levels)
     : [...FALLBACK_THINKING_LEVELS];

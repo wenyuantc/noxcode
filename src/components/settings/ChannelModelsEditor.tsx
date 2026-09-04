@@ -245,56 +245,55 @@ export function ChannelModelsEditor({
                   </Select>
                 </div>
 
-                <fieldset
-                  disabled={disabled || !thinkingOn}
-                  className="min-w-0 space-y-1.5 disabled:opacity-40"
-                >
-                  <div
-                    className="flex flex-wrap gap-2 pt-0.5"
-                    role="group"
-                    aria-label={t("channels.fields.thinkingLevels")}
-                  >
-                    {optionLevels.map((level) => {
-                      const checkboxId = `channel-model-${index}-thinking-${level}`;
-                      const checked = selectedLevels.includes(level);
-                      return (
-                        <label
-                          key={level}
-                          htmlFor={checkboxId}
-                          className="flex cursor-pointer items-center gap-1.5 rounded-md border border-border/60 bg-muted/30 px-2 py-1 text-xs text-foreground transition-colors hover:bg-muted/60"
-                        >
-                          <Checkbox
-                            id={checkboxId}
-                            checked={checked}
-                            disabled={disabled || !thinkingOn}
-                            aria-label={t(`channels.thinkingLevels.${level}`, {
-                              defaultValue: level,
-                            })}
-                            onCheckedChange={(nextChecked) => {
-                              const next = nextChecked
-                                ? [...selectedLevels, level]
-                                : selectedLevels.filter((item) => item !== level);
-                              updateAt(
-                                index,
-                                withThinkingLevels(model, next, {
-                                  thinkingEnabled: model.thinking_enabled,
-                                }),
-                              );
-                            }}
-                          />
-                          <span className="font-mono text-[11px]">
-                            {t(`channels.thinkingLevels.${level}`, { defaultValue: level })}
-                          </span>
-                        </label>
-                      );
-                    })}
-                  </div>
-                  {emptySelection ? (
-                    <p className="text-[11px] text-destructive">
-                      {t("channels.fields.thinkingLevelsEmpty")}
-                    </p>
-                  ) : null}
-                </fieldset>
+                {thinkingOn ? (
+                  <fieldset disabled={disabled} className="min-w-0 space-y-1.5 disabled:opacity-40">
+                    <div
+                      className="flex flex-wrap gap-2 pt-0.5"
+                      role="group"
+                      aria-label={t("channels.fields.thinkingLevels")}
+                    >
+                      {optionLevels.map((level) => {
+                        const checkboxId = `channel-model-${index}-thinking-${level}`;
+                        const checked = selectedLevels.includes(level);
+                        return (
+                          <label
+                            key={level}
+                            htmlFor={checkboxId}
+                            className="flex cursor-pointer items-center gap-1.5 rounded-md border border-border/60 bg-muted/30 px-2 py-1 text-xs text-foreground transition-colors hover:bg-muted/60"
+                          >
+                            <Checkbox
+                              id={checkboxId}
+                              checked={checked}
+                              disabled={disabled}
+                              aria-label={t(`channels.thinkingLevels.${level}`, {
+                                defaultValue: level,
+                              })}
+                              onCheckedChange={(nextChecked) => {
+                                const next = nextChecked
+                                  ? [...selectedLevels, level]
+                                  : selectedLevels.filter((item) => item !== level);
+                                updateAt(
+                                  index,
+                                  withThinkingLevels(model, next, {
+                                    thinkingEnabled: model.thinking_enabled,
+                                  }),
+                                );
+                              }}
+                            />
+                            <span className="font-mono text-[11px]">
+                              {t(`channels.thinkingLevels.${level}`, { defaultValue: level })}
+                            </span>
+                          </label>
+                        );
+                      })}
+                    </div>
+                    {emptySelection ? (
+                      <p className="text-[11px] text-destructive">
+                        {t("channels.fields.thinkingLevelsEmpty")}
+                      </p>
+                    ) : null}
+                  </fieldset>
+                ) : null}
               </div>
             </div>
           );
