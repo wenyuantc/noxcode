@@ -1,6 +1,21 @@
 import { create } from "zustand";
 
-import { applyTheme, cycleTheme, getThemePreference, type ThemeMode } from "@/lib/theme";
+import {
+  applyCodeAppearance,
+  clampCodeFontSize,
+  clampUiFontSize,
+  persistCodeAppearance,
+  readCodeAppearance,
+  type CodeAppearance,
+} from "@/lib/codeAppearance";
+import type { CodeThemeId } from "@/lib/codeThemes";
+import {
+  applyTheme,
+  cycleTheme,
+  getThemePreference,
+  isDarkThemeMode,
+  type ThemeMode,
+} from "@/lib/theme";
 
 const WIDTH_KEY = "noxcode:sidebar-width";
 const COLLAPSED_KEY = "noxcode:sidebar-collapsed";
@@ -19,7 +34,9 @@ function readThinkingLevel(): string | null {
   return raw || null;
 }
 
-interface UiState {
+const initialAppearance = readCodeAppearance();
+
+interface UiState extends CodeAppearance {
   sidebarWidth: number;
   sidebarCollapsed: boolean;
   commandOpen: boolean;
@@ -29,6 +46,7 @@ interface UiState {
   composerPlanMode: boolean;
   composerThinkingLevel: string | null;
   theme: ThemeMode;
+  isDark: boolean;
   setSidebarWidth: (width: number) => void;
   toggleSidebar: () => void;
   setCommandOpen: (open: boolean) => void;
@@ -39,6 +57,33 @@ interface UiState {
   setComposerThinkingLevel: (value: string | null) => void;
   setTheme: (mode: ThemeMode) => void;
   cycleTheme: () => void;
+  setIsDark: (isDark: boolean) => void;
+  setUiFontSize: (value: number) => void;
+  setCodeThemeLight: (value: CodeThemeId) => void;
+  setCodeThemeDark: (value: CodeThemeId) => void;
+  setCodeLineNumbers: (value: boolean) => void;
+  setCodeSoftWrap: (value: boolean) => void;
+  setCodeFontSize: (value: number) => void;
+}
+
+function appearanceFromState(state: UiState): CodeAppearance {
+  return {
+    uiFontSize: state.uiFontSize,
+    codeThemeLight: state.codeThemeLight,
+    codeThemeDark: state.codeThemeDark,
+    codeLineNumbers: state.codeLineNumbers,
+    codeSoftWrap: state.codeSoftWrap,
+    codeFontSize: state.codeFontSize,
+  };
+}
+
+function commitAppearance(partial: Partial<CodeAppearance>) {
+  useUiStore.setState((state) => {
+    const next = { ...appearanceFromState(state), ...partial };
+    persistCodeAppearance(next);
+    applyCodeAppearance(next);
+    return next;
+  });
 }
 
 export const useUiStore = create<UiState>((set, get) => ({
@@ -51,6 +96,8 @@ export const useUiStore = create<UiState>((set, get) => ({
   composerPlanMode: typeof window !== "undefined" && localStorage.getItem(PLAN_MODE_KEY) === "1",
   composerThinkingLevel: readThinkingLevel(),
   theme: getThemePreference(),
+  isDark: isDarkThemeMode(getThemePreference()),
+  ...initialAppearance,
   setSidebarWidth: (width) => {
     const next = Math.min(480, Math.max(200, width));
     localStorage.setItem(WIDTH_KEY, String(next));
@@ -76,12 +123,19 @@ export const useUiStore = create<UiState>((set, get) => ({
     set({ composerThinkingLevel: next });
   },
   setTheme: (mode) => {
-    applyTheme(mode);
-    set({ theme: mode });
+    const isDark = applyTheme(mode);
+    set({ theme: mode, isDark });
   },
   cycleTheme: () => {
     const mode = cycleTheme(get().theme);
-    applyTheme(mode);
-    set({ theme: mode });
+    const isDark = applyTheme(mode);
+    set({ theme: mode, isDark });
   },
+  setIsDark: (isDark) => set({ isDark }),
+  setUiFontSize: (value) => commitAppearance({ uiFontSize: clampUiFontSize(value) }),
+  setCodeThemeLight: (value) => commitAppearance({ codeThemeLight: value }),
+  setCodeThemeDark: (value) => commitAppearance({ codeThemeDark: value }),
+  setCodeLineNumbers: (value) => commitAppearance({ codeLineNumbers: value }),
+  setCodeSoftWrap: (value) => commitAppearance({ codeSoftWrap: value }),
+  setCodeFontSize: (value) => commitAppearance({ codeFontSize: clampCodeFontSize(value) }),
 }));

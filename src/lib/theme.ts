@@ -41,6 +41,22 @@ export function applyTheme(mode: ThemeMode) {
   return isDark;
 }
 
+export function watchSystemTheme(
+  getMode: () => ThemeMode,
+  onApply?: (isDark: boolean, mode: ThemeMode) => void,
+) {
+  if (typeof window === "undefined") return () => {};
+  const media = window.matchMedia("(prefers-color-scheme: dark)");
+  const handler = () => {
+    const mode = getMode();
+    if (mode !== "system") return;
+    const isDark = applyTheme("system");
+    onApply?.(isDark, mode);
+  };
+  media.addEventListener("change", handler);
+  return () => media.removeEventListener("change", handler);
+}
+
 export function cycleTheme(mode: ThemeMode): ThemeMode {
   if (mode === "system") return "light";
   if (mode === "light") return "dark";

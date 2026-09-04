@@ -20,9 +20,24 @@
 
           document.documentElement.classList.toggle("dark", isDark);
           document.documentElement.style.colorScheme = isDark ? "dark" : "light";
+
+          const uiFont = Number(localStorage.getItem("noxcode:ui-font-size"));
+          const codeFont = Number(localStorage.getItem("noxcode:code-font-size"));
+          document.documentElement.style.setProperty(
+            "--ui-font-size",
+            Number.isFinite(uiFont) && uiFont >= 12 && uiFont <= 20 ? `${uiFont}px` : "14px",
+          );
+          document.documentElement.style.setProperty(
+            "--code-font-size",
+            Number.isFinite(codeFont) && codeFont >= 10 && codeFont <= 22
+              ? `${codeFont}px`
+              : "12px",
+          );
         } catch {
           document.documentElement.classList.remove("dark");
           document.documentElement.style.colorScheme = "light";
+          document.documentElement.style.setProperty("--ui-font-size", "14px");
+          document.documentElement.style.setProperty("--code-font-size", "12px");
         }
       })();
     </script>

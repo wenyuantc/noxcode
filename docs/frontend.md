@@ -16,7 +16,7 @@ P5 落地单主界面 + 全屏设置。布局学 ZCode：左侧两级树、输�
 ## 目录
 
 ```
-src/main.tsx             i18n init → applyTheme → App
+src/main.tsx             i18n init → applyTheme / applyCodeAppearance → App
 src/App.tsx              四条路由 + 权限 / SSH 信任对话框
 src/lib/backend.ts       唯一 IPC 出口
 src/lib/appUpdate.ts     检查 / 下载 / 重启桌面更新
@@ -24,6 +24,11 @@ src/lib/apiLogs.ts       API 调用记录格式化 / 分页
 src/lib/sessionLines.ts  行前缀解析、结构化 tool 信封、call_id / 子 Agent 分桶配对、时序 segments（同一回合按编号折叠进首个窗口，即使事件交错）/ 待办解析
 src/lib/planMode.ts      按会话解析 Composer 的运行时 / 默认计划模式
 src/lib/gitHelpers.ts    暂存分组、diff 行着色
+src/lib/codeAppearance.ts 界面字号 / 代码主题 / 行号 / 换行 / 代码字号
+src/lib/codeThemes.ts    10 个 Shiki 代码主题注册
+src/lib/codeLanguage.ts  从 className / 路径推断语言
+src/lib/diffLineNumbers.ts unified diff 新旧行号
+src/lib/codeHighlighter.ts Shiki 单例高亮
 src/locales/{zh-CN,en}   九个命名空间
 src/stores/              ui / workspace / channel / session / settings / update
 src/hooks/               useNativeEvents · useSshTrustEvents · useAppHotkeys
@@ -32,6 +37,7 @@ src/components/layout/   AppShell · Sidebar*
 src/components/session/  Composer · EventStream · 回合行 / 计划卡 / Ask 卡 · 待办面板 · pickers · 权限对话框
 src/components/settings/ SettingsLayout + 分节
 src/components/apiLogs/  调用详情弹层
+src/components/code/     CodeBlock · CodePreview
 src/components/git/      GitPanel · DiffView · CheckpointTimeline
 ```
 
@@ -39,7 +45,7 @@ src/components/git/      GitPanel · DiffView · CheckpointTimeline
 
 | Store | 持久化键 | 职责 |
 | --- | --- | --- |
-| `uiStore` | `noxcode:sidebar-width`（200–480）、`noxcode:sidebar-collapsed`、`noxcode:composer-plan-mode`、`noxcode:composer-thinking-level`、`theme` / `theme-mode` | 侧栏、命令面板、Git 抽屉、Composer 草稿、计划模式、思考等级、主题 |
+| `uiStore` | `noxcode:sidebar-width`（200–480）、`noxcode:sidebar-collapsed`、`noxcode:composer-plan-mode`、`noxcode:composer-thinking-level`、`theme` / `theme-mode`、`noxcode:ui-font-size`、`noxcode:code-theme-light` / `noxcode:code-theme-dark`、`noxcode:code-line-numbers`、`noxcode:code-soft-wrap`、`noxcode:code-font-size` | 侧栏、命令面板、Git 抽屉、Composer 草稿、计划模式、思考等级、主题、界面字号、代码外观 |
 | `workspaceStore` | `noxcode:active-workspace` | 工作区列表、会话树、健康检查 |
 | `channelStore` | `noxcode:active-model` | 渠道列表、当前渠道/模型 |
 | `sessionStore` | — | live 会话、事件行、turn-state、按会话计划模式、权限/提问 |
@@ -98,4 +104,4 @@ Windows / Linux 把 `⌘` 换成 Ctrl。定义在 `src/lib/shortcuts.ts`。`Shif
 
 `fallbackLng=zh-CN`，键 `noxcode:locale`。命名空间：`common` `nav` `layout` `sessions` `settings` `ssh` `git` `apiLogs` `errors`。`localeKeys.test.ts` 强制 zh-CN / en 键结构一致。
 
-主题键 `theme-mode` / `theme`，与 `index.html` 防闪脚本一致。
+主题键 `theme-mode` / `theme`，与 `index.html` 防闪脚本一致。代码外观键 `noxcode:ui-font-size`、`noxcode:code-theme-light`、`noxcode:code-theme-dark`、`noxcode:code-line-numbers`、`noxcode:code-soft-wrap`、`noxcode:code-font-size` 同样走 localStorage；启动时写入 `--ui-font-size` / `--code-font-size`。围栏代码、文件读取预览、Git diff 与 API 日志 JSON 经 `CodeBlock` / Shiki 使用当前浅色或深色代码主题。
