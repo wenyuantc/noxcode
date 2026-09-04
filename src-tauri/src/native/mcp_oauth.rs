@@ -462,7 +462,9 @@ async fn read_request_head(stream: &mut tokio::net::TcpStream) -> Result<String,
             break;
         }
         buffer.extend_from_slice(&chunk[..read]);
-        if buffer.windows(4).any(|window| window == b"\r\n\r\n") || buffer.len() >= MAX_REQUEST_BYTES {
+        if buffer.windows(4).any(|window| window == b"\r\n\r\n")
+            || buffer.len() >= MAX_REQUEST_BYTES
+        {
             break;
         }
     }
@@ -500,23 +502,27 @@ async fn run_flow<R: Runtime>(
 ) {
     let outcome: Result<(), (String, Option<tokio::net::TcpStream>)> =
         match wait_for_callback(listener, &state).await {
-            Ok((code, mut stream)) => match exchange_code(&oauth, &code, &redirect_uri, &verifier).await
-            {
-                Ok(token) => match save_token(&server.id, &token) {
-                    Ok(()) => {
-                        let _ = stream
-                            .write_all(&http_response(
-                                "200 OK",
-                                &callback_html(true, &format!("已为「{}」保存访问令牌。", server.name)),
-                            ))
-                            .await;
-                        let _ = stream.shutdown().await;
-                        Ok(())
-                    }
+            Ok((code, mut stream)) => {
+                match exchange_code(&oauth, &code, &redirect_uri, &verifier).await {
+                    Ok(token) => match save_token(&server.id, &token) {
+                        Ok(()) => {
+                            let _ = stream
+                                .write_all(&http_response(
+                                    "200 OK",
+                                    &callback_html(
+                                        true,
+                                        &format!("已为「{}」保存访问令牌。", server.name),
+                                    ),
+                                ))
+                                .await;
+                            let _ = stream.shutdown().await;
+                            Ok(())
+                        }
+                        Err(error) => Err((error, Some(stream))),
+                    },
                     Err(error) => Err((error, Some(stream))),
-                },
-                Err(error) => Err((error, Some(stream))),
-            },
+                }
+            }
             Err(failure) => Err(failure),
         };
     let (ok, message) = match outcome {
@@ -524,7 +530,10 @@ async fn run_flow<R: Runtime>(
         Err((error, stream)) => {
             if let Some(mut stream) = stream {
                 let _ = stream
-                    .write_all(&http_response("400 Bad Request", &callback_html(false, &error)))
+                    .write_all(&http_response(
+                        "400 Bad Request",
+                        &callback_html(false, &error),
+                    ))
                     .await;
                 let _ = stream.shutdown().await;
             }
@@ -583,8 +592,8 @@ pub async fn start_mcp_oauth<R: Runtime>(
     ));
     replace_pending_flow(&server_id, Some(handle));
 
-    if let Err(error) = tauri_plugin_opener::OpenerExt::opener(&app)
-        .open_url(authorize_url.clone(), None::<&str>)
+    if let Err(error) =
+        tauri_plugin_opener::OpenerExt::opener(&app).open_url(authorize_url.clone(), None::<&str>)
     {
         // 打开浏览器失败不算致命：前端仍可展示链接让用户手动打开。
         eprintln!("[mcp-oauth] 打开浏览器失败: {error}");
@@ -672,7 +681,10 @@ mod tests {
     #[test]
     fn callback_request_yields_code_when_state_matches() {
         let request = "GET /callback?code=abc%2Fdef&state=s1 HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n";
-        assert_eq!(parse_callback_request(request, "s1").expect("code"), "abc/def");
+        assert_eq!(
+            parse_callback_request(request, "s1").expect("code"),
+            "abc/def"
+        );
         let mismatch = parse_callback_request(request, "other").expect_err("state");
         assert!(mismatch.contains("state"));
         let denied = parse_callback_request(
@@ -683,7 +695,10 @@ mod tests {
         assert!(denied.contains("access_denied"));
         assert!(denied.contains("user said no"));
         assert!(parse_callback_request("GET /favicon.ico HTTP/1.1\r\n\r\n", "s1").is_err());
-        assert!(parse_callback_request("POST /callback?code=x&state=s1 HTTP/1.1\r\n\r\n", "s1").is_err());
+        assert!(
+            parse_callback_request("POST /callback?code=x&state=s1 HTTP/1.1\r\n\r\n", "s1")
+                .is_err()
+        );
     }
 
     #[test]

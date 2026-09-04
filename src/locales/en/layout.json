@@ -4,7 +4,7 @@
     "afternoon": "Good afternoon — I'll take it from here",
     "evening": "Good evening — what should we do next?"
   },
-  "composerPlaceholder": "Ask noxcode, use @ to add context, / to pick a skill",
+  "composerPlaceholder": "Ask noxcode, use @ to add context, / for commands or skills, $ to pick a skill",
   "noWorkspace": "No workspace selected",
   "scratchWorkspace": "Scratch workspace",
   "sessions": "Sessions",

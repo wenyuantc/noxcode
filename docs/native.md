@@ -134,7 +134,7 @@ P4 把进程内编程 Agent 接到渠道 + 工作区外壳。数据流仍是 `Re
 
 工作区 / 历史：`list/create/update/delete_workspace`、`check_workspace_health`、`list_agent_sessions`、`get_agent_session_log_lines`、`prepare_agent_session_resume`、`set_agent_session_pinned`、`delete_agent_session`、`list_activity_logs`。
 
-设置：`get/update_native_settings`、`list_native_global_skills`、`open_native_skills_dir`、`list/create/update/delete_native_subagent`、`get/update/reset_mcp_servers`、`export_mcp_servers_snippet`、`list/get_native_api_call_log`。
+设置：`get/update_native_settings`、`list_native_global_skills`、`list_native_skills`、`open_native_skills_dir`、`create/delete/copy/import/scan/set_enabled` 技能命令、`list/create/update/delete_native_subagent`、`get/update/reset_mcp_servers`、`export_mcp_servers_snippet`、`list/get_native_api_call_log`。
 
 删除工作区前会 `clear_workspace_checkpoints`。删除会话前会 `delete_checkpoints_for_session`。运行中的渠道 / 工作区 / 会话拒绝删除。
 
@@ -166,7 +166,8 @@ P4 把进程内编程 Agent 接到渠道 + 工作区外壳。数据流仍是 `Re
 - 工作区钩子：`<workspace>/.noxcode/hooks.json`、`.claude/settings.json`、`.claude/settings.local.json`
 - `native-subagents.json`：自定义子智能体（`scope=all|workspaces`）
 - `mcp-servers.json`：MCP server 支持 `scope=all|workspaces` 与 `workspace_ids`；会话只连接已启用且匹配当前工作区的服务器
-- `native-skills/`：全局技能；工作区另读 `.agents/skills` 与 `.claude/skills`
+- `native-skills-state.json`：技能启停名单（按 `SKILL.md` 路径）
+- 用户级技能：`~/.noxcode/skills`（旧 `$APPCONFIG/native-skills` 仅只读兜底）；工作区另读 `.noxcode/skills`、`.zcode/skills`、`.agents/skills`、`.claude/skills`（cwd 与 git 根）
 
 MCP 连接失败只写警告行，不中断会话。SSH 工作区在远端拉起 MCP，失败不回退本机。
 

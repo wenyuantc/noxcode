@@ -93,7 +93,9 @@ fn normalize_server(mut server: McpServerConfig) -> Result<McpServerConfig, Stri
         oauth.client_id = oauth.client_id.trim().to_string();
         oauth.authorize_url = oauth.authorize_url.trim().to_string();
         oauth.token_url = oauth.token_url.trim().to_string();
-        if oauth.client_id.is_empty() || oauth.authorize_url.is_empty() || oauth.token_url.is_empty()
+        if oauth.client_id.is_empty()
+            || oauth.authorize_url.is_empty()
+            || oauth.token_url.is_empty()
         {
             return Err("OAuth 配置需要 client_id、authorize_url 与 token_url".to_string());
         }
@@ -240,7 +242,8 @@ pub fn resolve_session_mcp_servers<R: Runtime>(
 ) -> Result<Vec<McpServerConfig>, String> {
     let global = resolve_effective_mcp_servers(app, workspace_id)?;
     let config_dir = app_config_dir(app).ok();
-    let plugins = crate::native::plugins::load_enabled_plugins(config_dir.as_deref(), workspace_root);
+    let plugins =
+        crate::native::plugins::load_enabled_plugins(config_dir.as_deref(), workspace_root);
     let plugin_servers = crate::native::plugins::plugin_mcp_servers(&plugins);
     let project_servers = workspace_root
         .map(load_project_mcp_servers)

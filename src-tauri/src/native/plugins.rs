@@ -205,7 +205,12 @@ pub fn substitute_plugin_vars(text: &str, vars: &PluginVars<'_>) -> String {
 fn substitute_value(value: &Value, vars: &PluginVars<'_>) -> Value {
     match value {
         Value::String(text) => Value::String(substitute_plugin_vars(text, vars)),
-        Value::Array(items) => Value::Array(items.iter().map(|item| substitute_value(item, vars)).collect()),
+        Value::Array(items) => Value::Array(
+            items
+                .iter()
+                .map(|item| substitute_value(item, vars))
+                .collect(),
+        ),
         Value::Object(map) => Value::Object(
             map.iter()
                 .map(|(key, item)| (key.clone(), substitute_value(item, vars)))
@@ -249,7 +254,10 @@ fn resolve_inline_or_file(
             let path = root.join(rel.trim().trim_start_matches("./"));
             let value = read_json(&path);
             if value.is_none() {
-                errors.push(format!("{label} 文件不存在或不是合法 JSON：{}", path.display()));
+                errors.push(format!(
+                    "{label} 文件不存在或不是合法 JSON：{}",
+                    path.display()
+                ));
             }
             value
         }
@@ -415,7 +423,10 @@ fn parse_user_config_fields(raw: &BTreeMap<String, Value>) -> Vec<PluginUserConf
                     Value::String(text) => text.clone(),
                     other => other.to_string(),
                 }),
-                required: map.get("required").and_then(Value::as_bool).unwrap_or(false),
+                required: map
+                    .get("required")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false),
             },
             Value::String(text) => PluginUserConfigField {
                 key: key.clone(),
@@ -499,9 +510,15 @@ pub fn load_plugin(
         data_dir: &data_dir,
         user_config: &user_config,
     };
-    let hooks = resolve_inline_or_file(root, manifest.hooks.as_ref(), DEFAULT_HOOKS_FILES, &mut errors, "hooks")
-        .map(|value| parse_plugin_hooks(&substitute_value(&value, &vars), &name))
-        .unwrap_or_default();
+    let hooks = resolve_inline_or_file(
+        root,
+        manifest.hooks.as_ref(),
+        DEFAULT_HOOKS_FILES,
+        &mut errors,
+        "hooks",
+    )
+    .map(|value| parse_plugin_hooks(&substitute_value(&value, &vars), &name))
+    .unwrap_or_default();
     let mcp_servers = resolve_inline_or_file(
         root,
         manifest.mcp_servers.as_ref(),
@@ -511,7 +528,10 @@ pub fn load_plugin(
     )
     .map(|value| parse_plugin_mcp_servers(&substitute_value(&value, &vars), &name))
     .unwrap_or_default();
-    let enabled = !state.disabled.iter().any(|item| item.eq_ignore_ascii_case(&name));
+    let enabled = !state
+        .disabled
+        .iter()
+        .any(|item| item.eq_ignore_ascii_case(&name));
     Ok(NativePlugin {
         description: pick_description(&manifest),
         version: manifest
@@ -647,7 +667,10 @@ pub fn plugin_mcp_servers(plugins: &[NativePlugin]) -> Vec<McpServerConfig> {
         .collect()
 }
 
-pub fn plugin_dirs(plugins: &[NativePlugin], pick: fn(&NativePlugin) -> &Vec<String>) -> Vec<(String, PathBuf)> {
+pub fn plugin_dirs(
+    plugins: &[NativePlugin],
+    pick: fn(&NativePlugin) -> &Vec<String>,
+) -> Vec<(String, PathBuf)> {
     plugins
         .iter()
         .flat_map(|plugin| {
@@ -717,7 +740,10 @@ fn temp_install_dir(plugins_root: &Path) -> PathBuf {
 }
 
 /// 安装到 `$APPCONFIG/plugins/<name>/`：本地目录复制，git URL 浅克隆；同名已存在则覆盖。
-pub async fn install_plugin_from_source(config_dir: &Path, source: &str) -> Result<NativePlugin, String> {
+pub async fn install_plugin_from_source(
+    config_dir: &Path,
+    source: &str,
+) -> Result<NativePlugin, String> {
     let source = source.trim();
     if source.is_empty() {
         return Err("安装源不能为空".to_string());
@@ -741,7 +767,10 @@ pub async fn install_plugin_from_source(config_dir: &Path, source: &str) -> Resu
         .map_err(|error| format!("克隆插件仓库失败: {error}"))?;
         if !output.success() {
             let _ = fs::remove_dir_all(&staging);
-            return Err(format!("克隆插件仓库失败: {}", output.stderr_lossy().trim()));
+            return Err(format!(
+                "克隆插件仓库失败: {}",
+                output.stderr_lossy().trim()
+            ));
         }
         // 去掉 .git，插件以快照形式保存。
         let _ = fs::remove_dir_all(staging.join(".git"));
@@ -771,8 +800,7 @@ pub async fn install_plugin_from_source(config_dir: &Path, source: &str) -> Resu
     };
     let final_dir = plugins_root.join(&plugin.name);
     if final_dir.exists() {
-        fs::remove_dir_all(&final_dir)
-            .map_err(|error| format!("移除旧版本插件失败: {error}"))?;
+        fs::remove_dir_all(&final_dir).map_err(|error| format!("移除旧版本插件失败: {error}"))?;
     }
     fs::rename(&staged, &final_dir).map_err(|error| format!("放置插件目录失败: {error}"))?;
     load_plugin(
@@ -951,7 +979,10 @@ mod tests {
 
     #[test]
     fn plugin_names_are_validated() {
-        assert_eq!(normalize_plugin_name(" my-plugin_1.0 ").expect("ok"), "my-plugin_1.0");
+        assert_eq!(
+            normalize_plugin_name(" my-plugin_1.0 ").expect("ok"),
+            "my-plugin_1.0"
+        );
         assert!(normalize_plugin_name("").is_err());
         assert!(normalize_plugin_name("../etc").is_err());
         assert!(normalize_plugin_name(".hidden").is_err());
@@ -987,9 +1018,15 @@ mod tests {
               }
             }"#,
         );
-        write(&root.join("skills/review/SKILL.md"), "---\nname: review\ndescription: r\n---\nbody");
+        write(
+            &root.join("skills/review/SKILL.md"),
+            "---\nname: review\ndescription: r\n---\nbody",
+        );
         write(&root.join("commands/hello.md"), "Say hi to $ARGUMENTS");
-        write(&root.join("agents/helper.md"), "---\nname: helper\ndescription: h\n---\nprompt");
+        write(
+            &root.join("agents/helper.md"),
+            "---\nname: helper\ndescription: h\n---\nprompt",
+        );
 
         // 未配置必填项时报错但仍加载。
         let plugins = load_plugins(Some(&config), None);
@@ -1000,7 +1037,11 @@ mod tests {
         assert_eq!(plugin.description, "演示插件");
         assert!(plugin.enabled);
         assert_eq!(plugin.skill_dirs.len(), 1);
-        assert_eq!(plugin.command_dirs.len(), 1, "不存在的 extra-commands 被忽略");
+        assert_eq!(
+            plugin.command_dirs.len(),
+            1,
+            "不存在的 extra-commands 被忽略"
+        );
         assert_eq!(plugin.agent_dirs.len(), 1);
         assert_eq!(plugin.hooks.len(), 1);
         assert_eq!(plugin.hooks[0].event, HOOK_EVENT_PRE_TOOL_USE);
@@ -1037,7 +1078,16 @@ mod tests {
         let plugins = load_plugins(Some(&config), None);
         assert!(!plugins[0].enabled);
         assert!(plugins[0].errors.is_empty());
-        assert_eq!(plugins[0].mcp_servers.iter().find(|s| s.name == "demo/docs").unwrap().env[0].value, "secret");
+        assert_eq!(
+            plugins[0]
+                .mcp_servers
+                .iter()
+                .find(|s| s.name == "demo/docs")
+                .unwrap()
+                .env[0]
+                .value,
+            "secret"
+        );
         assert!(load_enabled_plugins(Some(&config), None).is_empty());
 
         set_plugin_enabled(&config, "demo", true).expect("enable");
@@ -1056,7 +1106,9 @@ mod tests {
             r#"{ "name": "shared", "description": "global" }"#,
         );
         write(
-            &workspace.join(WORKSPACE_PLUGINS_DIR).join("shared/noxcode-plugin.json"),
+            &workspace
+                .join(WORKSPACE_PLUGINS_DIR)
+                .join("shared/noxcode-plugin.json"),
             r#"{ "name": "shared", "description": "workspace" }"#,
         );
         write(
@@ -1081,7 +1133,8 @@ mod tests {
         assert_eq!(servers.len(), 1);
         assert_eq!(servers[0].id, "plugin-p-x");
         assert_eq!(servers[0].transport, MCP_TRANSPORT_STDIO);
-        let empty = parse_plugin_mcp_servers(&serde_json::json!({ "bad": { "type": "http" } }), "p");
+        let empty =
+            parse_plugin_mcp_servers(&serde_json::json!({ "bad": { "type": "http" } }), "p");
         assert!(empty.is_empty(), "缺 url 的 http 服务器被跳过");
     }
 
@@ -1102,9 +1155,11 @@ mod tests {
         let installed = plugins_dir(&config).join("local-demo");
         assert!(installed.join("commands/a.md").is_file());
         assert!(!installed.join(".git").exists(), ".git 不复制");
-        assert!(install_plugin_from_source(&config, &config.join("missing").to_string_lossy())
-            .await
-            .is_err());
+        assert!(
+            install_plugin_from_source(&config, &config.join("missing").to_string_lossy())
+                .await
+                .is_err()
+        );
         assert!(looks_like_git_source("https://github.com/acme/plugin.git"));
         assert!(looks_like_git_source("git@github.com:acme/plugin.git"));
         assert!(!looks_like_git_source("/tmp/plugin"));

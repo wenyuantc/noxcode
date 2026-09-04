@@ -304,7 +304,7 @@
         "SSH passwords / private-key passphrases in the keyring (service noxcode-ssh)",
         "ssh-secret-index.json in the app config directory",
         "mcp-servers.json, native-settings.json (including hooks), network-settings.json, and quick-prompts.json in the app config directory",
-        "The global skills directory native-skills/",
+        "The global skills directory ~/.noxcode/skills",
         "Git checkpoint objects inside repositories",
         "Local UI state such as window size"
       ]
@@ -451,8 +451,97 @@
   },
   "skills": {
     "title": "Skills",
-    "hint": "SKILL.md files under $APPCONFIG/native-skills.",
-    "openDir": "Open skills folder"
+    "hint": "Manage project and user skills. User skills live in ~/.noxcode/skills and can be used in chat with $name or /.",
+    "openDir": "Open skills folder",
+    "searchPlaceholder": "Search skills...",
+    "refresh": "Refresh",
+    "refreshing": "Refreshing...",
+    "empty": "No skills found",
+    "footerSummary": "{{total}} skills · {{enabled}} enabled",
+    "noDescription": "No description",
+    "storageDir": "Skills directory",
+    "openPath": "Open",
+    "enabled": "Enabled",
+    "disabled": "Disabled",
+    "copyToCommon": "Copy to common",
+    "copiedToCommon": "Copied to global skills.",
+    "copyFailed": "Failed to copy skill.",
+    "deleted": "Skill deleted.",
+    "deleteFailed": "Failed to delete skill.",
+    "toggleFailed": "Failed to update skill status.",
+    "group": {
+      "local": "Workspace and personal skills",
+      "plugin": "Plugin skills"
+    },
+    "filter": {
+      "source": "Source",
+      "status": "Status",
+      "workspaceDir": "Workspace",
+      "all": "All",
+      "enabled": "Enabled",
+      "disabled": "Disabled",
+      "globalDir": "Global ~/.noxcode/skills",
+      "pluginDir": "Plugins",
+      "ssh": "Remote"
+    },
+    "source": {
+      "workspace_noxcode": "Workspace .noxcode",
+      "workspace_zcode": "Workspace .zcode",
+      "workspace_agents": "Workspace .agents",
+      "workspace_claude": "Workspace .claude",
+      "plugin": "Plugin",
+      "global": "Global"
+    },
+    "delete": {
+      "title": "Delete skill",
+      "description": "Delete “{{name}}”? This removes the skill folder from disk and cannot be undone.",
+      "action": "Delete"
+    },
+    "create": {
+      "open": "New skill",
+      "title": "New skill",
+      "name": "Name",
+      "nameHint": "Lowercase letters, numbers, and hyphens",
+      "description": "Description",
+      "scope": "Save to",
+      "scopeGlobal": "Global",
+      "submit": "Create",
+      "needWorkspace": "Select a local workspace.",
+      "failed": "Failed to create skill."
+    },
+    "import": {
+      "open": "Import skills from external agents",
+      "title": "Import external agent skills",
+      "description": "Scan reusable skills from Claude Code, Codex CLI, OpenCode, Cursor, and ZCode. Only missing skills are imported.",
+      "scanning": "Scanning importable skills...",
+      "empty": "No importable skills found. Check the external agent skills directories and scan again.",
+      "summary": "Found {{count}} importable skills",
+      "target": "Import target",
+      "targetGlobal": "Import to global",
+      "targetProject": "Import to project",
+      "mode": "Import mode",
+      "modeCopy": "Copy",
+      "modeSymlink": "Symlink",
+      "modeCopyHint": "Copy the full skill directory into noxcode. Later changes in the external directory will not sync automatically.",
+      "modeSymlinkHint": "Create a directory link to the external skill. Later source changes are followed, but the path must stay available.",
+      "selectAll": "Select all",
+      "clearAll": "Clear all",
+      "selectionCount": "{{selected}}/{{total}} selected",
+      "start": "Import selected skills",
+      "importing": "Importing skills...",
+      "finish": "Done",
+      "imported": "Imported",
+      "skipped": "Skipped",
+      "failed": "Failed",
+      "skipExists": "Name already exists",
+      "needWorkspace": "Importing to a project needs a local workspace.",
+      "complete": "The skills list has been refreshed. Existing same-name skills were kept."
+    },
+    "diagnostics": {
+      "summary": "Skill diagnostics: {{errorCount}} error(s), {{warningCount}} warning(s)",
+      "expand": "Expand diagnostics",
+      "collapse": "Collapse diagnostics"
+    }
   },
   "hooks": {
     "title": "Hooks",

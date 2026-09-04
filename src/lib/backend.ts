@@ -46,7 +46,13 @@ import type {
   NativeApiCallLogPage,
   NativeAutomation,
   NativeContextUsage,
+  CreateNativeSkillInput,
+  ExternalSkillScan,
+  ImportExternalSkillsInput,
+  ImportExternalSkillsResult,
   NativeGlobalSkills,
+  NativeSkill,
+  NativeSkillsView,
   NativeMemoryEntry,
   NativeMemoryView,
   NativePermissionDecision,
@@ -553,8 +559,42 @@ export function listNativeGlobalSkills(): Promise<NativeGlobalSkills> {
   return invoke("list_native_global_skills");
 }
 
+export function listNativeSkills(workspaceId?: string | null): Promise<NativeSkillsView> {
+  return invoke("list_native_skills", { workspaceId: workspaceId ?? null });
+}
+
 export function openNativeSkillsDir(): Promise<void> {
   return invoke("open_native_skills_dir");
+}
+
+export function openNativeSkillPath(path: string): Promise<void> {
+  return invoke("open_native_skill_path", { path });
+}
+
+export function createNativeSkill(payload: CreateNativeSkillInput): Promise<NativeSkill> {
+  return invoke("create_native_skill", { payload });
+}
+
+export function deleteNativeSkill(path: string, workspaceId?: string | null): Promise<void> {
+  return invoke("delete_native_skill", { path, workspaceId: workspaceId ?? null });
+}
+
+export function copyNativeSkillToGlobal(path: string): Promise<NativeSkill> {
+  return invoke("copy_native_skill_to_global", { path });
+}
+
+export function setNativeSkillEnabled(skillMdPath: string, enabled: boolean): Promise<string[]> {
+  return invoke("set_native_skill_enabled", { skillMdPath, enabled });
+}
+
+export function scanExternalSkills(workspaceId?: string | null): Promise<ExternalSkillScan> {
+  return invoke("scan_external_skills", { workspaceId: workspaceId ?? null });
+}
+
+export function importExternalSkills(
+  payload: ImportExternalSkillsInput,
+): Promise<ImportExternalSkillsResult> {
+  return invoke("import_external_skills", { payload });
 }
 
 export const NATIVE_SUBAGENT_CUSTOM_TOOLS = [

@@ -200,7 +200,7 @@ Cron 自动化：`workspace_id`（级联删除）、`name`、`prompt`、`cron`�
 - keyring 里的 SSH 密码 / 私钥口令（服务名 `noxcode-ssh`）
 - 应用配置目录里的 `ssh-secret-index.json`
 - 应用配置目录里的 `mcp-servers.json`、`native-settings.json`（含钩子）、`network-settings.json`、`quick-prompts.json`
-- 全局技能目录 `native-skills/`
+- 全局技能目录 `~/.noxcode/skills`（以及旧的 `$APPCONFIG/native-skills`）
 - Git 仓库里的 checkpoint 对象
 - 窗口尺寸等本地 UI 状态
 

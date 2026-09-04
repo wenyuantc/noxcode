@@ -312,10 +312,19 @@ mod tests {
 
     #[test]
     fn newer_point_releases_resolve_to_their_own_entry() {
-        assert_eq!(lookup_catalog("claude-fable-5-1").unwrap().id, "claude-fable-5-1");
+        assert_eq!(
+            lookup_catalog("claude-fable-5-1").unwrap().id,
+            "claude-fable-5-1"
+        );
         assert_eq!(lookup_catalog("fable-5.1").unwrap().id, "claude-fable-5-1");
-        assert_eq!(lookup_catalog("claude-fable-5").unwrap().id, "claude-fable-5");
-        assert_eq!(lookup_catalog("gemini-3.8-flash").unwrap().id, "gemini-3.8-flash");
+        assert_eq!(
+            lookup_catalog("claude-fable-5").unwrap().id,
+            "claude-fable-5"
+        );
+        assert_eq!(
+            lookup_catalog("gemini-3.8-flash").unwrap().id,
+            "gemini-3.8-flash"
+        );
         assert_eq!(
             apply_catalog_defaults("gemini-3.8-flash").input_types,
             types(&["text", "image", "video"])

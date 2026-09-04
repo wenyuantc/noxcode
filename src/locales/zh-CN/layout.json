@@ -4,7 +4,7 @@
     "afternoon": "下午好呀，接下来交给我吧",
     "evening": "晚上好，接下来交给我吧"
   },
-  "composerPlaceholder": "向 noxcode 提问，使用 @ 添加上下文，使用 / 选择技能",
+  "composerPlaceholder": "向 noxcode 提问，使用 @ 添加上下文，使用 / 选择命令或技能，使用 $ 选择技能",
   "noWorkspace": "未选择工作区",
   "scratchWorkspace": "临时工作区",
   "sessions": "会话",

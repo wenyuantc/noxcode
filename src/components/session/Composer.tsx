@@ -5,17 +5,31 @@ import { useTranslation } from "react-i18next";
 import { Button } from "@/components/ui/button";
 import {
   compactNativeSession,
+  expandNativeSlashCommand,
   forkNativeSession,
   listGitFiles,
-  listNativeGlobalSkills,
+  listNativeSkills,
+  listNativeSlashCommands,
+  listNativeSubagents,
   stopNativeSession,
 } from "@/lib/backend";
 import { clampMentionIndex, resolveComposerMentionKey } from "@/lib/composerMention";
+import {
+  builtinSlashCommands,
+  filterComposerSlashItems,
+  isBuiltinSlashName,
+  parseComposerTrigger,
+  parseLeadingSlash,
+  parseSkillInvocation,
+  skillInvocationPrompt,
+  subagentDelegationPrompt,
+  type ComposerSlashItem,
+} from "@/lib/composerSlash";
 import { applyComposerPlanMode, resolveComposerPlanMode } from "@/lib/planMode";
 import { submitSessionPrompt } from "@/lib/sessionSubmission";
 import { composerThinkingLevels, resolveComposerThinkingLevel } from "@/lib/modelCatalog";
-import type { NativeSkill } from "@/lib/types";
 import { cn } from "@/lib/utils";
+import { ComposerSlashMenu } from "./ComposerSlashMenu";
 import { useChannelStore } from "@/stores/channelStore";
 import { useSessionStore } from "@/stores/sessionStore";
 import { useUiStore } from "@/stores/uiStore";
@@ -70,8 +84,8 @@ export function Composer({ compact = false }: { compact?: boolean }) {
   const [model, setModel] = useState(activeModelId ?? "");
   const [error, setError] = useState<string | null>(null);
   const [files, setFiles] = useState<string[]>([]);
-  const [skills, setSkills] = useState<NativeSkill[]>([]);
-  const [mentionOpen, setMentionOpen] = useState<"@" | "/" | null>(null);
+  const [slashItems, setSlashItems] = useState<ComposerSlashItem[]>([]);
+  const [mentionOpen, setMentionOpen] = useState<"@" | "/" | "$" | null>(null);
   const [mentionIndex, setMentionIndex] = useState(0);
   const [sending, setSending] = useState(false);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -89,52 +103,101 @@ export function Composer({ compact = false }: { compact?: boolean }) {
     setModel(activeModelId ?? "");
   }, [activeModelId]);
 
+  const trigger = parseComposerTrigger(draft);
+
   useEffect(() => {
-    const last = draft.split(/\s/).pop() ?? "";
-    if (last.startsWith("@") && workspaceId) {
+    if (trigger?.kind === "@" && workspaceId) {
       setMentionOpen("@");
-      void listGitFiles(workspaceId, last.slice(1), 30)
+      void listGitFiles(workspaceId, trigger.query, 30)
         .then(setFiles)
         .catch(() => setFiles([]));
-    } else if (last.startsWith("/")) {
-      setMentionOpen("/");
-      void listNativeGlobalSkills()
-        .then((doc) =>
-          setSkills(
-            doc.skills.filter((skill) =>
-              skill.name.toLowerCase().includes(last.slice(1).toLowerCase()),
-            ),
-          ),
-        )
-        .catch(() => setSkills([]));
-    } else {
-      setMentionOpen(null);
+      return;
     }
-  }, [draft, workspaceId]);
+    if (trigger?.kind === "/" || trigger?.kind === "$") {
+      setMentionOpen(trigger.kind);
+      return;
+    }
+    setMentionOpen(null);
+    setSlashItems([]);
+  }, [draft, trigger?.kind, trigger?.query, workspaceId]);
 
-  const mentionQuery = draft.split(/\s/).pop() ?? "";
+  useEffect(() => {
+    if (mentionOpen !== "/" && mentionOpen !== "$") return;
+    let cancelled = false;
+    const labels = {
+      init: "AGENTS.md",
+      fork: "checkpoint",
+      compact: "context",
+    };
+    void Promise.all([
+      listNativeSlashCommands(workspaceId).catch(() => []),
+      listNativeSkills(workspaceId).catch(() => null),
+      listNativeSubagents(workspaceId).catch(() => []),
+    ]).then(([commands, skillsView, subagents]) => {
+      if (cancelled) return;
+      const disabled = new Set(
+        (skillsView?.disabled_paths ?? []).map((path) => path.replace(/\\/g, "/")),
+      );
+      const commandItems: ComposerSlashItem[] = [
+        ...builtinSlashCommands(labels),
+        ...commands.map((command) => ({
+          group: "commands" as const,
+          key: `command:${command.path}`,
+          name: command.name,
+          description: command.description,
+          sourceLabel: command.plugin ?? command.source,
+          token: `/${command.name}`,
+        })),
+      ];
+      const skillItems: ComposerSlashItem[] = (skillsView?.skills ?? [])
+        .filter((skill) => !disabled.has(skill.skill_md_path.replace(/\\/g, "/")))
+        .map((skill) => ({
+          group: "skills" as const,
+          key: `skill:${skill.skill_md_path}`,
+          name: skill.name,
+          description: skill.description,
+          sourceLabel: skill.plugin ?? skill.source,
+          token: `$${skill.name}`,
+        }));
+      const agentItems: ComposerSlashItem[] = subagents.map((agent) => ({
+        group: "subagents" as const,
+        key: `subagent:${agent.id}`,
+        name: agent.name,
+        description: agent.description,
+        token: subagentDelegationPrompt(agent.name, agent.id),
+      }));
+      setSlashItems(
+        mentionOpen === "$" ? skillItems : [...commandItems, ...skillItems, ...agentItems],
+      );
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [mentionOpen, workspaceId]);
+
+  const mentionQuery = trigger?.query ?? "";
   useEffect(() => {
     setMentionIndex(0);
   }, [mentionOpen, mentionQuery]);
 
   const mentionItems =
+    mentionOpen === "@" ? files.map((file) => ({ key: file, label: file, token: `@${file}` })) : [];
+  const visibleSlashItems =
+    mentionOpen === "/" || mentionOpen === "$"
+      ? filterComposerSlashItems(slashItems, mentionQuery)
+      : [];
+  const pickerItems =
     mentionOpen === "@"
-      ? files.map((file) => ({ key: file, label: file, token: `@${file}` }))
-      : mentionOpen === "/"
-        ? skills.map((skill) => ({
-            key: skill.name,
-            label: skill.name,
-            token: `使用技能：${skill.name}`,
-          }))
-        : [];
-  const activeMentionIndex = clampMentionIndex(mentionIndex, mentionItems.length);
+      ? mentionItems
+      : visibleSlashItems.map((item) => ({ key: item.key, label: item.name, token: item.token }));
+  const activeMentionIndex = clampMentionIndex(mentionIndex, pickerItems.length);
 
   useEffect(() => {
     const list = mentionListRef.current;
     if (!list) return;
     const active = list.querySelector("[data-mention-active='true']");
     if (active instanceof HTMLElement) active.scrollIntoView({ block: "nearest" });
-  }, [activeMentionIndex, mentionItems.length]);
+  }, [activeMentionIndex, pickerItems.length]);
 
   const working = Boolean(live) && turnState !== "waiting_input" && turnState !== "ended";
   const sendBusy = sending || working;
@@ -201,6 +264,21 @@ export function Composer({ compact = false }: { compact?: boolean }) {
       return;
     }
     if (sendBusy) return;
+    let nextPrompt = prompt;
+    const skillCall = parseSkillInvocation(prompt);
+    if (skillCall) {
+      nextPrompt = skillInvocationPrompt(skillCall.name, skillCall.args);
+    } else {
+      const slash = parseLeadingSlash(prompt);
+      if (slash && !isBuiltinSlashName(slash.name)) {
+        try {
+          const expanded = await expandNativeSlashCommand(workspaceId, slash.name, slash.args);
+          nextPrompt = expanded.prompt;
+        } catch {
+          // 未注册的自定义命令按普通文本发送。
+        }
+      }
+    }
     setError(null);
     setSending(true);
     setEffort(resolvedEffort);
@@ -209,7 +287,7 @@ export function Composer({ compact = false }: { compact?: boolean }) {
         sessionId: selectedSessionId,
         workspaceId,
         channelId,
-        prompt,
+        prompt: nextPrompt,
         model: model || null,
         reasoningEffort: resolvedEffort || null,
         planMode: composerPlanMode,
@@ -257,8 +335,8 @@ export function Composer({ compact = false }: { compact?: boolean }) {
               key: event.key,
               shiftKey: event.shiftKey,
               isComposing: event.nativeEvent.isComposing || event.keyCode === 229,
-              mentionVisible: mentionItems.length > 0,
-              itemCount: mentionItems.length,
+              mentionVisible: pickerItems.length > 0,
+              itemCount: pickerItems.length,
               activeIndex: activeMentionIndex,
             });
             if (action.type === "move") {
@@ -267,7 +345,7 @@ export function Composer({ compact = false }: { compact?: boolean }) {
               return;
             }
             if (action.type === "confirm") {
-              const item = mentionItems[activeMentionIndex];
+              const item = pickerItems[activeMentionIndex];
               if (!item) return;
               event.preventDefault();
               insertToken(item.token);
@@ -291,7 +369,7 @@ export function Composer({ compact = false }: { compact?: boolean }) {
           placeholder={t("layout:composerPlaceholder")}
           className="min-h-24 w-full resize-none bg-transparent px-4 py-3 text-sm leading-relaxed outline-none placeholder:text-muted-foreground/60"
         />
-        {mentionItems.length > 0 ? (
+        {mentionOpen === "@" && mentionItems.length > 0 ? (
           <div
             ref={mentionListRef}
             className="mx-3 mb-2 max-h-40 overflow-y-auto rounded-xl border border-border/60 bg-popover p-1 text-sm shadow-md"
@@ -314,10 +392,14 @@ export function Composer({ compact = false }: { compact?: boolean }) {
               </button>
             ))}
           </div>
-        ) : mentionOpen === "/" ? (
-          <div className="mx-3 mb-2 max-h-40 overflow-y-auto rounded-xl border border-border/60 bg-popover p-2 text-sm shadow-md">
-            <p className="text-xs text-muted-foreground">{t("sessions:noSkills")}</p>
-          </div>
+        ) : mentionOpen === "/" || mentionOpen === "$" ? (
+          <ComposerSlashMenu
+            items={visibleSlashItems}
+            activeIndex={activeMentionIndex}
+            listRef={mentionListRef}
+            onHover={setMentionIndex}
+            onPick={(item) => insertToken(item.token)}
+          />
         ) : null}
         <div className="flex flex-wrap items-center gap-1.5 border-t border-border/50 px-3 py-2 text-xs">
           <PermissionModePicker />

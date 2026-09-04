@@ -833,7 +833,12 @@ export interface UpdateNativeSettingsInput {
 }
 
 export type NativeSkillSource =
-  "workspace_noxcode" | "workspace_agents" | "workspace_claude" | "plugin" | "global";
+  | "workspace_noxcode"
+  | "workspace_zcode"
+  | "workspace_agents"
+  | "workspace_claude"
+  | "plugin"
+  | "global";
 
 export interface NativeSkill {
   name: string;
@@ -847,6 +852,60 @@ export interface NativeSkill {
   argument_hint: string | null;
   when_to_use: string | null;
   plugin: string | null;
+}
+
+export interface SkillDiagnostic {
+  code: string;
+  path: string;
+  message: string;
+  level: string;
+}
+
+export interface NativeSkillsView {
+  global_dir: string;
+  workspace_root: string | null;
+  skills: NativeSkill[];
+  disabled_paths: string[];
+  diagnostics: SkillDiagnostic[];
+}
+
+export interface CreateNativeSkillInput {
+  scope: "global" | "project";
+  name: string;
+  description: string;
+  workspace_id?: string | null;
+}
+
+export interface ExternalSkillItem {
+  name: string;
+  description: string;
+  source_path: string;
+  importable: boolean;
+  skip_reason: string | null;
+}
+
+export interface ExternalSkillGroup {
+  id: string;
+  label: string;
+  scope: string;
+  skills: ExternalSkillItem[];
+}
+
+export interface ExternalSkillScan {
+  groups: ExternalSkillGroup[];
+}
+
+export interface ImportExternalSkillsInput {
+  workspace_id?: string | null;
+  target: "global" | "project";
+  mode: "copy" | "symlink";
+  items: Array<{ source_path: string; name: string }>;
+}
+
+export interface ImportExternalSkillsResult {
+  imported: string[];
+  skipped: string[];
+  failed: string[];
 }
 
 export type NativeSlashCommandSource =

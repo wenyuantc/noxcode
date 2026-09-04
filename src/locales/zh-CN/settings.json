@@ -304,7 +304,7 @@
         "密钥环中的 SSH 密码 / 私钥口令（服务名 noxcode-ssh）",
         "应用配置目录中的 ssh-secret-index.json",
         "应用配置目录中的 mcp-servers.json、native-settings.json（含钩子）、network-settings.json、quick-prompts.json",
-        "全局技能目录 native-skills/",
+        "全局技能目录 ~/.noxcode/skills",
         "Git 仓库中的 checkpoint 对象",
         "窗口尺寸等本地 UI 状态"
       ]
@@ -451,8 +451,97 @@
   },
   "skills": {
     "title": "技能",
-    "hint": "发现全局 $APPCONFIG/native-skills 下的 SKILL.md。",
-    "openDir": "打开技能目录"
+    "hint": "管理项目级与用户级技能。用户目录为 ~/.noxcode/skills，可在聊天里通过 $name 或 / 使用。",
+    "openDir": "打开技能目录",
+    "searchPlaceholder": "搜索技能...",
+    "refresh": "刷新",
+    "refreshing": "刷新中...",
+    "empty": "没有可用技能",
+    "footerSummary": "共 {{total}} 个技能 · {{enabled}} 个已启用",
+    "noDescription": "暂无描述",
+    "storageDir": "技能存储目录",
+    "openPath": "打开",
+    "enabled": "已启用",
+    "disabled": "已停用",
+    "copyToCommon": "复制到通用目录",
+    "copiedToCommon": "已复制到全局技能。",
+    "copyFailed": "复制技能失败。",
+    "deleted": "已删除技能。",
+    "deleteFailed": "删除技能失败。",
+    "toggleFailed": "更新启用状态失败。",
+    "group": {
+      "local": "工作区与个人技能",
+      "plugin": "Plugin 技能"
+    },
+    "filter": {
+      "source": "来源筛选",
+      "status": "启用状态",
+      "workspaceDir": "工作区",
+      "all": "全部",
+      "enabled": "已启用",
+      "disabled": "已停用",
+      "globalDir": "全局 ~/.noxcode/skills",
+      "pluginDir": "插件",
+      "ssh": "远程"
+    },
+    "source": {
+      "workspace_noxcode": "工作区 .noxcode",
+      "workspace_zcode": "工作区 .zcode",
+      "workspace_agents": "工作区 .agents",
+      "workspace_claude": "工作区 .claude",
+      "plugin": "插件",
+      "global": "全局"
+    },
+    "delete": {
+      "title": "删除技能",
+      "description": "确定删除「{{name}}」？将从磁盘移除该技能目录，且无法撤销。",
+      "action": "删除"
+    },
+    "create": {
+      "open": "新建技能",
+      "title": "新建技能",
+      "name": "名称",
+      "nameHint": "小写字母、数字和连字符",
+      "description": "描述",
+      "scope": "保存到",
+      "scopeGlobal": "全局",
+      "submit": "创建",
+      "needWorkspace": "请选择一个本地工作区。",
+      "failed": "创建技能失败。"
+    },
+    "import": {
+      "open": "从外部 Agent 导入技能",
+      "title": "导入外部 Agent 技能",
+      "description": "扫描 Claude Code、Codex CLI、OpenCode、Cursor 与 ZCode 中可复用的技能；只导入缺失项，不覆盖现有技能。",
+      "scanning": "正在扫描可导入技能...",
+      "empty": "暂无可导入技能。可检查外部 Agent 的 skills 目录后重新扫描。",
+      "summary": "发现 {{count}} 个可导入技能",
+      "target": "导入目标",
+      "targetGlobal": "导入到全局",
+      "targetProject": "导入到项目",
+      "mode": "导入方式",
+      "modeCopy": "直接复制",
+      "modeSymlink": "软链",
+      "modeCopyHint": "将完整技能目录复制到 noxcode。外部目录后续变更不会自动同步。",
+      "modeSymlinkHint": "创建指向外部技能目录的链接。会跟随来源变更，但依赖来源路径持续可用。",
+      "selectAll": "全选",
+      "clearAll": "取消全选",
+      "selectionCount": "已选 {{selected}}/{{total}}",
+      "start": "导入已选技能",
+      "importing": "正在导入技能...",
+      "finish": "完成",
+      "imported": "已导入",
+      "skipped": "已跳过",
+      "failed": "失败",
+      "skipExists": "同名已存在",
+      "needWorkspace": "导入到项目需要先选择本地工作区。",
+      "complete": "技能列表已刷新。同名技能会保留现有版本。"
+    },
+    "diagnostics": {
+      "summary": "技能加载诊断：{{errorCount}} 个错误，{{warningCount}} 个警告",
+      "expand": "展开诊断",
+      "collapse": "收起诊断"
+    }
   },
   "hooks": {
     "title": "钩子",

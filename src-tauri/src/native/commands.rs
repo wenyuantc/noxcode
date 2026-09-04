@@ -157,10 +157,7 @@ pub fn unquote(value: &str) -> String {
 /// `[a, b]` / `a, b` / `a b` / 已由块列表拼成的 `a, b` → 去重后的列表。
 /// 含逗号或括号（如 `Bash(git add:*)`）时只按逗号切分，避免拆散带空格的模式。
 pub fn parse_list_field(value: &str) -> Vec<String> {
-    let inner = value
-        .trim()
-        .trim_start_matches('[')
-        .trim_end_matches(']');
+    let inner = value.trim().trim_start_matches('[').trim_end_matches(']');
     let raw_items: Vec<&str> = if inner.contains(',') || inner.contains('(') {
         inner.split(',').collect()
     } else {
@@ -424,9 +421,9 @@ pub fn has_argument_placeholders(body: &str) -> bool {
         return true;
     }
     let bytes = body.as_bytes();
-    bytes.windows(2).any(|window| {
-        window[0] == b'$' && window[1].is_ascii_digit() && window[1] != b'0'
-    })
+    bytes
+        .windows(2)
+        .any(|window| window[0] == b'$' && window[1].is_ascii_digit() && window[1] != b'0')
 }
 
 pub fn expand_arguments(body: &str, args: &str) -> String {
@@ -495,10 +492,7 @@ async fn run_inline_bash(command: &str, cwd: &Path) -> String {
                 text.push_str(stderr.trim_end());
             }
             if !output.status.success() {
-                text.push_str(&format!(
-                    "\n(exit {})",
-                    output.status.code().unwrap_or(-1)
-                ));
+                text.push_str(&format!("\n(exit {})", output.status.code().unwrap_or(-1)));
             }
             text
         }
@@ -660,7 +654,10 @@ mod tests {
         assert_eq!(command.description, "Review a PR");
         assert_eq!(command.argument_hint.as_deref(), Some("[pr-number]"));
         assert_eq!(command.allowed_tools, vec!["Bash(git *)", "Read"]);
-        assert_eq!(parse_list_field("Read Grep Glob"), vec!["Read", "Grep", "Glob"]);
+        assert_eq!(
+            parse_list_field("Read Grep Glob"),
+            vec!["Read", "Grep", "Glob"]
+        );
         assert_eq!(command.model.as_deref(), Some("gpt-5"));
         assert_eq!(command.skills, vec!["review", "lint"]);
         assert_eq!(command.body.trim(), "# Body\nUse $1");
@@ -684,9 +681,15 @@ mod tests {
             "Fix bug in src/a b.rs; all: bug \"src/a b.rs\" extra"
         );
         assert_eq!(expand_arguments("Only $3", "a b"), "Only ");
-        assert_eq!(expand_arguments("No placeholders", "x y"), "No placeholders\n\nx y");
+        assert_eq!(
+            expand_arguments("No placeholders", "x y"),
+            "No placeholders\n\nx y"
+        );
         assert_eq!(expand_arguments("No placeholders", "  "), "No placeholders");
-        assert_eq!(split_args(r#"a 'b c' d\ e "f\"g""#), vec!["a", "b c", "d e", "f\"g"]);
+        assert_eq!(
+            split_args(r#"a 'b c' d\ e "f\"g""#),
+            vec!["a", "b c", "d e", "f\"g"]
+        );
         assert!(has_argument_placeholders("$1"));
         assert!(!has_argument_placeholders("$0 costs $"));
     }
