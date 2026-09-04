@@ -288,7 +288,6 @@ describe("thinking level selection", () => {
         label: "Future",
         context_tokens: 128000,
         max_output_tokens: 8192,
-        input_types: ["text"],
         thinking: true,
         thinking_levels: ["low", "ultra"],
         input_types: ["text"],
