@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { AlertCircle, Check, Copy, FileCode2, Layers, Loader2, Timer } from "lucide-react";
 
+import { CodeBlock } from "@/components/code/CodeBlock";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -424,9 +425,11 @@ export function ApiCallLogDetailDialog({ open, logId, onOpenChange }: ApiCallLog
                 )}
               </div>
               {requestBody ? (
-                <pre className="min-h-0 flex-1 overflow-auto rounded-xl border border-border/70 bg-muted/20 p-4 font-mono text-xs leading-relaxed text-foreground select-text">
-                  {requestBody}
-                </pre>
+                <CodeBlock
+                  className="min-h-0 flex-1 rounded-xl"
+                  code={requestBody}
+                  language="json"
+                />
               ) : (
                 <div className="flex h-36 items-center justify-center rounded-xl border border-dashed border-border text-xs text-muted-foreground">
                   {t("emptyBody")}
@@ -470,9 +473,11 @@ export function ApiCallLogDetailDialog({ open, logId, onOpenChange }: ApiCallLog
                 )}
               </div>
               {responseBody ? (
-                <pre className="min-h-0 flex-1 overflow-auto rounded-xl border border-border/70 bg-muted/20 p-4 font-mono text-xs leading-relaxed text-foreground select-text">
-                  {responseBody}
-                </pre>
+                <CodeBlock
+                  className="min-h-0 flex-1 rounded-xl"
+                  code={responseBody}
+                  language="json"
+                />
               ) : (
                 <div className="flex h-36 items-center justify-center rounded-xl border border-dashed border-border text-xs text-muted-foreground">
                   {t("emptyBody")}

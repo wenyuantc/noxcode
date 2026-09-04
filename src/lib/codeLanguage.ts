@@ -1,0 +1,176 @@
+const LANGUAGE_CLASS = /(?:^|\s)language-([a-z0-9+#_-]+)(?:\s|$)/i;
+
+const LANGUAGE_ALIASES: Record<string, string> = {
+  "": "plaintext",
+  text: "plaintext",
+  txt: "plaintext",
+  plain: "plaintext",
+  plaintext: "plaintext",
+  js: "javascript",
+  jsx: "jsx",
+  mjs: "javascript",
+  cjs: "javascript",
+  ts: "typescript",
+  tsx: "tsx",
+  mts: "typescript",
+  cts: "typescript",
+  py: "python",
+  rb: "ruby",
+  rs: "rust",
+  go: "go",
+  golang: "go",
+  sh: "bash",
+  bash: "bash",
+  zsh: "bash",
+  shell: "bash",
+  shellscript: "bash",
+  yml: "yaml",
+  yaml: "yaml",
+  md: "markdown",
+  markdown: "markdown",
+  jsonc: "jsonc",
+  json: "json",
+  html: "html",
+  htm: "html",
+  css: "css",
+  scss: "scss",
+  less: "less",
+  toml: "toml",
+  sql: "sql",
+  java: "java",
+  kt: "kotlin",
+  kts: "kotlin",
+  c: "c",
+  h: "c",
+  cpp: "cpp",
+  cc: "cpp",
+  cxx: "cpp",
+  hpp: "cpp",
+  cs: "csharp",
+  fs: "fsharp",
+  php: "php",
+  swift: "swift",
+  dart: "dart",
+  vue: "vue",
+  svelte: "svelte",
+  xml: "xml",
+  svg: "xml",
+  dockerfile: "dockerfile",
+  docker: "dockerfile",
+  makefile: "makefile",
+  mk: "makefile",
+  diff: "diff",
+  patch: "diff",
+  ini: "ini",
+  conf: "ini",
+  env: "ini",
+  graphql: "graphql",
+  gql: "graphql",
+  proto: "protobuf",
+  lua: "lua",
+  r: "r",
+  scala: "scala",
+  zig: "zig",
+  ex: "elixir",
+  exs: "elixir",
+  hs: "haskell",
+  ps1: "powershell",
+  psm1: "powershell",
+};
+
+const EXTENSION_LANGUAGE: Record<string, string> = {
+  ts: "typescript",
+  tsx: "tsx",
+  mts: "typescript",
+  cts: "typescript",
+  js: "javascript",
+  jsx: "jsx",
+  mjs: "javascript",
+  cjs: "javascript",
+  py: "python",
+  pyi: "python",
+  rs: "rust",
+  go: "go",
+  json: "json",
+  jsonc: "jsonc",
+  json5: "jsonc",
+  bash: "bash",
+  sh: "bash",
+  zsh: "bash",
+  md: "markdown",
+  mdx: "markdown",
+  css: "css",
+  scss: "scss",
+  less: "less",
+  html: "html",
+  htm: "html",
+  yaml: "yaml",
+  yml: "yaml",
+  toml: "toml",
+  sql: "sql",
+  java: "java",
+  kt: "kotlin",
+  kts: "kotlin",
+  c: "c",
+  h: "c",
+  cpp: "cpp",
+  cc: "cpp",
+  cxx: "cpp",
+  hpp: "cpp",
+  cs: "csharp",
+  php: "php",
+  rb: "ruby",
+  swift: "swift",
+  dart: "dart",
+  vue: "vue",
+  svelte: "svelte",
+  xml: "xml",
+  svg: "xml",
+  dockerfile: "dockerfile",
+  makefile: "makefile",
+  mk: "makefile",
+  diff: "diff",
+  patch: "diff",
+  ini: "ini",
+  conf: "ini",
+  env: "ini",
+  graphql: "graphql",
+  gql: "graphql",
+  proto: "protobuf",
+  lua: "lua",
+  r: "r",
+  scala: "scala",
+  zig: "zig",
+  ex: "elixir",
+  exs: "elixir",
+  hs: "haskell",
+  ps1: "powershell",
+  psm1: "powershell",
+};
+
+export function normalizeLanguage(lang?: string | null): string {
+  const key = lang?.trim().toLowerCase() ?? "";
+  return LANGUAGE_ALIASES[key] ?? (key || "plaintext");
+}
+
+export function languageFromClassName(className?: string | null): string {
+  if (!className) return "plaintext";
+  const match = className.match(LANGUAGE_CLASS);
+  return normalizeLanguage(match?.[1]);
+}
+
+export function languageFromPath(path?: string | null): string {
+  if (!path) return "plaintext";
+  const normalized = path.trim().replace(/\\/g, "/");
+  const base = normalized.split("/").pop() ?? normalized;
+  if (/^dockerfile(\.|$)/i.test(base) || base.toLowerCase() === "dockerfile") {
+    return "dockerfile";
+  }
+  if (/^makefile$/i.test(base) || /\.mk$/i.test(base)) {
+    return "makefile";
+  }
+  const dot = base.lastIndexOf(".");
+  if (dot <= 0 || dot === base.length - 1) return "plaintext";
+  const ext = base.slice(dot + 1).toLowerCase();
+  return EXTENSION_LANGUAGE[ext] ?? "plaintext";
+}

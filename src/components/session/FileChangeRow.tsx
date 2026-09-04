@@ -2,6 +2,8 @@ import { ChevronRight, FilePenLine } from "lucide-react";
 import { useState } from "react";
 import { useTranslation } from "react-i18next";
 
+import { CodeBlock } from "@/components/code/CodeBlock";
+import { languageFromPath } from "@/lib/codeLanguage";
 import type { GroupedSessionItem } from "@/lib/sessionLines";
 import { fileActionKey, filePathText } from "@/lib/sessionLines";
 
@@ -53,9 +55,11 @@ export function FileChangeRow({
                   {filePathText(item)}
                 </p>
                 {item.result ? (
-                  <pre className="mt-1.5 max-h-48 overflow-auto whitespace-pre-wrap rounded-md bg-black/20 p-2 font-mono text-[11px] leading-relaxed text-muted-foreground select-text">
-                    {item.result}
-                  </pre>
+                  <CodeBlock
+                    className="mt-1.5 max-h-48"
+                    code={item.result}
+                    language={languageFromPath(filePathText(item))}
+                  />
                 ) : null}
               </li>
             ))}

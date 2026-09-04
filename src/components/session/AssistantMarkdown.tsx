@@ -1,11 +1,14 @@
-import { memo } from "react";
+import { Children, isValidElement, memo, useMemo, type ReactNode } from "react";
 import type { Components } from "react-markdown";
 import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 
+import { CodeBlock } from "@/components/code/CodeBlock";
+import { languageFromClassName } from "@/lib/codeLanguage";
 import { cn } from "@/lib/utils";
+import { useUiStore } from "@/stores/uiStore";
 
-function markdownComponents(variant: "default" | "plan"): Components {
+function markdownComponents(variant: "default" | "plan", codeFontSize: number): Components {
   const headingAccent = variant === "plan" ? "text-cyan-600 dark:text-cyan-400" : "";
   return {
     h1: ({ children }) => (
@@ -56,19 +59,30 @@ function markdownComponents(variant: "default" | "plan"): Components {
       </a>
     ),
     code: ({ className, children }) => {
-      const inline = !className;
-      if (inline) {
-        return (
-          <code className="rounded bg-muted px-1 py-0.5 font-mono text-[0.8em]">{children}</code>
-        );
+      const text = String(children ?? "").replace(/\n$/, "");
+      const language = languageFromClassName(className);
+      const isBlock = Boolean(className) || text.includes("\n");
+      if (isBlock) {
+        return <CodeBlock code={text} language={language} className="mb-0" />;
       }
-      return <code className={`block font-mono text-xs ${className ?? ""}`}>{children}</code>;
+      return (
+        <code className="rounded bg-muted px-1 py-0.5 font-mono" style={{ fontSize: codeFontSize }}>
+          {children}
+        </code>
+      );
     },
-    pre: ({ children }) => (
-      <pre className="mb-2 overflow-auto rounded-md border bg-muted/40 px-3 py-2 text-xs leading-5 last:mb-0">
-        {children}
-      </pre>
-    ),
+    pre: ({ children }) => {
+      const items = Children.toArray(children);
+      const only = items.length === 1 ? items[0] : null;
+      if (isValidElement(only) && only.type === CodeBlock) {
+        return <div className="mb-2 last:mb-0">{only as ReactNode}</div>;
+      }
+      return (
+        <pre className="code-surface mb-2 overflow-auto rounded-md border border-border/70 px-3 py-2 last:mb-0">
+          {children}
+        </pre>
+      );
+    },
     table: ({ children }) => (
       <div className="mb-2 overflow-auto">
         <table className="w-full border-collapse text-sm">{children}</table>
@@ -79,9 +93,6 @@ function markdownComponents(variant: "default" | "plan"): Components {
   };
 }
 
-const defaultComponents = markdownComponents("default");
-const planComponents = markdownComponents("plan");
-
 export const AssistantMarkdown = memo(function AssistantMarkdown({
   text,
   variant = "default",
@@ -89,12 +100,14 @@ export const AssistantMarkdown = memo(function AssistantMarkdown({
   text: string;
   variant?: "default" | "plan";
 }) {
+  const codeFontSize = useUiStore((state) => state.codeFontSize);
+  const components = useMemo(
+    () => markdownComponents(variant, codeFontSize),
+    [codeFontSize, variant],
+  );
   return (
     <div className="text-sm leading-6">
-      <Markdown
-        remarkPlugins={[remarkGfm]}
-        components={variant === "plan" ? planComponents : defaultComponents}
-      >
+      <Markdown remarkPlugins={[remarkGfm]} components={components}>
         {text}
       </Markdown>
     </div>
