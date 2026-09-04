@@ -723,7 +723,7 @@ export function AiChannelsSettingsTab() {
             </div>
           </div>
 
-          <DialogFooter className="shrink-0 border-t border-border/50 px-6 py-3 bg-muted/10">
+          <DialogFooter className="m-0 shrink-0 border-t border-border/50 bg-muted/10 px-6 py-4">
             {!isCreate ? (
               <Button
                 variant="destructive"

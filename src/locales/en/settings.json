@@ -369,16 +369,49 @@
     "actions": {
       "addServer": "Add server",
       "addPlaywright": "Add Playwright preset",
+      "edit": "Edit",
+      "create": "Create",
       "save": "Save",
+      "cancel": "Cancel",
       "exportSnippet": "Export snippet",
       "resetExample": "Reset example",
       "delete": "Delete"
     },
+    "status": {
+      "enabled": "Enabled",
+      "disabled": "Disabled"
+    },
+    "dialogs": {
+      "createTitle": "New MCP Server",
+      "editTitle": "Edit MCP Server",
+      "deleteTitle": "Delete MCP Server",
+      "deleteConfirm": "Are you sure you want to delete MCP server \"{{name}}\"?",
+      "resetTitle": "Reset MCP Configuration",
+      "resetConfirm": "Resetting will overwrite all current MCP servers with default examples. Continue?"
+    },
+    "validation": {
+      "nameRequired": "MCP server name cannot be empty",
+      "commandRequired": "Launch command is required for stdio transport",
+      "urlRequired": "Server URL is required for http / sse transport",
+      "urlInvalid": "MCP server URL must be an http(s) address",
+      "oauthIncomplete": "OAuth configuration requires client_id, authorize_url, and token_url"
+    },
     "fields": {
       "enabled": "Enabled",
-      "namePlaceholder": "Name",
+      "name": "Name",
+      "namePlaceholder": "Name, e.g. filesystem",
+      "transport": "Transport Protocol",
+      "command": "Launch Command",
       "commandPlaceholder": "Launch command (for example npx, uvx, or an absolute path)",
+      "args": "Arguments",
       "argsPlaceholder": "Arguments (space-separated)",
+      "env": "Environment Variables (KEY=value per line, optional)",
+      "envPlaceholder": "API_KEY=xxx\nDEBUG=true",
+      "url": "Server URL",
+      "urlPlaceholder": "https://api.example.com/mcp",
+      "headers": "Custom Headers (KEY=value per line, optional)",
+      "headersPlaceholder": "Authorization=Bearer ...\nX-Custom-Header=value",
+      "notes": "Notes",
       "notesPlaceholder": "Notes (optional)",
       "scope": "Scope",
       "scopeAll": "All workspaces",
@@ -392,6 +425,9 @@
     },
     "messages": {
       "saved": "MCP configuration saved to mcp-servers.json in the app config directory.",
+      "created": "MCP server created.",
+      "updated": "MCP server updated.",
+      "deleted": "MCP server deleted.",
       "reset": "Reset to the default example configuration.",
       "exported": "Generated the export snippet and tried to copy it to the clipboard.",
       "playwrightAdded": "Added the Playwright preset. Save to apply. It is disabled by default.",

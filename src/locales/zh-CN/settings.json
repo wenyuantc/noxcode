@@ -369,16 +369,49 @@
     "actions": {
       "addServer": "添加服务器",
       "addPlaywright": "添加 Playwright 预设",
+      "edit": "编辑",
+      "create": "创建",
       "save": "保存",
+      "cancel": "取消",
       "exportSnippet": "导出片段",
       "resetExample": "重置示例",
       "delete": "删除"
     },
+    "status": {
+      "enabled": "已启用",
+      "disabled": "停用"
+    },
+    "dialogs": {
+      "createTitle": "新建 MCP 服务器",
+      "editTitle": "编辑 MCP 服务器",
+      "deleteTitle": "删除 MCP 服务器",
+      "deleteConfirm": "确定删除 MCP 服务器「{{name}}」吗？",
+      "resetTitle": "重置 MCP 配置",
+      "resetConfirm": "重置将覆盖当前所有 MCP 配置并恢复默认示例，是否继续？"
+    },
+    "validation": {
+      "nameRequired": "MCP 服务器名称不能为空",
+      "commandRequired": "stdio 传输协议需要填写启动命令",
+      "urlRequired": "http / sse 传输协议需要填写服务 URL",
+      "urlInvalid": "MCP 服务 URL 必须是 http(s) 地址",
+      "oauthIncomplete": "OAuth 配置需要 client_id、authorize_url 与 token_url"
+    },
     "fields": {
       "enabled": "启用",
-      "namePlaceholder": "名称",
+      "name": "名称",
+      "namePlaceholder": "名称，如：filesystem",
+      "transport": "传输协议",
+      "command": "启动命令",
       "commandPlaceholder": "启动命令（如 npx、uvx 或绝对路径）",
+      "args": "启动参数",
       "argsPlaceholder": "参数（空格分隔）",
+      "env": "环境变量（KEY=value 每行一条，可选）",
+      "envPlaceholder": "API_KEY=xxx\nDEBUG=true",
+      "url": "服务 URL",
+      "urlPlaceholder": "https://api.example.com/mcp",
+      "headers": "自定义 Headers（KEY=value 每行一条，可选）",
+      "headersPlaceholder": "Authorization=Bearer ...\nX-Custom-Header=value",
+      "notes": "备注说明",
       "notesPlaceholder": "备注（可选）",
       "scope": "作用域",
       "scopeAll": "所有工作区",
@@ -392,6 +425,9 @@
     },
     "messages": {
       "saved": "MCP 配置已保存到应用配置目录的 mcp-servers.json。",
+      "created": "MCP 服务器已创建。",
+      "updated": "MCP 服务器已更新。",
+      "deleted": "MCP 服务器已删除。",
       "reset": "已重置为默认示例配置。",
       "exported": "已生成导出片段，并尝试复制到剪贴板。",
       "playwrightAdded": "已加入 Playwright 预设，保存后生效。默认未启用。",

@@ -408,7 +408,7 @@ export function PermissionRulesSection() {
             </div>
           </div>
 
-          <DialogFooter className="border-t border-border/50 px-6 py-3 bg-muted/10">
+          <DialogFooter className="m-0 shrink-0 border-t border-border/50 bg-muted/10 px-6 py-4">
             <Button
               variant="outline"
               size="sm"
