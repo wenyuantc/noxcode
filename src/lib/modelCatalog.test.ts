@@ -4,6 +4,7 @@ import {
   applyCatalogToModel,
   canSaveChannelModels,
   catalogThinkingLevels,
+  composerThinkingEnabled,
   composerThinkingLevels,
   defaultThinkingLevel,
   displayedThinkingLevels,
@@ -444,5 +445,46 @@ describe("thinking level selection", () => {
     expect(resolveComposerThinkingLevel(deepseekLevels, null, "max")).toBe("max");
     expect(composerThinkingLevels(null)).toEqual(["low", "medium", "high"]);
     expect(resolveComposerThinkingLevel(["low", "medium", "high"], null, null)).toBe("medium");
+  });
+
+  it("hides composer thinking levels unless the model explicitly enables thinking", () => {
+    expect(composerThinkingEnabled(null)).toBe(false);
+    expect(composerThinkingEnabled(emptyChannelModel("custom-local-model"))).toBe(false);
+    expect(
+      composerThinkingEnabled(
+        model({
+          id: "composer-2.5",
+          thinking_enabled: false,
+          thinking_levels: ["low", "medium", "high"],
+        }),
+      ),
+    ).toBe(false);
+    expect(
+      composerThinkingLevels(
+        model({
+          id: "composer-2.5",
+          thinking_enabled: false,
+          thinking_level: null,
+          thinking_levels: ["low", "medium", "high"],
+        }),
+      ),
+    ).toEqual([]);
+    expect(
+      composerThinkingLevels(
+        model({
+          id: "custom-local-model",
+          thinking_enabled: null,
+          thinking_levels: ["high"],
+        }),
+      ),
+    ).toEqual([]);
+    expect(
+      composerThinkingEnabled(
+        model({
+          id: "deepseek-reasoner",
+          thinking_enabled: true,
+        }),
+      ),
+    ).toBe(true);
   });
 });
