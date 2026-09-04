@@ -21,7 +21,7 @@ src/App.tsx              四条路由 + 权限 / SSH 信任对话框
 src/lib/backend.ts       唯一 IPC 出口
 src/lib/appUpdate.ts     检查 / 下载 / 重启桌面更新
 src/lib/apiLogs.ts       API 调用记录格式化 / 分页
-src/lib/sessionLines.ts  行前缀解析、结构化 tool 信封、call_id / 子 Agent 分桶配对、时序 segments / 待办解析
+src/lib/sessionLines.ts  行前缀解析、结构化 tool 信封、call_id / 子 Agent 分桶配对、时序 segments（同一回合按编号折叠进首个窗口，即使事件交错）/ 待办解析
 src/lib/planMode.ts      按会话解析 Composer 的运行时 / 默认计划模式
 src/lib/gitHelpers.ts    暂存分组、diff 行着色
 src/locales/{zh-CN,en}   九个命名空间
