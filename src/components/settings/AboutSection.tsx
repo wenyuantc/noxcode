@@ -3,30 +3,27 @@ import { CheckCircle2, Download, Info, Loader2, RefreshCw, RotateCw } from "luci
 import { useTranslation } from "react-i18next";
 
 import { Button } from "@/components/ui/button";
-import {
-  type AppUpdateInfo,
-  type AppUpdateProgress,
-  checkForAppUpdate,
-  downloadAndInstallUpdate,
-  getAppVersion,
-  mapUpdaterError,
-  relaunchApp,
-  updaterErrorI18nKey,
-} from "@/lib/appUpdate";
+import { getAppVersion, updaterErrorI18nKey } from "@/lib/appUpdate";
 import { formatDate } from "@/lib/utils";
+import { useUpdateStore } from "@/stores/updateStore";
 import { SettingCard } from "./SettingCard";
 import { SettingFeedbackCallout } from "./SettingFeedbackCallout";
 
 export function AboutSection() {
   const { t } = useTranslation("settings");
   const [currentVersion, setCurrentVersion] = useState<string | null>(null);
-  const [availableUpdate, setAvailableUpdate] = useState<AppUpdateInfo | null>(null);
-  const [checking, setChecking] = useState(false);
-  const [installing, setInstalling] = useState(false);
-  const [installed, setInstalled] = useState(false);
-  const [upToDate, setUpToDate] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [progress, setProgress] = useState<AppUpdateProgress | null>(null);
+  const status = useUpdateStore((state) => state.status);
+  const checking = useUpdateStore((state) => state.checking);
+  const availableUpdate = useUpdateStore((state) => state.update);
+  const progress = useUpdateStore((state) => state.progress);
+  const upToDate = useUpdateStore((state) => state.upToDate);
+  const errorCode = useUpdateStore((state) => state.errorCode);
+  const errorDetail = useUpdateStore((state) => state.errorDetail);
+  const relaunchFailedDetail = useUpdateStore((state) => state.relaunchFailedDetail);
+  const checkForUpdate = useUpdateStore((state) => state.checkForUpdate);
+  const startDownload = useUpdateStore((state) => state.startDownload);
+  const relaunch = useUpdateStore((state) => state.relaunch);
+  const clearError = useUpdateStore((state) => state.clearError);
 
   useEffect(() => {
     let cancelled = false;
@@ -46,68 +43,24 @@ export function AboutSection() {
     };
   }, []);
 
+  useEffect(() => {
+    void checkForUpdate();
+  }, [checkForUpdate]);
+
+  const installing = status === "downloading";
+  const installed = status === "ready";
   const busy = checking || installing;
   const displayVersion = currentVersion ?? t("about.unknownVersion");
-
-  const setMappedError = (cause: unknown) => {
-    const code = mapUpdaterError(cause);
-    const detail = cause instanceof Error ? cause.message : String(cause ?? "");
-    setError(t(updaterErrorI18nKey(code), { detail }));
-  };
-
-  const handleCheck = async () => {
-    setChecking(true);
-    setError(null);
-    setUpToDate(false);
-    setInstalled(false);
-    setProgress(null);
-    try {
-      const update = await checkForAppUpdate();
-      if (!update) {
-        setAvailableUpdate(null);
-        setUpToDate(true);
-        return;
-      }
-      setAvailableUpdate(update);
-    } catch (cause) {
-      setAvailableUpdate(null);
-      setMappedError(cause);
-    } finally {
-      setChecking(false);
-    }
-  };
-
-  const handleInstall = async () => {
-    if (!availableUpdate) {
-      return;
-    }
-    setInstalling(true);
-    setError(null);
-    setProgress({ downloaded: 0, total: null, percent: null });
-    try {
-      await downloadAndInstallUpdate(availableUpdate, setProgress);
-      setInstalled(true);
-    } catch (cause) {
-      setMappedError(cause);
-    } finally {
-      setInstalling(false);
-    }
-  };
-
-  const handleRestart = async () => {
-    setError(null);
-    try {
-      await relaunchApp();
-    } catch (cause) {
-      const detail = cause instanceof Error ? cause.message : String(cause ?? "");
-      setError(t("about.restartFailed", { detail }));
-    }
-  };
+  const error = relaunchFailedDetail
+    ? t("about.restartFailed", { detail: relaunchFailedDetail })
+    : errorCode
+      ? t(updaterErrorI18nKey(errorCode), { detail: errorDetail })
+      : null;
 
   return (
     <div className="space-y-6">
       {error ? (
-        <SettingFeedbackCallout variant="error" message={error} onClose={() => setError(null)} />
+        <SettingFeedbackCallout variant="error" message={error} onClose={clearError} />
       ) : null}
 
       {/* 品牌与版本横幅卡片 */}
@@ -121,8 +74,8 @@ export function AboutSection() {
             type="button"
             variant="outline"
             size="sm"
-            disabled={busy}
-            onClick={() => void handleCheck()}
+            disabled={busy || installed}
+            onClick={() => void checkForUpdate()}
             className="h-7 text-xs gap-1"
           >
             {checking ? (
@@ -185,7 +138,7 @@ export function AboutSection() {
                     type="button"
                     size="sm"
                     disabled={busy}
-                    onClick={() => void handleInstall()}
+                    onClick={() => void startDownload()}
                     className="h-8 text-xs gap-1.5"
                   >
                     {installing ? (
@@ -199,7 +152,7 @@ export function AboutSection() {
                   <Button
                     type="button"
                     size="sm"
-                    onClick={() => void handleRestart()}
+                    onClick={() => void relaunch()}
                     className="h-8 text-xs gap-1.5"
                   >
                     <RotateCw className="size-3.5" />

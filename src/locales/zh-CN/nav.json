@@ -2,6 +2,10 @@
   "newSession": "新建会话",
   "search": "搜索",
   "settings": "设置",
+  "update": "更新",
+  "downloading": "下载中",
+  "restartUpdate": "重启更新",
+  "updateAvailableTitle": "更新到 {{version}}",
   "apiLogs": "API 调用记录",
   "backToWorkspace": "返回工作区",
   "shortcuts": {

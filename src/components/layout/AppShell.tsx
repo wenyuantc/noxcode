@@ -13,7 +13,6 @@ import { useWorkspaceStore } from "@/stores/workspaceStore";
 import { SidebarCommands } from "./SidebarCommands";
 import { SidebarFooter } from "./SidebarFooter";
 import { SidebarTree } from "./SidebarTree";
-import { StartupUpdateBanner } from "./StartupUpdateBanner";
 
 export function AppShell() {
   const collapsed = useUiStore((state) => state.sidebarCollapsed);
@@ -72,7 +71,6 @@ export function AppShell() {
         />
       ) : null}
       <main className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
-        <StartupUpdateBanner />
         <div className="min-h-0 min-w-0 flex-1 overflow-hidden">
           {selected ? <SessionView /> : <HomeEmptyState />}
         </div>

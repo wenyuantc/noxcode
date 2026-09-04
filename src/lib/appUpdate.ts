@@ -96,40 +96,8 @@ export function updaterErrorI18nKey(code: UpdaterErrorCode): string {
   }
 }
 
-export const DISMISSED_UPDATE_VERSION_KEY = "noxcode:dismissed-update-version";
-
 export function isAppUpdateDevMode(): boolean {
   return import.meta.env.DEV === true || !isTauri();
-}
-
-export function shouldPromptStartupUpdate(version: string): boolean {
-  if (typeof window === "undefined" || !version) {
-    return Boolean(version);
-  }
-  return window.localStorage.getItem(DISMISSED_UPDATE_VERSION_KEY) !== version;
-}
-
-export function dismissStartupUpdate(version: string): void {
-  if (typeof window === "undefined" || !version) {
-    return;
-  }
-  window.localStorage.setItem(DISMISSED_UPDATE_VERSION_KEY, version);
-}
-
-/** Silent startup check: never throws; skips dev/browser and dismissed versions. */
-export async function checkForAppUpdateOnStartup(): Promise<AppUpdateInfo | null> {
-  if (isAppUpdateDevMode()) {
-    return null;
-  }
-  try {
-    const info = await checkForAppUpdate();
-    if (!info || !shouldPromptStartupUpdate(info.version)) {
-      return null;
-    }
-    return info;
-  } catch {
-    return null;
-  }
 }
 
 export async function getAppVersion(): Promise<string> {
