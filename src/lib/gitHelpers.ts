@@ -1,13 +1,17 @@
 import type { GitStatus, GitStatusEntry } from "@/lib/types";
 
+function isXyChanged(char: string | undefined): boolean {
+  return char !== undefined && char !== " " && char !== "." && char !== "?" && char !== "!";
+}
+
 export function isStaged(entry: GitStatusEntry): boolean {
   const xy = entry.xy.padEnd(2, " ");
-  return xy[0] !== " " && xy[0] !== "?" && xy[0] !== "!";
+  return isXyChanged(xy[0]);
 }
 
 export function isUnstaged(entry: GitStatusEntry): boolean {
   const xy = entry.xy.padEnd(2, " ");
-  return xy[1] !== " " && xy[1] !== "?";
+  return isXyChanged(xy[1]);
 }
 
 export function isUntracked(entry: GitStatusEntry): boolean {

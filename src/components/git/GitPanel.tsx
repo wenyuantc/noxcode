@@ -65,6 +65,7 @@ export function GitPanel() {
   const [activityLogs, setActivityLogs] = useState<ActivityLog[]>([]);
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [diff, setDiff] = useState<GitFileDiff | null>(null);
+  const [diffScope, setDiffScope] = useState<"worktree" | "staged" | null>(null);
   const [message, setMessage] = useState("");
   const [restoreTarget, setRestoreTarget] = useState<GitCheckpoint | null>(null);
   const [preview, setPreview] = useState<GitRestorePreview | null>(null);
@@ -111,7 +112,10 @@ export function GitPanel() {
 
   useEffect(() => {
     if (!workspaceId || !gitFocusPath) return;
-    void getGitFileDiff(workspaceId, gitFocusPath, "worktree").then(setDiff);
+    void getGitFileDiff(workspaceId, gitFocusPath, "worktree").then((next) => {
+      setDiff(next);
+      setDiffScope("worktree");
+    });
   }, [gitFocusPath, workspaceId]);
 
   const groups = groupGitStatus(status);
@@ -147,13 +151,23 @@ export function GitPanel() {
     });
   };
 
+  const closeDiff = () => {
+    setDiff(null);
+    setDiffScope(null);
+  };
+
   const showDiff = (entry: GitStatusEntry, scope: "worktree" | "staged") => {
     if (!workspaceId) return;
-    if (diff?.path === entry.path) {
-      setDiff(null);
+    if (diff?.path === entry.path && diffScope === scope) {
+      closeDiff();
       return;
     }
-    void getGitFileDiff(workspaceId, entry.path, scope, entry.orig_path ?? undefined).then(setDiff);
+    void getGitFileDiff(workspaceId, entry.path, scope, entry.orig_path ?? undefined).then(
+      (next) => {
+        setDiff(next);
+        setDiffScope(scope);
+      },
+    );
   };
 
   const handleStageAll = async () => {
@@ -215,7 +229,7 @@ export function GitPanel() {
         return next;
       });
       if (diff && selectedUnstagedPaths.includes(diff.path)) {
-        setDiff(null);
+        closeDiff();
       }
       await reload();
     } finally {
@@ -271,7 +285,7 @@ export function GitPanel() {
         return next;
       });
       if (diff?.path === path) {
-        setDiff(null);
+        closeDiff();
       }
       await reload();
     } finally {
@@ -285,7 +299,7 @@ export function GitPanel() {
     try {
       await commitGitChanges(workspaceId, message.trim());
       setMessage("");
-      if (diff) setDiff(null);
+      if (diff) closeDiff();
       await reload();
     } finally {
       setBusy(false);
@@ -515,6 +529,7 @@ export function GitPanel() {
                 selected={selected}
                 isStagedGroup
                 activeDiffPath={diff?.path}
+                activeDiffScope={diffScope}
                 onToggle={toggle}
                 onToggleAll={() => toggleGroup(groups.staged)}
                 onOpen={(entry) => showDiff(entry, "staged")}
@@ -537,6 +552,7 @@ export function GitPanel() {
                 entries={groups.unstaged}
                 selected={selected}
                 activeDiffPath={diff?.path}
+                activeDiffScope={diffScope}
                 onToggle={toggle}
                 onToggleAll={() => toggleGroup(groups.unstaged)}
                 onOpen={(entry) => showDiff(entry, "worktree")}
@@ -560,6 +576,7 @@ export function GitPanel() {
                 entries={groups.untracked}
                 selected={selected}
                 activeDiffPath={diff?.path}
+                activeDiffScope={diffScope}
                 onToggle={toggle}
                 onToggleAll={() => toggleGroup(groups.untracked)}
                 onOpen={(entry) => showDiff(entry, "worktree")}
@@ -601,7 +618,7 @@ export function GitPanel() {
                     size="icon-xs"
                     variant="ghost"
                     className="size-5 text-muted-foreground hover:text-foreground"
-                    onClick={() => setDiff(null)}
+                    onClick={closeDiff}
                     title={t("close")}
                   >
                     <X className="size-3" />
@@ -704,9 +721,17 @@ export function GitPanel() {
   );
 }
 
-function StatusBadge({ xy }: { xy: string }) {
-  const code = xy.trim() || "?";
-  const char = code.charAt(0);
+function xySideChar(xy: string, side: "index" | "worktree"): string {
+  const padded = xy.padEnd(2, " ");
+  const preferred = side === "index" ? padded[0] : padded[1];
+  if (preferred && preferred !== " " && preferred !== ".") return preferred;
+  const fallback = side === "index" ? padded[1] : padded[0];
+  if (fallback && fallback !== " " && fallback !== ".") return fallback;
+  return "?";
+}
+
+function StatusBadge({ xy, side }: { xy: string; side: "index" | "worktree" }) {
+  const char = xySideChar(xy, side);
   let colorClass = "bg-muted text-muted-foreground border-border";
   if (char === "M") {
     colorClass = "bg-amber-500/15 text-amber-600 dark:text-amber-400 border-amber-500/20";
@@ -737,6 +762,7 @@ function FileGroup({
   selected,
   isStagedGroup,
   activeDiffPath,
+  activeDiffScope,
   onToggle,
   onToggleAll,
   onOpen,
@@ -751,6 +777,7 @@ function FileGroup({
   selected: Set<string>;
   isStagedGroup?: boolean;
   activeDiffPath?: string;
+  activeDiffScope?: "worktree" | "staged" | null;
   onToggle: (path: string) => void;
   onToggleAll: () => void;
   onOpen: (entry: GitStatusEntry) => void;
@@ -816,7 +843,8 @@ function FileGroup({
         <ul className="divide-y divide-border/40 p-0.5">
           {entries.map((entry) => {
             const isChecked = selected.has(entry.path);
-            const isActive = activeDiffPath === entry.path;
+            const groupScope = isStagedGroup ? "staged" : "worktree";
+            const isActive = activeDiffPath === entry.path && activeDiffScope === groupScope;
             const lastSlash = entry.path.lastIndexOf("/");
             const fileName = lastSlash >= 0 ? entry.path.slice(lastSlash + 1) : entry.path;
             const dirPath = lastSlash >= 0 ? entry.path.slice(0, lastSlash) : "";
@@ -835,7 +863,7 @@ function FileGroup({
                   onChange={() => onToggle(entry.path)}
                   className="size-3.5 cursor-pointer rounded border-muted-foreground/30 accent-primary shrink-0"
                 />
-                <StatusBadge xy={entry.xy} />
+                <StatusBadge xy={entry.xy} side={isStagedGroup ? "index" : "worktree"} />
                 <button
                   type="button"
                   className="flex min-w-0 flex-1 items-baseline gap-1 text-left truncate"
