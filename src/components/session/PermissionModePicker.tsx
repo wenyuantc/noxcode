@@ -9,7 +9,7 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { updateNativeSettings } from "@/lib/backend";
-import { resolveComposerPlanMode } from "@/lib/planMode";
+import { applyComposerPlanMode, resolveComposerPlanMode } from "@/lib/planMode";
 import { isNativePermissionMode, type NativePermissionMode } from "@/lib/types";
 import { cn } from "@/lib/utils";
 import { useSettingsStore } from "@/stores/settingsStore";
@@ -50,15 +50,24 @@ export function PermissionModePicker() {
     : "default";
   const selected: ComposerPermissionChoice = planMode ? "plan" : persisted;
 
+  const writePlanMode = (enabled: boolean) => {
+    applyComposerPlanMode({
+      enabled,
+      sessionId: selectedSessionId,
+      setDefault: setPlanMode,
+      setSession: (id, next) => useSessionStore.getState().onPlanMode(id, next),
+    });
+  };
+
   const selectMode = (value: string | null) => {
     if (value === "plan") {
-      setPlanMode(true);
+      writePlanMode(true);
       return;
     }
     if (!isNativePermissionMode(value)) {
       return;
     }
-    setPlanMode(false);
+    writePlanMode(false);
     if (value !== persisted) {
       void updateNativeSettings({ permission_mode: value }).then(setNative);
     }

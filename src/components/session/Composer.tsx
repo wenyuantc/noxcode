@@ -10,10 +10,12 @@ import {
   listNativeGlobalSkills,
   stopNativeSession,
 } from "@/lib/backend";
-import { resolveComposerPlanMode } from "@/lib/planMode";
+import { clampMentionIndex, resolveComposerMentionKey } from "@/lib/composerMention";
+import { applyComposerPlanMode, resolveComposerPlanMode } from "@/lib/planMode";
 import { submitSessionPrompt } from "@/lib/sessionSubmission";
 import { composerThinkingLevels, resolveComposerThinkingLevel } from "@/lib/modelCatalog";
 import type { NativeSkill } from "@/lib/types";
+import { cn } from "@/lib/utils";
 import { useChannelStore } from "@/stores/channelStore";
 import { useSessionStore } from "@/stores/sessionStore";
 import { useUiStore } from "@/stores/uiStore";
@@ -70,8 +72,10 @@ export function Composer({ compact = false }: { compact?: boolean }) {
   const [files, setFiles] = useState<string[]>([]);
   const [skills, setSkills] = useState<NativeSkill[]>([]);
   const [mentionOpen, setMentionOpen] = useState<"@" | "/" | null>(null);
+  const [mentionIndex, setMentionIndex] = useState(0);
   const [sending, setSending] = useState(false);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const mentionListRef = useRef<HTMLDivElement>(null);
 
   const selectedModel = channel?.models.find((item) => item.id === model);
   const efforts = composerThinkingLevels(selectedModel);
@@ -107,6 +111,30 @@ export function Composer({ compact = false }: { compact?: boolean }) {
       setMentionOpen(null);
     }
   }, [draft, workspaceId]);
+
+  const mentionQuery = draft.split(/\s/).pop() ?? "";
+  useEffect(() => {
+    setMentionIndex(0);
+  }, [mentionOpen, mentionQuery]);
+
+  const mentionItems =
+    mentionOpen === "@"
+      ? files.map((file) => ({ key: file, label: file, token: `@${file}` }))
+      : mentionOpen === "/"
+        ? skills.map((skill) => ({
+            key: skill.name,
+            label: skill.name,
+            token: `使用技能：${skill.name}`,
+          }))
+        : [];
+  const activeMentionIndex = clampMentionIndex(mentionIndex, mentionItems.length);
+
+  useEffect(() => {
+    const list = mentionListRef.current;
+    if (!list) return;
+    const active = list.querySelector("[data-mention-active='true']");
+    if (active instanceof HTMLElement) active.scrollIntoView({ block: "nearest" });
+  }, [activeMentionIndex, mentionItems.length]);
 
   const working = Boolean(live) && turnState !== "waiting_input" && turnState !== "ended";
   const sendBusy = sending || working;
@@ -202,6 +230,15 @@ export function Composer({ compact = false }: { compact?: boolean }) {
     textareaRef.current?.focus();
   };
 
+  const togglePlanMode = () => {
+    applyComposerPlanMode({
+      enabled: !composerPlanMode,
+      sessionId: selectedSessionId,
+      setDefault: useUiStore.getState().setComposerPlanMode,
+      setSession: (id, enabled) => useSessionStore.getState().onPlanMode(id, enabled),
+    });
+  };
+
   return (
     <div className="mx-auto w-full max-w-3xl">
       {!compact ? (
@@ -216,7 +253,37 @@ export function Composer({ compact = false }: { compact?: boolean }) {
           value={draft}
           onChange={(event) => setDraft(event.target.value)}
           onKeyDown={(event) => {
-            if (event.key === "Enter" && !event.shiftKey) {
+            const action = resolveComposerMentionKey({
+              key: event.key,
+              shiftKey: event.shiftKey,
+              isComposing: event.nativeEvent.isComposing || event.keyCode === 229,
+              mentionVisible: mentionItems.length > 0,
+              itemCount: mentionItems.length,
+              activeIndex: activeMentionIndex,
+            });
+            if (action.type === "move") {
+              event.preventDefault();
+              setMentionIndex(action.nextIndex);
+              return;
+            }
+            if (action.type === "confirm") {
+              const item = mentionItems[activeMentionIndex];
+              if (!item) return;
+              event.preventDefault();
+              insertToken(item.token);
+              return;
+            }
+            if (action.type === "dismiss") {
+              event.preventDefault();
+              setMentionOpen(null);
+              return;
+            }
+            if (action.type === "togglePlanMode") {
+              event.preventDefault();
+              togglePlanMode();
+              return;
+            }
+            if (action.type === "send") {
               event.preventDefault();
               if (!sendBusy) void send();
             }
@@ -224,36 +291,30 @@ export function Composer({ compact = false }: { compact?: boolean }) {
           placeholder={t("layout:composerPlaceholder")}
           className="min-h-24 w-full resize-none bg-transparent px-4 py-3 text-sm outline-none"
         />
-        {mentionOpen === "@" && files.length > 0 ? (
-          <div className="mx-3 mb-2 max-h-40 overflow-y-auto rounded-md border bg-popover text-sm">
-            {files.map((file) => (
+        {mentionItems.length > 0 ? (
+          <div
+            ref={mentionListRef}
+            className="mx-3 mb-2 max-h-40 overflow-y-auto rounded-md border bg-popover text-sm"
+          >
+            {mentionItems.map((item, index) => (
               <button
-                key={file}
+                key={item.key}
                 type="button"
-                className="block w-full truncate px-3 py-1.5 text-left hover:bg-accent"
-                onClick={() => insertToken(`@${file}`)}
+                data-mention-active={index === activeMentionIndex ? "true" : undefined}
+                className={cn(
+                  "block w-full truncate px-3 py-1.5 text-left",
+                  index === activeMentionIndex ? "bg-accent" : "hover:bg-accent",
+                )}
+                onMouseEnter={() => setMentionIndex(index)}
+                onClick={() => insertToken(item.token)}
               >
-                {file}
+                {item.label}
               </button>
             ))}
           </div>
-        ) : null}
-        {mentionOpen === "/" ? (
+        ) : mentionOpen === "/" ? (
           <div className="mx-3 mb-2 max-h-40 overflow-y-auto rounded-md border bg-popover text-sm">
-            {skills.length === 0 ? (
-              <p className="px-3 py-2 text-muted-foreground">{t("sessions:noSkills")}</p>
-            ) : (
-              skills.map((skill) => (
-                <button
-                  key={skill.name}
-                  type="button"
-                  className="block w-full truncate px-3 py-1.5 text-left hover:bg-accent"
-                  onClick={() => insertToken(`使用技能：${skill.name}`)}
-                >
-                  {skill.name}
-                </button>
-              ))
-            )}
+            <p className="px-3 py-2 text-muted-foreground">{t("sessions:noSkills")}</p>
           </div>
         ) : null}
         <div className="flex flex-wrap items-center gap-2 border-t px-3 py-2 text-xs">
