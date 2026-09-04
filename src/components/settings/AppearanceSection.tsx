@@ -1,4 +1,5 @@
 import { Check, Laptop, Moon, Sun } from "lucide-react";
+import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 
 import { CodePreview } from "@/components/code/CodePreview";
@@ -64,6 +65,22 @@ function PxInput({
   max: number;
   onChange: (value: number) => void;
 }) {
+  const [draft, setDraft] = useState(String(value));
+  const [focused, setFocused] = useState(false);
+
+  useEffect(() => {
+    if (!focused) setDraft(String(value));
+  }, [focused, value]);
+
+  const commit = (raw: string) => {
+    const next = Number(raw);
+    if (!Number.isFinite(next)) {
+      setDraft(String(value));
+      return;
+    }
+    onChange(next);
+  };
+
   return (
     <div className="relative w-20">
       <Input
@@ -73,11 +90,22 @@ function PxInput({
         min={min}
         max={max}
         step={1}
-        value={value}
+        value={focused ? draft : value}
+        onFocus={() => {
+          setFocused(true);
+          setDraft(String(value));
+        }}
+        onBlur={() => {
+          setFocused(false);
+          commit(draft);
+        }}
         onChange={(event) => {
-          const next = Number(event.target.value);
-          if (!Number.isFinite(next)) return;
-          onChange(next);
+          const raw = event.target.value;
+          setDraft(raw);
+          const next = Number(raw);
+          if (Number.isFinite(next) && next >= min && next <= max) {
+            onChange(next);
+          }
         }}
       />
       <span className="pointer-events-none absolute inset-y-0 right-2.5 flex items-center text-xs text-muted-foreground">
