@@ -28,6 +28,8 @@ import {
   parsePlanLine,
   parseSubagentResult,
   parseSubagentTag,
+  sanitizeSubagentLabel,
+  isParentAgentSpawn,
   subagentSegmentIdentity,
   aggregateUsages,
   summarizeRetry,
@@ -109,6 +111,7 @@ describe("sessionLines", () => {
     expect(parentRead?.result).toBe("parent-content");
     expect(childRead?.result).toBe("child-content");
     expect(agentCall?.result).toBe("子 Agent（general）完成");
+    expect(agentCall?.subagentTag).toBe("[子 Agent 1(general) - 改文件]");
   });
 
   it("leaves orphan tool results unpaired", () => {
@@ -781,6 +784,105 @@ describe("sessionLines", () => {
       success: false,
       error: "网络超时",
     });
+  });
+
+  it("sanitizes subagent labels like the rust runner", () => {
+    expect(sanitizeSubagentLabel("  改  文件  ")).toBe("改 文件");
+    expect(sanitizeSubagentLabel("查[规则](核心)")).toBe("查规则核心");
+    expect(sanitizeSubagentLabel("")).toBe("子任务");
+    expect(sanitizeSubagentLabel("测".repeat(32))).toBe("测".repeat(32));
+    expect(sanitizeSubagentLabel("测".repeat(33))).toBe(`${"测".repeat(31)}…`);
+  });
+
+  it("detects parent agent spawn lines", () => {
+    expect(isParentAgentSpawn({ text: "[子 Agent] 分析 oms-admin 模块" })).toBe(true);
+    expect(
+      isParentAgentSpawn({
+        text: "[子 Agent 1(explore) - 分析 oms-admin 模块] [子 Agent] 分析 oms-admin 模块",
+      }),
+    ).toBe(true);
+    expect(
+      isParentAgentSpawn({
+        text: "[读取] a.ts",
+        tool: { name: "Agent" },
+      }),
+    ).toBe(true);
+    expect(isParentAgentSpawn({ text: "[子 Agent 1(explore) - 分析] [读取] a.ts" })).toBe(false);
+  });
+
+  it("folds untagged parent agent spawn into the matching subagent segment", () => {
+    const blocks = buildTurnBlocks(
+      groupSessionLines([
+        line("1", "[USER_INPUT] 帮我分析项目", "2026-01-01T00:00:00Z"),
+        line("2", "[思考] 先委派探索子 Agent", "2026-01-01T00:00:01Z"),
+        line("3", "[子 Agent] 摸底项目整体结构", "2026-01-01T00:00:02Z"),
+        line(
+          "4",
+          "[子 Agent 1(explore) - 摸底项目整体结构] 启动（explore）",
+          "2026-01-01T00:00:03Z",
+        ),
+        line(
+          "5",
+          "[子 Agent 1(explore) - 摸底项目整体结构] [读取] pom.xml",
+          "2026-01-01T00:00:04Z",
+        ),
+        line(
+          "6",
+          "[子 Agent 1(explore) - 摸底项目整体结构] [工具结果]\n<project>...</project>",
+          "2026-01-01T00:00:05Z",
+        ),
+        line("7", "[子 Agent 1(explore) - 摸底项目整体结构] 结束 成功", "2026-01-01T00:00:06Z"),
+        line(
+          "8",
+          "[工具结果]\n子 Agent（摸底项目整体结构 / explore）完成。\n\n报告",
+          "2026-01-01T00:00:07Z",
+        ),
+        line("9", "主 Agent 汇总完成", "2026-01-01T00:00:08Z"),
+      ]),
+    );
+    expect(blocks[0]?.segments.map((segment) => segment.kind)).toEqual([
+      "thinking",
+      "subagent",
+      "assistant",
+    ]);
+    const subagent = blocks[0]?.segments[1];
+    expect(subagent?.items.some((item) => item.text === "[子 Agent] 摸底项目整体结构")).toBe(true);
+    expect(
+      subagent?.items.find((item) => item.text === "[子 Agent] 摸底项目整体结构")?.subagentTag,
+    ).toBe("[子 Agent 1(explore) - 摸底项目整体结构]");
+    expect(
+      subagent?.items.find((item) => item.text === "[子 Agent] 摸底项目整体结构")?.result,
+    ).toContain("完成");
+  });
+
+  it("folds parallel parent agent spawns into matching subagent windows", () => {
+    const blocks = buildTurnBlocks(
+      groupSessionLines([
+        line("1", "[USER_INPUT] 并行摸底", "2026-01-01T00:00:00Z"),
+        line("2", "[子 Agent] one", "2026-01-01T00:00:01Z"),
+        line("3", "[子 Agent 1(general) - one] 启动（general）", "2026-01-01T00:00:02Z"),
+        line("4", "[子 Agent] two", "2026-01-01T00:00:03Z"),
+        line("5", "[子 Agent 2(general) - two] 启动（general）", "2026-01-01T00:00:04Z"),
+        line("6", "[子 Agent 1(general) - one] 结束 成功", "2026-01-01T00:00:05Z"),
+        line("7", "[子 Agent 2(general) - two] 结束 成功", "2026-01-01T00:00:06Z"),
+      ]),
+    );
+    expect(blocks[0]?.segments.map((segment) => segment.kind)).toEqual(["subagent", "subagent"]);
+    expect(blocks[0]?.segments[0]?.items.map((item) => item.id)).toEqual(["2", "3", "6"]);
+    expect(blocks[0]?.segments[1]?.items.map((item) => item.id)).toEqual(["4", "5", "7"]);
+    expect(blocks[0]?.segments[0]?.items[0]?.subagentTag).toBe("[子 Agent 1(general) - one]");
+    expect(blocks[0]?.segments[1]?.items[0]?.subagentTag).toBe("[子 Agent 2(general) - two]");
+  });
+
+  it("leaves unmatched parent agent spawn as a top-level tools row", () => {
+    const blocks = buildTurnBlocks(
+      groupSessionLines([
+        line("1", "[USER_INPUT] 问好", "2026-01-01T00:00:00Z"),
+        line("2", "[子 Agent] 对不上的任务", "2026-01-01T00:00:01Z"),
+        line("3", "主 Agent 自己回答", "2026-01-01T00:00:02Z"),
+      ]),
+    );
+    expect(blocks[0]?.segments.map((segment) => segment.kind)).toEqual(["tools", "assistant"]);
   });
 
   it("groups subagent lines into dedicated subagent segments", () => {
