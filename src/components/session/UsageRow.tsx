@@ -4,13 +4,7 @@ import type { GroupedSessionItem, ParsedUsage } from "@/lib/sessionLines";
 import { parseUsageLine } from "@/lib/sessionLines";
 import { cn, formatTokenCount } from "@/lib/utils";
 
-export function UsageChips({
-  usage,
-  className,
-}: {
-  usage: ParsedUsage;
-  className?: string;
-}) {
+export function UsageChips({ usage, className }: { usage: ParsedUsage; className?: string }) {
   const { t } = useTranslation("sessions");
 
   const items = [
@@ -42,13 +36,7 @@ export function UsageChips({
   );
 }
 
-export function UsageRow({
-  item,
-  className,
-}: {
-  item: GroupedSessionItem;
-  className?: string;
-}) {
+export function UsageRow({ item, className }: { item: GroupedSessionItem; className?: string }) {
   const parsed = parseUsageLine(item.text);
   if (!parsed) return null;
   return <UsageChips usage={parsed} className={className} />;
