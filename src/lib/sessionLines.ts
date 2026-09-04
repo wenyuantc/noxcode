@@ -305,6 +305,15 @@ export function parseSubagentTag(tag: string | null | undefined): ParsedSubagent
   };
 }
 
+/** 同一回合子 Agent 窗口身份：优先编号，解析失败则回退完整 tag。 */
+export function subagentSegmentIdentity(item: { subagentTag?: string }): string | null {
+  const tag = item.subagentTag;
+  if (!tag) return null;
+  const parsed = parseSubagentTag(tag);
+  if (parsed) return `index:${parsed.index}`;
+  return `tag:${tag}`;
+}
+
 export interface ParsedSubagentResult {
   description: string;
   kind: string;
@@ -990,11 +999,31 @@ export function buildTurnSegments(items: GroupedSessionItem[]): TurnSegment[] {
     let key = segmentKey(item);
     if (currentKey === "retry" && isRetryFailureLine(item.text)) key = "retry";
     if (key === "skip") continue;
+    if (key === "subagent") {
+      const identity = subagentSegmentIdentity(item);
+      const currentIdentity =
+        currentKey === "subagent" ? subagentSegmentIdentity(currentItems[0] ?? {}) : null;
+      if (identity && currentIdentity === identity) {
+        currentItems.push(item);
+        continue;
+      }
+      if (identity) {
+        const existing = segments.find(
+          (segment) =>
+            segment.kind === "subagent" &&
+            subagentSegmentIdentity(segment.items[0] ?? {}) === identity,
+        );
+        if (existing) {
+          existing.items.push(item);
+          continue;
+        }
+      }
+    }
     const mergeable =
       key !== "terminal" && key !== "todo" && key !== "compact" && key !== "goal" && key !== "plan";
     const subagentMatch =
       currentKey === "subagent" && key === "subagent"
-        ? currentItems[0]?.subagentTag === item.subagentTag
+        ? subagentSegmentIdentity(currentItems[0] ?? {}) === subagentSegmentIdentity(item)
         : true;
     if (currentKey !== key || !mergeable || !subagentMatch) {
       flush();

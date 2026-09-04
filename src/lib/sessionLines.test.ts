@@ -28,6 +28,7 @@ import {
   parsePlanLine,
   parseSubagentResult,
   parseSubagentTag,
+  subagentSegmentIdentity,
   aggregateUsages,
   summarizeRetry,
   thinkingDurationSeconds,
@@ -814,6 +815,72 @@ describe("sessionLines", () => {
     expect(blocks).toHaveLength(1);
     expect(blocks[0]?.segments.map((s) => s.kind)).toEqual(["thinking", "subagent", "assistant"]);
     expect(blocks[0]?.segments[1]?.items).toHaveLength(4); // lines 3, 4, 5 (paired with 6), 7
+  });
+
+  it("identifies subagent windows by index then raw tag", () => {
+    expect(
+      subagentSegmentIdentity({
+        subagentTag: "[子 Agent 1(explore) - 摸底项目整体结构]",
+      }),
+    ).toBe("index:1");
+    expect(
+      subagentSegmentIdentity({
+        subagentTag: "[子 Agent 3(general) - 改文件]",
+      }),
+    ).toBe("index:3");
+    expect(subagentSegmentIdentity({ subagentTag: "[子 Agent 未编号]" })).toBe(
+      "tag:[子 Agent 未编号]",
+    );
+    expect(subagentSegmentIdentity({})).toBeNull();
+  });
+
+  it("folds interleaved same-index subagent lines into one window each", () => {
+    const tag1 = "[子 Agent 1(explore) - 分析 RuleRecord 新增模块]";
+    const tag3 = "[子 Agent 3(explore) - 分析 TestController 与项目上下文]";
+    const blocks = buildTurnBlocks(
+      groupSessionLines([
+        line("1", "[USER_INPUT] 深度分析", "2026-01-01T00:00:00Z"),
+        line("2", `${tag1} 启动（explore）`, "2026-01-01T00:00:01Z"),
+        line("3", `${tag3} 启动（explore）`, "2026-01-01T00:00:02Z"),
+        line("4", `${tag1} [思考] 4秒\n先看 RuleRecord`, "2026-01-01T00:00:03Z"),
+        line("5", `${tag3} [思考] 3秒\n先看 TestController`, "2026-01-01T00:00:04Z"),
+        line("6", `${tag1} 继续摸底新增模块的包结构。`, "2026-01-01T00:00:05Z"),
+        line("7", `${tag3} 继续核对控制器与项目上下文。`, "2026-01-01T00:00:06Z"),
+        line("8", `${tag1} [读取] RuleRecord.java`, "2026-01-01T00:00:07Z"),
+        line("9", `${tag3} [读取] TestController.java`, "2026-01-01T00:00:08Z"),
+        line("10", `${tag1} [工具结果]\nclass RuleRecord`, "2026-01-01T00:00:09Z"),
+        line("11", `${tag3} [工具结果]\nclass TestController`, "2026-01-01T00:00:10Z"),
+        line("12", `${tag1} 结束 成功`, "2026-01-01T00:00:11Z"),
+        line("13", `${tag3} 结束 成功`, "2026-01-01T00:00:12Z"),
+      ]),
+    );
+    expect(blocks).toHaveLength(1);
+    expect(blocks[0]?.segments.map((segment) => segment.kind)).toEqual(["subagent", "subagent"]);
+    const first = blocks[0]?.segments[0];
+    const second = blocks[0]?.segments[1];
+    expect(parseSubagentTag(first?.items[0]?.subagentTag)?.index).toBe(1);
+    expect(parseSubagentTag(second?.items[0]?.subagentTag)?.index).toBe(3);
+    expect(first?.items).toHaveLength(5);
+    expect(second?.items).toHaveLength(5);
+    expect(first?.items.map((item) => item.id)).toEqual(["2", "4", "6", "8", "12"]);
+    expect(second?.items.map((item) => item.id)).toEqual(["3", "5", "7", "9", "13"]);
+  });
+
+  it("keeps a background subagent window at first appearance across parent text", () => {
+    const tag1 = "[子 Agent 1(explore) - 后台摸底]";
+    const blocks = buildTurnBlocks(
+      groupSessionLines([
+        line("1", "[USER_INPUT] 先摸底", "2026-01-01T00:00:00Z"),
+        line("2", `${tag1} 启动（explore）`, "2026-01-01T00:00:01Z"),
+        line("3", "主 Agent 先继续回答。", "2026-01-01T00:00:02Z"),
+        line("4", `${tag1} [思考] 2秒\n再扫一遍目录`, "2026-01-01T00:00:03Z"),
+        line("5", `${tag1} 已核对入口与构建配置。`, "2026-01-01T00:00:04Z"),
+        line("6", `${tag1} 结束 成功`, "2026-01-01T00:00:05Z"),
+      ]),
+    );
+    expect(blocks[0]?.segments.map((segment) => segment.kind)).toEqual(["subagent", "assistant"]);
+    expect(blocks[0]?.segments[0]?.items.map((item) => item.id)).toEqual(["2", "4", "5", "6"]);
+    expect(blocks[0]?.segments[1]?.items.map((item) => item.id)).toEqual(["3"]);
   });
 
   it("parses subagent usage line and aggregates usages", () => {
