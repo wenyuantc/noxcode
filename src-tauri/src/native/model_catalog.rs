@@ -2,9 +2,13 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::db::models::ChannelModelConfig;
+use crate::db::models::{default_channel_input_types, ChannelModelConfig};
 
 const CATALOG_JSON: &str = include_str!("model_catalog.json");
+
+/// 模型输入类型合法集合，顺序即规范化后的存储顺序。
+pub const CHANNEL_INPUT_TYPES: [&str; 3] = ["text", "image", "video"];
+pub const INPUT_TYPE_TEXT: &str = "text";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModelCatalogEntry {
@@ -18,6 +22,9 @@ pub struct ModelCatalogEntry {
     pub thinking: bool,
     #[serde(default)]
     pub thinking_levels: Vec<String>,
+    /// 目录声明的输入类型；未声明视为仅文本。
+    #[serde(default = "default_channel_input_types")]
+    pub input_types: Vec<String>,
 }
 
 fn catalog_entries() -> &'static [ModelCatalogEntry] {
@@ -157,6 +164,37 @@ fn normalize_thinking_config(config: &mut ChannelModelConfig) {
         default_thinking_level(allowed.as_slice(), config.thinking_level.as_deref());
 }
 
+/// 规范输入类型：去空白、小写、去重、丢弃未知值，按 text / image / video 排序并保证含 text。
+pub fn normalize_input_types(values: impl IntoIterator<Item = impl AsRef<str>>) -> Vec<String> {
+    let selected: Vec<String> = values
+        .into_iter()
+        .map(|value| value.as_ref().trim().to_ascii_lowercase())
+        .collect();
+    CHANNEL_INPUT_TYPES
+        .iter()
+        .filter(|kind| **kind == INPUT_TYPE_TEXT || selected.iter().any(|item| item == *kind))
+        .map(|kind| (*kind).to_string())
+        .collect()
+}
+
+/// 写入前拒绝未知输入类型；空白项忽略。
+fn validate_input_types(config: &ChannelModelConfig) -> Result<(), String> {
+    for value in config.input_types.iter().flatten() {
+        let key = value.trim().to_ascii_lowercase();
+        if key.is_empty() {
+            continue;
+        }
+        if !CHANNEL_INPUT_TYPES.contains(&key.as_str()) {
+            return Err(format!(
+                "模型「{}」的输入类型「{}」不受支持",
+                config.id,
+                value.trim()
+            ));
+        }
+    }
+    Ok(())
+}
+
 pub fn apply_catalog_defaults(model_id: &str) -> ChannelModelConfig {
     let mut config = ChannelModelConfig {
         id: model_id.trim().to_string(),
@@ -165,6 +203,7 @@ pub fn apply_catalog_defaults(model_id: &str) -> ChannelModelConfig {
         thinking_enabled: None,
         thinking_level: None,
         thinking_levels: None,
+        input_types: None,
     };
     fill_from_catalog(&mut config);
     config
@@ -185,8 +224,15 @@ pub fn fill_from_catalog(config: &mut ChannelModelConfig) {
         if config.thinking_levels.is_none() {
             config.thinking_levels = Some(entry.thinking_levels.clone());
         }
+        if config.input_types.is_none() {
+            config.input_types = Some(entry.input_types.clone());
+        }
     }
     normalize_thinking_config(config);
+    // 未设置且目录里没有的模型回退仅文本；已设置的集合只做规范化。
+    config.input_types = Some(normalize_input_types(
+        config.input_types.as_deref().unwrap_or_default(),
+    ));
 }
 
 pub fn validate_channel_model_config(config: &ChannelModelConfig) -> Result<(), String> {
@@ -197,6 +243,7 @@ pub fn validate_channel_model_config(config: &ChannelModelConfig) -> Result<(), 
 }
 
 pub fn normalize_channel_model_config(config: &mut ChannelModelConfig) -> Result<(), String> {
+    validate_input_types(config)?;
     fill_from_catalog(config);
     validate_channel_model_config(config)
 }
@@ -264,6 +311,18 @@ mod tests {
     }
 
     #[test]
+    fn newer_point_releases_resolve_to_their_own_entry() {
+        assert_eq!(lookup_catalog("claude-fable-5-1").unwrap().id, "claude-fable-5-1");
+        assert_eq!(lookup_catalog("fable-5.1").unwrap().id, "claude-fable-5-1");
+        assert_eq!(lookup_catalog("claude-fable-5").unwrap().id, "claude-fable-5");
+        assert_eq!(lookup_catalog("gemini-3.8-flash").unwrap().id, "gemini-3.8-flash");
+        assert_eq!(
+            apply_catalog_defaults("gemini-3.8-flash").input_types,
+            types(&["text", "image", "video"])
+        );
+    }
+
+    #[test]
     fn gpt_5_6_luna_includes_xhigh_and_max() {
         let entry = lookup_catalog("gpt-5.6-luna").expect("luna");
         assert!(entry.thinking_levels.contains(&"xhigh".to_string()));
@@ -318,6 +377,79 @@ mod tests {
             thinking_enabled: Some(true),
             thinking_level: Some("high".to_string()),
             thinking_levels: None,
+            input_types: None,
+        }
+    }
+
+    fn types(values: &[&str]) -> Option<Vec<String>> {
+        Some(values.iter().map(|item| (*item).to_string()).collect())
+    }
+
+    #[test]
+    fn input_types_default_to_text_and_normalize() {
+        // 目录声明多模态的模型采用目录；文本模型与未知模型回退仅文本。
+        assert_eq!(
+            apply_catalog_defaults("gpt-4o").input_types,
+            types(&["text", "image"])
+        );
+        assert_eq!(
+            apply_catalog_defaults("gemini-2.5-pro").input_types,
+            types(&["text", "image", "video"])
+        );
+        assert_eq!(
+            apply_catalog_defaults("deepseek-chat").input_types,
+            types(&["text"])
+        );
+        assert_eq!(
+            apply_catalog_defaults("custom-local-model").input_types,
+            types(&["text"])
+        );
+
+        // 用户已保存的集合不被目录覆盖。
+        let mut config = apply_catalog_defaults("gpt-4o");
+        config.input_types = types(&["text"]);
+        fill_from_catalog(&mut config);
+        assert_eq!(config.input_types, types(&["text"]));
+
+        assert_eq!(
+            normalize_input_types(["video", " Image ", "text", "text"]),
+            vec!["text".to_string(), "image".to_string(), "video".to_string()]
+        );
+        assert_eq!(normalize_input_types(["image"]), vec!["text", "image"]);
+        assert_eq!(normalize_input_types(Vec::<String>::new()), vec!["text"]);
+        assert_eq!(normalize_input_types(["audio", "text"]), vec!["text"]);
+    }
+
+    #[test]
+    fn normalize_rejects_unknown_input_types_but_keeps_known_selection() {
+        let mut config = apply_catalog_defaults("gpt-4o");
+        config.input_types = types(&["audio"]);
+        assert_eq!(
+            normalize_channel_model_config(&mut config).unwrap_err(),
+            "模型「gpt-4o」的输入类型「audio」不受支持"
+        );
+
+        let mut config = apply_catalog_defaults("gpt-4o");
+        config.input_types = types(&["image", "video"]);
+        normalize_channel_model_config(&mut config).expect("known types are valid");
+        assert_eq!(config.input_types, types(&["text", "image", "video"]));
+    }
+
+    #[test]
+    fn catalog_input_types_are_known_values() {
+        for entry in list_catalog() {
+            assert!(
+                entry.input_types.contains(&INPUT_TYPE_TEXT.to_string()),
+                "{}",
+                entry.id
+            );
+            for kind in &entry.input_types {
+                assert!(
+                    CHANNEL_INPUT_TYPES.contains(&kind.as_str()),
+                    "{}: {kind}",
+                    entry.id
+                );
+            }
         }
     }
 

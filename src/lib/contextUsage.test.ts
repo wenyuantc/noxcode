@@ -24,6 +24,7 @@ function channel(id: string, modelId: string, contextTokens: number | null): AiC
         thinking_enabled: null,
         thinking_level: null,
         thinking_levels: null,
+        input_types: null,
       },
     ],
     enabled: true,

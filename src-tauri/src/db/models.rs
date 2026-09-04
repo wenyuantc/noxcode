@@ -157,6 +157,11 @@ pub struct AiChannelRecord {
     pub lite_model: Option<String>,
 }
 
+/// 目录条目缺省输入类型：未声明时视为仅文本。
+pub fn default_channel_input_types() -> Vec<String> {
+    vec!["text".to_string()]
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ChannelModelConfig {
     pub id: String,
@@ -170,6 +175,10 @@ pub struct ChannelModelConfig {
     pub thinking_level: Option<String>,
     #[serde(default)]
     pub thinking_levels: Option<Vec<String>>,
+    /// 支持的输入类型：`text` / `image` / `video`，始终包含 `text`。
+    /// `None` 表示未设置，读取时采用目录默认（未知模型回退仅文本）。
+    #[serde(default)]
+    pub input_types: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

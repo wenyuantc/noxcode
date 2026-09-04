@@ -248,6 +248,9 @@ export interface GitPushResult {
 
 export type AiChannelProtocol = "openai" | "anthropic" | "codex";
 
+export const CHANNEL_INPUT_TYPES = ["text", "image", "video"] as const;
+export type ChannelInputType = (typeof CHANNEL_INPUT_TYPES)[number];
+
 export interface AiChannelModel {
   id: string;
   context_tokens: number | null;
@@ -255,6 +258,8 @@ export interface AiChannelModel {
   thinking_enabled: boolean | null;
   thinking_level: string | null;
   thinking_levels: string[] | null;
+  /** 支持的输入类型，始终包含 "text"；null 表示未设置，采用目录默认。 */
+  input_types: ChannelInputType[] | null;
 }
 
 export interface ModelCatalogEntry {
@@ -266,6 +271,7 @@ export interface ModelCatalogEntry {
   max_output_tokens: number;
   thinking: boolean;
   thinking_levels: string[];
+  input_types: ChannelInputType[];
 }
 
 export interface AiChannel {

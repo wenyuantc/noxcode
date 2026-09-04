@@ -59,11 +59,13 @@ Base URL 必须是 `http://` 或 `https://`，末尾 `/` 会去掉后再拼路�
 
 ## `models_json` 与思考等级
 
-`ChannelModelConfig`：`id`、`context_tokens`、`max_output_tokens`、`thinking_enabled`、`thinking_level`、`thinking_levels`。
+`ChannelModelConfig`：`id`、`context_tokens`、`max_output_tokens`、`thinking_enabled`、`thinking_level`、`thinking_levels`、`input_types`。
 
 - `thinking_levels` 仅在为 `None` 时采用目录全集（未知模型回退 `low/medium/high`）；用户已保存的显式子集或空数组不会被目录新增等级覆盖。
 - 开启思考时拒绝空集合；关闭思考时清空 `thinking_level`。
 - 运行时 `thinking_level` 必须属于已选集合，越界回退默认等级（`resolve_runtime_reasoning_effort`）。
+- `input_types` 取值仅 `text` / `image` / `video`。`None`（旧数据或新模型未设置）时采用目录条目的 `input_types`，目录未声明或未知模型回退 `["text"]`；用户已保存的显式集合不会被目录覆盖（与 `thinking_levels` 同一套规则）。读取时去重、丢弃未知值、按 `text/image/video` 排序并保证含 `text`，规范化后总是落为 `Some`；创建/更新时出现未知值直接拒绝保存。设置页中「文本」锁定不可取消。本期该字段只做存储与展示，不影响会话输入或请求体。
+- `model_catalog.json` 条目可选声明 `input_types`，未声明视为仅文本；`catalog_input_types_are_known_values` 单测保证目录里只出现合法值且都含 `text`。
 
 删除渠道时若有该渠道的 live session，拒绝删除。历史会话上的 `ai_channel_id` 置空。
 

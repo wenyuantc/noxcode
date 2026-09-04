@@ -1,4 +1,4 @@
-import { Plus, Sparkles, Trash2 } from "lucide-react";
+import { Lock, Plus, Sparkles, Trash2 } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
 import {
@@ -7,10 +7,12 @@ import {
   displayedThinkingLevels,
   emptyChannelModel,
   lookupModelCatalog,
+  selectedInputTypes,
   selectedThinkingLevels,
+  toggleInputType,
   withThinkingLevels,
 } from "@/lib/modelCatalog";
-import type { AiChannelModel, ModelCatalogEntry } from "@/lib/types";
+import { CHANNEL_INPUT_TYPES, type AiChannelModel, type ModelCatalogEntry } from "@/lib/types";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
@@ -74,6 +76,7 @@ export function ChannelModelsEditor({
           const optionLevels = displayedThinkingLevels(model, catalog);
           const selectedLevels = selectedThinkingLevels(model, entry);
           const emptySelection = thinkingOn && selectedLevels.length === 0;
+          const inputTypes = selectedInputTypes(model, entry);
 
           return (
             <div
@@ -160,6 +163,51 @@ export function ChannelModelsEditor({
                       });
                     }}
                   />
+                </div>
+              </div>
+
+              <div className="space-y-1.5 border-t border-border/40 pt-2">
+                <label className="text-xs text-muted-foreground">
+                  {t("channels.fields.inputTypes")}
+                </label>
+                <div
+                  className="flex flex-wrap gap-2"
+                  role="group"
+                  aria-label={t("channels.fields.inputTypes")}
+                >
+                  {CHANNEL_INPUT_TYPES.map((kind) => {
+                    const checkboxId = `channel-model-${index}-input-${kind}`;
+                    const locked = kind === "text";
+                    const checked = inputTypes.includes(kind);
+                    return (
+                      <label
+                        key={kind}
+                        htmlFor={checkboxId}
+                        title={locked ? t("channels.fields.inputTypeLocked") : undefined}
+                        className={`flex items-center gap-1.5 rounded-md border border-border/60 bg-muted/30 px-2 py-1 text-xs text-foreground transition-colors ${
+                          locked || disabled ? "cursor-default" : "cursor-pointer hover:bg-muted/60"
+                        }`}
+                      >
+                        <Checkbox
+                          id={checkboxId}
+                          checked={checked}
+                          disabled={disabled || locked}
+                          aria-label={t(`channels.inputTypes.${kind}`)}
+                          onCheckedChange={(nextChecked) => {
+                            if (locked) return;
+                            updateAt(
+                              index,
+                              toggleInputType(model, entry, kind, nextChecked === true),
+                            );
+                          }}
+                        />
+                        <span>{t(`channels.inputTypes.${kind}`)}</span>
+                        {locked ? (
+                          <Lock className="size-3 text-muted-foreground" aria-hidden="true" />
+                        ) : null}
+                      </label>
+                    );
+                  })}
                 </div>
               </div>
 

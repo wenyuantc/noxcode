@@ -1,4 +1,10 @@
-import { NATIVE_THINKING_LEVELS, type AiChannelModel, type ModelCatalogEntry } from "@/lib/types";
+import {
+  CHANNEL_INPUT_TYPES,
+  NATIVE_THINKING_LEVELS,
+  type AiChannelModel,
+  type ChannelInputType,
+  type ModelCatalogEntry,
+} from "@/lib/types";
 
 export const FALLBACK_THINKING_LEVELS = ["low", "medium", "high"];
 
@@ -10,7 +16,39 @@ export function emptyChannelModel(id = ""): AiChannelModel {
     thinking_enabled: null,
     thinking_level: null,
     thinking_levels: null,
+    input_types: null,
   };
+}
+
+/** 规范输入类型：丢弃未知值、去重、按 text/image/video 排序，且始终包含 text。 */
+export function normalizeInputTypes(
+  values: readonly string[] | null | undefined,
+): ChannelInputType[] {
+  const selected = new Set((values ?? []).map((value) => value.trim().toLowerCase()));
+  return CHANNEL_INPUT_TYPES.filter((kind) => kind === "text" || selected.has(kind));
+}
+
+/** 生效的输入类型：渠道已保存集合优先，未设置时采用目录，未知模型仅文本。 */
+export function selectedInputTypes(
+  model: Pick<AiChannelModel, "input_types">,
+  entry: ModelCatalogEntry | null,
+): ChannelInputType[] {
+  if (model.input_types == null) {
+    return normalizeInputTypes(entry?.input_types);
+  }
+  return normalizeInputTypes(model.input_types);
+}
+
+/** 切换单个输入类型；text 被锁定，不可关闭。 */
+export function toggleInputType(
+  model: AiChannelModel,
+  entry: ModelCatalogEntry | null,
+  kind: ChannelInputType,
+  enabled: boolean,
+): AiChannelModel {
+  const current = selectedInputTypes(model, entry);
+  const next = enabled ? [...current, kind] : current.filter((item) => item !== kind);
+  return { ...model, input_types: normalizeInputTypes(next) };
 }
 
 export function catalogThinkingLevels(entry: ModelCatalogEntry | null): string[] {
@@ -174,6 +212,11 @@ export function applyCatalogToModel(
   const entry = lookupModelCatalog(catalog, model.id);
   if (!entry) return { ...model, id: model.id.trim() };
   const next: AiChannelModel = { ...model, id: model.id.trim() };
+  if (overwrite || next.input_types == null) {
+    next.input_types = normalizeInputTypes(entry.input_types);
+  } else {
+    next.input_types = normalizeInputTypes(next.input_types);
+  }
   if (overwrite || next.context_tokens == null) next.context_tokens = entry.context_tokens;
   if (overwrite || next.max_output_tokens == null) next.max_output_tokens = entry.max_output_tokens;
   if (overwrite || next.thinking_enabled == null) next.thinking_enabled = entry.thinking;

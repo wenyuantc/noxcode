@@ -439,6 +439,7 @@ mod tests {
                 thinking_enabled: None,
                 thinking_level: None,
                 thinking_levels: None,
+                input_types: None,
             }]),
             lite_model: Some("gpt-4o".to_string()),
             enabled: Some(true),
@@ -464,6 +465,86 @@ mod tests {
             let listed = list_ai_channels_with(&pool).await.expect("list");
             assert_eq!(listed.len(), 1);
             assert_eq!(listed[0].id, created.id);
+        });
+    }
+
+    #[test]
+    fn input_types_persist_and_reject_unknown() {
+        tauri::async_runtime::block_on(async {
+            let pool = setup_migrated_pool().await;
+            let created = create_ai_channel_with(&pool, sample_create())
+                .await
+                .expect("create");
+            // 未设置时采用目录默认（gpt-4o 支持图片）。
+            let text_image = Some(vec!["text".to_string(), "image".to_string()]);
+            assert_eq!(created.models[0].input_types, text_image);
+
+            // 用户显式收窄为仅文本后，读回不会被目录重新加回图片。
+            let mut model = created.models[0].clone();
+            model.input_types = Some(vec!["text".to_string()]);
+            let narrowed = update_ai_channel_with(
+                &pool,
+                &created.id,
+                UpdateAiChannel {
+                    name: None,
+                    protocol: None,
+                    base_url: None,
+                    api_key: None,
+                    extra_headers_json: None,
+                    models: Some(vec![model.clone()]),
+                    lite_model: None,
+                    enabled: None,
+                },
+            )
+            .await
+            .expect("narrow to text");
+            assert_eq!(
+                narrowed.models[0].input_types,
+                Some(vec!["text".to_string()])
+            );
+
+            model.input_types = Some(vec!["image".to_string()]);
+            let updated = update_ai_channel_with(
+                &pool,
+                &created.id,
+                UpdateAiChannel {
+                    name: None,
+                    protocol: None,
+                    base_url: None,
+                    api_key: None,
+                    extra_headers_json: None,
+                    models: Some(vec![model.clone()]),
+                    lite_model: None,
+                    enabled: None,
+                },
+            )
+            .await
+            .expect("update input types");
+            assert_eq!(updated.models[0].input_types, text_image);
+            let listed = list_ai_channels_with(&pool).await.expect("list");
+            assert_eq!(listed[0].models[0].input_types, text_image);
+
+            model.input_types = Some(vec!["text".to_string(), "audio".to_string()]);
+            let rejected = update_ai_channel_with(
+                &pool,
+                &created.id,
+                UpdateAiChannel {
+                    name: None,
+                    protocol: None,
+                    base_url: None,
+                    api_key: None,
+                    extra_headers_json: None,
+                    models: Some(vec![model]),
+                    lite_model: None,
+                    enabled: None,
+                },
+            )
+            .await;
+            assert!(rejected.is_err());
+            let listed = list_ai_channels_with(&pool)
+                .await
+                .expect("list after reject");
+            assert_eq!(listed[0].models[0].input_types, text_image);
         });
     }
 

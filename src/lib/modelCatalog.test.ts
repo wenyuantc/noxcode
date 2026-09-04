@@ -10,8 +10,11 @@ import {
   emptyChannelModel,
   lookupModelCatalog,
   materializeThinkingLevels,
+  normalizeInputTypes,
   resolveComposerThinkingLevel,
+  selectedInputTypes,
   selectedThinkingLevels,
+  toggleInputType,
   withThinkingLevels,
 } from "@/lib/modelCatalog";
 import type { AiChannelModel, ModelCatalogEntry } from "@/lib/types";
@@ -26,6 +29,7 @@ const catalog: ModelCatalogEntry[] = [
     max_output_tokens: 16384,
     thinking: false,
     thinking_levels: [],
+    input_types: ["text", "image"],
   },
   {
     id: "deepseek-reasoner",
@@ -36,6 +40,7 @@ const catalog: ModelCatalogEntry[] = [
     max_output_tokens: 65536,
     thinking: true,
     thinking_levels: ["low", "medium", "high"],
+    input_types: ["text"],
   },
   {
     id: "gpt-5.6-luna",
@@ -46,6 +51,7 @@ const catalog: ModelCatalogEntry[] = [
     max_output_tokens: 128000,
     thinking: true,
     thinking_levels: ["low", "medium", "high", "xhigh", "max"],
+    input_types: ["text", "image"],
   },
 ];
 
@@ -145,6 +151,72 @@ describe("model catalog lookup", () => {
     expect(filled.thinking_enabled).toBeNull();
     expect(filled.thinking_level).toBeNull();
     expect(filled.thinking_levels).toBeNull();
+  });
+});
+
+describe("input types", () => {
+  it("leaves new models unset and resolves the effective set from the catalog", () => {
+    expect(emptyChannelModel("gpt-4o").input_types).toBeNull();
+    const gpt4o = lookupModelCatalog(catalog, "gpt-4o");
+    expect(selectedInputTypes(emptyChannelModel("gpt-4o"), gpt4o)).toEqual(["text", "image"]);
+    expect(selectedInputTypes(emptyChannelModel("custom-local-model"), null)).toEqual(["text"]);
+    expect(selectedInputTypes(model({ id: "gpt-4o", input_types: ["text"] }), gpt4o)).toEqual([
+      "text",
+    ]);
+  });
+
+  it("fills catalog input types when unset or overwriting", () => {
+    expect(applyCatalogToModel(catalog, emptyChannelModel("gpt-4o")).input_types).toEqual([
+      "text",
+      "image",
+    ]);
+    expect(
+      applyCatalogToModel(catalog, emptyChannelModel("deepseek-reasoner")).input_types,
+    ).toEqual(["text"]);
+    const narrowed = model({ id: "gpt-4o", input_types: ["text"] });
+    expect(applyCatalogToModel(catalog, narrowed).input_types).toEqual(["text"]);
+    expect(applyCatalogToModel(catalog, narrowed, true).input_types).toEqual(["text", "image"]);
+    expect(
+      applyCatalogToModel(catalog, emptyChannelModel("custom-local-model")).input_types,
+    ).toBeNull();
+  });
+
+  it("normalizes order, duplicates, unknown values and missing text", () => {
+    expect(normalizeInputTypes(["video", " Image ", "text", "text"])).toEqual([
+      "text",
+      "image",
+      "video",
+    ]);
+    expect(normalizeInputTypes(["image"])).toEqual(["text", "image"]);
+    expect(normalizeInputTypes(["audio"])).toEqual(["text"]);
+    expect(normalizeInputTypes([])).toEqual(["text"]);
+    expect(normalizeInputTypes(undefined)).toEqual(["text"]);
+  });
+
+  it("toggles image and video but keeps text locked", () => {
+    const gpt4o = lookupModelCatalog(catalog, "gpt-4o");
+    // 未设置时从目录集合出发切换，切换后落为显式集合。
+    const withoutImage = toggleInputType(emptyChannelModel("gpt-4o"), gpt4o, "image", false);
+    expect(withoutImage.input_types).toEqual(["text"]);
+    const withImage = toggleInputType(withoutImage, gpt4o, "image", true);
+    expect(withImage.input_types).toEqual(["text", "image"]);
+    const withBoth = toggleInputType(withImage, gpt4o, "video", true);
+    expect(withBoth.input_types).toEqual(["text", "image", "video"]);
+    expect(toggleInputType(withBoth, gpt4o, "image", false).input_types).toEqual(["text", "video"]);
+    expect(toggleInputType(withBoth, gpt4o, "text", false).input_types).toEqual([
+      "text",
+      "image",
+      "video",
+    ]);
+  });
+
+  it("keeps user-selected input types when re-filling without overwrite", () => {
+    const chosen = model({ id: "deepseek-reasoner", input_types: ["text", "image"] });
+    expect(applyCatalogToModel(catalog, chosen).input_types).toEqual(["text", "image"]);
+    expect(applyCatalogToModel(catalog, chosen, true).input_types).toEqual(["text"]);
+    const unknown = model({ id: "custom-local-model", input_types: ["video"] });
+    expect(applyCatalogToModel(catalog, unknown).input_types).toEqual(["video"]);
+    expect(selectedInputTypes(unknown, null)).toEqual(["text", "video"]);
   });
 });
 

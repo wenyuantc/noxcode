@@ -80,6 +80,8 @@
       "thinkingLevels": "Allowed thinking levels",
       "thinkingLevelsHint": "All thinking levels are listed. Defaults to the levels this model has in the catalog. Runtime uses medium when selected, otherwise the first selected level.",
       "thinkingLevelsEmpty": "Select at least one thinking level when thinking is on.",
+      "inputTypes": "Input types",
+      "inputTypeLocked": "Text is always supported and cannot be unchecked",
       "extraHeaders": "Extra headers (JSON object, optional)",
       "liteModel": "Lite model (compaction, memory, hook judgement)",
       "liteModelNone": "Use the main model",
@@ -95,6 +97,11 @@
       "disabled": "Disabled",
       "thinkingOn": "Thinking on",
       "thinkingOff": "Thinking off"
+    },
+    "inputTypes": {
+      "text": "Text",
+      "image": "Image",
+      "video": "Video"
     },
     "thinkingLevels": {
       "none": "None",

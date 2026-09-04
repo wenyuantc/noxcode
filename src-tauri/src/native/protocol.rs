@@ -130,6 +130,7 @@ pub fn parse_channel_models_json(raw: &str) -> Result<Vec<ChannelModelConfig>, S
                 thinking_enabled: None,
                 thinking_level: None,
                 thinking_levels: None,
+                input_types: None,
             },
             Value::Object(_) => serde_json::from_value(item.clone())
                 .map_err(|_| "模型配置必须包含 id".to_string())?,
@@ -322,6 +323,45 @@ mod tests {
             Some(["low".to_string(), "medium".to_string(), "high".to_string()].as_slice())
         );
         assert_eq!(unknown[0].thinking_level.as_deref(), Some("high"));
+    }
+
+    #[test]
+    fn channel_models_json_input_types_default_and_roundtrip() {
+        // 旧数据没有该字段：已知模型采用目录，未知模型回退仅文本。
+        let legacy =
+            parse_channel_models_json(r#"["gpt-4o",{"id":"deepseek-chat"},"custom-local"]"#)
+                .unwrap();
+        assert_eq!(
+            legacy[0].input_types.as_deref(),
+            Some(["text", "image"].map(String::from).as_slice())
+        );
+        assert_eq!(
+            legacy[1].input_types.as_deref(),
+            Some(["text"].map(String::from).as_slice())
+        );
+        assert_eq!(
+            legacy[2].input_types.as_deref(),
+            Some(["text"].map(String::from).as_slice())
+        );
+
+        // 用户显式保存的集合优先于目录。
+        let stored = parse_channel_models_json(
+            r#"[{"id":"gpt-4o","input_types":["text"]},{"id":"custom","input_types":["audio","video"]}]"#,
+        )
+        .unwrap();
+        assert_eq!(
+            stored[0].input_types.as_deref(),
+            Some(["text"].map(String::from).as_slice())
+        );
+        assert_eq!(
+            stored[1].input_types.as_deref(),
+            Some(["text", "video"].map(String::from).as_slice())
+        );
+
+        let encoded = serialize_channel_models(&stored);
+        assert!(encoded.contains(r#""input_types":["text","video"]"#));
+        let reparsed = parse_channel_models_json(&encoded).unwrap();
+        assert_eq!(reparsed, stored);
     }
 
     #[test]
