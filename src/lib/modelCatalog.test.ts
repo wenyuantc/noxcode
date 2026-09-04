@@ -290,6 +290,7 @@ describe("thinking level selection", () => {
         max_output_tokens: 8192,
         thinking: true,
         thinking_levels: ["low", "ultra"],
+        input_types: ["text"],
       },
     ];
     expect(displayedThinkingLevels(emptyChannelModel("future-model"), withExtra)).toEqual([
