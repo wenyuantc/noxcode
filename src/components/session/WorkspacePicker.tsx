@@ -4,7 +4,6 @@ import { useTranslation } from "react-i18next";
 
 import { ensureScratchWorkspace } from "@/lib/backend";
 import { openLocalWorkspace } from "@/lib/openLocalWorkspace";
-import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { RemoteConnectDialog } from "@/components/workspace/RemoteConnectDialog";
 import { useDismissible } from "@/hooks/useDismissible";
@@ -33,29 +32,34 @@ export function WorkspacePicker({ onRequestOpen }: { onRequestOpen?: () => void 
   };
 
   return (
-    <div ref={rootRef} className="relative">
-      <Button
-        type="button"
-        variant="outline"
-        size="sm"
-        onClick={() => {
-          setOpenMenu((value) => !value);
-          onRequestOpen?.();
-        }}
-      >
-        <FolderOpen className="size-3.5" />
-        <span className="max-w-40 truncate">{active?.name ?? t("searchWorkspace")}</span>
-      </Button>
-      {active ? (
+    <div ref={rootRef} className="relative inline-flex items-center">
+      <div className="group/wp inline-flex h-7 items-center rounded-lg border border-border/70 bg-background/80 px-2 text-xs font-medium text-foreground/90 shadow-2xs transition-all duration-150 hover:bg-muted/40">
         <button
           type="button"
-          className="ml-1 text-muted-foreground"
-          title={t("clearWorkspace")}
-          onClick={() => void setActive(null)}
+          className="flex cursor-pointer items-center gap-1.5 outline-none"
+          onClick={() => {
+            setOpenMenu((value) => !value);
+            onRequestOpen?.();
+          }}
         >
-          <X className="size-3.5" />
+          <FolderOpen className="size-3.5 shrink-0 text-muted-foreground" />
+          <span className="max-w-40 truncate">{active?.name ?? t("searchWorkspace")}</span>
         </button>
-      ) : null}
+        {active ? (
+          <button
+            type="button"
+            className="ml-1.5 -mr-0.5 cursor-pointer rounded p-0.5 text-muted-foreground/70 transition-colors hover:bg-muted hover:text-foreground"
+            title={t("clearWorkspace")}
+            aria-label={t("clearWorkspace")}
+            onClick={(event) => {
+              event.stopPropagation();
+              void setActive(null);
+            }}
+          >
+            <X className="size-3" />
+          </button>
+        ) : null}
+      </div>
       {openMenu ? (
         <div className="absolute z-30 mt-1 w-72 rounded-lg border bg-popover p-2 shadow-lg">
           <div className="mb-2 flex items-center gap-2 px-1">

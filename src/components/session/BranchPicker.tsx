@@ -77,11 +77,15 @@ export function BranchPicker() {
   if (!workspaceId) return null;
 
   return (
-    <div ref={rootRef} className="relative">
-      <Button type="button" variant="outline" size="sm" onClick={toggleOpen}>
-        <GitBranch className="size-3.5" />
+    <div ref={rootRef} className="relative inline-flex items-center">
+      <button
+        type="button"
+        onClick={toggleOpen}
+        className="inline-flex h-7 cursor-pointer items-center gap-1.5 rounded-lg border border-border/70 bg-background/80 px-2 text-xs font-medium text-foreground/90 shadow-2xs transition-all duration-150 outline-none hover:bg-muted/40"
+      >
+        <GitBranch className="size-3.5 shrink-0 text-muted-foreground" />
         <span className="max-w-32 truncate">{current?.name ?? "—"}</span>
-      </Button>
+      </button>
       {open ? (
         <div className="absolute z-30 mt-1 w-80 rounded-lg border bg-popover p-2 shadow-lg">
           <div className="mb-2 flex items-center gap-2 px-1">

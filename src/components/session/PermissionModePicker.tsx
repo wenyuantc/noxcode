@@ -77,13 +77,13 @@ export function PermissionModePicker() {
     <DropdownMenu>
       <DropdownMenuTrigger
         className={cn(
-          "inline-flex h-7 items-center justify-between gap-1 rounded-md border bg-background px-2 text-xs outline-none",
-          selected === "yolo" && "text-amber-600",
+          "inline-flex h-7 cursor-pointer items-center justify-between gap-1.5 rounded-lg border border-border/70 bg-background/80 px-2 text-xs font-medium shadow-2xs transition-all duration-150 outline-none hover:bg-muted/40",
+          selected === "yolo" && "text-amber-500 font-semibold",
         )}
       >
         <ModeIcon mode={selected} />
         <span className="truncate">{t(`permission.${selected}.title`)}</span>
-        <ChevronDown className="size-3.5 shrink-0 text-muted-foreground" />
+        <ChevronDown className="size-3 shrink-0 text-muted-foreground/70" />
       </DropdownMenuTrigger>
       <DropdownMenuContent align="start" className="w-64">
         <DropdownMenuRadioGroup value={selected} onValueChange={selectMode}>

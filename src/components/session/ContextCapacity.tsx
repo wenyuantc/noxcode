@@ -53,14 +53,16 @@ export function ContextCapacity({ usage }: { usage?: NativeContextUsage }) {
     <div ref={rootRef} className="relative">
       <button
         type="button"
-        className="inline-flex h-7 items-center gap-1 rounded-md px-1.5 text-xs text-muted-foreground outline-none hover:text-foreground"
+        className="inline-flex h-7 cursor-pointer items-center gap-1.5 rounded-lg border border-border/50 bg-background/60 px-2 font-mono text-[11px] text-muted-foreground shadow-2xs transition-all duration-150 outline-none hover:bg-muted/40 hover:text-foreground"
         onClick={() => setOpen((value) => !value)}
       >
-        <span>
+        <span className="tabular-nums">
           {usedLabel} / {limitLabel}
         </span>
         {cacheRate != null ? (
-          <span>· {t("contextCacheShort", { rate: Math.round(cacheRate) })}</span>
+          <span className="text-muted-foreground/70 font-sans">
+            · {t("contextCacheShort", { rate: Math.round(cacheRate) })}
+          </span>
         ) : null}
       </button>
       {open ? (

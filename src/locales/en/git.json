@@ -6,6 +6,7 @@
   "unstaged": "Unstaged",
   "untracked": "Untracked",
   "stage": "Stage",
+  "stageAll": "Stage all",
   "unstage": "Unstage",
   "discard": "Discard",
   "commit": "Commit",
@@ -39,5 +40,11 @@
   "openFolder": "Open folder",
   "remoteConnect": "Remote connection",
   "noProject": "Work without a project",
-  "clearWorkspace": "Clear workspace"
+  "clearWorkspace": "Clear workspace",
+  "discardConfirm": "Discard selected changes? This cannot be undone.",
+  "discardFileConfirm": "Discard changes for this file? This cannot be undone.",
+  "noChanges": "No uncommitted changes",
+  "refresh": "Refresh",
+  "close": "Close",
+  "diffTitle": "File diff"
 }

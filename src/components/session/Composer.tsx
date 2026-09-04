@@ -247,7 +247,7 @@ export function Composer({ compact = false }: { compact?: boolean }) {
           <BranchPicker />
         </div>
       ) : null}
-      <div className="rounded-xl border bg-card shadow-sm">
+      <div className="rounded-2xl border border-border/70 bg-card/95 shadow-sm transition-all duration-150 focus-within:border-ring/60 focus-within:ring-2 focus-within:ring-ring/10">
         <textarea
           ref={textareaRef}
           value={draft}
@@ -289,12 +289,12 @@ export function Composer({ compact = false }: { compact?: boolean }) {
             }
           }}
           placeholder={t("layout:composerPlaceholder")}
-          className="min-h-24 w-full resize-none bg-transparent px-4 py-3 text-sm outline-none"
+          className="min-h-24 w-full resize-none bg-transparent px-4 py-3 text-sm leading-relaxed outline-none placeholder:text-muted-foreground/60"
         />
         {mentionItems.length > 0 ? (
           <div
             ref={mentionListRef}
-            className="mx-3 mb-2 max-h-40 overflow-y-auto rounded-md border bg-popover text-sm"
+            className="mx-3 mb-2 max-h-40 overflow-y-auto rounded-xl border border-border/60 bg-popover p-1 text-sm shadow-md"
           >
             {mentionItems.map((item, index) => (
               <button
@@ -302,8 +302,10 @@ export function Composer({ compact = false }: { compact?: boolean }) {
                 type="button"
                 data-mention-active={index === activeMentionIndex ? "true" : undefined}
                 className={cn(
-                  "block w-full truncate px-3 py-1.5 text-left",
-                  index === activeMentionIndex ? "bg-accent" : "hover:bg-accent",
+                  "block w-full truncate rounded-lg px-2.5 py-1.5 text-left text-xs font-medium transition-colors",
+                  index === activeMentionIndex
+                    ? "bg-accent text-accent-foreground"
+                    : "hover:bg-accent/70",
                 )}
                 onMouseEnter={() => setMentionIndex(index)}
                 onClick={() => insertToken(item.token)}
@@ -313,11 +315,11 @@ export function Composer({ compact = false }: { compact?: boolean }) {
             ))}
           </div>
         ) : mentionOpen === "/" ? (
-          <div className="mx-3 mb-2 max-h-40 overflow-y-auto rounded-md border bg-popover text-sm">
-            <p className="px-3 py-2 text-muted-foreground">{t("sessions:noSkills")}</p>
+          <div className="mx-3 mb-2 max-h-40 overflow-y-auto rounded-xl border border-border/60 bg-popover p-2 text-sm shadow-md">
+            <p className="text-xs text-muted-foreground">{t("sessions:noSkills")}</p>
           </div>
         ) : null}
-        <div className="flex flex-wrap items-center gap-2 border-t px-3 py-2 text-xs">
+        <div className="flex flex-wrap items-center gap-1.5 border-t border-border/50 px-3 py-2 text-xs">
           <PermissionModePicker />
           <ChannelModelPicker />
           <ThinkingLevelPicker value={resolvedEffort} levels={efforts} onChange={setEffort} />
@@ -327,13 +329,19 @@ export function Composer({ compact = false }: { compact?: boolean }) {
             <Button
               size="sm"
               variant="outline"
+              className="h-7 gap-1.5 rounded-lg border-destructive/40 px-2.5 text-xs text-destructive hover:bg-destructive/10"
               onClick={() => void stopNativeSession(live.session_record_id)}
             >
               <Square className="size-3.5" />
               {t("sessions:stop")}
             </Button>
           ) : null}
-          <Button size="sm" onClick={() => void send()} disabled={sendBusy}>
+          <Button
+            size="sm"
+            className="h-7 cursor-pointer gap-1.5 rounded-lg px-3 text-xs font-medium shadow-2xs transition-all hover:opacity-95 active:scale-[0.98]"
+            onClick={() => void send()}
+            disabled={sendBusy}
+          >
             {sendBusy ? (
               <Loader2 className="size-3.5 animate-spin" />
             ) : (

@@ -72,42 +72,52 @@ export function TurnActionBar({
   };
 
   return (
-    <div className="flex items-center gap-1 text-muted-foreground">
-      <button
-        type="button"
-        className="rounded p-1 hover:bg-muted"
-        title={copied ? t("common:copied") : t("sessions:copy")}
-        aria-label={copied ? t("common:copied") : t("sessions:copy")}
-        onClick={() => void copy()}
-      >
-        {copied ? <Check className="size-3.5 text-emerald-500" /> : <Copy className="size-3.5" />}
-      </button>
-      <button
-        type="button"
-        className={cn("rounded p-1 hover:bg-muted", vote === "up" && "text-foreground")}
-        title={t("like")}
-        onClick={() => setVote((value) => (value === "up" ? null : "up"))}
-      >
-        <ThumbsUp className="size-3.5" />
-      </button>
-      <button
-        type="button"
-        className={cn("rounded p-1 hover:bg-muted", vote === "down" && "text-foreground")}
-        title={t("dislike")}
-        onClick={() => setVote((value) => (value === "down" ? null : "down"))}
-      >
-        <ThumbsDown className="size-3.5" />
-      </button>
-      <button
-        type="button"
-        className="rounded p-1 hover:bg-muted disabled:opacity-40"
-        title={t("retry")}
-        disabled={working || !userText?.trim()}
-        onClick={retry}
-      >
-        <RotateCcw className="size-3.5" />
-      </button>
-      <span className="ml-1 text-[11px]">{formatClock(endedAt)}</span>
+    <div className="flex items-center gap-2 pt-1 text-muted-foreground">
+      <div className="inline-flex items-center gap-0.5 rounded-lg border border-border/40 bg-muted/20 p-0.5 shadow-2xs backdrop-blur-xs">
+        <button
+          type="button"
+          className="cursor-pointer rounded-md p-1 transition-colors hover:bg-muted hover:text-foreground"
+          title={copied ? t("common:copied") : t("sessions:copy")}
+          aria-label={copied ? t("common:copied") : t("sessions:copy")}
+          onClick={() => void copy()}
+        >
+          {copied ? <Check className="size-3 text-emerald-500" /> : <Copy className="size-3" />}
+        </button>
+        <button
+          type="button"
+          className={cn(
+            "cursor-pointer rounded-md p-1 transition-colors hover:bg-muted hover:text-foreground",
+            vote === "up" && "bg-muted text-foreground",
+          )}
+          title={t("like")}
+          onClick={() => setVote((value) => (value === "up" ? null : "up"))}
+        >
+          <ThumbsUp className="size-3" />
+        </button>
+        <button
+          type="button"
+          className={cn(
+            "cursor-pointer rounded-md p-1 transition-colors hover:bg-muted hover:text-foreground",
+            vote === "down" && "bg-muted text-foreground",
+          )}
+          title={t("dislike")}
+          onClick={() => setVote((value) => (value === "down" ? null : "down"))}
+        >
+          <ThumbsDown className="size-3" />
+        </button>
+        <button
+          type="button"
+          className="cursor-pointer rounded-md p-1 transition-colors hover:bg-muted hover:text-foreground disabled:opacity-40"
+          title={t("retry")}
+          disabled={working || !userText?.trim()}
+          onClick={retry}
+        >
+          <RotateCcw className="size-3" />
+        </button>
+      </div>
+      <span className="font-mono text-[10.5px] text-muted-foreground/60 tabular-nums">
+        {formatClock(endedAt)}
+      </span>
     </div>
   );
 }

@@ -74,7 +74,7 @@ export function UserBubble({
 
   if (editing) {
     return (
-      <div className="ml-auto w-full max-w-[80%] rounded-xl border bg-secondary">
+      <div className="ml-auto w-full max-w-[80%] rounded-2xl border border-ring/40 bg-secondary/90 shadow-sm transition-all focus-within:ring-2 focus-within:ring-ring/20">
         <textarea
           value={draft}
           autoFocus
@@ -91,12 +91,12 @@ export function UserBubble({
               void resend();
             }
           }}
-          className="w-full resize-none bg-transparent px-3 py-2 text-sm outline-none"
+          className="w-full resize-none bg-transparent px-3.5 py-2.5 text-sm leading-relaxed outline-none"
         />
-        <div className="flex items-center justify-end gap-1 px-2 pb-2">
+        <div className="flex items-center justify-end gap-1.5 px-3 pb-2.5">
           <button
             type="button"
-            className="rounded p-1 text-muted-foreground hover:bg-muted hover:text-foreground"
+            className="cursor-pointer rounded-lg p-1 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
             title={t("common:cancel")}
             aria-label={t("common:cancel")}
             onClick={() => {
@@ -108,7 +108,7 @@ export function UserBubble({
           </button>
           <button
             type="button"
-            className="flex size-7 items-center justify-center rounded-full bg-foreground text-background disabled:opacity-40"
+            className="flex size-7 cursor-pointer items-center justify-center rounded-full bg-primary text-primary-foreground shadow-2xs transition-all hover:opacity-90 disabled:opacity-40"
             title={t("sessions:send")}
             aria-label={t("sessions:send")}
             disabled={sending || working || !draft.trim()}
@@ -123,36 +123,38 @@ export function UserBubble({
 
   return (
     <div className="group flex items-start justify-end gap-1.5">
-      <div className="max-w-[80%] rounded-xl bg-secondary px-3 py-1.5 text-sm whitespace-pre-wrap">
-        {text}
-      </div>
       <div
         className={cn(
-          "flex items-center pt-0.5 text-muted-foreground opacity-0 transition-opacity group-hover:opacity-100 group-focus-within:opacity-100",
+          "flex items-center pt-1 text-muted-foreground opacity-0 transition-opacity group-hover:opacity-100 group-focus-within:opacity-100",
           copied && "opacity-100",
         )}
       >
-        <button
-          type="button"
-          className="rounded p-1 hover:bg-muted hover:text-foreground"
-          title={copied ? t("common:copied") : t("sessions:copy")}
-          aria-label={copied ? t("common:copied") : t("sessions:copy")}
-          onClick={() => void copy()}
-        >
-          {copied ? <Check className="size-3.5 text-emerald-500" /> : <Copy className="size-3.5" />}
-        </button>
-        {editable ? (
+        <div className="inline-flex items-center gap-0.5 rounded-lg border border-border/40 bg-background/80 p-0.5 shadow-2xs backdrop-blur-xs">
           <button
             type="button"
-            className="rounded p-1 hover:bg-muted hover:text-foreground disabled:opacity-40"
-            title={t("sessions:edit")}
-            aria-label={t("sessions:edit")}
-            disabled={working}
-            onClick={() => setEditing(true)}
+            className="cursor-pointer rounded-md p-1 transition-colors hover:bg-muted hover:text-foreground"
+            title={copied ? t("common:copied") : t("sessions:copy")}
+            aria-label={copied ? t("common:copied") : t("sessions:copy")}
+            onClick={() => void copy()}
           >
-            <Pencil className="size-3.5" />
+            {copied ? <Check className="size-3 text-emerald-500" /> : <Copy className="size-3" />}
           </button>
-        ) : null}
+          {editable ? (
+            <button
+              type="button"
+              className="cursor-pointer rounded-md p-1 transition-colors hover:bg-muted hover:text-foreground disabled:opacity-40"
+              title={t("sessions:edit")}
+              aria-label={t("sessions:edit")}
+              disabled={working}
+              onClick={() => setEditing(true)}
+            >
+              <Pencil className="size-3" />
+            </button>
+          ) : null}
+        </div>
+      </div>
+      <div className="max-w-[80%] rounded-2xl rounded-tr-xs border border-border/60 bg-secondary/80 px-3.5 py-2 text-sm leading-relaxed text-foreground shadow-2xs whitespace-pre-wrap select-text">
+        {text}
       </div>
     </div>
   );

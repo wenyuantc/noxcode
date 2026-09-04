@@ -4,6 +4,7 @@ import { useTranslation } from "react-i18next";
 
 import type { GroupedSessionItem, SessionTurnBlock } from "@/lib/sessionLines";
 import { formatSessionDuration, workDurationSeconds } from "@/lib/sessionLines";
+import { cn } from "@/lib/utils";
 import { ToolCallLine } from "./ToolCallLine";
 
 export function WorkSummaryBar({
@@ -24,21 +25,35 @@ export function WorkSummaryBar({
   const label = working ? t("workingFor", { duration }) : t("workedFor", { duration });
 
   return (
-    <div>
+    <div className="py-0.5">
       <button
         type="button"
-        className="flex items-center gap-1 text-sm text-muted-foreground"
+        className={cn(
+          "inline-flex cursor-pointer items-center gap-1.5 rounded-lg border border-border/40 bg-muted/20 px-2 py-0.5 text-xs font-medium text-muted-foreground/85 shadow-2xs transition-colors hover:bg-muted/40 hover:text-foreground",
+          tools.length === 0 && "cursor-default",
+        )}
         onClick={() => {
           if (tools.length === 0) return;
           setOpen((value) => !value);
         }}
       >
-        <span>{label}</span>
+        <span className="tabular-nums">{label}</span>
         {tools.length > 0 ? (
-          <ChevronDown className={`size-3.5 transition ${open ? "" : "-rotate-90"}`} />
+          <ChevronDown
+            className={cn(
+              "size-3 shrink-0 text-muted-foreground/70 transition-transform duration-150",
+              !open && "-rotate-90",
+            )}
+          />
         ) : null}
       </button>
-      {open ? tools.map((item) => <ToolCallLine key={item.id} item={item} />) : null}
+      {open ? (
+        <div className="mt-1.5 space-y-1 rounded-xl border border-border/40 bg-muted/10 p-2">
+          {tools.map((item) => (
+            <ToolCallLine key={item.id} item={item} />
+          ))}
+        </div>
+      ) : null}
     </div>
   );
 }

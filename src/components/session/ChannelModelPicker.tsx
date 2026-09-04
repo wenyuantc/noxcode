@@ -29,9 +29,9 @@ export function ChannelModelPicker() {
 
   return (
     <DropdownMenu>
-      <DropdownMenuTrigger className="inline-flex h-7 max-w-48 items-center justify-between gap-1 rounded-md border bg-background px-2 text-xs outline-none">
+      <DropdownMenuTrigger className="inline-flex h-7 max-w-48 cursor-pointer items-center justify-between gap-1.5 rounded-lg border border-border/70 bg-background/80 px-2 text-xs font-medium text-foreground/90 shadow-2xs transition-all duration-150 outline-none hover:bg-muted/40">
         <span className="truncate">{label}</span>
-        <ChevronDown className="size-3.5 shrink-0 text-muted-foreground" />
+        <ChevronDown className="size-3 shrink-0 text-muted-foreground/70" />
       </DropdownMenuTrigger>
       <DropdownMenuContent align="start" className="min-w-48">
         {enabled.length === 0 ? (

@@ -5,6 +5,8 @@ import { useTranslation } from "react-i18next";
 import type { GroupedSessionItem } from "@/lib/sessionLines";
 import { fileActionKey, filePathText } from "@/lib/sessionLines";
 
+import { cn } from "@/lib/utils";
+
 export function FileChangeRow({
   items,
   grouped,
@@ -22,29 +24,43 @@ export function FileChangeRow({
       : "";
 
   return (
-    <div>
+    <div className="rounded-xl border border-border/60 bg-muted/15 transition-all duration-150 hover:border-border/80">
       <button
         type="button"
-        className="flex w-full items-center gap-2 text-sm text-muted-foreground"
+        className="flex w-full cursor-pointer items-center gap-2 px-3 py-2 text-xs"
         onClick={() => setOpen((value) => !value)}
       >
-        <FilePenLine className="size-3.5 shrink-0" />
-        <span className="min-w-0 flex-1 truncate text-left">{label}</span>
-        <ChevronRight className={`size-3.5 shrink-0 transition ${open ? "rotate-90" : ""}`} />
+        <FilePenLine className="size-3.5 shrink-0 text-emerald-500/90 dark:text-emerald-400" />
+        <span className="inline-flex items-center rounded border border-border/40 bg-background/50 px-1.5 py-0.5 font-medium text-[10px] text-muted-foreground">
+          {grouped ? "修改" : "文件"}
+        </span>
+        <span className="min-w-0 flex-1 truncate text-left font-medium text-foreground/80">
+          {label}
+        </span>
+        <ChevronRight
+          className={cn(
+            "size-3.5 shrink-0 text-muted-foreground/70 transition-transform duration-150",
+            open && "rotate-90",
+          )}
+        />
       </button>
       {open ? (
-        <ul className="mt-1 space-y-1 text-xs text-muted-foreground">
-          {items.map((item) => (
-            <li key={item.id} className="truncate font-mono">
-              {filePathText(item)}
-              {item.result ? (
-                <pre className="mt-1 max-h-40 overflow-auto whitespace-pre-wrap rounded-md border px-2 py-1">
-                  {item.result}
-                </pre>
-              ) : null}
-            </li>
-          ))}
-        </ul>
+        <div className="border-t border-border/40 p-3">
+          <ul className="space-y-2 text-xs">
+            {items.map((item) => (
+              <li key={item.id} className="rounded-lg border border-border/40 bg-muted/20 p-2">
+                <p className="truncate font-mono text-[11px] text-foreground/90 font-medium">
+                  {filePathText(item)}
+                </p>
+                {item.result ? (
+                  <pre className="mt-1.5 max-h-48 overflow-auto whitespace-pre-wrap rounded-md bg-black/20 p-2 font-mono text-[11px] leading-relaxed text-muted-foreground select-text">
+                    {item.result}
+                  </pre>
+                ) : null}
+              </li>
+            ))}
+          </ul>
+        </div>
       ) : null}
     </div>
   );

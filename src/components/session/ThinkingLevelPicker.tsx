@@ -59,10 +59,10 @@ export function ThinkingLevelPicker({
 
   return (
     <DropdownMenu>
-      <DropdownMenuTrigger className="inline-flex h-7 items-center justify-between gap-1 rounded-md border bg-background px-2 text-xs outline-none">
+      <DropdownMenuTrigger className="inline-flex h-7 cursor-pointer items-center justify-between gap-1.5 rounded-lg border border-border/70 bg-background/80 px-2 text-xs font-medium text-foreground/90 shadow-2xs transition-all duration-150 outline-none hover:bg-muted/40">
         <EffortIcon level={value} />
         <span className="truncate">{titleOf(value)}</span>
-        <ChevronDown className="size-3.5 shrink-0 text-muted-foreground" />
+        <ChevronDown className="size-3 shrink-0 text-muted-foreground/70" />
       </DropdownMenuTrigger>
       <DropdownMenuContent align="start" className="w-64">
         <DropdownMenuRadioGroup value={value} onValueChange={(next) => next && onChange(next)}>
