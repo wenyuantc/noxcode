@@ -357,6 +357,11 @@
   "mcp": {
     "title": "MCP server management",
     "description": "Maintain the global stdio MCP server list here. Sessions connect only enabled servers (local spawn on this machine, remote spawn on SSH workspaces). The configuration is stored as mcp-servers.json in the app config directory and is not part of SQL backups.",
+    "transport": {
+      "stdio": "stdio",
+      "http": "Streamable HTTP",
+      "sse": "SSE (legacy)"
+    },
     "states": {
       "loading": "Loading MCP configuration...",
       "empty": "No MCP servers yet. Click Add Server."

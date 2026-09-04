@@ -357,6 +357,11 @@
   "mcp": {
     "title": "MCP 服务器管理",
     "description": "在此维护全局 stdio MCP Server 清单。会话只连接已启用的服务器（本地本机 spawn，SSH 工作区在远端 spawn）。配置保存在应用配置目录的 mcp-servers.json，不在 SQL 备份范围内。",
+    "transport": {
+      "stdio": "标准输入输出（stdio）",
+      "http": "Streamable HTTP",
+      "sse": "SSE（旧版）"
+    },
     "states": {
       "loading": "加载 MCP 配置...",
       "empty": "暂无 MCP 服务器，请点击添加服务器。"

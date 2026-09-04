@@ -2,6 +2,7 @@
 //!
 //! 传输：`stdio`（本机子进程 / SSH 远端）、`http`（Streamable HTTP：POST JSON-RPC，
 //! 响应为 JSON 或 SSE）、`sse`（旧版：GET 事件流 + `endpoint` 事件给出的 POST 地址）。
+//! `stdio` 按 MCP 规范使用换行分隔 JSON；接收端兼容旧的 `Content-Length` 帧。
 //! 协议：`tools/*`、`resources/list|read`、`prompts/list|get`；服务端发起的
 //! `elicitation/create`（转成向用户提问）、`sampling/createMessage`（用当前模型作答）、
 //! `roots/list`、`ping` 由 [`McpHostHandlers`] 处理。
@@ -238,12 +239,10 @@ fn prompt_tool_name(server_id: &str, prompt: &str) -> String {
 }
 
 pub fn encode_rpc_message(value: &Value) -> Result<Vec<u8>, String> {
-    let body =
+    let mut line =
         serde_json::to_vec(value).map_err(|error| format!("序列化 MCP 消息失败: {error}"))?;
-    let header = format!("Content-Length: {}\r\n\r\n", body.len());
-    let mut framed = header.into_bytes();
-    framed.extend_from_slice(&body);
-    Ok(framed)
+    line.push(b'\n');
+    Ok(line)
 }
 
 pub fn remote_mcp_shell_command(server: &McpServerConfig) -> Result<String, String> {
@@ -1637,13 +1636,19 @@ mod tests {
     }
 
     #[test]
-    fn encode_rpc_uses_content_length() {
-        let body = json!({"jsonrpc":"2.0","id":1,"method":"initialize"});
+    fn encode_rpc_uses_newline_delimited_json() {
+        let body = json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {"note": "line one\nline two"}
+        });
         let framed = encode_rpc_message(&body).expect("frame");
-        let text = String::from_utf8(framed).expect("utf8");
-        assert!(text.starts_with("Content-Length: "));
-        assert!(text.contains("\r\n\r\n{"));
-        assert!(text.contains("initialize"));
+        assert_eq!(framed.last(), Some(&b'\n'));
+        assert_eq!(framed.iter().filter(|byte| **byte == b'\n').count(), 1);
+        assert!(!framed.starts_with(b"Content-Length:"));
+        let parsed: Value = serde_json::from_slice(&framed[..framed.len() - 1]).expect("json");
+        assert_eq!(parsed, body);
     }
 
     #[test]
@@ -1673,20 +1678,20 @@ mod tests {
     }
 
     #[test]
-    fn take_rpc_message_reads_content_length_and_json_line() {
-        let framed = encode_rpc_message(&json!({"jsonrpc":"2.0","id":1})).expect("frame");
-        let mut pending = framed;
+    fn take_rpc_message_reads_json_line_and_legacy_content_length() {
+        let mut line = encode_rpc_message(&json!({"jsonrpc":"2.0","id":1})).expect("frame");
+        let value = take_rpc_message(&mut line).expect("ready").expect("json");
+        assert_eq!(value["id"], 1);
+        assert!(line.is_empty());
+
+        let body = br#"{"jsonrpc":"2.0","id":2}"#;
+        let mut pending = format!("Content-Length: {}\r\n\r\n", body.len()).into_bytes();
+        pending.extend_from_slice(body);
         let value = take_rpc_message(&mut pending)
             .expect("ready")
             .expect("json");
-        assert_eq!(value["id"], 1);
+        assert_eq!(value["id"], 2);
         assert!(pending.is_empty());
-
-        let mut line = br#"{"ok":true}
-"#
-        .to_vec();
-        let value = take_rpc_message(&mut line).expect("ready").expect("json");
-        assert_eq!(value["ok"], true);
     }
 
     #[test]
