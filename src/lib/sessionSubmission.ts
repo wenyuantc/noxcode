@@ -1,5 +1,5 @@
 import { resumeNativeSession, startNativeSession } from "@/lib/backend";
-import type { StartNativeSessionInput } from "@/lib/types";
+import type { AgentSessionStarted, StartNativeSessionInput } from "@/lib/types";
 
 export interface SessionSubmissionInput {
   sessionId?: string | null;
@@ -9,15 +9,18 @@ export interface SessionSubmissionInput {
   model?: string | null;
   reasoningEffort?: string | null;
   planMode?: boolean | null;
+  permissionMode?: string | null;
   imagePaths?: string[] | null;
 }
 
 export interface SessionSubmissionApi {
-  startNativeSession: (payload: StartNativeSessionInput) => Promise<unknown>;
+  startNativeSession: (
+    payload: StartNativeSessionInput,
+  ) => Promise<AgentSessionStarted | undefined>;
   resumeNativeSession: (
     payload: StartNativeSessionInput,
     resumeSessionId?: string,
-  ) => Promise<unknown>;
+  ) => Promise<AgentSessionStarted | undefined>;
 }
 
 const defaultApi: SessionSubmissionApi = {
@@ -37,6 +40,7 @@ export function sessionSubmissionPayload(input: SessionSubmissionInput): StartNa
     model: input.model ?? null,
     reasoning_effort: input.reasoningEffort ?? null,
     plan_mode: input.planMode ?? null,
+    permission_mode: input.permissionMode ?? null,
     resume_session_id: sessionId,
     image_paths: imagePaths.length > 0 ? imagePaths : null,
   };
@@ -45,12 +49,11 @@ export function sessionSubmissionPayload(input: SessionSubmissionInput): StartNa
 export async function submitSessionPrompt(
   input: SessionSubmissionInput,
   api: SessionSubmissionApi = defaultApi,
-): Promise<void> {
+): Promise<AgentSessionStarted | undefined> {
   const payload = sessionSubmissionPayload(input);
   const sessionId = payload.resume_session_id;
   if (sessionId) {
-    await api.resumeNativeSession(payload, sessionId);
-    return;
+    return api.resumeNativeSession(payload, sessionId);
   }
-  await api.startNativeSession(payload);
+  return api.startNativeSession(payload);
 }

@@ -101,6 +101,9 @@ pub struct PendingPlanQuestion {
 
 pub struct NativeLiveSession {
     pub info: NativeSessionInfo,
+    pub runtime: Option<crate::db::models::NativeSessionRuntime>,
+    pub background: Option<Arc<crate::native::agent::background::BackgroundTaskRegistry>>,
+    pub closing: bool,
     pub cancel: CancelFlag,
     pub followup_tx: mpsc::Sender<NativeFollowup>,
     pub join: JoinHandle<()>,
@@ -136,6 +139,27 @@ impl NativeAgentManager {
 
     pub fn get_session(&self, session_record_id: &str) -> Option<&NativeLiveSession> {
         self.sessions.get(session_record_id)
+    }
+
+    pub fn get_session_mut(&mut self, session_record_id: &str) -> Option<&mut NativeLiveSession> {
+        self.sessions.get_mut(session_record_id)
+    }
+
+    pub fn begin_finish(
+        &mut self,
+        session_record_id: &str,
+    ) -> Result<Option<mpsc::Sender<NativeFollowup>>, String> {
+        let Some(session) = self.sessions.get_mut(session_record_id) else {
+            return Ok(None);
+        };
+        if !session.closing
+            && (session.working.load(Ordering::SeqCst)
+                || session.followup_tx.capacity() < session.followup_tx.max_capacity())
+        {
+            return Err("Agent 正在工作，请先停止当前回合".to_string());
+        }
+        session.closing = true;
+        Ok(Some(session.followup_tx.clone()))
     }
 
     pub fn deny_pending_permission(&mut self, session_record_id: &str) {
@@ -229,10 +253,16 @@ impl NativeAgentManager {
         }
         if decision == NativePermissionDecision::AllowSession
             && pending.request.kind != NativeToolRiskKind::Mcp
+            && pending.request.tool_name != "WorkspaceHooks"
         {
             session
                 .allow_all_high_risk
                 .store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+        if session.allow_all_high_risk.load(Ordering::SeqCst) {
+            if let Some(runtime) = &mut session.runtime {
+                runtime.permission_mode = crate::native::settings::PERMISSION_MODE_YOLO.to_string();
+            }
         }
         pending
             .reply
@@ -362,10 +392,19 @@ impl NativeAgentManager {
 
 pub async fn shutdown_all_sessions(manager: &tokio::sync::Mutex<NativeAgentManager>) {
     let sessions = manager.lock().await.take_all();
-    for session in sessions {
-        session.cancel.cancel();
-        let _ = session.followup_tx.send(NativeFollowup::Finish).await;
-        let _ = session.join.await;
+    for mut session in sessions {
+        if session.working.load(Ordering::SeqCst) {
+            session.cancel.cancel();
+        }
+        let _ = session.followup_tx.try_send(NativeFollowup::Finish);
+        if tokio::time::timeout(std::time::Duration::from_secs(30), &mut session.join)
+            .await
+            .is_err()
+        {
+            session.cancel.cancel();
+            session.join.abort();
+            let _ = session.join.await;
+        }
     }
 }
 
@@ -385,6 +424,9 @@ mod tests {
                 session_kind: "execution".to_string(),
                 session_record_id: "sess-1".to_string(),
             },
+            runtime: None,
+            background: None,
+            closing: false,
             cancel: CancelFlag::new(),
             followup_tx: tx,
             join: tokio::spawn(async {}),
@@ -420,6 +462,9 @@ mod tests {
                 session_kind: "execution".to_string(),
                 session_record_id: id.to_string(),
             },
+            runtime: None,
+            background: None,
+            closing: false,
             cancel: CancelFlag::new(),
             followup_tx: tx,
             join: tokio::spawn(async {}),
@@ -520,6 +565,57 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn workspace_hook_trust_never_grants_other_tool_permissions() {
+        let mut manager = NativeAgentManager::new();
+        manager.add_session(live_session("sess-1"));
+        let (request, rx) = pending("hooks", "WorkspaceHooks");
+        manager.enqueue_permission("sess-1", request).unwrap();
+        manager
+            .resolve_permission("sess-1", "hooks", NativePermissionDecision::AllowSession)
+            .unwrap();
+        assert_eq!(rx.await.unwrap(), NativePermissionDecision::AllowSession);
+        assert!(!manager
+            .get_session("sess-1")
+            .unwrap()
+            .allow_all_high_risk
+            .load(Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn graceful_finish_rejects_working_sessions_without_cancelling() {
+        let mut manager = NativeAgentManager::new();
+        manager.add_session(live_session("sess-1"));
+        let session = manager.get_session("sess-1").unwrap();
+        session.working.store(true, Ordering::SeqCst);
+        assert!(manager.begin_finish("sess-1").is_err());
+        let session = manager.get_session("sess-1").unwrap();
+        assert!(!session.closing);
+        assert!(!session.cancel.is_cancelled());
+        session.working.store(false, Ordering::SeqCst);
+        assert!(manager.begin_finish("sess-1").unwrap().is_some());
+        let session = manager.get_session("sess-1").unwrap();
+        assert!(session.closing);
+        assert!(!session.cancel.is_cancelled());
+    }
+
+    #[tokio::test]
+    async fn shutdown_idle_sessions_preserves_normal_completion() {
+        let mut manager = NativeAgentManager::new();
+        let mut session = live_session("sess-1");
+        let cancel = session.cancel.clone();
+        let cancel_run = cancel.clone();
+        let (tx, mut rx) = mpsc::channel(1);
+        session.followup_tx = tx;
+        session.join = tokio::spawn(async move {
+            assert!(matches!(rx.recv().await, Some(NativeFollowup::Finish)));
+            assert!(!cancel_run.is_cancelled());
+        });
+        manager.add_session(session);
+        shutdown_all_sessions(&tokio::sync::Mutex::new(manager)).await;
+        assert!(!cancel.is_cancelled());
+    }
+
+    #[tokio::test]
     async fn shutdown_all_sessions_sends_finish_and_awaits_join() {
         let mut manager = NativeAgentManager::new();
         let (tx, mut rx) = mpsc::channel(1);
@@ -543,6 +639,9 @@ mod tests {
                 session_kind: "execution".to_string(),
                 session_record_id: "sess-shutdown".to_string(),
             },
+            runtime: None,
+            background: None,
+            closing: false,
             cancel: CancelFlag::new(),
             followup_tx: tx,
             join,

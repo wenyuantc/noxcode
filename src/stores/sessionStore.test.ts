@@ -60,8 +60,12 @@ describe("sessionStore history", () => {
       turnState: {},
       usage: {},
       stream: {},
-      permission: null,
-      planQuestion: null,
+      historyLoaded: {},
+      configurationBySession: {},
+      backgroundBySession: {},
+      permissions: {},
+      planQuestions: {},
+      planApprovals: {},
     });
     useWorkspaceStore.setState({ sessions: [] });
     useChannelStore.setState({
@@ -161,6 +165,7 @@ describe("sessionStore history", () => {
   it("skips fetch when history is already cached", async () => {
     useSessionStore.setState({
       lines: { s1: [{ id: "cached", sessionId: "s1", text: "cached", createdAt: "t" }] },
+      historyLoaded: { s1: true },
     });
     await useSessionStore.getState().loadHistory("s1");
     expect(getLines).not.toHaveBeenCalled();
@@ -168,7 +173,7 @@ describe("sessionStore history", () => {
     expect(useSessionStore.getState().lines.s1?.[0]?.id).toBe("cached");
   });
 
-  it("does not overwrite lines filled while fetch is in flight", async () => {
+  it("merges history with live events received while fetch is in flight", async () => {
     let resolve: ((value: AgentSessionEvent[]) => void) | undefined;
     getLines.mockReturnValue(
       new Promise((next) => {
@@ -181,7 +186,82 @@ describe("sessionStore history", () => {
     resolve?.([event("old")]);
     await pending;
 
-    expect(useSessionStore.getState().lines.s1?.map((line) => line.id)).toEqual(["live"]);
+    expect(useSessionStore.getState().lines.s1?.map((line) => line.id)).toEqual(["old", "live"]);
+  });
+
+  it("preserves live-only images when the same persisted event arrives", async () => {
+    const images = [
+      { name: "image.png", mime_type: "image/png", data_url: "data:image/png;base64,aW1hZ2U=" },
+    ];
+    useSessionStore.getState().onStdout({ ...stdout("s1", "image"), images });
+    getLines.mockResolvedValue([event("image")]);
+    await useSessionStore.getState().ensureHistory("s1");
+    expect(useSessionStore.getState().lines.s1).toHaveLength(1);
+    expect(useSessionStore.getState().lines.s1[0].images).toEqual(images);
+  });
+
+  it("does not discard unpersisted output lacking an event id", () => {
+    useSessionStore.getState().onStdout({ ...stdout("s1", ""), line: "first" });
+    useSessionStore.getState().onStdout({ ...stdout("s1", ""), line: "second" });
+    expect(useSessionStore.getState().lines.s1.map((line) => line.text)).toEqual([
+      "first",
+      "second",
+    ]);
+  });
+
+  it("closes background tasks on exit and clears them on a new runtime", () => {
+    useSessionStore.getState().onStarted(started("s1", "execution"));
+    useSessionStore.getState().onBackgroundTasks({
+      session_record_id: "s1",
+      tasks: [
+        {
+          task_id: "task-1",
+          description: "test",
+          kind: "general",
+          status: "running",
+          report: null,
+        },
+      ],
+    });
+    useSessionStore.getState().onExit({ ...started("s1", "execution"), code: 0 });
+    expect(useSessionStore.getState().backgroundBySession.s1[0].status).toBe("stopped");
+    useSessionStore.getState().onStarted(started("s1", "execution"));
+    expect(useSessionStore.getState().backgroundBySession.s1).toEqual([]);
+  });
+
+  it("fetches history even when stdout arrived before opening a session", async () => {
+    useSessionStore.getState().onStdout(stdout("s1", "live"));
+    getLines.mockResolvedValue([event("old"), event("live")]);
+    await useSessionStore.getState().ensureHistory("s1");
+    useSessionStore.getState().onStdout(stdout("s1", "live"));
+    expect(useSessionStore.getState().lines.s1.map((line) => line.id)).toEqual(["old", "live"]);
+    expect(getLines).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not change selection when a background session starts", () => {
+    useSessionStore.getState().selectSession("active");
+    useSessionStore.getState().onStarted(started("background", "execution"));
+    expect(useSessionStore.getState().selectedSessionId).toBe("active");
+  });
+
+  it("keeps concurrent requests and only removes the resolved request", () => {
+    const request = {
+      session_record_id: "s1",
+      request_id: "r1",
+      profile_id: "p",
+      workspace_id: "ws-1",
+      session_kind: "execution",
+      plan: "plan",
+    };
+    useSessionStore.getState().setPlanApproval(request);
+    useSessionStore.getState().setPlanApproval({ ...request, request_id: "r2" });
+    useSessionStore.getState().setPlanApproval({ ...request, session_record_id: "s2" });
+    useSessionStore.getState().resolveRequest({ ...request, kind: "plan_approval" });
+    expect(Object.keys(useSessionStore.getState().planApprovals.s1)).toEqual(["r2"]);
+    expect(Object.keys(useSessionStore.getState().planApprovals.s2)).toEqual(["r1"]);
+    useSessionStore.getState().onExit({ ...started("s1", "execution"), code: 0 });
+    expect(useSessionStore.getState().planApprovals.s1).toBeUndefined();
+    expect(useSessionStore.getState().planApprovals.s2.r1).toBeDefined();
   });
 
   it("keeps a previous fetch in cache after switching away", async () => {

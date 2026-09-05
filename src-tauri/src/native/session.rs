@@ -14,8 +14,8 @@ use crate::app::shared::{new_id, now_sqlite, sqlite_pool, EXECUTION_TARGET_SSH};
 use crate::app::ssh::configs::fetch_ssh_config_record_by_id;
 use crate::db::models::{
     AgentSessionExit, AgentSessionOutput, AgentSessionRecord, AgentSessionStarted,
-    NativeContextUsage, NativePlanModeChanged, NativeTextDelta, NativeToolEvent, NativeToolImage,
-    NativeTurnState, StartNativeSessionInput,
+    NativeContextUsage, NativePlanModeChanged, NativeSessionRuntime, NativeTextDelta,
+    NativeToolEvent, NativeToolImage, NativeTurnState, StartNativeSessionInput,
 };
 use crate::engine::context::resolve_workspace_execution_context_with_pool;
 use crate::engine::UsageDelta;
@@ -471,13 +471,22 @@ async fn attach_skills_and_hooks(
         config_dir.as_deref(),
         workspace_root.as_deref(),
     );
-    let plugin_hooks = crate::native::plugins::plugin_hooks(&plugins);
+    let (workspace_plugins, global_plugins): (Vec<_>, Vec<_>) = plugins
+        .iter()
+        .cloned()
+        .partition(|plugin| plugin.source == crate::native::plugins::PluginSource::Workspace);
+    let plugin_hooks = crate::native::plugins::plugin_hooks(&global_plugins);
     // 本地工作区再叠加 .noxcode/hooks.json 与 .claude/settings.json 里的钩子。
-    let workspace_hooks = if runner.ctx.ssh.is_none() {
+    let mut workspace_hooks = if runner.ctx.ssh.is_none() {
         crate::native::hooks_config::load_workspace_hooks(&runner.ctx.workspace.root)
     } else {
         Vec::new()
     };
+    workspace_hooks.extend(crate::native::plugins::plugin_hooks(&workspace_plugins));
+    if !workspace_hooks.is_empty() && !approve_workspace_hooks(&runner.ctx, &workspace_hooks).await
+    {
+        workspace_hooks.clear();
+    }
     runner.ctx.hooks = crate::native::hooks_config::merge_hooks(
         crate::native::hooks_config::merge_hooks(global_hooks, plugin_hooks),
         workspace_hooks,
@@ -500,6 +509,59 @@ async fn attach_skills_and_hooks(
     parts.skills = crate::native::skills::format_skills_prompt(&skills);
     runner.skills_prompt = parts.skills.clone();
     runner.ctx.skills = skills;
+}
+
+// 仓库内的命令配置不等于用户授权；不经过工具自动批准或 permission_request hooks。
+async fn approve_workspace_hooks(
+    ctx: &crate::native::tools::dispatch::ToolCtx,
+    hooks: &[crate::db::models::NativeHook],
+) -> bool {
+    let Some(requester) = &ctx.request_permission else {
+        return false;
+    };
+    if ctx.cancel.is_cancelled() {
+        return false;
+    }
+    let request_id = uuid::Uuid::new_v4().to_string();
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    requester(
+        crate::native::tools::dispatch::PermissionPrompt {
+            request_id: request_id.clone(),
+            tool_name: "WorkspaceHooks".to_string(),
+            kind: NativeToolRiskKind::Opaque,
+            summary: format!(
+                "工作区 {} 提供了 {} 个自动执行钩子。仅在信任仓库内容时批准本次会话：\n{}",
+                ctx.workspace.root.display(),
+                hooks.len(),
+                serde_json::to_string_pretty(hooks).unwrap_or_default()
+            ),
+            remote: false,
+            mcp_server_id: None,
+            suggested_rule: None,
+        },
+        tx,
+    );
+    let timeout = if ctx.permission_timeout.is_zero() {
+        Duration::from_secs(120)
+    } else {
+        ctx.permission_timeout
+    };
+    let decision = tokio::select! {
+        result = rx => result.ok(),
+        _ = tokio::time::sleep(timeout) => None,
+        _ = async { while !ctx.cancel.is_cancelled() {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }} => None,
+    };
+    if decision.is_none() {
+        if let Some(expire) = &ctx.expire_permission {
+            let _ = expire(request_id).await;
+        }
+    }
+    matches!(
+        decision,
+        Some(NativePermissionDecision::AllowOnce | NativePermissionDecision::AllowSession)
+    )
 }
 
 fn attach_subagent_runtime(
@@ -1265,22 +1327,22 @@ async fn enqueue_live_input(
     if trimmed.is_empty() && loaded.images.is_empty() {
         return Err("输入内容不能为空".to_string());
     }
-    let live = {
-        let manager = manager.lock().await;
-        manager
-            .get_session(session_record_id)
-            .map(|session| (session.info.clone(), session.followup_tx.clone()))
-    };
-    let Some((info, tx)) = live else {
+    let manager = manager.lock().await;
+    let Some(session) = manager.get_session(session_record_id) else {
         return Ok(None);
     };
-    tx.send(NativeFollowup::input_with_images(
-        trimmed.to_string(),
-        loaded.images,
-    ))
-    .await
-    .map_err(|_| "内置 Agent 会话已结束，无法发送输入".to_string())?;
-    Ok(Some(info))
+    if session.closing {
+        return Err("内置 Agent 正在结束，请稍后重试".to_string());
+    }
+    session
+        .followup_tx
+        .try_send(NativeFollowup::input_with_images(
+            trimmed.to_string(),
+            loaded.images,
+        ))
+        .map_err(|error| format!("无法发送输入，队列已满或会话已结束: {error}"))?;
+    session.working.store(true, Ordering::SeqCst);
+    Ok(Some(session.info.clone()))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1521,16 +1583,30 @@ pub(crate) async fn start_native_with_manager(
         .filter(|item| !item.is_empty())
         .map(ToOwned::to_owned);
     if let Some(resume_id) = resume_id.as_deref() {
-        if let Some(info) =
-            enqueue_live_input(
-                manager_state.as_ref(),
-                resume_id,
-                &payload.prompt,
-                payload.image_paths.as_deref(),
-            )
-            .await?
+        let runtime = {
+            let manager = manager_state.lock().await;
+            if let Some(session) = manager.get_session(resume_id) {
+                if session.info.workspace_id.as_deref() != Some(&workspace_id) {
+                    return Err("会话不属于当前工作区".to_string());
+                }
+                if let Some(runtime) = &session.runtime {
+                    validate_live_configuration(runtime, &payload)?;
+                }
+                session.runtime.clone()
+            } else {
+                None
+            }
+        };
+        if let Some(info) = enqueue_live_input(
+            manager_state.as_ref(),
+            resume_id,
+            &payload.prompt,
+            payload.image_paths.as_deref(),
+        )
+        .await?
         {
             let started = AgentSessionStarted {
+                runtime,
                 profile_id: info.profile_id,
                 workspace_id: info.workspace_id.unwrap_or_else(|| workspace_id.clone()),
                 session_kind: info.session_kind,
@@ -1667,17 +1743,27 @@ pub(crate) async fn start_native_with_manager(
         }
     }
 
+    let permission_mode = payload
+        .permission_mode
+        .as_deref()
+        .map(|mode| crate::native::settings::normalize_permission_mode(Some(mode)))
+        .unwrap_or_else(|| crate::native::settings::effective_permission_mode(&app));
+    let runtime = NativeSessionRuntime {
+        ai_channel_id: run.channel_id.clone(),
+        model: run.model.clone(),
+        reasoning_effort: run.effort.clone(),
+        permission_mode: permission_mode.clone(),
+        plan_mode,
+    };
     let started = AgentSessionStarted {
+        runtime: Some(runtime.clone()),
         profile_id: String::new(),
         workspace_id: workspace_id.clone(),
         session_kind: kind.clone(),
         session_record_id: session_record_id.clone(),
     };
-    let _ = app.emit("native-session", &started);
-
     let (followup_tx, followup_rx) = mpsc::channel(8);
     let cancel = crate::native::tools::CancelFlag::new();
-    let permission_mode = crate::native::settings::effective_permission_mode(&app);
     let allow_all_high_risk = Arc::new(AtomicBool::new(
         crate::native::settings::permission_mode_is_yolo(&permission_mode),
     ));
@@ -1727,11 +1813,15 @@ pub(crate) async fn start_native_with_manager(
             image_paths,
             plan_mode,
             resume_run,
+            permission_mode,
         )
         .await;
     });
 
     manager_state.lock().await.add_session(NativeLiveSession {
+        runtime: Some(runtime),
+        background: None,
+        closing: false,
         info: NativeSessionInfo {
             profile_id: String::new(),
             channel_id: channel_id.clone(),
@@ -1750,8 +1840,38 @@ pub(crate) async fn start_native_with_manager(
         pending_question: std::collections::VecDeque::new(),
         pending_plan_approval: std::collections::VecDeque::new(),
     });
+    let _ = app.emit("native-session", &started);
     let _ = loop_ready_tx.send(());
     Ok(started)
+}
+
+fn validate_live_configuration(
+    runtime: &NativeSessionRuntime,
+    payload: &StartNativeSessionInput,
+) -> Result<(), String> {
+    let differs = payload.ai_channel_id.trim() != runtime.ai_channel_id
+        || payload
+            .model
+            .as_deref()
+            .filter(|value| !value.trim().is_empty())
+            .is_some_and(|value| value.trim() != runtime.model)
+        || payload
+            .reasoning_effort
+            .as_deref()
+            .filter(|value| !value.trim().is_empty())
+            .is_some_and(|value| Some(value.trim()) != runtime.reasoning_effort.as_deref())
+        || payload
+            .plan_mode
+            .is_some_and(|value| value != runtime.plan_mode)
+        || payload.permission_mode.as_deref().is_some_and(|value| {
+            crate::native::settings::normalize_permission_mode(Some(value))
+                != runtime.permission_mode
+        });
+    if differs {
+        Err("运行配置已变更，请先正常结束空闲会话，再使用新配置继续".to_string())
+    } else {
+        Ok(())
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1774,6 +1894,7 @@ async fn run_native_loop(
     image_paths: Option<Vec<String>>,
     plan_mode: bool,
     resume_session_id: Option<String>,
+    permission_mode: String,
 ) {
     let followup_rx = Arc::new(Mutex::new(followup_rx));
     let mut runner = AgentRunner::new(LocalWorkspace::new(PathBuf::from(&run_cwd)));
@@ -1785,6 +1906,24 @@ async fn run_native_loop(
     runner.ctx.cancel = cancel.clone();
     runner.ctx.allow_all_high_risk = allow_all_high_risk;
     runner.ctx.permission_rules = permission_rules;
+    let background_app = app.clone();
+    let background_session = session_record_id.clone();
+    runner.background.set_on_change(Some(Arc::new(move |tasks| {
+        let _ = background_app.emit(
+            "native-background-tasks",
+            serde_json::json!({
+                "session_record_id": background_session,
+                "tasks": tasks,
+            }),
+        );
+    })));
+    if let Some(session) = manager_state
+        .lock()
+        .await
+        .get_session_mut(&session_record_id)
+    {
+        session.background = Some(runner.background.clone());
+    }
     runner.steer_rx = Some(followup_rx.clone());
     if plan_mode {
         runner.set_read_only(true);
@@ -1792,8 +1931,21 @@ async fn run_native_loop(
     }
     let plan_mode_app = app.clone();
     let plan_mode_session = session_record_id.clone();
+    let plan_mode_manager = manager_state.clone();
     runner.ctx.on_plan_mode_change = Some(Arc::new(move |value| {
         emit_plan_mode(&plan_mode_app, &plan_mode_session, value);
+        let manager = plan_mode_manager.clone();
+        let session_id = plan_mode_session.clone();
+        tauri::async_runtime::spawn(async move {
+            if let Some(runtime) = manager
+                .lock()
+                .await
+                .get_session_mut(&session_id)
+                .and_then(|session| session.runtime.as_mut())
+            {
+                runtime.plan_mode = value;
+            }
+        });
     }));
     // The initial event also covers callers that start a session without the
     // Composer (for example, scheduled runs); the frontend has a session_kind
@@ -1806,7 +1958,6 @@ async fn run_native_loop(
         session_record_id.clone(),
     );
     let announce_startup = should_announce_session_startup(resume_session_id.as_deref());
-    let permission_mode = crate::native::settings::effective_permission_mode(&app);
     runner.ctx.auto_approve_overwrite =
         crate::native::settings::permission_mode_auto_approves_edits(&permission_mode);
     let build_mode = crate::native::settings::permission_mode_auto_approves_build(&permission_mode);
@@ -1913,7 +2064,14 @@ async fn run_native_loop(
                     ),
                 )
                 .await;
-                if should_emit {
+                if should_emit
+                    && manager_state
+                        .lock()
+                        .await
+                        .get_session(&session_record_id)
+                        .and_then(|session| session.pending_permission.front())
+                        .is_some_and(|pending| pending.request.request_id == request.request_id)
+                {
                     let _ = app.emit(
                         "native-permission-request",
                         permission_event(&session_record_id, &request),
@@ -1947,13 +2105,14 @@ async fn run_native_loop(
                         .ok()
                         .flatten()
                 };
+                emit_request_resolved(&app, &session_record_id, &request_id, "permission");
                 emit_native_line(
                     &app,
                     &session_record_id,
                     &profile_id,
                     Some(&workspace_id),
                     &kind,
-                    "[PERMISSION] 确认超时，已按拒绝处理".to_string(),
+                    "[PERMISSION] 确认请求已失效，已按拒绝处理".to_string(),
                 )
                 .await;
                 if let Some(request) = next {
@@ -2572,19 +2731,26 @@ async fn run_native_loop(
     )
     .await;
 
-    finish_memory(
-        &app,
-        &run,
-        &runner,
-        memory_dir.as_deref(),
-        memory_settings.as_ref(),
-        &session_record_id,
-        &profile_id,
-        &workspace_id,
-        &kind,
-        cancel.is_cancelled(),
+    if tokio::time::timeout(
+        Duration::from_secs(20),
+        finish_memory(
+            &app,
+            &run,
+            &runner,
+            memory_dir.as_deref(),
+            memory_settings.as_ref(),
+            &session_record_id,
+            &profile_id,
+            &workspace_id,
+            &kind,
+            cancel.is_cancelled(),
+        ),
     )
-    .await;
+    .await
+    .is_err()
+    {
+        eprintln!("[native] 会话结束记忆处理超时，保留已有记录");
+    }
 
     // 会话结束时停掉仍在跑的后台子 Agent。
     runner.background.stop_all();
@@ -2763,6 +2929,7 @@ pub async fn resolve_native_tool_permission(
         .lock()
         .await
         .resolve_permission(&session_record_id, &request_id, decision)?;
+    emit_request_resolved(&app, &session_record_id, &request_id, "permission");
     if let Some(request) = next {
         let _ = app.emit(
             "native-permission-request",
@@ -2932,18 +3099,18 @@ pub async fn compact_native_session(
     let instructions = instructions
         .map(|item| item.trim().to_string())
         .filter(|item| !item.is_empty());
-    let tx = {
-        let manager = state.lock().await;
-        manager
-            .get_session(&session_record_id)
-            .map(|session| session.followup_tx.clone())
-    };
-    let Some(tx) = tx else {
+    let manager = state.lock().await;
+    let Some(session) = manager.get_session(&session_record_id) else {
         return Ok(false);
     };
-    tx.send(NativeFollowup::Compact(instructions))
-        .await
-        .map_err(|_| "会话已结束，无法压缩".to_string())?;
+    if session.closing {
+        return Err("会话正在结束，无法压缩".to_string());
+    }
+    session
+        .followup_tx
+        .try_send(NativeFollowup::Compact(instructions))
+        .map_err(|error| format!("无法压缩，输入队列已满或会话已结束: {error}"))?;
+    session.working.store(true, Ordering::SeqCst);
     Ok(true)
 }
 
@@ -2964,6 +3131,7 @@ pub async fn resolve_native_plan_approval(
             feedback: feedback.unwrap_or_default(),
         },
     )?;
+    emit_request_resolved(&app, &session_record_id, &request_id, "plan_approval");
     if let Some(request) = next {
         let _ = app.emit(
             "native-plan-approval-request",
@@ -2987,6 +3155,7 @@ pub async fn answer_native_plan_question(
         &request_id,
         PlanQuestionAnswer { skipped, answers },
     )?;
+    emit_request_resolved(&app, &session_record_id, &request_id, "question");
     if let Some(request) = next {
         let _ = app.emit(
             "native-plan-question",
@@ -3053,24 +3222,111 @@ pub async fn send_native_input(
     Ok(())
 }
 
+fn emit_request_resolved(app: &AppHandle, session_record_id: &str, request_id: &str, kind: &str) {
+    let _ = app.emit(
+        "native-request-resolved",
+        serde_json::json!({
+            "session_record_id": session_record_id, "request_id": request_id, "kind": kind,
+        }),
+    );
+}
+
+async fn background_registry(
+    state: &Mutex<NativeAgentManager>,
+    session_record_id: &str,
+) -> Result<Arc<crate::native::agent::background::BackgroundTaskRegistry>, String> {
+    let manager = state.lock().await;
+    let session = manager
+        .get_session(session_record_id)
+        .ok_or_else(|| "会话已结束".to_string())?;
+    if session.closing {
+        return Err("会话正在结束".to_string());
+    }
+    session
+        .background
+        .clone()
+        .ok_or_else(|| "会话尚未完成初始化".to_string())
+}
+
+#[tauri::command]
+pub async fn list_native_background_tasks(
+    state: State<'_, Arc<Mutex<NativeAgentManager>>>,
+    session_record_id: String,
+) -> Result<Vec<crate::native::agent::background::BackgroundTaskSnapshot>, String> {
+    Ok(state
+        .lock()
+        .await
+        .get_session(&session_record_id)
+        .and_then(|session| session.background.as_ref())
+        .map(|registry| registry.snapshots())
+        .unwrap_or_default())
+}
+
+#[tauri::command]
+pub async fn send_native_background_message(
+    state: State<'_, Arc<Mutex<NativeAgentManager>>>,
+    session_record_id: String,
+    task_id: String,
+    message: String,
+) -> Result<(), String> {
+    if message.trim().is_empty() {
+        return Err("消息不能为空".to_string());
+    }
+    background_registry(state.inner(), &session_record_id)
+        .await?
+        .send_message(&task_id, message.trim())
+        .await
+}
+
+#[tauri::command]
+pub async fn stop_native_background_task(
+    state: State<'_, Arc<Mutex<NativeAgentManager>>>,
+    session_record_id: String,
+    task_id: String,
+) -> Result<bool, String> {
+    background_registry(state.inner(), &session_record_id)
+        .await?
+        .stop(&task_id)
+        .ok_or_else(|| "后台任务不存在".to_string())
+}
+
 #[tauri::command]
 pub async fn finish_native_input(
-    app: AppHandle,
     state: State<'_, Arc<Mutex<NativeAgentManager>>>,
     session_record_id: String,
 ) -> Result<(), String> {
-    if !stop_native_process(
-        &app,
-        state.inner(),
-        &session_record_id,
-        "stopping_requested",
-        "收到结束输入请求",
-    )
-    .await?
-    {
-        return Err(format!(
-            "会话 {session_record_id} 当前没有运行中的内置 Agent"
-        ));
+    finish_live_input(state.inner(), &session_record_id).await
+}
+
+async fn finish_live_input(
+    manager_state: &Mutex<NativeAgentManager>,
+    session_record_id: &str,
+) -> Result<(), String> {
+    let completion = {
+        let mut manager = manager_state.lock().await;
+        let Some(tx) = manager.begin_finish(session_record_id)? else {
+            return Ok(());
+        };
+        if let Err(error) = tx.try_send(NativeFollowup::Finish) {
+            if !tx.is_closed() {
+                if let Some(session) = manager.get_session_mut(session_record_id) {
+                    session.closing = false;
+                }
+                return Err(format!("无法结束会话，输入队列已满: {error}"));
+            }
+        }
+        manager
+            .get_session(session_record_id)
+            .map(|session| session.join.abort_handle())
+    };
+    if let Some(completion) = completion {
+        tokio::time::timeout(Duration::from_secs(40), async {
+            while !completion.is_finished() {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .map_err(|_| "会话仍在保存或释放资源，请稍后重试".to_string())?;
     }
     Ok(())
 }
@@ -3136,6 +3392,179 @@ mod tests {
     };
     use crate::native::agent::compact::{BudgetSnapshot, ContextWindow};
     use crate::native::agent::r#loop::AgentDiagnosticsSnapshot;
+
+    #[test]
+    fn live_followup_rejects_silently_ignored_configuration_changes() {
+        let runtime = crate::db::models::NativeSessionRuntime {
+            ai_channel_id: "channel".to_string(),
+            model: "model".to_string(),
+            reasoning_effort: Some("high".to_string()),
+            permission_mode: "default".to_string(),
+            plan_mode: false,
+        };
+        let base =
+            serde_json::json!({"ai_channel_id":"channel", "workspace_id":"ws", "prompt":"next"});
+        let input = serde_json::from_value(base.clone()).unwrap();
+        assert!(super::validate_live_configuration(&runtime, &input).is_ok());
+        for (key, value) in [
+            ("ai_channel_id", serde_json::json!("other-channel")),
+            ("model", serde_json::json!("other-model")),
+            ("reasoning_effort", serde_json::json!("low")),
+            ("permission_mode", serde_json::json!("yolo")),
+            ("plan_mode", serde_json::json!(true)),
+        ] {
+            let mut changed = base.clone();
+            changed[key] = value;
+            let input = serde_json::from_value(changed).unwrap();
+            assert!(
+                super::validate_live_configuration(&runtime, &input).is_err(),
+                "{key}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn workspace_hooks_require_explicit_trust_even_with_yolo() {
+        use crate::native::tools::dispatch::ToolCtx;
+        use crate::native::tools::local::LocalWorkspace;
+        use crate::native::tools::permission::NativePermissionDecision;
+        use std::sync::{
+            atomic::{AtomicUsize, Ordering},
+            Arc,
+        };
+        let root = tempfile::tempdir().unwrap();
+        let hooks = vec![crate::db::models::NativeHook::shell(
+            "workspace",
+            "session_start",
+            "*",
+            "printf trusted",
+            5,
+            true,
+        )];
+        let mut ctx = ToolCtx::new(LocalWorkspace::new(root.path().to_path_buf()));
+        ctx.allow_all_high_risk.store(true, Ordering::SeqCst);
+        ctx.auto_approve_opaque_bash = true;
+        ctx.hooks = vec![crate::db::models::NativeHook::shell(
+            "auto-allow",
+            "permission_request",
+            "*",
+            "printf '{\"decision\":\"allow\"}'",
+            5,
+            true,
+        )];
+        assert!(!super::approve_workspace_hooks(&ctx, &hooks).await);
+        let requests = Arc::new(AtomicUsize::new(0));
+        let seen = requests.clone();
+        ctx.request_permission = Some(Arc::new(move |prompt, tx| {
+            assert_eq!(prompt.tool_name, "WorkspaceHooks");
+            assert!(prompt.suggested_rule.is_none());
+            seen.fetch_add(1, Ordering::SeqCst);
+            tx.send(NativePermissionDecision::Deny).unwrap();
+        }));
+        assert!(!super::approve_workspace_hooks(&ctx, &hooks).await);
+        assert_eq!(requests.load(Ordering::SeqCst), 1);
+        ctx.request_permission = Some(Arc::new(|_, tx| {
+            tx.send(NativePermissionDecision::AllowOnce).unwrap();
+        }));
+        assert!(super::approve_workspace_hooks(&ctx, &hooks).await);
+        ctx.cancel.cancel();
+        assert!(!super::approve_workspace_hooks(&ctx, &hooks).await);
+    }
+
+    #[tokio::test]
+    async fn workspace_hook_trust_timeout_expires_request() {
+        use std::sync::{
+            atomic::{AtomicBool, Ordering},
+            Arc,
+        };
+        let root = tempfile::tempdir().unwrap();
+        let mut ctx = crate::native::tools::dispatch::ToolCtx::new(
+            crate::native::tools::local::LocalWorkspace::new(root.path().to_path_buf()),
+        );
+        ctx.permission_timeout = std::time::Duration::from_millis(10);
+        let pending = Arc::new(std::sync::Mutex::new(None));
+        let pending_request = pending.clone();
+        ctx.request_permission = Some(Arc::new(move |_, tx| {
+            *pending_request.lock().unwrap() = Some(tx);
+        }));
+        let expired = Arc::new(AtomicBool::new(false));
+        let expired_handler = expired.clone();
+        ctx.expire_permission = Some(Arc::new(move |_| {
+            let expired = expired_handler.clone();
+            tauri::async_runtime::spawn(async move {
+                expired.store(true, Ordering::SeqCst);
+            })
+        }));
+        assert!(!super::approve_workspace_hooks(&ctx, &[]).await);
+        assert!(expired.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn graceful_finish_waits_for_completion_and_blocks_racing_input() {
+        use crate::native::manager::{
+            NativeAgentManager, NativeFollowup, NativeLiveSession, NativeSessionInfo,
+        };
+        use std::sync::{
+            atomic::{AtomicBool, Ordering},
+            Arc,
+        };
+        let manager = Arc::new(tokio::sync::Mutex::new(NativeAgentManager::new()));
+        let (tx, mut rx) = tokio::sync::mpsc::channel(8);
+        let cancel = crate::native::tools::CancelFlag::new();
+        let cancelled = cancel.clone();
+        let manager_run = manager.clone();
+        let finished = Arc::new(AtomicBool::new(false));
+        let finished_run = finished.clone();
+        let (closing_tx, closing_rx) = tokio::sync::oneshot::channel();
+        let join = tokio::spawn(async move {
+            assert!(matches!(rx.recv().await, Some(NativeFollowup::Finish)));
+            assert!(!cancelled.is_cancelled());
+            let _ = closing_tx.send(());
+            tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+            finished_run.store(true, Ordering::SeqCst);
+            manager_run.lock().await.remove_session("finish-test");
+        });
+        manager.lock().await.add_session(NativeLiveSession {
+            info: NativeSessionInfo {
+                profile_id: String::new(),
+                channel_id: "ch".to_string(),
+                workspace_id: Some("ws".to_string()),
+                session_kind: "execution".to_string(),
+                session_record_id: "finish-test".to_string(),
+            },
+            runtime: None,
+            background: None,
+            closing: false,
+            cancel,
+            followup_tx: tx,
+            join,
+            allow_all_high_risk: Arc::new(AtomicBool::new(false)),
+            working: Arc::new(AtomicBool::new(false)),
+            permission_rules: crate::native::permission_rules::shared_rules(Default::default()),
+            workspace_root: None,
+            pending_permission: Default::default(),
+            pending_question: Default::default(),
+            pending_plan_approval: Default::default(),
+        });
+        let manager_finish = manager.clone();
+        let finish =
+            tokio::spawn(
+                async move { super::finish_live_input(&manager_finish, "finish-test").await },
+            );
+        closing_rx.await.unwrap();
+        assert!(!finished.load(Ordering::SeqCst));
+        assert!(
+            super::enqueue_live_input(&manager, "finish-test", "race", None)
+                .await
+                .is_err()
+        );
+        finish.await.unwrap().unwrap();
+        assert!(finished.load(Ordering::SeqCst));
+        assert!(manager.lock().await.get_session("finish-test").is_none());
+        super::finish_live_input(&manager, "finish-test")
+            .await
+            .unwrap();
+    }
 
     #[test]
     fn cancelled_run_error_is_not_a_failure() {
@@ -3468,6 +3897,9 @@ mod tests {
                 session_kind: "execution".to_string(),
                 session_record_id: "sess-1".to_string(),
             },
+            runtime: None,
+            background: None,
+            closing: false,
             cancel: CancelFlag::new(),
             followup_tx: tx,
             join: tokio::spawn(async {}),
@@ -3528,6 +3960,9 @@ mod tests {
                 session_kind: "execution".to_string(),
                 session_record_id: "sess-1".to_string(),
             },
+            runtime: None,
+            background: None,
+            closing: false,
             cancel: CancelFlag::new(),
             followup_tx: tx,
             join: tokio::spawn(async {}),

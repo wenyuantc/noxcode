@@ -511,6 +511,7 @@ export interface StartNativeSessionInput {
   resume_session_id?: string | null;
   image_paths?: string[] | null;
   plan_mode?: boolean | null;
+  permission_mode?: string | null;
 }
 
 export interface AgentSessionStarted {
@@ -518,6 +519,34 @@ export interface AgentSessionStarted {
   workspace_id: string;
   session_kind: string;
   session_record_id: string;
+  runtime?: NativeSessionRuntime | null;
+}
+
+export interface NativeSessionRuntime {
+  ai_channel_id: string;
+  model: string;
+  reasoning_effort: string | null;
+  permission_mode: string;
+  plan_mode: boolean;
+}
+
+export interface NativeRequestResolved {
+  session_record_id: string;
+  request_id: string;
+  kind: "permission" | "question" | "plan_approval";
+}
+
+export interface NativeBackgroundTask {
+  task_id: string;
+  description: string;
+  kind: string;
+  status: "queued" | "running" | "done" | "failed" | "stopped";
+  report: string | null;
+}
+
+export interface NativeBackgroundTasks {
+  session_record_id: string;
+  tasks: NativeBackgroundTask[];
 }
 
 export type NativeToolPhase = "start" | "result";

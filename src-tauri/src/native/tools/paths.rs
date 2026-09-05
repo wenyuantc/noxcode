@@ -1,3 +1,5 @@
+use std::fs;
+use std::io::ErrorKind;
 use std::path::{Component, Path, PathBuf};
 
 pub fn normalize_logical_path(path: &Path) -> PathBuf {
@@ -21,17 +23,49 @@ pub fn resolve_under_workspace(root: &Path, input: &str) -> Result<PathBuf, Stri
     if trimmed.is_empty() {
         return Err("路径不能为空".to_string());
     }
-    let root = normalize_logical_path(root);
+    let root = if root.is_absolute() {
+        root.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .map_err(|error| format!("读取当前目录失败: {error}"))?
+            .join(root)
+    };
     let candidate = if Path::new(trimmed).is_absolute() {
         PathBuf::from(trimmed)
     } else {
         root.join(trimmed)
     };
-    let resolved = normalize_logical_path(&candidate);
-    if !is_under_root(&root, &resolved) {
+    // 不先折叠 `..`：符号链接后的父目录必须遵循文件系统语义。
+    let physical_root = canonicalize_allow_missing(&root)?;
+    let resolved = canonicalize_allow_missing(&candidate)?;
+    if !is_under_root(&physical_root, &resolved) {
         return Err(format!("路径超出工作区: {trimmed}"));
     }
     Ok(resolved)
+}
+
+fn canonicalize_allow_missing(path: &Path) -> Result<PathBuf, String> {
+    match fs::canonicalize(path) {
+        Ok(resolved) => Ok(resolved),
+        Err(error) if error.kind() == ErrorKind::NotFound => {
+            if fs::symlink_metadata(path).is_ok_and(|meta| meta.file_type().is_symlink()) {
+                return Err(format!("无法解析符号链接: {}", path.display()));
+            }
+            let parent = path
+                .parent()
+                .filter(|parent| *parent != path)
+                .ok_or_else(|| format!("无法解析路径: {}", path.display()))?;
+            let physical_parent = canonicalize_allow_missing(parent)?;
+            let component = path
+                .components()
+                .next_back()
+                .ok_or_else(|| format!("无法解析路径: {}", path.display()))?;
+            Ok(normalize_logical_path(
+                &physical_parent.join(component.as_os_str()),
+            ))
+        }
+        Err(error) => Err(format!("无法解析路径 {}: {error}", path.display())),
+    }
 }
 
 pub fn resolve_under_workspace_posix(root: &str, input: &str) -> Result<String, String> {
@@ -47,7 +81,8 @@ pub fn resolve_under_workspace_posix(root: &str, input: &str) -> Result<String, 
     };
     let resolved = normalize_posix(&candidate);
     let root_normalized = normalize_posix(&root);
-    if resolved != root_normalized && !resolved.starts_with(&format!("{root_normalized}/")) {
+    let prefix = format!("{}/", root_normalized.trim_end_matches('/'));
+    if resolved != root_normalized && !resolved.starts_with(&prefix) {
         return Err(format!("路径超出工作区: {trimmed}"));
     }
     Ok(resolved)
@@ -107,9 +142,47 @@ mod tests {
     fn allows_relative_and_nested_paths() {
         let root = PathBuf::from("/tmp/ws");
         let resolved = resolve_under_workspace(&root, "src/main.rs").unwrap();
-        assert_eq!(resolved, PathBuf::from("/tmp/ws/src/main.rs"));
+        assert_eq!(
+            resolved,
+            canonicalize_allow_missing(&root)
+                .unwrap()
+                .join("src/main.rs")
+        );
         let nested = resolve_under_workspace(&root, "src/../README.md").unwrap();
-        assert_eq!(nested, PathBuf::from("/tmp/ws/README.md"));
+        assert_eq!(
+            nested,
+            canonicalize_allow_missing(&root).unwrap().join("README.md")
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rejects_symlink_escape_for_existing_and_new_files() {
+        use std::os::unix::fs::symlink;
+        let root = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        fs::write(outside.path().join("secret"), "secret").unwrap();
+        symlink(outside.path(), root.path().join("link")).unwrap();
+        symlink(outside.path().join("missing"), root.path().join("dangling")).unwrap();
+        for path in [
+            "link/secret",
+            "link/new/nested.txt",
+            "link/../outside.txt",
+            "dangling",
+        ] {
+            assert!(
+                resolve_under_workspace(root.path(), path).is_err(),
+                "{path}"
+            );
+        }
+        fs::create_dir(root.path().join("inside")).unwrap();
+        symlink(root.path().join("inside"), root.path().join("safe")).unwrap();
+        assert_eq!(
+            resolve_under_workspace(root.path(), "safe/new.txt").unwrap(),
+            fs::canonicalize(root.path())
+                .unwrap()
+                .join("inside/new.txt")
+        );
     }
 
     #[test]
@@ -118,5 +191,9 @@ mod tests {
         assert!(error.contains("超出工作区"));
         let ok = resolve_under_workspace_posix("/home/proj", "lib/a.rs").unwrap();
         assert_eq!(ok, "/home/proj/lib/a.rs");
+        assert_eq!(
+            resolve_under_workspace_posix("/", "etc/hosts").unwrap(),
+            "/etc/hosts"
+        );
     }
 }

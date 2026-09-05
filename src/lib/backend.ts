@@ -47,6 +47,9 @@ import type {
   NativeApiCallLogPage,
   NativeUsageAnalytics,
   NativeAutomation,
+  NativeBackgroundTask,
+  NativeBackgroundTasks,
+  NativeRequestResolved,
   NativeContextUsage,
   CreateNativeSkillInput,
   ExternalSkillScan,
@@ -423,6 +426,43 @@ export function sendNativeInput(sessionRecordId: string, input: string): Promise
 
 export function finishNativeInput(sessionRecordId: string): Promise<void> {
   return invoke("finish_native_input", { sessionRecordId });
+}
+
+export function listNativeBackgroundTasks(
+  sessionRecordId: string,
+): Promise<NativeBackgroundTask[]> {
+  return invoke("list_native_background_tasks", { sessionRecordId });
+}
+
+export function sendNativeBackgroundMessage(
+  sessionRecordId: string,
+  taskId: string,
+  message: string,
+): Promise<void> {
+  return invoke("send_native_background_message", { sessionRecordId, taskId, message });
+}
+
+export function stopNativeBackgroundTask(
+  sessionRecordId: string,
+  taskId: string,
+): Promise<boolean> {
+  return invoke("stop_native_background_task", { sessionRecordId, taskId });
+}
+
+export function onNativeBackgroundTasks(
+  callback: (payload: NativeBackgroundTasks) => void,
+): Promise<UnlistenFn> {
+  return listen<NativeBackgroundTasks>("native-background-tasks", (event) =>
+    callback(event.payload),
+  );
+}
+
+export function onNativeRequestResolved(
+  callback: (payload: NativeRequestResolved) => void,
+): Promise<UnlistenFn> {
+  return listen<NativeRequestResolved>("native-request-resolved", (event) =>
+    callback(event.payload),
+  );
 }
 
 export function resolveNativeToolPermission(

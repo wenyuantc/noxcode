@@ -10,6 +10,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use serde::Serialize;
 use tokio::sync::{mpsc, Notify};
 
 use crate::native::manager::NativeFollowup;
@@ -17,6 +18,7 @@ use crate::native::tools::CancelFlag;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TaskStatus {
+    Queued,
     Running,
     Done(String),
     Failed(String),
@@ -26,6 +28,7 @@ pub enum TaskStatus {
 impl TaskStatus {
     pub fn label(&self) -> &'static str {
         match self {
+            Self::Queued => "queued",
             Self::Running => "running",
             Self::Done(_) => "done",
             Self::Failed(_) => "failed",
@@ -34,7 +37,7 @@ impl TaskStatus {
     }
 
     pub fn is_finished(&self) -> bool {
-        !matches!(self, Self::Running)
+        !matches!(self, Self::Queued | Self::Running)
     }
 }
 
@@ -47,6 +50,7 @@ pub struct BackgroundTask {
     announced: Mutex<bool>,
     notify: Notify,
     steer_tx: mpsc::Sender<NativeFollowup>,
+    accepting_messages: Mutex<bool>,
 }
 
 impl BackgroundTask {
@@ -65,16 +69,60 @@ pub struct CoordinatorMessage {
     pub message: String,
 }
 
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct BackgroundTaskSnapshot {
+    pub task_id: String,
+    pub description: String,
+    pub kind: String,
+    pub status: String,
+    pub report: Option<String>,
+}
+
+type OnChange = Arc<dyn Fn(Vec<BackgroundTaskSnapshot>) + Send + Sync>;
+
 #[derive(Default)]
 pub struct BackgroundTaskRegistry {
     tasks: Mutex<HashMap<String, Arc<BackgroundTask>>>,
     inbox: Mutex<Vec<CoordinatorMessage>>,
     seq: AtomicU32,
+    on_change: Mutex<Option<OnChange>>,
 }
 
 impl BackgroundTaskRegistry {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    pub fn set_on_change(&self, on_change: Option<OnChange>) {
+        if let Ok(mut current) = self.on_change.lock() {
+            *current = on_change;
+        }
+    }
+
+    pub fn snapshots(&self) -> Vec<BackgroundTaskSnapshot> {
+        self.list()
+            .into_iter()
+            .map(|task| {
+                let status = task.status();
+                BackgroundTaskSnapshot {
+                    task_id: task.id.clone(),
+                    description: task.description.clone(),
+                    kind: task.kind.clone(),
+                    status: status.label().to_string(),
+                    report: match status {
+                        TaskStatus::Done(report) | TaskStatus::Failed(report) => Some(report),
+                        _ => None,
+                    },
+                }
+            })
+            .collect()
+    }
+
+    fn notify_changed(&self) {
+        let on_change = self.on_change.lock().ok().and_then(|value| value.clone());
+        if let Some(on_change) = on_change {
+            on_change(self.snapshots());
+        }
     }
 
     /// 登记一个后台任务，返回任务句柄与给子 Agent 的 steer 接收端。
@@ -91,15 +139,29 @@ impl BackgroundTaskRegistry {
             description: description.to_string(),
             kind: kind.to_string(),
             cancel: CancelFlag::new(),
-            status: Mutex::new(TaskStatus::Running),
+            status: Mutex::new(TaskStatus::Queued),
             announced: Mutex::new(false),
             notify: Notify::new(),
             steer_tx,
+            accepting_messages: Mutex::new(true),
         });
         if let Ok(mut tasks) = self.tasks.lock() {
             tasks.insert(id, task.clone());
         }
+        self.notify_changed();
         (task, steer_rx)
+    }
+
+    pub fn mark_running(&self, task_id: &str) {
+        let Some(task) = self.get(task_id) else {
+            return;
+        };
+        if let Ok(mut status) = task.status.lock() {
+            if *status == TaskStatus::Queued && !task.cancel.is_cancelled() {
+                *status = TaskStatus::Running;
+            }
+        }
+        self.notify_changed();
     }
 
     pub fn get(&self, task_id: &str) -> Option<Arc<BackgroundTask>> {
@@ -124,44 +186,47 @@ impl BackgroundTaskRegistry {
             return;
         };
         if let Ok(mut status) = task.status.lock() {
-            if *status == TaskStatus::Running {
-                *status = match outcome {
-                    Ok(report) => TaskStatus::Done(report),
-                    Err(error) if task.cancel.is_cancelled() => {
-                        let _ = error;
-                        TaskStatus::Stopped
+            if !status.is_finished() {
+                *status = if task.cancel.is_cancelled() {
+                    TaskStatus::Stopped
+                } else {
+                    match outcome {
+                        Ok(report) => TaskStatus::Done(report),
+                        Err(error) => TaskStatus::Failed(error),
                     }
-                    Err(error) => TaskStatus::Failed(error),
                 };
             }
         }
         task.notify.notify_waiters();
+        self.notify_changed();
     }
 
     /// 取消任务；已结束返回 false。
     pub fn stop(&self, task_id: &str) -> Option<bool> {
         let task = self.get(task_id)?;
-        if task.status().is_finished() {
+        let mut status = task.status.lock().ok()?;
+        if status.is_finished() {
             return Some(false);
         }
         task.cancel.cancel();
-        if let Ok(mut status) = task.status.lock() {
-            *status = TaskStatus::Stopped;
-        }
+        *status = TaskStatus::Stopped;
+        drop(status);
         task.notify.notify_waiters();
+        self.notify_changed();
         Some(true)
     }
 
     pub fn stop_all(&self) {
         for task in self.list() {
-            if !task.status().is_finished() {
-                task.cancel.cancel();
-                if let Ok(mut status) = task.status.lock() {
+            if let Ok(mut status) = task.status.lock() {
+                if !status.is_finished() {
+                    task.cancel.cancel();
                     *status = TaskStatus::Stopped;
+                    task.notify.notify_waiters();
                 }
-                task.notify.notify_waiters();
             }
         }
+        self.notify_changed();
     }
 
     /// 等待任务结束，超时返回当前状态。
@@ -190,16 +255,48 @@ impl BackgroundTaskRegistry {
         let task = self
             .get(task_id)
             .ok_or_else(|| format!("未知任务：{task_id}"))?;
+        let accepting = task
+            .accepting_messages
+            .lock()
+            .map_err(|_| format!("任务 {task_id} 的消息通道不可用"))?;
         if task.status().is_finished() {
             return Err(format!(
                 "任务 {task_id} 已结束（{}）",
                 task.status().label()
             ));
         }
+        if !*accepting {
+            return Err(format!("任务 {task_id} 已结束消息接收"));
+        }
         task.steer_tx
-            .send(NativeFollowup::input(message))
-            .await
-            .map_err(|_| format!("任务 {task_id} 的消息通道已关闭"))
+            .try_send(NativeFollowup::input(message))
+            .map_err(|error| match error {
+                mpsc::error::TrySendError::Full(_) => {
+                    format!("任务 {task_id} 的消息队列已满，请稍后重试")
+                }
+                mpsc::error::TrySendError::Closed(_) => {
+                    format!("任务 {task_id} 的消息通道已关闭")
+                }
+            })
+    }
+
+    /// 与 send_message 同步最后一次空队列检查，避免接受后即丢失的末尾消息。
+    pub fn seal_messages_if_empty(
+        &self,
+        task_id: &str,
+        receiver: &mpsc::Receiver<NativeFollowup>,
+    ) -> bool {
+        let Some(task) = self.get(task_id) else {
+            return true;
+        };
+        let Ok(mut accepting) = task.accepting_messages.lock() else {
+            return false;
+        };
+        if !receiver.is_empty() {
+            return false;
+        }
+        *accepting = false;
+        true
     }
 
     /// 子 → 父：留言进父 Agent 的收件箱。
@@ -250,7 +347,7 @@ impl BackgroundTaskRegistry {
                 TaskStatus::Done(report) => format!("完成：{}", preview(report)),
                 TaskStatus::Failed(error) => format!("失败：{}", preview(error)),
                 TaskStatus::Stopped => "已停止".to_string(),
-                TaskStatus::Running => continue,
+                TaskStatus::Queued | TaskStatus::Running => continue,
             };
             lines.push(format!(
                 "- 后台任务 {}（{}）{summary}。用 TaskOutput 读取完整结果。",
@@ -275,6 +372,10 @@ impl BackgroundTaskRegistry {
         let task = self.get(task_id)?;
         let status = task.status();
         Some(match status {
+            TaskStatus::Queued => format!(
+                "任务 {} 等待并发许可（{} / {}）。可用 TaskStop 取消排队。",
+                task.id, task.kind, task.description
+            ),
             TaskStatus::Running => format!(
                 "任务 {} 仍在运行（{} / {}）。可用 TaskOutput(wait=true) 等待，或 SendMessage 追加指令。",
                 task.id, task.kind, task.description
@@ -314,7 +415,12 @@ mod tests {
         let registry = BackgroundTaskRegistry::new();
         let (task, mut steer_rx) = registry.register("检查测试", "explore");
         assert_eq!(task.id, "task-1");
-        assert_eq!(task.status(), TaskStatus::Running);
+        assert_eq!(task.status(), TaskStatus::Queued);
+        assert!(registry
+            .describe("task-1")
+            .unwrap()
+            .contains("等待并发许可"));
+        registry.mark_running(&task.id);
         assert!(registry.describe("task-1").unwrap().contains("仍在运行"));
         let waited = registry.wait("task-1", Duration::from_millis(20)).await;
         assert_eq!(waited, Some(TaskStatus::Running));
@@ -357,5 +463,51 @@ mod tests {
         let (second, _rx2) = registry.register("另一个", "general");
         registry.stop_all();
         assert_eq!(second.status(), TaskStatus::Stopped);
+    }
+
+    #[tokio::test]
+    async fn full_message_queue_returns_without_waiting() {
+        let registry = BackgroundTaskRegistry::new();
+        let (task, receiver) = registry.register("pending", "general");
+        for _ in 0..16 {
+            registry.send_message(&task.id, "pending").await.unwrap();
+        }
+        let result = tokio::time::timeout(
+            Duration::from_millis(100),
+            registry.send_message(&task.id, "overflow"),
+        )
+        .await
+        .expect("queue must not block");
+        assert!(result.unwrap_err().contains("消息队列已满"));
+        assert!(!registry.seal_messages_if_empty(&task.id, &receiver));
+    }
+
+    #[tokio::test]
+    async fn sealed_task_rejects_new_messages_before_finish_is_published() {
+        let registry = BackgroundTaskRegistry::new();
+        let (task, receiver) = registry.register("finishing", "general");
+        registry.mark_running(&task.id);
+        assert!(registry.seal_messages_if_empty(&task.id, &receiver));
+        assert!(registry.send_message(&task.id, "too late").await.is_err());
+    }
+
+    #[test]
+    fn snapshots_notify_queued_running_and_terminal_states() {
+        let registry = BackgroundTaskRegistry::new();
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let captured = events.clone();
+        registry.set_on_change(Some(Arc::new(move |snapshots| {
+            captured.lock().unwrap().push(snapshots);
+        })));
+        let (task, _) = registry.register("test", "explore");
+        registry.mark_running(&task.id);
+        registry.finish(&task.id, Err("failed test".to_string()));
+        let events = events.lock().unwrap();
+        assert_eq!(events.len(), 3);
+        assert_eq!(events[0][0].status, "queued");
+        assert_eq!(events[1][0].status, "running");
+        assert_eq!(events[2][0].status, "failed");
+        assert_eq!(events[2][0].report.as_deref(), Some("failed test"));
+        assert_eq!(events[2][0].task_id, task.id);
     }
 }

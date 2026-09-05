@@ -1,4 +1,5 @@
 use std::collections::hash_map::DefaultHasher;
+use std::collections::VecDeque;
 use std::fs;
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
@@ -7,7 +8,7 @@ use std::time::{Duration, UNIX_EPOCH};
 
 use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine;
-use tokio::io::AsyncReadExt;
+use tokio::io::{AsyncRead, AsyncReadExt};
 
 use crate::native::model::types::NativeImage;
 use crate::process_spawn::tokio_command;
@@ -20,9 +21,8 @@ use super::shell_snapshot::{COMMAND_ENV, SNAPSHOT_ENV};
 const READ_DEFAULT_LIMIT: usize = 2000;
 pub const BASH_DEFAULT_TIMEOUT: Duration = Duration::from_secs(120);
 pub const BASH_MAX_TIMEOUT: Duration = Duration::from_secs(600);
-/// 单次 Bash 在内存里保留的输出上限；完整输出由 artifact 层落盘，这里只防止
-/// `cat` 一个巨型文件把进程内存吃光。
-const BASH_OUTPUT_HARD_LIMIT: usize = 2 * 1024 * 1024;
+/// 单次 Bash 保留的输出上限；持续排空管道，但不在内存累计完整输出。
+pub(super) const BASH_OUTPUT_HARD_LIMIT: usize = 2 * 1024 * 1024;
 const BASH_MODEL_CHARS: usize = 30_000;
 /// Read 工具支持直接返回的图片类型。
 const IMAGE_EXTENSIONS: &[(&str, &str)] = &[
@@ -52,6 +52,16 @@ pub struct FileFingerprint {
 }
 
 impl FileFingerprint {
+    pub fn of_bytes(content: &[u8]) -> Self {
+        let mut hasher = DefaultHasher::new();
+        content.hash(&mut hasher);
+        Self {
+            len: content.len() as u64,
+            mtime_ms: 0,
+            hash: hasher.finish(),
+        }
+    }
+
     pub fn of_content(path: &Path, content: &[u8]) -> Self {
         let metadata = fs::metadata(path).ok();
         let mtime_ms = metadata
@@ -60,12 +70,9 @@ impl FileFingerprint {
             .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
             .map(|duration| duration.as_millis() as i64)
             .unwrap_or(0);
-        let mut hasher = DefaultHasher::new();
-        content.hash(&mut hasher);
         Self {
-            len: content.len() as u64,
             mtime_ms,
-            hash: hasher.finish(),
+            ..Self::of_bytes(content)
         }
     }
 
@@ -328,11 +335,7 @@ impl LocalWorkspace {
         if cancel.is_cancelled() {
             return Err("已取消".to_string());
         }
-        let timeout = Duration::from_millis(
-            timeout_ms
-                .unwrap_or(self.bash_default_timeout.as_millis() as i64)
-                .clamp(1, BASH_MAX_TIMEOUT.as_millis() as i64) as u64,
-        );
+        let timeout = bash_timeout(timeout_ms, self.bash_default_timeout);
         let mut cmd = tokio_command("bash");
         match self.shell_snapshot.as_ref().filter(|path| path.is_file()) {
             Some(snapshot) => {
@@ -351,31 +354,33 @@ impl LocalWorkspace {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .kill_on_drop(true);
+        #[cfg(unix)]
+        cmd.process_group(0);
         for (key, value) in extra_env {
             cmd.env(key, value);
         }
         let mut child = cmd
             .spawn()
             .map_err(|error| format!("启动 Bash 失败: {error}"))?;
-        let mut stdout = child
+        let stdout = child
             .stdout
             .take()
             .ok_or_else(|| "Bash stdout 不可用".to_string())?;
-        let mut stderr = child
+        let stderr = child
             .stderr
             .take()
             .ok_or_else(|| "Bash stderr 不可用".to_string())?;
-        let mut stdout_buf = Vec::new();
-        let mut stderr_buf = Vec::new();
-        let status = tokio::select! {
-            result = child.wait() => {
-                stdout.read_to_end(&mut stdout_buf).await.ok();
-                stderr.read_to_end(&mut stderr_buf).await.ok();
-                result.map_err(|error| format!("Bash 执行失败: {error}"))?
-            }
+        let process_id = child.id();
+        let (status, stdout_buf, stderr_buf) = tokio::select! {
+            result = async {
+                tokio::try_join!(
+                    child.wait(),
+                    read_bounded(stdout, BASH_OUTPUT_HARD_LIMIT / 2),
+                    read_bounded(stderr, BASH_OUTPUT_HARD_LIMIT / 2),
+                )
+            } => result.map_err(|error| format!("Bash 执行失败: {error}"))?,
             _ = tokio::time::sleep(timeout) => {
-                let _ = child.start_kill();
-                let _ = child.wait().await;
+                terminate_bash(&mut child, process_id).await;
                 return Ok(CommandStatus {
                     exit_code: -1,
                     output: "Bash 超时".to_string(),
@@ -383,17 +388,17 @@ impl LocalWorkspace {
                 });
             }
             _ = wait_cancel(cancel) => {
-                let _ = child.start_kill();
-                let _ = child.wait().await;
+                terminate_bash(&mut child, process_id).await;
                 return Err("已取消".to_string());
             }
         };
-        let mut text = String::from_utf8_lossy(&stdout_buf).into_owned();
-        if !stderr_buf.is_empty() {
+        let mut text = stdout_buf.into_text();
+        let stderr_text = stderr_buf.into_text();
+        if !stderr_text.is_empty() {
             if !text.is_empty() {
                 text.push('\n');
             }
-            text.push_str(&String::from_utf8_lossy(&stderr_buf));
+            text.push_str(&stderr_text);
         }
         let text = cap_bytes_tail(&text, BASH_OUTPUT_HARD_LIMIT);
         Ok(CommandStatus {
@@ -402,6 +407,81 @@ impl LocalWorkspace {
             timed_out: false,
         })
     }
+}
+
+pub(super) fn bash_timeout(timeout_ms: Option<i64>, default: Duration) -> Duration {
+    Duration::from_millis(
+        timeout_ms
+            .unwrap_or(default.as_millis() as i64)
+            .clamp(1, BASH_MAX_TIMEOUT.as_millis() as i64) as u64,
+    )
+}
+
+pub(super) struct BoundedOutput {
+    bytes: VecDeque<u8>,
+    limit: usize,
+    discarded: usize,
+}
+
+impl BoundedOutput {
+    pub(super) fn new(limit: usize) -> Self {
+        Self {
+            bytes: VecDeque::new(),
+            limit,
+            discarded: 0,
+        }
+    }
+
+    pub(super) fn push(&mut self, bytes: &[u8]) {
+        let overflow = self
+            .bytes
+            .len()
+            .saturating_add(bytes.len())
+            .saturating_sub(self.limit);
+        self.discarded = self.discarded.saturating_add(overflow);
+        let remove = overflow.min(self.bytes.len());
+        self.bytes.drain(..remove);
+        self.bytes.extend(&bytes[overflow - remove..]);
+    }
+
+    pub(super) fn into_text(self) -> String {
+        let bytes: Vec<u8> = self.bytes.into();
+        let text = String::from_utf8_lossy(&bytes);
+        if self.discarded == 0 {
+            text.into_owned()
+        } else {
+            format!("[输出过长，已丢弃前 {} 字节]\n{text}", self.discarded)
+        }
+    }
+}
+
+async fn read_bounded(
+    mut reader: impl AsyncRead + Unpin,
+    limit: usize,
+) -> std::io::Result<BoundedOutput> {
+    let mut output = BoundedOutput::new(limit);
+    let mut chunk = [0; 8192];
+    loop {
+        let count = reader.read(&mut chunk).await?;
+        if count == 0 {
+            return Ok(output);
+        }
+        output.push(&chunk[..count]);
+    }
+}
+
+async fn terminate_bash(child: &mut tokio::process::Child, process_id: Option<u32>) {
+    #[cfg(unix)]
+    if let Some(pid) = process_id {
+        // Bash 使用独立进程组，避免子进程继续持有管道或写文件。
+        unsafe {
+            libc::killpg(pid as i32, libc::SIGKILL);
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = process_id;
+    let _ = child.start_kill();
+    let _ = child.wait().await;
 }
 
 /// 查找可用的 ripgrep：优先随应用打包的 `tools/rg`，其次 PATH。
@@ -1059,9 +1139,15 @@ fn walk_files(dir: &Path, out: &mut Vec<PathBuf>) {
         if entry.file_name() == ".git" {
             continue;
         }
-        if path.is_dir() {
+        let Ok(kind) = entry.file_type() else {
+            continue;
+        };
+        if kind.is_symlink() {
+            continue;
+        }
+        if kind.is_dir() {
             walk_files(&path, out);
-        } else {
+        } else if kind.is_file() {
             out.push(path);
         }
     }
@@ -1236,6 +1322,101 @@ mod tests {
             .expect("bash");
         assert!(out.contains("native-bash"));
         let _ = fs::remove_dir_all(&ws.root);
+    }
+
+    #[tokio::test]
+    async fn bash_drains_both_streams_without_deadlock_and_bounds_output() {
+        let root = tempfile::tempdir().unwrap();
+        let ws = LocalWorkspace::new(root.path().to_path_buf());
+        let status = ws.bash_with_status(
+            "head -c 3145728 /dev/zero; head -c 3145728 /dev/zero >&2; printf out-tail; printf err-tail >&2",
+            Some(5000), &CancelFlag::new(), &[],
+        ).await.unwrap();
+        assert!(!status.timed_out);
+        assert_eq!(status.exit_code, 0);
+        assert!(status.output.contains("out-tail"));
+        assert!(status.output.ends_with("err-tail"));
+        assert!(status.output.contains("已丢弃"));
+        assert!(status.output.len() <= BASH_OUTPUT_HARD_LIMIT + 100);
+    }
+
+    #[tokio::test]
+    async fn bash_timeout_and_cancel_remain_effective_while_draining() {
+        let root = tempfile::tempdir().unwrap();
+        let ws = LocalWorkspace::new(root.path().to_path_buf());
+        let status = ws
+            .bash_with_status("sleep 5", Some(50), &CancelFlag::new(), &[])
+            .await
+            .unwrap();
+        assert!(status.timed_out);
+        let cancel = CancelFlag::new();
+        let other = cancel.clone();
+        let (result, ()) = tokio::join!(
+            ws.bash_with_status("while :; do printf output; done", Some(5000), &cancel, &[]),
+            async move {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+                other.cancel();
+            },
+        );
+        assert_eq!(result.unwrap_err(), "已取消");
+    }
+
+    #[test]
+    fn bounded_output_retains_exact_tail_without_unbounded_growth() {
+        let mut output = BoundedOutput::new(4);
+        output.push(b"abc");
+        output.push(b"defghijk");
+        assert_eq!(output.bytes.len(), 4);
+        assert_eq!(output.discarded, 7);
+        assert!(output.into_text().ends_with("hijk"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn extra_roots_keep_their_permissions_without_symlink_escape() {
+        use std::os::unix::fs::symlink;
+        let root = tempfile::tempdir().unwrap();
+        let reads = tempfile::tempdir().unwrap();
+        let writes = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let mut ws = LocalWorkspace::new(root.path().to_path_buf());
+        ws.extra_read_roots.push(reads.path().to_path_buf());
+        ws.extra_write_roots.push(writes.path().to_path_buf());
+        fs::write(reads.path().join("artifact"), "artifact").unwrap();
+        fs::write(outside.path().join("secret"), "secret").unwrap();
+        symlink(outside.path(), reads.path().join("escape")).unwrap();
+        symlink(outside.path(), writes.path().join("escape")).unwrap();
+        let artifact = reads.path().join("artifact").to_string_lossy().into_owned();
+        assert!(ws
+            .read_file(&artifact, None, None)
+            .unwrap()
+            .contains("artifact"));
+        assert!(ws.write_file(&artifact, "blocked").is_err());
+        assert!(ws
+            .write_file(
+                &writes.path().join("memory/new.md").to_string_lossy(),
+                "memory"
+            )
+            .is_ok());
+        assert!(ws
+            .read_file(
+                &reads.path().join("escape/secret").to_string_lossy(),
+                None,
+                None
+            )
+            .is_err());
+        assert!(ws
+            .write_file(
+                &writes.path().join("escape/new.txt").to_string_lossy(),
+                "blocked"
+            )
+            .is_err());
+        symlink(outside.path(), root.path().join("escape")).unwrap();
+        assert!(!ws
+            .grep_files("secret", None, None, None)
+            .unwrap()
+            .contains("secret"));
+        assert!(!ws.glob_files("**/*", None).unwrap().contains("secret"));
     }
 
     #[tokio::test]

@@ -40,13 +40,16 @@ export function SubagentRow({ segment, running, nowMs }: SubagentRowProps) {
     () =>
       items.find((item) => {
         const body = sessionLineBody(item.text);
-        return body.startsWith("结束 成功") || body.startsWith("结束 失败");
+        return /^(?:后台任务 \S+ )?结束 (?:成功|失败|停止|已停止)/.test(body);
       }),
     [items],
   );
 
   const isCompleted = Boolean(endItem);
   const isFailed = endItem ? sessionLineBody(endItem.text).includes("失败") : false;
+  const isStopped = endItem
+    ? sessionLineBody(endItem.text).includes("停止")
+    : !running && !isCompleted;
   const isRunning = Boolean(running && !isCompleted);
 
   const [open, setOpen] = useState(false);
@@ -200,6 +203,8 @@ export function SubagentRow({ segment, running, nowMs }: SubagentRowProps) {
               <span className="size-1.5 animate-pulse rounded-full bg-amber-500" />
               {t("subagentRunning")}
             </span>
+          ) : isStopped ? (
+            <span className="text-[11px] text-muted-foreground">已停止</span>
           ) : isFailed ? (
             <span className="flex items-center gap-1 text-[11px] font-medium text-rose-600 dark:text-rose-400">
               <AlertCircle className="size-3" />

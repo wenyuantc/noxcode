@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
-import { Clock, Loader2, Play, Plus, Trash2 } from "lucide-react";
+import { Clock, Loader2, Play, Plus, Trash2, Pencil, ExternalLink } from "lucide-react";
 import { useTranslation } from "react-i18next";
+import { useNavigate } from "react-router-dom";
 
 import {
   createNativeAutomation,
@@ -24,11 +25,13 @@ import { Switch } from "@/components/ui/switch";
 import { Textarea } from "@/components/ui/textarea";
 import { useChannelStore } from "@/stores/channelStore";
 import { useWorkspaceStore } from "@/stores/workspaceStore";
+import { useSessionStore } from "@/stores/sessionStore";
 import { SettingCard } from "./SettingCard";
 import { SettingFeedbackCallout } from "./SettingFeedbackCallout";
 
 export function AutomationsSection() {
   const { t } = useTranslation(["settings", "common"]);
+  const navigate = useNavigate();
   const workspaceId = useWorkspaceStore((state) => state.activeWorkspaceId);
   const channelId = useChannelStore((state) => state.activeChannelId);
   const model = useChannelStore((state) => state.activeModelId);
@@ -38,6 +41,11 @@ export function AutomationsSection() {
   const [dialogOpen, setDialogOpen] = useState(false);
   const [saving, setSaving] = useState(false);
   const [runningId, setRunningId] = useState<string | null>(null);
+  const [editing, setEditing] = useState<NativeAutomation | null>(null);
+  const [resultSessionId, setResultSessionId] = useState<string | null>(null);
+  const [formChannelId, setFormChannelId] = useState("");
+  const [formModel, setFormModel] = useState("");
+  const channels = useChannelStore((state) => state.channels);
 
   // Form State
   const [name, setName] = useState("");
@@ -62,6 +70,9 @@ export function AutomationsSection() {
   }, [reload]);
 
   const openCreate = () => {
+    setEditing(null);
+    setFormChannelId(channelId ?? "");
+    setFormModel(model ?? "");
     setName("");
     setCron("0 9 * * mon-fri");
     setPrompt("");
@@ -70,20 +81,40 @@ export function AutomationsSection() {
     setDialogOpen(true);
   };
 
+  const openEdit = (item: NativeAutomation) => {
+    setEditing(item);
+    setName(item.name);
+    setCron(item.cron);
+    setPrompt(item.prompt);
+    setFormChannelId(item.channel_id ?? "");
+    setFormModel(item.model ?? "");
+    setError(null);
+    setDialogOpen(true);
+  };
+  const openResult = async (sessionId: string) => {
+    try {
+      await useWorkspaceStore.getState().refreshSessions();
+      await useSessionStore.getState().loadHistory(sessionId);
+      await navigate("/");
+    } catch (reason) {
+      setError(String(reason));
+    }
+  };
+
   const create = async () => {
     if (!workspaceId || !name.trim() || !cron.trim() || !prompt.trim()) return;
     setSaving(true);
     setError(null);
     try {
-      await createNativeAutomation({
-        workspace_id: workspaceId,
+      const values = {
         name: name.trim(),
         cron: cron.trim(),
         prompt: prompt.trim(),
-        channel_id: channelId ?? null,
-        model: model ?? null,
-        enabled: true,
-      });
+        channel_id: formChannelId || null,
+        model: formModel || null,
+      };
+      if (editing) await updateNativeAutomation(editing.id, values);
+      else await createNativeAutomation({ ...values, workspace_id: workspaceId, enabled: true });
       setName("");
       setPrompt("");
       setDialogOpen(false);
@@ -116,6 +147,7 @@ export function AutomationsSection() {
     runNativeAutomationNow(item.id)
       .then((sessionId) => {
         setMessage(t("settings:automations.started", { session: sessionId }));
+        setResultSessionId(sessionId);
         reload();
       })
       .catch((reason: unknown) => setError(String(reason)))
@@ -133,6 +165,18 @@ export function AutomationsSection() {
       ) : null}
       {error ? (
         <SettingFeedbackCallout variant="error" message={error} onClose={() => setError(null)} />
+      ) : null}
+      {resultSessionId ? (
+        <Button
+          variant="outline"
+          size="sm"
+          onClick={() => {
+            void openResult(resultSessionId);
+          }}
+        >
+          <ExternalLink className="size-3.5" />
+          查看运行会话
+        </Button>
       ) : null}
 
       <SettingCard
@@ -215,6 +259,28 @@ export function AutomationsSection() {
                   </div>
 
                   <div className="flex items-center gap-2 shrink-0 self-end sm:self-center">
+                    {item.last_session_id ? (
+                      <Button
+                        variant="ghost"
+                        size="icon-xs"
+                        title="查看最近运行会话"
+                        aria-label="查看最近运行会话"
+                        onClick={() => {
+                          void openResult(item.last_session_id!);
+                        }}
+                      >
+                        <ExternalLink className="size-3.5" />
+                      </Button>
+                    ) : null}
+                    <Button
+                      variant="ghost"
+                      size="icon-xs"
+                      title="编辑自动化"
+                      aria-label="编辑自动化"
+                      onClick={() => openEdit(item)}
+                    >
+                      <Pencil className="size-3.5" />
+                    </Button>
                     <Switch
                       checked={item.enabled !== 0}
                       onCheckedChange={(checked) => toggle(item, checked)}
@@ -256,13 +322,18 @@ export function AutomationsSection() {
         <DialogContent className="sm:max-w-md rounded-2xl p-0 overflow-hidden">
           <DialogHeader className="border-b border-border/50 px-6 py-4">
             <DialogTitle className="text-base font-semibold tracking-tight">
-              {t("settings:automations.createTitle")}
+              {editing ? "编辑自动化" : t("settings:automations.createTitle")}
             </DialogTitle>
             <DialogDescription className="text-xs text-muted-foreground">
               {t("settings:automations.createHint")}
             </DialogDescription>
           </DialogHeader>
           <div className="space-y-3.5 px-6 py-4">
+            {error ? (
+              <p role="alert" className="text-sm text-destructive">
+                {error}
+              </p>
+            ) : null}
             <div>
               <label className="text-xs font-medium text-muted-foreground">
                 {t("settings:automations.name")}
@@ -300,6 +371,43 @@ export function AutomationsSection() {
                 onChange={(e) => setPrompt(e.target.value)}
               />
             </div>
+            <label className="block text-xs">
+              渠道
+              <select
+                aria-label="自动化渠道"
+                className="mt-1 h-8 w-full rounded-md border bg-background px-2"
+                value={formChannelId}
+                onChange={(event) => {
+                  setFormChannelId(event.target.value);
+                  setFormModel("");
+                }}
+              >
+                <option value="">默认渠道</option>
+                {channels.map((channel) => (
+                  <option key={channel.id} value={channel.id}>
+                    {channel.name}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label className="block text-xs">
+              模型
+              <select
+                aria-label="自动化模型"
+                className="mt-1 h-8 w-full rounded-md border bg-background px-2"
+                value={formModel}
+                onChange={(event) => setFormModel(event.target.value)}
+              >
+                <option value="">默认模型</option>
+                {channels
+                  .find((channel) => channel.id === formChannelId)
+                  ?.models.map((item) => (
+                    <option key={item.id} value={item.id}>
+                      {item.id}
+                    </option>
+                  ))}
+              </select>
+            </label>
           </div>
           <DialogFooter className="m-0 shrink-0 border-t border-border/50 bg-muted/10 px-6 py-4">
             <Button
@@ -317,7 +425,7 @@ export function AutomationsSection() {
               onClick={() => void create()}
             >
               {saving ? <Loader2 className="mr-1 size-3.5 animate-spin" /> : null}
-              {t("settings:automations.create")}
+              {editing ? t("common:save") : t("settings:automations.create")}
             </Button>
           </DialogFooter>
         </DialogContent>

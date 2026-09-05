@@ -132,7 +132,12 @@ fn classify_bash(command: &str) -> NativeToolRisk {
         };
     }
     let segments = split_shell_segments(command);
-    let mut worst: Option<(NativeToolRiskKind, String)> = None;
+    let mut worst = has_output_redirect(command).then(|| {
+        (
+            NativeToolRiskKind::Overwrite,
+            format!("Shell 输出重定向：{command}"),
+        )
+    });
     let mut previous_first: Option<String> = None;
     for segment in &segments {
         if is_opaque_shell(segment) {
@@ -199,13 +204,27 @@ fn risk_rank(kind: NativeToolRiskKind) -> u8 {
 }
 
 fn is_opaque_shell(command: &str) -> bool {
-    command.contains("$(")
-        || command.contains("${")
+    command.contains('$')
         || command.contains('`')
+        || command.contains('\\')
         || command.contains("<<")
+        || command.contains(['(', ')', '{', '}'])
         || tokenize(command)
             .first()
             .is_some_and(|token| token.starts_with('$'))
+}
+
+fn has_output_redirect(command: &str) -> bool {
+    let mut quote = None;
+    for ch in command.chars() {
+        match (quote, ch) {
+            (None, '\'' | '"') => quote = Some(ch),
+            (Some(current), value) if current == value => quote = None,
+            (None, '>') => return true,
+            _ => {}
+        }
+    }
+    false
 }
 
 fn classify_tokens(tokens: &[String], original: &str) -> Option<(NativeToolRiskKind, String)> {
@@ -265,6 +284,12 @@ fn classify_tokens(tokens: &[String], original: &str) -> Option<(NativeToolRiskK
     if matches!(first, "rm" | "rmdir") {
         return Some((NativeToolRiskKind::Delete, format!("删除：{original}")));
     }
+    if matches!(first, "cp" | "mv" | "install" | "tee" | "truncate") {
+        return Some((
+            NativeToolRiskKind::Overwrite,
+            format!("可能覆盖文件：{original}"),
+        ));
+    }
     if first == "git" {
         let sub = git_subcommand(&tokens);
         if sub == "rm" {
@@ -310,18 +335,45 @@ fn classify_tokens(tokens: &[String], original: &str) -> Option<(NativeToolRiskK
                 format!("丢弃改动：{original}"),
             ));
         }
-        if sub == "restore"
-            && tokens
-                .iter()
-                .any(|token| token == "--worktree" || token == "--source" || token == "--")
-        {
+        if sub == "restore" {
             return Some((
                 NativeToolRiskKind::ForceGit,
                 format!("git restore：{original}"),
             ));
         }
     }
-    None
+    if is_known_read_command(&tokens) {
+        None
+    } else {
+        Some((
+            NativeToolRiskKind::Opaque,
+            format!("未验证的命令：{original}"),
+        ))
+    }
+}
+
+fn is_known_read_command(tokens: &[String]) -> bool {
+    let Some(first) = tokens.first().map(String::as_str) else {
+        return false;
+    };
+    // 只给可审计的命令子集默认放行，脚本、构建工具和任意可执行文件需显式授权。
+    match first {
+        "echo" | "printf" | "pwd" | "ls" | "cat" | "head" | "tail" | "wc" | "whoami" | "id"
+        | "uname" | "true" | "false" | "cd" | "basename" | "dirname" | "readlink" => true,
+        "git" => {
+            matches!(
+                tokens.get(1).map(String::as_str),
+                Some("status" | "diff" | "log" | "show" | "ls-files" | "rev-parse")
+            ) && !tokens.iter().skip(2).any(|token| {
+                token == "-c"
+                    || token.starts_with("--output")
+                    || token.starts_with("--ext-diff")
+                    || token.starts_with("--textconv")
+                    || token.starts_with("--exec-path")
+            })
+        }
+        _ => false,
+    }
 }
 
 fn unwrap_tokens(tokens: &[String]) -> Vec<String> {
@@ -1163,6 +1215,41 @@ mod tests {
             classify_native_tool_risk("Bash", r#"{"command":"git status"}"#, None, false),
             NativeToolRisk::Low
         );
+    }
+
+    #[test]
+    fn bash_unknown_commands_and_overwrites_are_not_low_risk() {
+        for command in [
+            "git restore .",
+            "git restore file.txt",
+            "printf replacement > existing.txt",
+            "echo replacement>>existing.txt",
+            "cp a b",
+            "mv a b",
+            "./custom-script",
+            "npm test",
+            "python script.py",
+            "sed -i '' s/a/b/ file",
+            "git diff --output=result",
+            "git -c core.fsmonitor=./script status",
+            "/tmp/ls",
+            "rg --pre ./script x",
+        ] {
+            assert!(
+                matches!(classify_bash(command), NativeToolRisk::High { .. }),
+                "{command}"
+            );
+        }
+        for command in [
+            "echo hello",
+            "printf hello",
+            "git status --short",
+            "git diff --stat",
+            "ls -la",
+            "pwd && cat README.md",
+        ] {
+            assert_eq!(classify_bash(command), NativeToolRisk::Low, "{command}");
+        }
     }
 
     #[test]

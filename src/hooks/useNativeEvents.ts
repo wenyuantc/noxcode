@@ -11,6 +11,8 @@ import {
   onNativeStdout,
   onNativeTextDelta,
   onNativeTurnState,
+  onNativeBackgroundTasks,
+  onNativeRequestResolved,
 } from "@/lib/backend";
 import { useSessionStore } from "@/stores/sessionStore";
 import { useWorkspaceStore } from "@/stores/workspaceStore";
@@ -35,6 +37,10 @@ export function useNativeEvents() {
       }),
     );
     track(onNativeStdout((output) => useSessionStore.getState().onStdout(output)));
+    track(
+      onNativeBackgroundTasks((payload) => useSessionStore.getState().onBackgroundTasks(payload)),
+    );
+    track(onNativeRequestResolved((payload) => useSessionStore.getState().resolveRequest(payload)));
     track(onNativeTextDelta((delta) => useSessionStore.getState().onDelta(delta)));
     track(onNativeContextUsage((usage) => useSessionStore.getState().onUsage(usage)));
     track(

@@ -644,6 +644,7 @@ pub struct StartNativeSessionInput {
     pub resume_session_id: Option<String>,
     pub image_paths: Option<Vec<String>>,
     pub plan_mode: Option<bool>,
+    pub permission_mode: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -652,6 +653,17 @@ pub struct AgentSessionStarted {
     pub workspace_id: String,
     pub session_kind: String,
     pub session_record_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime: Option<NativeSessionRuntime>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NativeSessionRuntime {
+    pub ai_channel_id: String,
+    pub model: String,
+    pub reasoning_effort: Option<String>,
+    pub permission_mode: String,
+    pub plan_mode: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

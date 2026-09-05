@@ -20,14 +20,14 @@ P4 把进程内编程 Agent 接到渠道 + 工作区外壳。数据流仍是 `Re
 
 1. 同一工作区可以同时有多个 live session。`agent_sessions` 是可多次激活的逻辑会话：`resume` / `restart` / 会话内继续发送都复用同一 `session_record_id`，不为已有会话插入新行。删除工作区仍要求该工作区没有 live。
 2. 解析工作区执行上下文（本地目录或 SSH 远端路径）。
-3. 读取渠道，允许本次覆盖 model / effort / system_prompt。
+3. 读取渠道，允许本次覆盖 model / effort / system_prompt / permission_mode。`AgentSessionStarted.runtime` 返回实际生效的渠道、模型、强度、权限与计划模式；live 续聊拒绝静默忽略配置变化。前端工作中锁定配置，空闲修改时先等待旧 runtime 正常结束，再从同一 transcript 恢复。
 4. 建 `ModelClient`（渠道密钥 + 网络设置 + SQLite call log）。
 5. 无 `resume_session_id` 时插入 `agent_sessions`（`status=running`），并写出一次启动状态（渠道 banner / 权限说明 / MCP 状态）。有 `resume_session_id` 时：runtime 仍在则把 prompt 投到同一 live 的 `followup_tx`；runtime 已不在则校验工作区后原位重激活（刷新 `started_at` / 渠道 / 执行上下文，清空 `ended_at` / `exit_code`，保留 ID、标题、置顶、`created_at`、累计 token、旧事件和 checkpoint），并静默从同一 ID 的 transcript 恢复。冷启动不把「续聊 / 已恢复」或重复启动状态写进聊天；MCP 连接失败仍写出。发出 `native-session`。
 6. 组装系统提示：identity → 子 Agent 策略 → 环境 → Git → 全局模板 → `AGENTS.md` / `CLAUDE.md` → skills。
 7. 若工作区是 git 仓：`create_checkpoint(kind=session_start)`，失败只打日志。
 8. `auto_checkpoint_after_tool_call=true` 时，`Write` / `Edit` / `ApplyPatch` 成功后异步 `create_checkpoint(kind=after_tool_call)`，同一会话同时只允许一个在途打点；关闭开关不影响会话开始或回滚前检查点。
 9. 按当前 `workspace_id` 筛选并连接 `enabled=true` 且 `scope=all` 或命中 `scope=workspaces` / `workspace_ids` 的 MCP server。
-10. `run_native_loop` 转发 stdout / delta / context usage / 权限 / 计划提问 / 计划模式变化；退出时写 tokens、status、`native-exit`，并从 manager 移除。主窗口未聚焦且 `desktop_notifications=true` 时，会话结束 / 失败、权限确认和计划问题会发桌面通知。托盘 / 进程退出走 `shutdown_all_sessions`：拒绝待确认、cancel、`Finish`、await join，再关 SSH pool。
+10. `run_native_loop` 转发 stdout / delta / context usage / 权限 / 计划提问 / 计划模式变化；退出时写 tokens、status、`native-exit`，并从 manager 移除。主窗口未聚焦且 `desktop_notifications=true` 时，会话结束 / 失败、权限确认和计划问题会发桌面通知。托盘 / 进程退出走 `shutdown_all_sessions`：拒绝待确认，工作中任务 cancel，空闲任务正常 `Finish`，有限等待 join，再关 SSH pool。
 
 `session_kind` 只有 `execution` 与 `plan`。`plan_mode=true` 时先只读规划；未显式提交 `ExitPlanMode` 时本轮结束后自动放开写工具并继续实施，显式提交后则按用户批准结果决定。计划模式由启动参数决定，不写入 `native-settings.json`。运行中 `EnterPlanMode` / `ExitPlanMode` 会实际切换 runner 的共享状态，并发送 `native-plan-mode`；`ExitPlanMode` 只有在用户批准后才发送 `false`，等待审批或退回计划时保持 `true`。子 Agent 的切换不会广播到父会话。
 
@@ -43,6 +43,8 @@ P4 把进程内编程 Agent 接到渠道 + 工作区外壳。数据流仍是 `Re
 - 命令：`get/update/add/delete_native_permission_rules`；设置页「权限规则」可增删规则。
 
 `send_native_input` / `finish_native_input` 按 `session_record_id` 寻址。`resume_native_session` 若源会话仍在跑，则向同一 live 投递输入；进程不在则原位静默恢复 transcript。同一会话继续发送不是单独的「续聊」产品流程。手动停止写「收到停止请求」，`已取消` 不算失败、不写 `[ERROR] 已取消`。
+
+`finish_native_input` 只正常结束空闲且无排队输入的会话，保留自动记忆抽取机会，并等待资源释放；结束期间拒绝追加输入与配置重启。前端空闲时提供「结束会话」，`/fork` 会先正常结束再载入分叉历史。工作中可追加 steer，队列满立即报错。权限、提问和计划审批按会话与请求 ID 隔离，IPC 成功后才移除请求，失败保留重试；历史计划不附着新请求的审批按钮。后台会话启动不改变当前选中会话。
 
 ## 上下文持久化
 
@@ -68,6 +70,8 @@ P4 把进程内编程 Agent 接到渠道 + 工作区外壳。数据流仍是 `Re
 - `Edit` 匹配策略链：exact → quote_normalized → line_number_prefix_stripped → escape_normalized → unicode_escape_normalized → indentation_flexible → line_trimmed → block_anchor，结果里注明命中策略；CRLF 文件保持 CRLF。本地 Write / Edit 会校验文件自上次 Read 后未被修改，否则要求重新 Read；文件不存在时给出同目录相近文件名提示。
 - `Read` 支持 png / jpg / gif / webp：图片作为紧随工具结果的用户消息附件交给模型。
 - `Bash`：会话开始时导出一次 login shell 快照（函数 / 别名 / shell 选项 / PATH）到 `$APPCONFIG/shell-snapshots/`，之后每次只 `source` 快照再 `eval` 命令；导出失败或关闭 `shell_snapshot_enabled` 时回退 `bash -lc`。`Grep` 在 `rg_sidecar_enabled` 且找到打包的 `tools/rg` 或 PATH 上的 `rg` 时用 ripgrep，否则用 Rust 正则遍历。
+- 未验证 Shell 命令默认需要授权；重定向覆盖、`cp/mv`、所有 `git restore` 均进入风险判断。本地 Bash 同时排空两路输出并限内存，超时或取消时终止独立进程组；SSH Bash 透传 deadline / cancel 并发送终止信号、关闭通道。超出硬上限的输出仅保留尾部，不能从 artifact 恢复被丢弃前缀。
+- 本地文件工具按真实路径及最近存在父目录检查边界，额外读写根保持各自权限，递归搜索不跟随符号链接；SSH 文件工具拒绝符号链接路径。SSH Write 支持防覆盖创建新文件，覆盖旧文件仍要求 Read 与内容指纹匹配。这些边界不等同于操作系统级 Shell 沙箱。
 - `WebFetch` 有 15 分钟 / 50 MB 的内存缓存。
 
 ## 钩子
@@ -78,16 +82,19 @@ P4 把进程内编程 Agent 接到渠道 + 工作区外壳。数据流仍是 `Re
 
 来源：设置页的全局钩子（`native-settings.json`）+ 本地工作区的 `.noxcode/hooks.json`（`{ "hooks": [...] }`）与 `.claude/settings.json` / `.claude/settings.local.json` 的 `hooks` 段（`type: prompt` 映射为 `agent`，`matcher` 的 `A|B` 转成工具名列表）。全局先执行，工作区后执行。实现见 [`tools/hooks.rs`](../src-tauri/src/native/tools/hooks.rs) 与 [`hooks_config.rs`](../src-tauri/src/native/hooks_config.rs)。
 
+工作区及工作区插件贡献的钩子必须先通过 `WorkspaceHooks` 显式批准本次会话，拒绝、超时或取消均不执行。该信任请求不受 yolo、权限规则或其他自动批准钩子绕过，也不会连带放行其他工具。
+
 ## 子 Agent 档案与后台任务
 
 - `.md` 档案：`<workspace>/.noxcode/agents/*.md`、`.claude/agents/*.md`、`$APPCONFIG/agents/*.md`。frontmatter：`name`（必填）、`description`、`tools`（逗号或数组；空 / `*` = 全部）、`disallowedTools`、`permissionMode`、`maxTurns`、`skills`（只对子 Agent 开放的技能名）、`injectAgentsMd`；正文即系统提示。与设置页 json 同名时 json 优先；档案 `source = file`，设置页只展示不可编辑。解析见 [`subagents.rs`](../src-tauri/src/native/subagents.rs) `parse_subagent_markdown`。
 - 后台任务：`Agent(run_in_background=true)` 立即返回 `task_id`，子 Agent 在独立 tokio 任务里运行（自己的 CancelFlag，父取消会级联）。父 Agent 用 `TaskOutput(task_id, wait, timeout_ms)` 读取 / 等待、`TaskStop` 取消、`SendMessage` 追加指令（进子 Agent 的 steer 通道）；子 Agent 用 `RespondToCoordinator` 留言。完成与留言在父 Agent 下一次模型调用前以 `[后台任务提醒]` 注入。注册表见 [`agent/background.rs`](../src-tauri/src/native/agent/background.rs)；会话结束时停掉全部后台任务。
+- Agent 特殊调度与普通工具共用权限、只读检查及 Hook 前后置入口；前台和后台跨批共享同一并发许可。后台状态包含 queued / running / done / failed / stopped，消息在模型调用边界和最终返回前消费，队列满或任务已关闭立即报错。前端可查看任务、发送消息与停止任务，使用 `list_native_background_tasks`、`send_native_background_message`、`stop_native_background_task`。
 
 ## 自动化、目标与跨会话上下文
 
 - Cron 自动化（[`scheduler.rs`](../src-tauri/src/native/scheduler.rs)）：五段 cron + `@hourly/@daily/@weekly/@monthly`，本地时区算 `next_run_at`；调度器每 30 秒扫描，工作区有会话在工作中则推迟 1 分钟，到期时用 `start_native_with_manager` 启动新会话（提示词前缀 `[自动化 名称]`）。工具 `CronCreate`（需确认，`kind = automation`）/ `CronList` / `CronDelete`；命令 `list/create/update/delete_native_automations`、`run_native_automation_now`；设置页「自动化」。
 - 目标（[`goals.rs`](../src-tauri/src/native/goals.rs)）：`Goal(action=set|update|complete|clear, title, checklist, note)` 维护会话的当前目标与进度清单，`GoalRead` 读取；每次变更写 `[GOAL] {json}` 行，前端渲染为 `GoalRow`。
-- `ReadSessionContext`：不带 `session_id` 列出同工作区最近会话（标题、时间、轮数、最后回复摘录）；带 `session_id` 返回该会话最近的用户 / 助手对话摘录。
+- `ReadSessionContext`：不带 `session_id` 列出同工作区最近会话（标题、时间、轮数、最后回复摘录）；带 `session_id` 仍校验工作区归属，再返回最近的用户 / 助手对话摘录。
 - `/fork [checkpoint_id]` → `fork_native_session`：把已结束会话的 transcript 复制到一条新的会话记录（标题加「（分叉）」，`resume_session_id` 指向源会话），可选先回滚到某个 Git 检查点；新会话可直接续聊。
 - 以上工具通过 `ToolCtx.session_scope`（数据库池、工作区、渠道、模型）访问数据库，只对主 Agent 可见（`ReadSessionContext` 子 Agent 也可用）。
 
@@ -97,7 +104,7 @@ P4 把进程内编程 Agent 接到渠道 + 工作区外壳。数据流仍是 `Re
 
 - 注入：系统提示的「# 记忆（MEMORY.md）」块（索引 + 维护约定），记忆目录加入 `extra_write_roots`，模型可直接 Read / Write / Edit 记忆文件。
 - recall：每个用户回合按关键词（ASCII 词 + CJK 双字，名称 ×3 / 描述 ×2 / 正文 ×1）取前 3 条，以「[记忆回忆]」附在用户消息末尾（不进事件流）。
-- extract：会话结束（非取消、至少一问一答）后用轻量模型抽取候选，去重后落盘，事件流写 `[记忆] 已保存 N 条记忆`。
+- extract：会话正常结束（非取消、至少一问一答）后用轻量模型抽取候选，去重后落盘，事件流写 `[记忆] 已保存 N 条记忆`。结束时抽取和 dream 合计最多等待 20 秒，不无限阻塞退出。
 - dream：每 `memory_dream_interval` 次抽取（默认 10，0 = 从不）或设置页「立即整理」时，把全部记忆交给模型合并 / 去重 / 重写。
 - 命令：`list_native_memories`、`save_native_memory`、`delete_native_memory`、`open_native_memory_dir`、`dream_native_memory`。
 - `/init`：Composer 展开为「摸底仓库并生成 / 补充 AGENTS.md」的提示词，走普通 Agent 回合。
@@ -143,6 +150,8 @@ P4 把进程内编程 Agent 接到渠道 + 工作区外壳。数据流仍是 `Re
 | 事件 | 载荷 |
 | --- | --- |
 | `native-session` | `AgentSessionStarted` |
+| `native-request-resolved` | `session_record_id` + `request_id` + `kind(permission/question/plan_approval)`，仅清除对应请求。 |
+| `native-background-tasks` | `session_record_id` + `tasks`，后台任务完整快照。 |
 | `native-stdout` | `AgentSessionOutput`（已写入 `agent_session_events`）。工具 start/result 带可选 `tool`（`call_id` / `name` / `title` / `ok` / `duration_ms` 等）和 live-only `images`；落库 `message` 为 `{"nox":1,"line":"...","tool":{...}}` 信封，旧纯文本行仍可回放。 |
 | `native-text-delta` | `NativeTextDelta`（仅展示，不落库） |
 | `native-context-usage` | `NativeContextUsage`（`used` = 工具 schema + 消息；分类字段 + 上次调用 `prompt_tokens` / `cached_tokens`；仅父 Agent；同时写入 `agent_sessions.context_usage_json`） |

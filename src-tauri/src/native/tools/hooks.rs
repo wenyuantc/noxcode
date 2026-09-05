@@ -263,19 +263,12 @@ async fn run_command_handler(
             crate::app::ssh::shell::shell_escape_single_quoted(payload),
             hook.command
         );
-        match tokio::time::timeout(
+        ssh.bash_status_controlled(
+            &command,
             Duration::from_millis(timeout_ms.max(1) as u64),
-            ssh.bash_with_status(&command),
+            rt.cancel,
         )
         .await
-        {
-            Ok(result) => result,
-            Err(_) => Ok(CommandStatus {
-                exit_code: -1,
-                output: "Bash 超时".to_string(),
-                timed_out: true,
-            }),
-        }
     } else {
         let mut env: Vec<(String, String)> = rt.extra_env.to_vec();
         env.push(("NATIVE_HOOK_PAYLOAD".to_string(), payload.to_string()));

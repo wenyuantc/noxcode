@@ -94,6 +94,14 @@ impl SshCommandStream {
         self.channel.close().await?;
         Ok(())
     }
+
+    pub(crate) async fn terminate(&self) {
+        let _ = tokio::time::timeout(Duration::from_secs(1), async {
+            let _ = self.channel.signal(russh::Sig::KILL).await;
+            let _ = self.channel.close().await;
+        })
+        .await;
+    }
 }
 
 impl SshPool {

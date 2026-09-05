@@ -25,7 +25,8 @@ import { GoalRow } from "./GoalRow";
 import { RetryRow } from "./RetryRow";
 import { AgentStatusRow, McpStatusRow, PermissionStatusRow } from "./SessionStatusRows";
 import { PlanAskCard } from "./PlanAskCard";
-import { PlanRow } from "./PlanRow";
+import { BackgroundTasks } from "./BackgroundTasks";
+import { PendingPlanApproval, PlanRow } from "./PlanRow";
 import { SubagentRow } from "./SubagentRow";
 import { TerminalRow } from "./TerminalRow";
 import { ThinkingRow } from "./ThinkingRow";
@@ -168,7 +169,9 @@ export const EventStream = memo(function EventStream({
   const lines = useSessionStore((state) => state.lines[sessionId]) ?? EMPTY_LINES;
   const stream = useSessionStore((state) => state.stream[sessionId]);
   const turnState = useSessionStore((state) => state.turnState[sessionId]);
-  const planQuestion = useSessionStore((state) => state.planQuestion);
+  const planQuestion = useSessionStore(
+    (state) => Object.values(state.planQuestions[sessionId] ?? {})[0],
+  );
   const hasAsk = planQuestion?.session_record_id === sessionId;
   const items = useMemo(() => groupSessionLines(lines), [lines]);
   const blocks = useMemo(() => buildTurnBlocks(items), [items]);
@@ -365,6 +368,10 @@ export const EventStream = memo(function EventStream({
             {blocks.length === 0 && hasAsk ? <PlanAskCard sessionId={sessionId} /> : null}
           </div>
         )}
+        <div className="mx-auto mt-4 max-w-3xl space-y-4">
+          <PendingPlanApproval sessionId={sessionId} />
+          <BackgroundTasks sessionId={sessionId} />
+        </div>
       </div>
       {showLatest ? (
         <button

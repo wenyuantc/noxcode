@@ -98,8 +98,8 @@ pub type MutationHook = Arc<dyn Fn(&str) + Send + Sync>;
 /// 会话计划模式发生实际变化时通知宿主（Enter/ExitPlanMode）。
 pub type PlanModeChangeHook = Arc<dyn Fn(bool) + Send + Sync>;
 
-/// 已读文件登记：key 是本地解析后的绝对路径或 SSH 侧的原始路径；
-/// value 是读取时的指纹（SSH 无法取到时为 `None`）。
+/// 已读文件登记：key 是本地真实绝对路径或 SSH 侧的归一化绝对路径；
+/// value 是读取时的指纹（SSH 仅比较文件内容）。
 pub type ReadFileRegistry = Arc<Mutex<HashMap<String, Option<FileFingerprint>>>>;
 
 /// 工具执行上下文。`Clone` 得到的副本共享同一份可变状态（已读文件、待办、MCP、
@@ -348,6 +348,22 @@ pub async fn execute_tool(ctx: &ToolCtx, name: &str, arguments: &str) -> Result<
 }
 
 pub async fn execute_tool_call(ctx: &ToolCtx, call: &ToolCall) -> Result<ToolOutput, String> {
+    let prepared = preflight_tool(ctx, call).await?;
+    let result =
+        run_with_contract_timeout(ctx, &prepared.contract, &prepared.name, &prepared.arguments)
+            .await;
+    finalize_tool(ctx, prepared, result).await
+}
+
+pub(crate) struct PreparedTool {
+    pub name: String,
+    pub arguments: String,
+    contract: ToolContract,
+    additional_context: Vec<String>,
+}
+
+/// 特殊调度工具（如 Agent）与普通工具共用执行前后的安全边界。
+pub(crate) async fn preflight_tool(ctx: &ToolCtx, call: &ToolCall) -> Result<PreparedTool, String> {
     let name = call.name.as_str();
     let arguments = call.arguments.as_str();
     if ctx.cancel.is_cancelled() {
@@ -361,7 +377,27 @@ pub async fn execute_tool_call(ctx: &ToolCtx, call: &ToolCall) -> Result<ToolOut
     // 钩子可以改写参数（例如把危险命令替换成安全版本）。
     let arguments: &str = pre.updated_arguments.as_deref().unwrap_or(arguments);
     enforce_permissions(ctx, &contract, name, arguments).await?;
-    let result = run_with_contract_timeout(ctx, &contract, name, arguments).await;
+    if ctx.cancel.is_cancelled() {
+        return Err("已取消".to_string());
+    }
+    if ctx.is_read_only() && !contract.allowed_in_plan_mode {
+        return Err(format!("只读规划模式禁止调用工具 {name}"));
+    }
+    Ok(PreparedTool {
+        name: name.to_string(),
+        arguments: arguments.to_string(),
+        contract,
+        additional_context: pre.additional_context,
+    })
+}
+
+pub(crate) async fn finalize_tool(
+    ctx: &ToolCtx,
+    prepared: PreparedTool,
+    result: Result<ToolOutput, String>,
+) -> Result<ToolOutput, String> {
+    let name = prepared.name.as_str();
+    let arguments = prepared.arguments.as_str();
     match result {
         Ok(mut output) => {
             if matches!(name, "Write" | "Edit" | "ApplyPatch") {
@@ -371,7 +407,7 @@ pub async fn execute_tool_call(ctx: &ToolCtx, call: &ToolCall) -> Result<ToolOut
             }
             let post =
                 run_post_tool_hooks(&ctx.hook_runtime(), name, arguments, &output.text).await;
-            let mut extra_context: Vec<String> = pre.additional_context;
+            let mut extra_context: Vec<String> = prepared.additional_context;
             extra_context.extend(post.additional_context);
             if !extra_context.is_empty() {
                 output.text = format!(
@@ -620,6 +656,18 @@ async fn call_read_session_context(ctx: &ToolCtx, arguments: &str) -> Result<Str
         .filter(|item| !item.is_empty())
     {
         Some(session_id) => {
+            let workspace_id = scope_workspace(scope)?;
+            let permitted: bool = sqlx::query_scalar(
+                "SELECT EXISTS(SELECT 1 FROM agent_sessions WHERE id = $1 AND workspace_id = $2)",
+            )
+            .bind(session_id)
+            .bind(workspace_id)
+            .fetch_one(&scope.pool)
+            .await
+            .map_err(|error| format!("校验会话作用域失败: {error}"))?;
+            if !permitted {
+                return Err("会话不存在或不属于当前工作区".to_string());
+            }
             crate::native::goals::session_digest(&scope.pool, session_id, limit).await
         }
         None => {
@@ -882,11 +930,12 @@ async fn write_target_exists(ctx: &ToolCtx, arguments: &str) -> Option<bool> {
                 .filter(|item| !item.is_empty())
                 .map(ToOwned::to_owned)
         })?;
-    if ctx.ssh.is_some() {
-        return Some(ctx.has_read(&path));
+    if let Some(ssh) = ctx.ssh.as_ref() {
+        // 探测失败按已有文件处理，不能把远程错误当成低风险的新建。
+        return Some(ssh.exists(&path).await.unwrap_or(true));
     }
     ctx.workspace
-        .resolve(&path)
+        .resolve_for_write(&path)
         .ok()
         .map(|resolved| resolved.exists())
 }
@@ -989,7 +1038,12 @@ async fn request_permission(
         result = rx => PermissionWait::Decision(result.unwrap_or(NativePermissionDecision::Deny)),
     };
     let decision = match wait {
-        PermissionWait::Cancelled => NativePermissionDecision::Deny,
+        PermissionWait::Cancelled => {
+            if let Some(expire) = &ctx.expire_permission {
+                let _ = expire(request_id).await;
+            }
+            NativePermissionDecision::Deny
+        }
         PermissionWait::TimedOut => {
             if let Some(expire) = &ctx.expire_permission {
                 let _ = expire(request_id).await;
@@ -1088,7 +1142,10 @@ async fn call_apply_patch(ctx: &ToolCtx, arguments: &str) -> Result<String, Stri
             FileMutation::Write { path, content } => {
                 if let Some(ssh) = ctx.ssh.as_ref() {
                     ssh.write(&path, &content).await?;
-                    ctx.mark_read(path.clone(), None);
+                    ctx.mark_read(
+                        ssh.resolve(&path)?,
+                        Some(FileFingerprint::of_bytes(content.as_bytes())),
+                    );
                 } else {
                     let resolved = resolve_under_workspace(&ctx.workspace.root, &path)?;
                     ctx.workspace.write_file(&path, &content)?;
@@ -1102,7 +1159,7 @@ async fn call_apply_patch(ctx: &ToolCtx, arguments: &str) -> Result<String, Stri
             FileMutation::Delete { path } => {
                 if let Some(ssh) = ctx.ssh.as_ref() {
                     ssh.delete(&path).await?;
-                    ctx.mark_read(path.clone(), None);
+                    ctx.mark_read(ssh.resolve(&path)?, None);
                 } else {
                     let resolved = resolve_under_workspace(&ctx.workspace.root, &path)?;
                     ctx.workspace.delete_file(&path)?;
@@ -1153,7 +1210,10 @@ async fn call_read(ctx: &ToolCtx, arguments: &str) -> Result<ToolOutput, String>
     let limit = args.get("limit").and_then(Value::as_i64);
     if let Some(ssh) = ctx.ssh.as_ref() {
         let raw = ssh.read(&path).await?;
-        ctx.mark_read(path.clone(), None);
+        ctx.mark_read(
+            ssh.resolve(&path)?,
+            Some(FileFingerprint::of_bytes(raw.as_bytes())),
+        );
         return Ok(ToolOutput::text(format_read(&raw, offset, limit)));
     }
     let resolved = ctx.workspace.resolve_for_read(&path)?;
@@ -1216,18 +1276,51 @@ fn ensure_fresh_for_mutation(
     Ok(())
 }
 
+async fn ensure_ssh_fresh_for_mutation(
+    ctx: &ToolCtx,
+    ssh: &SshToolRuntime,
+    path: &str,
+    exists: bool,
+) -> Result<(), String> {
+    let key = ssh.resolve(path)?;
+    if !exists {
+        return ensure_remote_snapshot(ctx, &key, None);
+    }
+    if !ctx.has_read(&key) {
+        return Err("File has not been read yet. Read it first before writing to it.".to_string());
+    }
+    let current = ssh.read(path).await?;
+    ensure_remote_snapshot(ctx, &key, Some(&current))
+}
+
+fn ensure_remote_snapshot(ctx: &ToolCtx, key: &str, current: Option<&str>) -> Result<(), String> {
+    let Some(content) = current else {
+        return Ok(());
+    };
+    if !ctx.has_read(key) {
+        return Err("File has not been read yet. Read it first before writing to it.".to_string());
+    }
+    if ctx
+        .read_fingerprint(key)
+        .is_some_and(|recorded| recorded != FileFingerprint::of_bytes(content.as_bytes()))
+    {
+        return Err("远程文件自上次 Read 后已被修改，请重新 Read 再写入或编辑。".to_string());
+    }
+    Ok(())
+}
+
 async fn call_write(ctx: &ToolCtx, arguments: &str) -> Result<String, String> {
     let args = parse_args(arguments)?;
     let path = string_arg(&args, "file_path")?;
     let content = string_arg(&args, "content")?;
     if let Some(ssh) = ctx.ssh.as_ref() {
-        if !ctx.has_read(&path) {
-            return Err(
-                "File has not been read yet. Read it first before writing to it.".to_string(),
-            );
-        }
-        let output = ssh.write(&path, &content).await?;
-        ctx.mark_read(path, None);
+        let exists = ssh.exists(&path).await?;
+        ensure_ssh_fresh_for_mutation(ctx, ssh, &path, exists).await?;
+        let output = ssh.write_checked(&path, &content, !exists).await?;
+        ctx.mark_read(
+            ssh.resolve(&path)?,
+            Some(FileFingerprint::of_bytes(content.as_bytes())),
+        );
         return Ok(output);
     }
     let resolved = ctx.workspace.resolve_for_write(&path)?;
@@ -1254,12 +1347,14 @@ async fn call_edit(ctx: &ToolCtx, arguments: &str) -> Result<String, String> {
         .and_then(Value::as_bool)
         .unwrap_or(false);
     if let Some(ssh) = ctx.ssh.as_ref() {
-        if !ctx.has_read(&path) {
-            return Err("File has not been read yet. Read it first before editing.".to_string());
-        }
         let original = ssh.read(&path).await?;
+        ensure_remote_snapshot(ctx, &ssh.resolve(&path)?, Some(&original))?;
         let outcome = apply_edit_fuzzy(&original, &old, &new, replace_all)?;
         ssh.write(&path, &outcome.content).await?;
+        ctx.mark_read(
+            ssh.resolve(&path)?,
+            Some(FileFingerprint::of_bytes(outcome.content.as_bytes())),
+        );
         return Ok(edit_summary(&path, outcome.strategy, outcome.replacements));
     }
     let resolved = ctx.workspace.resolve_for_write(&path)?;
@@ -1338,7 +1433,14 @@ async fn call_bash(ctx: &ToolCtx, arguments: &str) -> Result<String, String> {
     let command = string_arg(&args, "command")?;
     let timeout = args.get("timeout").and_then(Value::as_i64);
     if let Some(ssh) = ctx.ssh.as_ref() {
-        return ssh.bash(&command).await;
+        return ssh
+            .bash_controlled(
+                &command,
+                timeout,
+                ctx.workspace.bash_default_timeout,
+                &ctx.cancel,
+            )
+            .await;
     }
     ctx.workspace
         .bash(&command, timeout, &ctx.cancel, &ctx.extra_env)
@@ -1416,6 +1518,132 @@ mod tests {
         Arc::new(|_prompt, tx: oneshot::Sender<NativePermissionDecision>| {
             let _ = tx.send(NativePermissionDecision::Deny);
         })
+    }
+
+    #[tokio::test]
+    async fn cancelling_permission_wait_expires_the_visible_request() {
+        let root = tempfile::tempdir().unwrap();
+        let mut ctx = ctx_for(root.path());
+        let pending = Arc::new(Mutex::new(None));
+        let pending_sink = pending.clone();
+        let cancel = ctx.cancel.clone();
+        ctx.request_permission = Some(Arc::new(move |prompt, reply| {
+            *pending_sink.lock().unwrap() = Some((prompt.request_id, reply));
+            cancel.cancel();
+        }));
+        let expired = Arc::new(Mutex::new(None));
+        let expired_sink = expired.clone();
+        ctx.expire_permission = Some(Arc::new(move |request_id| {
+            let expired = expired_sink.clone();
+            tauri::async_runtime::spawn(async move {
+                *expired.lock().unwrap() = Some(request_id);
+            })
+        }));
+        assert!(execute_tool(&ctx, "Bash", r#"{"command":"cp a b"}"#)
+            .await
+            .is_err());
+        let pending = pending.lock().unwrap();
+        assert_eq!(
+            expired.lock().unwrap().as_ref(),
+            pending.as_ref().map(|item| &item.0)
+        );
+        assert!(pending.is_some());
+    }
+
+    #[tokio::test]
+    async fn shell_redirection_requires_approval_before_overwriting() {
+        let root = tempfile::tempdir().unwrap();
+        fs::write(root.path().join("existing.txt"), "original").unwrap();
+        let mut ctx = ctx_for(root.path());
+        ctx.request_permission = Some(deny_requester());
+        let result = execute_tool(
+            &ctx,
+            "Bash",
+            r#"{"command":"printf replacement > existing.txt"}"#,
+        )
+        .await;
+        assert!(result.unwrap_err().contains("不允许"));
+        assert_eq!(
+            fs::read_to_string(root.path().join("existing.txt")).unwrap(),
+            "original"
+        );
+    }
+
+    #[test]
+    fn remote_new_files_do_not_require_read_but_existing_files_need_fresh_snapshot() {
+        let root = tempfile::tempdir().unwrap();
+        let ctx = ctx_for(root.path());
+        let key = "/remote/new.txt";
+        assert!(ensure_remote_snapshot(&ctx, key, None).is_ok());
+        assert!(ensure_remote_snapshot(&ctx, key, Some("existing"))
+            .unwrap_err()
+            .contains("Read it first"));
+        ctx.mark_read(key, Some(FileFingerprint::of_bytes(b"existing")));
+        assert!(ensure_remote_snapshot(&ctx, key, Some("existing")).is_ok());
+        assert!(ensure_remote_snapshot(&ctx, key, Some("changed"))
+            .unwrap_err()
+            .contains("已被修改"));
+    }
+
+    #[tokio::test]
+    async fn session_context_requires_same_workspace_for_explicit_session_id() {
+        use crate::native::model::types::Message;
+        use crate::native::transcript::{save_transcript, NativeTranscriptMeta};
+        let pool = crate::db::test_support::setup_migrated_pool().await;
+        for (workspace, session) in [("ws-a", "session-a"), ("ws-b", "session-b")] {
+            sqlx::query(
+                "INSERT INTO workspaces (id, name, workspace_type) VALUES ($1, $1, 'local')",
+            )
+            .bind(workspace)
+            .execute(&pool)
+            .await
+            .unwrap();
+            sqlx::query("INSERT INTO agent_sessions (id, workspace_id, title, status) VALUES ($1, $2, 'test', 'exited')")
+                .bind(session).bind(workspace).execute(&pool).await.unwrap();
+            save_transcript(
+                &pool,
+                session,
+                &[Message::user(format!("private-{workspace}"))],
+                &NativeTranscriptMeta {
+                    profile_id: None,
+                    workspace_id: Some(workspace.to_string()),
+                    model: "test".to_string(),
+                    turns: 1,
+                },
+            )
+            .await
+            .unwrap();
+        }
+        let root = tempfile::tempdir().unwrap();
+        let mut ctx = ctx_for(root.path());
+        ctx.session_scope = Some(SessionScope {
+            pool,
+            workspace_id: Some("ws-a".to_string()),
+            channel_id: "test".to_string(),
+            model: "test".to_string(),
+            on_goal: None,
+        });
+        let allowed = execute_tool(&ctx, "ReadSessionContext", r#"{"session_id":"session-a"}"#)
+            .await
+            .unwrap();
+        assert!(allowed.contains("private-ws-a"));
+        for session in ["session-b", "missing"] {
+            let error = execute_tool(
+                &ctx,
+                "ReadSessionContext",
+                &serde_json::json!({"session_id":session}).to_string(),
+            )
+            .await
+            .unwrap_err();
+            assert_eq!(error, "会话不存在或不属于当前工作区");
+        }
+        ctx.session_scope.as_mut().unwrap().workspace_id = None;
+        assert!(
+            execute_tool(&ctx, "ReadSessionContext", r#"{"session_id":"session-a"}"#)
+                .await
+                .unwrap_err()
+                .contains("没有绑定工作区")
+        );
     }
 
     #[tokio::test]
@@ -1900,7 +2128,7 @@ mod tests {
         execute_tool(&twin, "Read", r#"{"file_path":"a.txt"}"#)
             .await
             .expect("read");
-        assert!(ctx.has_read(&root.join("a.txt").to_string_lossy()));
+        assert!(ctx.has_read(&ctx.workspace.resolve("a.txt").unwrap().to_string_lossy()));
         execute_tool(
             &twin,
             "TodoWrite",
@@ -1911,7 +2139,7 @@ mod tests {
         assert_eq!(ctx.todos_snapshot().len(), 1);
         let child = ctx.fork_for_child();
         assert!(child.todos_snapshot().is_empty());
-        assert!(!child.has_read(&root.join("a.txt").to_string_lossy()));
+        assert!(!child.has_read(&ctx.workspace.resolve("a.txt").unwrap().to_string_lossy()));
         let _ = std::fs::remove_dir_all(root);
     }
 }

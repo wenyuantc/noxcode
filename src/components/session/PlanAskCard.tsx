@@ -4,6 +4,7 @@ import { useTranslation } from "react-i18next";
 
 import { Input } from "@/components/ui/input";
 import { answerNativePlanQuestion } from "@/lib/backend";
+import { resolveSessionRequest } from "@/lib/nativeRequestResolution";
 import { PLAN_QUESTION_OTHER, resolvePlanQuestionAnswer } from "@/lib/nativePlanQuestion";
 import { cn } from "@/lib/utils";
 import { useSessionStore } from "@/stores/sessionStore";
@@ -11,8 +12,11 @@ import { PlanPillButton } from "./PlanRow";
 
 export function PlanAskCard({ sessionId }: { sessionId: string }) {
   const { t } = useTranslation("sessions");
-  const pending = useSessionStore((state) => state.planQuestion);
-  const setPlanQuestion = useSessionStore((state) => state.setPlanQuestion);
+  const pending = useSessionStore(
+    (state) => Object.values(state.planQuestions[sessionId] ?? {})[0],
+  );
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
   const [selections, setSelections] = useState<string[]>([]);
   const [otherTexts, setOtherTexts] = useState<string[]>([]);
 
@@ -24,6 +28,7 @@ export function PlanAskCard({ sessionId }: { sessionId: string }) {
   useEffect(() => {
     setSelections(Array.from({ length: questionCount }, () => ""));
     setOtherTexts(Array.from({ length: questionCount }, () => ""));
+    setError(null);
   }, [requestId, questionCount]);
 
   if (!active) return null;
@@ -34,15 +39,25 @@ export function PlanAskCard({ sessionId }: { sessionId: string }) {
   const numbered = active.questions.length > 1;
   const canSubmit = answers.every((item) => item);
 
-  const submit = (skipped: boolean) => {
+  const submit = async (skipped: boolean) => {
+    if (busy) return;
     const current = active;
-    setPlanQuestion(null);
-    void answerNativePlanQuestion(
-      current.session_record_id,
-      current.request_id,
-      skipped,
-      answers.map((item) => item ?? ""),
-    );
+    setBusy(true);
+    setError(null);
+    try {
+      await resolveSessionRequest({ ...current, kind: "question" }, () =>
+        answerNativePlanQuestion(
+          current.session_record_id,
+          current.request_id,
+          skipped,
+          answers.map((item) => item ?? ""),
+        ),
+      );
+    } catch (reason) {
+      setError(String(reason));
+    } finally {
+      setBusy(false);
+    }
   };
 
   return (
@@ -57,6 +72,7 @@ export function PlanAskCard({ sessionId }: { sessionId: string }) {
           className="rounded-md p-1 text-muted-foreground hover:bg-muted hover:text-foreground"
           title={t("planAskClose")}
           aria-label={t("planAskClose")}
+          disabled={busy}
           onClick={() => submit(true)}
         >
           <X className="size-3.5" />
@@ -137,12 +153,23 @@ export function PlanAskCard({ sessionId }: { sessionId: string }) {
       </div>
 
       <div className="mt-4 flex flex-col items-center gap-2">
-        <PlanPillButton disabled={!canSubmit} onClick={() => submit(false)}>
+        {error ? (
+          <p role="alert" className="text-sm text-destructive">
+            {error}
+          </p>
+        ) : null}
+        <PlanPillButton
+          disabled={!canSubmit || busy}
+          onClick={() => {
+            void submit(false);
+          }}
+        >
           {t("planAskSend")}
         </PlanPillButton>
         <button
           type="button"
           className="text-sm text-muted-foreground hover:text-foreground"
+          disabled={busy}
           onClick={() => submit(true)}
         >
           {t("planAskCancel")}

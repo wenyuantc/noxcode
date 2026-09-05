@@ -1,6 +1,6 @@
 import { convertFileSrc, isTauri } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
-import { ArrowUp, Loader2, Square } from "lucide-react";
+import { ArrowUp, Loader2, Square, Check } from "lucide-react";
 import { useEffect, useRef, useState, type ClipboardEvent, type DragEvent } from "react";
 import { useTranslation } from "react-i18next";
 
@@ -17,6 +17,7 @@ import {
   stageComposerImage,
   stageComposerImageFromPath,
   stopNativeSession,
+  sendNativeInput,
 } from "@/lib/backend";
 import {
   appendComposerTrigger,
@@ -47,6 +48,7 @@ import {
 } from "@/lib/composerSlash";
 import { applyComposerPlanMode, resolveComposerPlanMode } from "@/lib/planMode";
 import { submitSessionPrompt } from "@/lib/sessionSubmission";
+import { changeSessionConfiguration, finishIdleSession } from "@/lib/sessionConfiguration";
 import {
   composerThinkingEnabled,
   composerThinkingLevels,
@@ -108,6 +110,9 @@ export function Composer({ compact = false }: { compact?: boolean }) {
   const effort = useUiStore((state) => state.composerThinkingLevel);
   const setEffort = useUiStore((state) => state.setComposerThinkingLevel);
   const selectedSessionId = useSessionStore((state) => state.selectedSessionId);
+  const runtime = useSessionStore((state) =>
+    selectedSessionId ? state.configurationBySession[selectedSessionId] : undefined,
+  );
   const planModeBySession = useSessionStore((state) => state.planModeBySession);
   const composerPlanMode = resolveComposerPlanMode(
     selectedSessionId,
@@ -123,8 +128,9 @@ export function Composer({ compact = false }: { compact?: boolean }) {
   const turnState = useSessionStore((state) =>
     live ? state.turnState[live.session_record_id] : undefined,
   );
-  const channel = channels.find((item) => item.id === channelId);
-  const [model, setModel] = useState(activeModelId ?? "");
+  const effectiveChannelId = runtime?.ai_channel_id ?? channelId;
+  const channel = channels.find((item) => item.id === effectiveChannelId);
+  const model = runtime?.model ?? activeModelId ?? "";
   const [error, setError] = useState<string | null>(null);
   const [files, setFiles] = useState<string[]>([]);
   const [slashItems, setSlashItems] = useState<ComposerSlashItem[]>([]);
@@ -146,13 +152,9 @@ export function Composer({ compact = false }: { compact?: boolean }) {
   const efforts = composerThinkingLevels(selectedModel);
   const resolvedEffort = resolveComposerThinkingLevel(
     efforts,
-    effort,
+    runtime?.reasoning_effort ?? effort,
     selectedModel?.thinking_level,
   );
-
-  useEffect(() => {
-    setModel(activeModelId ?? "");
-  }, [activeModelId]);
 
   useEffect(() => {
     if (sendingRef.current) return;
@@ -270,7 +272,7 @@ export function Composer({ compact = false }: { compact?: boolean }) {
   }, [activeMentionIndex, pickerItems.length]);
 
   const working = Boolean(live) && turnState !== "waiting_input" && turnState !== "ended";
-  const sendBusy = sending || working;
+  const sendBusy = sending;
 
   const skipMessage = (skip: ComposerImageSkip) => {
     if (skip.reason === "size") return t("sessions:imageTooLarge", { name: skip.name });
@@ -398,6 +400,7 @@ export function Composer({ compact = false }: { compact?: boolean }) {
   };
 
   const send = async () => {
+    if (sendingRef.current || sending) return;
     const prompt = draft.trim();
     if (!prompt && attachments.length === 0) {
       setError(t("sessions:emptyPrompt"));
@@ -407,7 +410,26 @@ export function Composer({ compact = false }: { compact?: boolean }) {
       setError(t("sessions:needWorkspace"));
       return;
     }
-    if (!channelId || !model) {
+    if (working && live && !/^\/(?:compact|fork|init)(?:\s|$)/i.test(prompt)) {
+      if (attachments.length) {
+        setError("运行中追加指令暂不支持附件");
+        return;
+      }
+      setSending(true);
+      sendingRef.current = true;
+      setError(null);
+      try {
+        await sendNativeInput(live.session_record_id, prompt);
+        setDraft("");
+      } catch (reason) {
+        setError(String(reason));
+      } finally {
+        setSending(false);
+        sendingRef.current = false;
+      }
+      return;
+    }
+    if (!effectiveChannelId || !model) {
       setError(t("sessions:needChannel"));
       return;
     }
@@ -427,9 +449,10 @@ export function Composer({ compact = false }: { compact?: boolean }) {
       setError(null);
       setSending(true);
       try {
+        await finishIdleSession(selectedSessionId);
         const forked = await forkNativeSession(selectedSessionId, forkMatch[1]);
         await useWorkspaceStore.getState().refreshSessions();
-        useSessionStore.getState().selectSession(forked);
+        await useSessionStore.getState().loadHistory(forked);
         setDraft("");
       } catch (err) {
         setError(err instanceof Error ? err.message : String(err));
@@ -481,16 +504,23 @@ export function Composer({ compact = false }: { compact?: boolean }) {
     if (thinkingOn) setEffort(resolvedEffort);
     try {
       const imagePaths = attachments.map((item) => item.path);
-      await submitSessionPrompt({
+      const started = await submitSessionPrompt({
         sessionId: selectedSessionId,
         workspaceId,
-        channelId,
+        channelId: effectiveChannelId,
         prompt: nextPrompt,
         model: model || null,
         reasoningEffort: thinkingOn ? resolvedEffort || null : null,
         planMode: composerPlanMode,
+        permissionMode: runtime?.permission_mode,
         imagePaths,
       });
+      if (started) {
+        useSessionStore.getState().onStarted(started);
+        if (useSessionStore.getState().selectedSessionId === selectedSessionId)
+          useSessionStore.getState().selectSession(started.session_record_id);
+        await useSessionStore.getState().ensureHistory(started.session_record_id);
+      }
       attachmentsRef.current = [];
       setDraft("");
       setAttachments([]);
@@ -527,13 +557,19 @@ export function Composer({ compact = false }: { compact?: boolean }) {
   const dataTransferHasFiles = (event: DragEvent<HTMLDivElement>) =>
     Array.from(event.dataTransfer.types).includes("Files");
 
-  const togglePlanMode = () => {
-    applyComposerPlanMode({
-      enabled: !composerPlanMode,
-      sessionId: selectedSessionId,
-      setDefault: useUiStore.getState().setComposerPlanMode,
-      setSession: (id, enabled) => useSessionStore.getState().onPlanMode(id, enabled),
-    });
+  const togglePlanMode = async () => {
+    if (working || sending) return;
+    try {
+      await changeSessionConfiguration(selectedSessionId, { plan_mode: !composerPlanMode });
+      applyComposerPlanMode({
+        enabled: !composerPlanMode,
+        sessionId: selectedSessionId,
+        setDefault: useUiStore.getState().setComposerPlanMode,
+        setSession: (id, enabled) => useSessionStore.getState().onPlanMode(id, enabled),
+      });
+    } catch (reason) {
+      setError(String(reason));
+    }
   };
 
   return (
@@ -636,7 +672,7 @@ export function Composer({ compact = false }: { compact?: boolean }) {
             }
             if (action.type === "togglePlanMode") {
               event.preventDefault();
-              togglePlanMode();
+              void togglePlanMode();
               return;
             }
             if (action.type === "send") {
@@ -684,10 +720,19 @@ export function Composer({ compact = false }: { compact?: boolean }) {
             onAddAttachment={() => void pickAttachments()}
             onInsertTrigger={insertTrigger}
           />
-          <PermissionModePicker />
-          <ChannelModelPicker />
+          <PermissionModePicker disabled={working || sending} onError={setError} />
+          <ChannelModelPicker disabled={working || sending} onError={setError} />
           {composerThinkingEnabled(selectedModel) && efforts.length > 0 ? (
-            <ThinkingLevelPicker value={resolvedEffort} levels={efforts} onChange={setEffort} />
+            <ThinkingLevelPicker
+              value={live?.runtime?.reasoning_effort ?? resolvedEffort}
+              levels={efforts}
+              disabled={working || sending}
+              onChange={(value) => {
+                void changeSessionConfiguration(selectedSessionId, { reasoning_effort: value })
+                  .then(() => setEffort(value))
+                  .catch((reason) => setError(String(reason)));
+              }}
+            />
           ) : null}
           <ContextCapacity usage={usage} />
           <span className="flex-1" />
@@ -696,10 +741,31 @@ export function Composer({ compact = false }: { compact?: boolean }) {
               size="sm"
               variant="outline"
               className="h-7 gap-1.5 rounded-lg border-destructive/40 px-2.5 text-xs text-destructive hover:bg-destructive/10"
-              onClick={() => void stopNativeSession(live.session_record_id)}
+              onClick={() =>
+                void stopNativeSession(live.session_record_id).catch((reason) =>
+                  setError(String(reason)),
+                )
+              }
             >
               <Square className="size-3.5" />
               {t("sessions:stop")}
+            </Button>
+          ) : null}
+          {!working && live ? (
+            <Button
+              size="sm"
+              variant="outline"
+              disabled={sending}
+              title="正常结束会话"
+              onClick={() => {
+                setSending(true);
+                void finishIdleSession(live.session_record_id)
+                  .catch((reason) => setError(String(reason)))
+                  .finally(() => setSending(false));
+              }}
+            >
+              <Check className="size-3.5" />
+              结束会话
             </Button>
           ) : null}
           <Button
@@ -713,7 +779,7 @@ export function Composer({ compact = false }: { compact?: boolean }) {
             ) : (
               <ArrowUp className="size-3.5" />
             )}
-            {t("sessions:send")}
+            {working ? "追加指令" : t("sessions:send")}
           </Button>
         </div>
       </div>

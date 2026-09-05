@@ -12,6 +12,10 @@ import type {
   NativePlanApprovalRequest,
   NativePlanQuestionRequest,
   NativeTextDelta,
+  NativeRequestResolved,
+  NativeBackgroundTask,
+  NativeBackgroundTasks,
+  NativeSessionRuntime,
 } from "@/lib/types";
 import { useChannelStore } from "@/stores/channelStore";
 import { useWorkspaceStore } from "@/stores/workspaceStore";
@@ -44,12 +48,15 @@ interface SessionState {
   liveBySession: Record<string, AgentSessionStarted>;
   planModeBySession: Record<string, boolean>;
   lines: Record<string, RawSessionLine[]>;
+  historyLoaded: Record<string, boolean>;
+  configurationBySession: Record<string, NativeSessionRuntime>;
+  backgroundBySession: Record<string, NativeBackgroundTask[]>;
   turnState: Record<string, string>;
   usage: Record<string, NativeContextUsage>;
   stream: Record<string, { kind: string; text: string }>;
-  permission: NativePermissionRequest | null;
-  planQuestion: NativePlanQuestionRequest | null;
-  planApproval: NativePlanApprovalRequest | null;
+  permissions: Record<string, Record<string, NativePermissionRequest>>;
+  planQuestions: Record<string, Record<string, NativePlanQuestionRequest>>;
+  planApprovals: Record<string, Record<string, NativePlanApprovalRequest>>;
   selectSession: (id: string | null) => void;
   ensureHistory: (sessionId: string) => Promise<void>;
   loadHistory: (sessionId: string) => Promise<void>;
@@ -60,22 +67,30 @@ interface SessionState {
   onTurnState: (sessionId: string, state: string) => void;
   onPlanMode: (sessionId: string, planMode: boolean) => void;
   onExit: (exit: AgentSessionExit) => void;
-  setPermission: (request: NativePermissionRequest | null) => void;
-  setPlanQuestion: (request: NativePlanQuestionRequest | null) => void;
-  setPlanApproval: (request: NativePlanApprovalRequest | null) => void;
+  setPermission: (request: NativePermissionRequest) => void;
+  setPlanQuestion: (request: NativePlanQuestionRequest) => void;
+  setPlanApproval: (request: NativePlanApprovalRequest) => void;
+  resolveRequest: (request: NativeRequestResolved) => void;
+  onBackgroundTasks: (payload: NativeBackgroundTasks) => void;
+  setConfiguration: (sessionId: string, runtime: NativeSessionRuntime) => void;
 }
+
+const historyRequests = new Map<string, Promise<void>>();
 
 export const useSessionStore = create<SessionState>((set, get) => ({
   selectedSessionId: null,
   liveBySession: {},
   planModeBySession: {},
   lines: {},
+  historyLoaded: {},
+  configurationBySession: {},
+  backgroundBySession: {},
   turnState: {},
   usage: {},
   stream: {},
-  permission: null,
-  planQuestion: null,
-  planApproval: null,
+  permissions: {},
+  planQuestions: {},
+  planApprovals: {},
   selectSession: (id) => {
     const session = id
       ? useWorkspaceStore.getState().sessions.find((item) => item.id === id)
@@ -96,23 +111,41 @@ export const useSessionStore = create<SessionState>((set, get) => ({
     });
   },
   ensureHistory: async (sessionId) => {
-    if (!get().lines[sessionId]) {
-      const events = await getAgentSessionLogLines(sessionId);
-      if (!get().lines[sessionId]) {
-        set({
-          lines: {
-            ...get().lines,
-            [sessionId]: events.map((event) =>
-              hydrateSessionLine({
-                id: event.id,
-                sessionId,
-                text: event.message ?? "",
-                createdAt: event.created_at,
-              }),
-            ),
-          },
-        });
+    if (!get().historyLoaded[sessionId]) {
+      let request = historyRequests.get(sessionId);
+      if (!request) {
+        request = (async () => {
+          const events = await getAgentSessionLogLines(sessionId);
+          set((state) => {
+            const liveLines = new Map(
+              (state.lines[sessionId] ?? []).map((line) => [line.id, line]),
+            );
+            const history = events.map(
+              (event) =>
+                liveLines.get(event.id) ??
+                hydrateSessionLine({
+                  id: event.id,
+                  sessionId,
+                  text: event.message ?? "",
+                  createdAt: event.created_at,
+                }),
+            );
+            const ids = new Set(history.map((line) => line.id));
+            return {
+              lines: {
+                ...state.lines,
+                [sessionId]: [
+                  ...history,
+                  ...(state.lines[sessionId] ?? []).filter((line) => !ids.has(line.id)),
+                ],
+              },
+              historyLoaded: { ...state.historyLoaded, [sessionId]: true },
+            };
+          });
+        })().finally(() => historyRequests.delete(sessionId));
+        historyRequests.set(sessionId, request);
       }
+      await request;
     }
     hydrateUsage(sessionId);
   },
@@ -134,14 +167,26 @@ export const useSessionStore = create<SessionState>((set, get) => ({
       ? current.planModeBySession
       : { ...current.planModeBySession, [id]: session.session_kind === "plan" };
     set({
-      selectedSessionId: id,
       liveBySession: { ...current.liveBySession, [id]: session },
-      planModeBySession,
-      turnState: { ...current.turnState, [id]: "working" },
+      planModeBySession: session.runtime
+        ? { ...planModeBySession, [id]: session.runtime.plan_mode }
+        : planModeBySession,
+      configurationBySession: session.runtime
+        ? { ...current.configurationBySession, [id]: session.runtime }
+        : current.configurationBySession,
+      backgroundBySession: current.liveBySession[id]
+        ? current.backgroundBySession
+        : { ...current.backgroundBySession, [id]: [] },
+      turnState: {
+        ...current.turnState,
+        [id]: current.liveBySession[id] ? (current.turnState[id] ?? "working") : "working",
+      },
     });
   },
   onStdout: (output) => {
     const current = get().lines[output.session_record_id] ?? [];
+    if (output.session_event_id && current.some((line) => line.id === output.session_event_id))
+      return;
     set({
       lines: {
         ...get().lines,
@@ -182,19 +227,91 @@ export const useSessionStore = create<SessionState>((set, get) => ({
   onPlanMode: (sessionId, planMode) =>
     set({
       planModeBySession: { ...get().planModeBySession, [sessionId]: planMode },
+      configurationBySession: get().configurationBySession[sessionId]
+        ? {
+            ...get().configurationBySession,
+            [sessionId]: { ...get().configurationBySession[sessionId], plan_mode: planMode },
+          }
+        : get().configurationBySession,
     }),
   onExit: (exit) => {
     const liveBySession = { ...get().liveBySession };
     delete liveBySession[exit.session_record_id];
     const stream = { ...get().stream };
     delete stream[exit.session_record_id];
+    const permissions = { ...get().permissions };
+    const planQuestions = { ...get().planQuestions };
+    const planApprovals = { ...get().planApprovals };
+    delete permissions[exit.session_record_id];
+    delete planQuestions[exit.session_record_id];
+    delete planApprovals[exit.session_record_id];
     set({
       liveBySession,
       stream,
+      permissions,
+      planQuestions,
+      planApprovals,
+      backgroundBySession: {
+        ...get().backgroundBySession,
+        [exit.session_record_id]: (get().backgroundBySession[exit.session_record_id] ?? []).map(
+          (task) =>
+            task.status === "running" || task.status === "queued"
+              ? { ...task, status: "stopped" }
+              : task,
+        ),
+      },
       turnState: { ...get().turnState, [exit.session_record_id]: "ended" },
     });
   },
-  setPermission: (permission) => set({ permission }),
-  setPlanQuestion: (planQuestion) => set({ planQuestion }),
-  setPlanApproval: (planApproval) => set({ planApproval }),
+  setPermission: (request) =>
+    set((state) => ({
+      permissions: {
+        ...state.permissions,
+        [request.session_record_id]: {
+          ...state.permissions[request.session_record_id],
+          [request.request_id]: request,
+        },
+      },
+    })),
+  setPlanQuestion: (request) =>
+    set((state) => ({
+      planQuestions: {
+        ...state.planQuestions,
+        [request.session_record_id]: {
+          ...state.planQuestions[request.session_record_id],
+          [request.request_id]: request,
+        },
+      },
+    })),
+  setPlanApproval: (request) =>
+    set((state) => ({
+      planApprovals: {
+        ...state.planApprovals,
+        [request.session_record_id]: {
+          ...state.planApprovals[request.session_record_id],
+          [request.request_id]: request,
+        },
+      },
+    })),
+  resolveRequest: ({ session_record_id: id, request_id: requestId, kind }) =>
+    set((state) => {
+      const key =
+        kind === "permission"
+          ? "permissions"
+          : kind === "question"
+            ? "planQuestions"
+            : "planApprovals";
+      const requests = { ...state[key][id] };
+      delete requests[requestId];
+      return { [key]: { ...state[key], [id]: requests } };
+    }),
+  onBackgroundTasks: ({ session_record_id, tasks }) =>
+    set((state) => ({
+      backgroundBySession: { ...state.backgroundBySession, [session_record_id]: tasks },
+    })),
+  setConfiguration: (sessionId, runtime) =>
+    set((state) => ({
+      configurationBySession: { ...state.configurationBySession, [sessionId]: runtime },
+      planModeBySession: { ...state.planModeBySession, [sessionId]: runtime.plan_mode },
+    })),
 }));

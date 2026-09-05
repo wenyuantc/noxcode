@@ -44,10 +44,12 @@ export function ThinkingLevelPicker({
   value,
   levels,
   onChange,
+  disabled = false,
 }: {
   value: string;
   levels: string[];
   onChange: (level: string) => void;
+  disabled?: boolean;
 }) {
   const { t, i18n } = useTranslation("sessions");
 
@@ -59,7 +61,10 @@ export function ThinkingLevelPicker({
 
   return (
     <DropdownMenu>
-      <DropdownMenuTrigger className="inline-flex h-7 cursor-pointer items-center justify-between gap-1.5 rounded-lg border border-border/70 bg-background/80 px-2 text-xs font-medium text-foreground/90 shadow-2xs transition-all duration-150 outline-none hover:bg-muted/40">
+      <DropdownMenuTrigger
+        disabled={disabled}
+        className="inline-flex h-7 cursor-pointer items-center justify-between gap-1.5 rounded-lg border border-border/70 bg-background/80 px-2 text-xs font-medium text-foreground/90 shadow-2xs transition-all duration-150 outline-none hover:bg-muted/40 disabled:opacity-60"
+      >
         <EffortIcon level={value} />
         <span className="truncate">{titleOf(value)}</span>
         <ChevronDown className="size-3 shrink-0 text-muted-foreground/70" />

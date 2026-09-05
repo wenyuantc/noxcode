@@ -451,6 +451,7 @@ pub async fn run_automation_now(
             resume_session_id: None,
             image_paths: None,
             plan_mode: Some(false),
+            permission_mode: None,
         },
     )
     .await?;

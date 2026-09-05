@@ -1,11 +1,18 @@
+use std::time::Duration;
+
 use tauri::AppHandle;
 
 use crate::app::ssh::exec::{
-    execute_ssh_command, execute_ssh_command_with_input, SshCommandOutput,
+    execute_ssh_command, execute_ssh_command_with_input, spawn_ssh_command, SshCommandOutput,
+    SshCommandStream, SshStreamEvent,
 };
 use crate::app::ssh::shell::shell_escape_single_quoted;
 use crate::db::models::SshConfigRecord;
 
+use super::cancel::CancelFlag;
+use super::local::{
+    bash_timeout, BoundedOutput, CommandStatus, BASH_DEFAULT_TIMEOUT, BASH_OUTPUT_HARD_LIMIT,
+};
 use super::paths::resolve_under_workspace_posix;
 
 #[derive(Clone)]
@@ -16,13 +23,45 @@ pub struct SshToolRuntime {
 }
 
 impl SshToolRuntime {
+    pub fn resolve(&self, path: &str) -> Result<String, String> {
+        resolve_under_workspace_posix(&self.root, path)
+    }
+
+    pub async fn exists(&self, path: &str) -> Result<bool, String> {
+        let command = ssh_exists_command(&self.root, path)?;
+        let output = execute_ssh_command(&self.app, &self.config, &command, true).await?;
+        match output.exit_code {
+            Some(0) => Ok(true),
+            Some(1) => Ok(false),
+            _ => Err(format!("检查远程文件失败: {}", output.stderr_lossy())),
+        }
+    }
+
     pub async fn read(&self, path: &str) -> Result<String, String> {
         let command = ssh_read_command(&self.root, path)?;
-        stdout_or_err(execute_ssh_command(&self.app, &self.config, &command, true).await?)
+        let output = execute_ssh_command(&self.app, &self.config, &command, true).await?;
+        if output.success() {
+            Ok(output.stdout_lossy())
+        } else {
+            stdout_or_err(output)
+        }
     }
 
     pub async fn write(&self, path: &str, content: &str) -> Result<String, String> {
-        let command = ssh_write_command(&self.root, path)?;
+        self.write_checked(path, content, false).await
+    }
+
+    pub async fn write_checked(
+        &self,
+        path: &str,
+        content: &str,
+        create_only: bool,
+    ) -> Result<String, String> {
+        let command = if create_only {
+            ssh_write_command_checked(&self.root, path, true)?
+        } else {
+            ssh_write_command(&self.root, path)?
+        };
         let output = execute_ssh_command_with_input(
             &self.app,
             &self.config,
@@ -48,7 +87,23 @@ impl SshToolRuntime {
     }
 
     pub async fn bash(&self, command: &str) -> Result<String, String> {
-        let status = self.bash_with_status(command).await?;
+        self.bash_controlled(command, None, BASH_DEFAULT_TIMEOUT, &CancelFlag::new())
+            .await
+    }
+
+    pub async fn bash_controlled(
+        &self,
+        command: &str,
+        timeout_ms: Option<i64>,
+        default_timeout: Duration,
+        cancel: &CancelFlag,
+    ) -> Result<String, String> {
+        let status = self
+            .bash_status_controlled(command, bash_timeout(timeout_ms, default_timeout), cancel)
+            .await?;
+        if status.timed_out {
+            return Err("Bash 超时".to_string());
+        }
         if status.exit_code != 0 {
             return Err(if status.output.trim().is_empty() {
                 format!("command failed: {}", status.exit_code)
@@ -63,30 +118,79 @@ impl SshToolRuntime {
         }
     }
 
-    pub async fn bash_with_status(
+    pub async fn bash_status_controlled(
         &self,
         command: &str,
-    ) -> Result<super::local::CommandStatus, String> {
-        let remote = ssh_bash_command(&self.root, command)?;
-        let output = execute_ssh_command(&self.app, &self.config, &remote, true).await?;
-        let mut text = output.stdout_lossy();
-        if !output.stderr.is_empty() {
-            if !text.is_empty() {
-                text.push('\n');
-            }
-            text.push_str(&output.stderr_lossy());
+        timeout: Duration,
+        cancel: &CancelFlag,
+    ) -> Result<CommandStatus, String> {
+        if cancel.is_cancelled() {
+            return Err("已取消".to_string());
         }
-        Ok(super::local::CommandStatus {
-            exit_code: output.exit_code.unwrap_or(-1),
-            output: text,
-            timed_out: false,
-        })
+        let remote = ssh_bash_command(&self.root, command)?;
+        let deadline = tokio::time::Instant::now() + timeout;
+        let stream = tokio::select! {
+            biased;
+            _ = wait_cancel(cancel) => return Err("已取消".to_string()),
+            _ = tokio::time::sleep_until(deadline) => return Ok(timed_out_status()),
+            result = spawn_ssh_command(&self.app, &self.config, &remote, true) => result?,
+        };
+        collect_bash_output(stream, deadline, cancel).await
     }
 
     pub async fn delete(&self, path: &str) -> Result<String, String> {
         let command = ssh_delete_command(&self.root, path)?;
         stdout_or_err(execute_ssh_command(&self.app, &self.config, &command, true).await?)?;
         Ok(format!("Deleted {path}"))
+    }
+}
+
+async fn collect_bash_output(
+    mut stream: SshCommandStream,
+    deadline: tokio::time::Instant,
+    cancel: &CancelFlag,
+) -> Result<CommandStatus, String> {
+    let mut output = BoundedOutput::new(BASH_OUTPUT_HARD_LIMIT);
+    let mut exit_code = -1;
+    loop {
+        let event = tokio::select! {
+            biased;
+            _ = wait_cancel(cancel) => {
+                stream.terminate().await;
+                return Err("已取消".to_string());
+            }
+            _ = tokio::time::sleep_until(deadline) => {
+                stream.terminate().await;
+                return Ok(timed_out_status());
+            }
+            event = stream.next() => event,
+        };
+        match event {
+            Some(SshStreamEvent::Stdout(bytes) | SshStreamEvent::Stderr(bytes)) => {
+                output.push(&bytes)
+            }
+            Some(SshStreamEvent::Exit(code)) => exit_code = code,
+            Some(SshStreamEvent::Closed) | None => break,
+        }
+    }
+    Ok(CommandStatus {
+        exit_code,
+        output: output.into_text(),
+        timed_out: false,
+    })
+}
+
+fn timed_out_status() -> CommandStatus {
+    CommandStatus {
+        exit_code: -1,
+        output: "Bash 超时".to_string(),
+        timed_out: true,
+    }
+}
+
+async fn wait_cancel(cancel: &CancelFlag) {
+    while !cancel.is_cancelled() {
+        tokio::time::sleep(Duration::from_millis(40)).await;
     }
 }
 
@@ -110,10 +214,27 @@ fn stdout_or_err(output: SshCommandOutput) -> Result<String, String> {
 
 pub fn ssh_read_command(root: &str, path: &str) -> Result<String, String> {
     let resolved = resolve_under_workspace_posix(root, path)?;
-    Ok(format!("cat {}", shell_escape_single_quoted(&resolved)))
+    Ok(format!(
+        "{}cat {}",
+        ssh_path_guard(root, &resolved)?,
+        shell_escape_single_quoted(&resolved)
+    ))
 }
 
 pub fn ssh_write_command(root: &str, path: &str) -> Result<String, String> {
+    ssh_write_command_checked(root, path, false)
+}
+
+fn ssh_exists_command(root: &str, path: &str) -> Result<String, String> {
+    let resolved = resolve_under_workspace_posix(root, path)?;
+    Ok(format!(
+        "{}test -e {}",
+        ssh_path_guard(root, &resolved)?,
+        shell_escape_single_quoted(&resolved)
+    ))
+}
+
+fn ssh_write_command_checked(root: &str, path: &str, create_only: bool) -> Result<String, String> {
     let resolved = resolve_under_workspace_posix(root, path)?;
     let parent = resolved
         .rsplit_once('/')
@@ -121,10 +242,35 @@ pub fn ssh_write_command(root: &str, path: &str) -> Result<String, String> {
         .filter(|dir| !dir.is_empty())
         .unwrap_or("/");
     Ok(format!(
-        "mkdir -p {} && cat > {}",
+        "{}mkdir -p {} && {}cat > {}",
+        ssh_path_guard(root, &resolved)?,
         shell_escape_single_quoted(parent),
+        if create_only { "(set -C; " } else { "" },
         shell_escape_single_quoted(&resolved)
-    ))
+    ) + if create_only { ")" } else { "" })
+}
+
+fn ssh_path_guard(root: &str, resolved: &str) -> Result<String, String> {
+    let root = resolve_under_workspace_posix(root, ".")?;
+    let relative = resolved
+        .strip_prefix(&root)
+        .unwrap_or(resolved)
+        .trim_start_matches('/');
+    let mut current = root.trim_end_matches('/').to_string();
+    let mut checks = Vec::new();
+    for part in relative.split('/').filter(|part| !part.is_empty()) {
+        current.push('/');
+        current.push_str(part);
+        checks.push(format!("[ -L {} ]", shell_escape_single_quoted(&current)));
+    }
+    if checks.is_empty() {
+        Ok(String::new())
+    } else {
+        Ok(format!(
+            "if {}; then printf '%s\\n' '路径包含符号链接，拒绝远程文件访问' >&2; exit 73; fi; ",
+            checks.join(" || ")
+        ))
+    }
 }
 
 pub fn ssh_glob_command(root: &str) -> Result<String, String> {
@@ -141,16 +287,23 @@ pub fn ssh_grep_command(root: &str, pattern: &str, path: Option<&str>) -> Result
         None => resolve_under_workspace_posix(root, ".")?,
     };
     Ok(format!(
-        "cd {} && (rg -n --no-heading {} . 2>/dev/null || grep -R -n {} .)",
+        "{}cd {} && (rg -n --no-heading -e {} -- {} 2>/dev/null || grep -r -n -e {} -- {})",
+        ssh_path_guard(root, &target)?,
+        shell_escape_single_quoted(root),
+        shell_escape_single_quoted(pattern),
         shell_escape_single_quoted(&target),
         shell_escape_single_quoted(pattern),
-        shell_escape_single_quoted(pattern)
+        shell_escape_single_quoted(&target)
     ))
 }
 
 pub fn ssh_delete_command(root: &str, path: &str) -> Result<String, String> {
     let resolved = resolve_under_workspace_posix(root, path)?;
-    Ok(format!("rm -f {}", shell_escape_single_quoted(&resolved)))
+    Ok(format!(
+        "{}rm -f {}",
+        ssh_path_guard(root, &resolved)?,
+        shell_escape_single_quoted(&resolved)
+    ))
 }
 
 pub fn ssh_bash_command(root: &str, command: &str) -> Result<String, String> {
@@ -168,6 +321,126 @@ pub fn ssh_bash_command(root: &str, command: &str) -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn remote_write_commands_create_new_files_without_clobbering_existing_files() {
+        use std::process::Stdio;
+        use tokio::io::AsyncWriteExt;
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_string_lossy();
+        for (content, success) in [("first", true), ("second", false)] {
+            let command = ssh_write_command_checked(&root, "nested/new.txt", true).unwrap();
+            let mut child = crate::process_spawn::tokio_command("sh")
+                .arg("-c")
+                .arg(command)
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .unwrap();
+            let mut input = child.stdin.take().unwrap();
+            let _ = input.write_all(content.as_bytes()).await;
+            drop(input);
+            let output = child.wait_with_output().await.unwrap();
+            assert_eq!(output.status.success(), success);
+        }
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("nested/new.txt")).unwrap(),
+            "first"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn remote_file_commands_reject_symlink_paths() {
+        let dir = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::write(outside.path().join("secret"), "secret").unwrap();
+        std::os::unix::fs::symlink(outside.path(), dir.path().join("escape")).unwrap();
+        let root = dir.path().to_string_lossy();
+        for command in [
+            ssh_read_command(&root, "escape/secret").unwrap(),
+            ssh_write_command(&root, "escape/new/nested.txt").unwrap(),
+            ssh_exists_command(&root, "escape/secret").unwrap(),
+            ssh_delete_command(&root, "escape/secret").unwrap(),
+            ssh_grep_command(&root, "secret", Some("escape")).unwrap(),
+        ] {
+            let result = crate::process_spawn::tokio_command("sh")
+                .arg("-c")
+                .arg(command)
+                .output()
+                .await
+                .unwrap();
+            assert_eq!(result.status.code(), Some(73));
+        }
+        assert_eq!(
+            std::fs::read_to_string(outside.path().join("secret")).unwrap(),
+            "secret"
+        );
+        assert!(!outside.path().join("new").exists());
+    }
+
+    #[tokio::test]
+    async fn native_ssh_stream_honors_deadline_and_cancellation() {
+        use crate::app::ssh::client::{AuthMaterial, ConnectParams};
+        use crate::app::ssh::known_hosts::{HostTrustBroker, KnownHostsPolicy};
+        use crate::app::ssh::test_server::{TestServerOpts, TestSshServer};
+        use crate::app::ssh::SshPool;
+        use std::sync::Arc;
+        let server = TestSshServer::start(TestServerOpts::default()).await;
+        let dir = tempfile::tempdir().unwrap();
+        let params = ConnectParams {
+            ssh_config_id: "native-controlled".to_string(),
+            name: "native-controlled".to_string(),
+            host: "127.0.0.1".to_string(),
+            port: server.port,
+            username: "tester".to_string(),
+            auth: AuthMaterial::Password("secret".to_string()),
+            policy: KnownHostsPolicy::Off,
+            known_hosts_path: dir.path().join("known_hosts"),
+            algorithms: None,
+        };
+        let pool = SshPool::new(
+            Arc::new(HostTrustBroker::new(Duration::from_secs(5))),
+            Duration::from_secs(600),
+        );
+        let stream = pool.spawn(&params, "hang").await.unwrap();
+        let started = tokio::time::Instant::now();
+        let status = collect_bash_output(
+            stream,
+            started + Duration::from_millis(50),
+            &CancelFlag::new(),
+        )
+        .await
+        .unwrap();
+        assert!(status.timed_out);
+        assert!(started.elapsed() < Duration::from_secs(1));
+        let stream = pool.spawn(&params, "hang").await.unwrap();
+        let cancel = CancelFlag::new();
+        let other = cancel.clone();
+        let (result, ()) = tokio::join!(
+            collect_bash_output(
+                stream,
+                tokio::time::Instant::now() + Duration::from_secs(10),
+                &cancel
+            ),
+            async move {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+                other.cancel();
+            },
+        );
+        assert_eq!(result.unwrap_err(), "已取消");
+        let stream = pool.spawn(&params, "echo still-connected").await.unwrap();
+        let status = collect_bash_output(
+            stream,
+            tokio::time::Instant::now() + Duration::from_secs(1),
+            &CancelFlag::new(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(status.exit_code, 0);
+        assert_eq!(status.output, "still-connected");
+    }
 
     #[test]
     fn commands_stay_inside_workspace() {

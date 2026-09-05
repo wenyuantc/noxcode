@@ -28,6 +28,7 @@ use crate::native::subagents::{
     NativeSubagent, MODEL_MODE_CHANNEL, TOOL_MODE_ALL,
 };
 use crate::native::tools::contract::ContractRegistry;
+use crate::native::tools::dispatch::{finalize_tool, preflight_tool, PreparedTool};
 use crate::native::tools::hooks::{run_stop_hooks, run_user_prompt_submit_hooks};
 use crate::native::tools::{
     execute_tool_call, read_only_tool_names, tool_contracts, tool_specs, LocalWorkspace,
@@ -125,6 +126,8 @@ pub struct AgentRunner {
     pub max_turns: u32,
     pub max_subagent_turns: u32,
     pub max_concurrent_subagents: u32,
+    /// Initialized on first delegation so callers can configure the public cap before starting.
+    subagent_semaphore: Option<Arc<Semaphore>>,
     pub subagent_policy: String,
     pub context_char_limit: usize,
     /// Shared by the parent rollout and all child agents. A zero limit means
@@ -244,6 +247,7 @@ impl AgentRunner {
             max_subagent_turns: crate::native::settings::DEFAULT_NATIVE_MAX_SUBAGENT_TURNS as u32,
             max_concurrent_subagents: crate::native::agent::subagent::MAX_CONCURRENT_SUBAGENTS
                 as u32,
+            subagent_semaphore: None,
             subagent_policy: crate::native::settings::DEFAULT_NATIVE_SUBAGENT_POLICY.to_string(),
             context_char_limit: DEFAULT_CONTEXT_CHARS,
             rollout_budget: RolloutBudget::shared(DEFAULT_ROLLOUT_TOKEN_BUDGET),
@@ -1082,7 +1086,13 @@ impl AgentRunner {
         self.checkpoint_transcript().await;
         let client = self.observe_child_client(parent, client, spec);
         loop {
+            if self.inject_steer_messages() {
+                self.checkpoint_transcript().await;
+            }
             let mut last_turn = self.prepare_model_call(Some(&client)).await?;
+            if self.pending_steer_finish {
+                last_turn = true;
+            }
             let tools = self.combined_tools();
             let mut tools_now: &[ToolSpec] = if last_turn { &[] } else { &tools };
             let call_budget =
@@ -1130,10 +1140,30 @@ impl AgentRunner {
                 self.budget_exhausted,
             );
             match self.consume_assistant_serial(assistant, last_turn).await? {
-                TurnControl::Stop(text) => return Ok(text),
+                TurnControl::Stop(text) => {
+                    if self.inject_steer_messages() {
+                        self.checkpoint_transcript().await;
+                        continue;
+                    }
+                    if !self.seal_background_messages() {
+                        continue;
+                    }
+                    return Ok(text);
+                }
                 TurnControl::Continue => {}
             }
         }
+    }
+
+    fn seal_background_messages(&self) -> bool {
+        let (Some((registry, task_id)), Some(receiver)) = (&self.ctx.coordinator, &self.steer_rx)
+        else {
+            return true;
+        };
+        let Ok(receiver) = receiver.try_lock() else {
+            return false;
+        };
+        registry.seal_messages_if_empty(task_id, &receiver)
     }
 
     pub async fn run_scripted(
@@ -1639,8 +1669,8 @@ impl AgentRunner {
             }
             self.assign_call_id(&mut call);
             if call.name == "Agent" {
-                self.push_tool_output(&call, ToolOutput::text("子 Agent 不能再委派子 Agent"))
-                    .await;
+                let output = self.reject_nested_agent(&call).await;
+                self.push_tool_output(&call, output).await;
                 continue;
             }
             self.emit_tool_start(&call).await;
@@ -1675,6 +1705,22 @@ impl AgentRunner {
         }
         match execute_tool_call(&self.ctx, call).await {
             Ok(value) => value,
+            Err(error) => ToolOutput::error(error),
+        }
+    }
+
+    async fn reject_nested_agent(&mut self, call: &ToolCall) -> ToolOutput {
+        if let Some(rejection) = self.repeat_guard(call) {
+            return ToolOutput::error(rejection);
+        }
+        match preflight_tool(&self.ctx, call).await {
+            Ok(prepared) => finalize_tool(
+                &self.ctx,
+                prepared,
+                Err("子 Agent 不能再委派子 Agent".to_string()),
+            )
+            .await
+            .unwrap_or_else(ToolOutput::error),
             Err(error) => ToolOutput::error(error),
         }
     }
@@ -1898,38 +1944,63 @@ impl AgentRunner {
     ) -> Result<(), String> {
         if self.depth > 0 {
             for call in calls {
-                self.push_tool_output(call, ToolOutput::text("子 Agent 不能再委派子 Agent"))
-                    .await;
+                let output = self.reject_nested_agent(call).await;
+                self.push_tool_output(call, output).await;
             }
             return Ok(());
         }
         if let Some(reload) = &self.reload_custom_subagents {
             self.custom_subagents = reload();
         }
-        let mut slot: Vec<Option<(ToolCall, String)>> = vec![None; calls.len()];
+        let mut slot: Vec<Option<(ToolCall, ToolOutput)>> = vec![None; calls.len()];
         struct Job {
             call: ToolCall,
             spec: SubagentSpec,
             index: u32,
+            prepared: PreparedTool,
         }
         let mut jobs = Vec::new();
         for (pos, call) in calls.iter().enumerate() {
+            if let Some(rejection) = self.repeat_guard(call) {
+                slot[pos] = Some((call.clone(), ToolOutput::error(rejection)));
+                continue;
+            }
+            let prepared = match preflight_tool(&self.ctx, call).await {
+                Ok(prepared) => prepared,
+                Err(error) => {
+                    slot[pos] = Some((call.clone(), ToolOutput::error(error)));
+                    continue;
+                }
+            };
+            let mut call = call.clone();
+            call.arguments = prepared.arguments.clone();
             match parse_subagent_args_with(&call.arguments, &self.custom_subagents) {
                 Ok(spec) => {
                     self.subagent_seq = self.subagent_seq.saturating_add(1);
                     jobs.push((
                         pos,
                         Job {
-                            call: call.clone(),
+                            call,
                             spec,
                             index: self.subagent_seq,
+                            prepared,
                         },
                     ));
                 }
-                Err(error) => slot[pos] = Some((call.clone(), error)),
+                Err(error) => {
+                    let output = finalize_tool(&self.ctx, prepared, Err(error))
+                        .await
+                        .unwrap_or_else(ToolOutput::error);
+                    slot[pos] = Some((call, output));
+                }
             }
         }
-        let semaphore = Arc::new(Semaphore::new(self.max_concurrent_subagents.max(1) as usize));
+        let semaphore = self
+            .subagent_semaphore
+            .get_or_insert_with(|| {
+                Arc::new(Semaphore::new(self.max_concurrent_subagents.max(1) as usize))
+            })
+            .clone();
         let mut join_set = JoinSet::new();
         let stub = self.subagent_stub.clone();
         let model_turn = self.model_turn.clone();
@@ -1977,7 +2048,7 @@ impl AgentRunner {
                 let run = run_child_job(
                     child,
                     spec.clone(),
-                    None,
+                    permit,
                     stub,
                     custom_override,
                     child_model_loader,
@@ -1986,8 +2057,9 @@ impl AgentRunner {
                 );
                 let cancel_flag = task.cancel.clone();
                 tokio::spawn(async move {
+                    tokio::pin!(run);
                     let outcome = tokio::select! {
-                        result = run => result,
+                        result = &mut run => result,
                         _ = async {
                             loop {
                                 if parent_cancel.is_cancelled() {
@@ -1996,7 +2068,7 @@ impl AgentRunner {
                                 }
                                 tokio::time::sleep(std::time::Duration::from_millis(100)).await;
                             }
-                        } => Err("父会话已取消".to_string()),
+                        } => run.await,
                     };
                     let status = if outcome.is_ok() { "成功" } else { "失败" };
                     Self::send_prefixed_event(
@@ -2006,21 +2078,25 @@ impl AgentRunner {
                     );
                     registry.finish(&task_id, outcome.map(|report| truncate_report(&report)));
                 });
-                slot[pos] = Some((
-                    job.call,
-                    format!(
+                let output = finalize_tool(
+                    &self.ctx,
+                    job.prepared,
+                    Ok(ToolOutput::text(format!(
                         "后台任务已启动：task_id={}（{} / {}）。用 TaskOutput 读取结果、SendMessage 追加指令、TaskStop 停止；任务完成时会收到提醒。",
                         task.id,
                         spec.kind.as_str(),
                         spec.description
-                    ),
-                ));
+                    ))),
+                )
+                .await
+                .unwrap_or_else(ToolOutput::error);
+                slot[pos] = Some((job.call, output));
                 continue;
             }
             let run = run_child_job(
                 child,
                 job.spec.clone(),
-                Some(permit),
+                permit,
                 stub,
                 custom_override,
                 child_model_loader,
@@ -2035,10 +2111,16 @@ impl AgentRunner {
         while let Some(joined) = join_set.join_next().await {
             let (pos, job, outcome) =
                 joined.map_err(|error| format!("子 Agent 任务失败: {error}"))?;
-            let output = match &outcome {
-                Ok(report) => format_subagent_result(&job.spec, Ok(report)),
-                Err(error) => format_subagent_result(&job.spec, Err(error)),
+            let result = match &outcome {
+                Ok(report) => Ok(ToolOutput::text(format_subagent_result(
+                    &job.spec,
+                    Ok(report),
+                ))),
+                Err(error) => Err(format_subagent_result(&job.spec, Err(error))),
             };
+            let output = finalize_tool(&self.ctx, job.prepared, result)
+                .await
+                .unwrap_or_else(ToolOutput::error);
             let status = if outcome.is_ok() { "成功" } else { "失败" };
             self.emit(format!(
                 "{} 结束 {status}",
@@ -2056,8 +2138,7 @@ impl AgentRunner {
         }
         for item in slot.into_iter().flatten() {
             let tag = tags.get(&item.0.id).map(String::as_str);
-            self.push_tool_output_with_tag(&item.0, ToolOutput::text(item.1), tag)
-                .await;
+            self.push_tool_output_with_tag(&item.0, item.1, tag).await;
         }
         Ok(())
     }
@@ -2110,12 +2191,12 @@ impl AgentRunner {
     }
 }
 
-/// 跑一个子 Agent：可选并发许可、测试桩、自定义渠道模型或继承父模型。
+/// 前台和后台任务共用 runner 的并发许可；等待许可与执行过程均响应取消。
 #[allow(clippy::too_many_arguments)]
 fn run_child_job(
     mut child: AgentRunner,
     spec: SubagentSpec,
-    permit: Option<Arc<Semaphore>>,
+    permit: Arc<Semaphore>,
     stub: Option<SubagentStub>,
     custom_override: Option<(String, String)>,
     child_model_loader: Option<ChildModelLoader>,
@@ -2123,51 +2204,71 @@ fn run_child_job(
     model_turn: Option<ModelTurnCfg>,
 ) -> Pin<Box<dyn Future<Output = Result<String, String>> + Send>> {
     Box::pin(async move {
-        let _permit = match permit {
-            Some(semaphore) => Some(
-                semaphore
-                    .acquire_owned()
-                    .await
-                    .map_err(|_| "子 Agent 并发许可已关闭".to_string())?,
-            ),
-            None => None,
+        let cancel = child.ctx.cancel.clone();
+        let _permit = tokio::select! {
+            biased;
+            _ = wait_for_cancel(&cancel) => return Err("已取消".to_string()),
+            permit = permit.acquire_owned() => {
+                permit.map_err(|_| "子 Agent 并发许可已关闭".to_string())?
+            }
         };
-        if let Some(stub) = stub {
-            Ok(stub(&spec))
-        } else if let Some((channel_id, model)) = custom_override {
-            let Some(loader) = child_model_loader else {
-                return Err("子 Agent 需要模型客户端".to_string());
-            };
-            let settings = loader(channel_id, model).await?;
-            child
-                .run_child_with_client(
-                    client_owned.as_ref(),
-                    &settings.client,
-                    &spec.prompt,
-                    &settings.model,
-                    settings.effort.as_deref(),
-                    settings.max_output_tokens,
-                    settings.thinking_enabled,
-                    Some(&spec),
-                )
-                .await
-        } else if let (Some(client), Some(cfg)) = (client_owned.as_ref(), model_turn) {
-            child
-                .run_child_with_client(
-                    Some(client),
-                    client,
-                    &spec.prompt,
-                    &cfg.model,
-                    cfg.effort.as_deref(),
-                    cfg.max_output_tokens,
-                    cfg.thinking_enabled,
-                    Some(&spec),
-                )
-                .await
-        } else {
-            Err("子 Agent 需要模型客户端".to_string())
+        if let Some((registry, task_id)) = &child.ctx.coordinator {
+            registry.mark_running(task_id);
+        }
+        let run = async {
+            if let Some(stub) = stub {
+                Ok(stub(&spec))
+            } else if let Some((channel_id, model)) = custom_override {
+                let Some(loader) = child_model_loader else {
+                    return Err("子 Agent 需要模型客户端".to_string());
+                };
+                let settings = loader(channel_id, model).await?;
+                child
+                    .run_child_with_client(
+                        client_owned.as_ref(),
+                        &settings.client,
+                        &spec.prompt,
+                        &settings.model,
+                        settings.effort.as_deref(),
+                        settings.max_output_tokens,
+                        settings.thinking_enabled,
+                        Some(&spec),
+                    )
+                    .await
+            } else if let (Some(client), Some(cfg)) = (client_owned.as_ref(), model_turn) {
+                child
+                    .run_child_with_client(
+                        Some(client),
+                        client,
+                        &spec.prompt,
+                        &cfg.model,
+                        cfg.effort.as_deref(),
+                        cfg.max_output_tokens,
+                        cfg.thinking_enabled,
+                        Some(&spec),
+                    )
+                    .await
+            } else {
+                Err("子 Agent 需要模型客户端".to_string())
+            }
+        };
+        tokio::pin!(run);
+        tokio::select! {
+            biased;
+            _ = wait_for_cancel(&cancel) => {
+                // 让正在运行的本地 / SSH 工具先观察取消并终止子进程，再中断模型请求。
+                let _ = tokio::time::timeout(std::time::Duration::from_secs(2), &mut run).await;
+                Err("已取消".to_string())
+            },
+            result = &mut run => result,
         }
     })
+}
+
+async fn wait_for_cancel(cancel: &crate::native::tools::CancelFlag) {
+    while !cancel.is_cancelled() {
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
 }
 
 fn last_turn_after_response(
@@ -2566,6 +2667,76 @@ mod tests {
             })
         }));
         snapshots
+    }
+
+    async fn mock_child_model(
+        registry: Arc<BackgroundTaskRegistry>,
+        task_id: String,
+        responses: Vec<(Value, Option<String>)>,
+    ) -> (ModelClient, tokio::task::JoinHandle<Vec<Value>>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind model");
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let mut captured = Vec::new();
+            for (response, steer) in responses {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut bytes = Vec::new();
+                let mut buffer = [0u8; 4096];
+                loop {
+                    let count = stream.read(&mut buffer).await.unwrap();
+                    assert!(count > 0, "incomplete model request");
+                    bytes.extend_from_slice(&buffer[..count]);
+                    let Some(header_end) = bytes.windows(4).position(|part| part == b"\r\n\r\n")
+                    else {
+                        continue;
+                    };
+                    let body_start = header_end + 4;
+                    let headers = String::from_utf8_lossy(&bytes[..header_end]);
+                    let content_length = headers
+                        .lines()
+                        .filter_map(|line| line.split_once(':'))
+                        .find(|(name, _)| name.eq_ignore_ascii_case("content-length"))
+                        .and_then(|(_, length)| length.trim().parse::<usize>().ok())
+                        .expect("content length");
+                    if bytes.len() < body_start + content_length {
+                        continue;
+                    }
+                    captured.push(
+                        serde_json::from_slice::<Value>(
+                            &bytes[body_start..body_start + content_length],
+                        )
+                        .unwrap(),
+                    );
+                    break;
+                }
+                if let Some(steer) = steer {
+                    registry.send_message(&task_id, &steer).await.unwrap();
+                }
+                let body = response.to_string();
+                let header = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                );
+                stream.write_all(header.as_bytes()).await.unwrap();
+                stream.write_all(body.as_bytes()).await.unwrap();
+                stream.shutdown().await.unwrap();
+            }
+            captured
+        });
+        let client = ModelClient::new(crate::native::model::client::ModelClientConfig {
+            protocol: crate::native::protocol::PROTOCOL_OPENAI.to_string(),
+            base_url: format!("http://{address}"),
+            api_key: "test".to_string(),
+            extra_headers: HashMap::new(),
+            retry: crate::native::model::RetryConfig::none(),
+            timeout: Duration::from_secs(5),
+            network: crate::app::network_settings::NetworkSettings::default(),
+        })
+        .unwrap();
+        (client, server)
     }
 
     fn assistant_tool_calls(calls: &[(&str, &str, &str)]) -> Message {
@@ -3819,6 +3990,385 @@ mod tests {
             .expect("run");
         assert_eq!(max.load(Ordering::SeqCst), 1, "cap 1 should not overlap");
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn agent_deny_rule_prevents_delegation() {
+        use crate::native::tools::contract::{PatternSource, PermissionCapability};
+        use crate::native::tools::permission::{PermissionRule, RuleEffect, RuleScope};
+        let (mut runner, root) = temp_runner();
+        runner.subagent_stub = Some(Arc::new(|_| panic!("denied Agent must not start")));
+        runner.ctx.permission_rules.write().unwrap().push(
+            RuleEffect::Deny,
+            PermissionRule {
+                id: "deny-agent".to_string(),
+                capability: PermissionCapability::Subagent,
+                pattern: "*".to_string(),
+                source: PatternSource::ToolName,
+                scope: RuleScope::Workspace,
+                note: String::new(),
+            },
+        );
+        runner
+            .run_scripted(
+                "go",
+                vec![
+                    assistant_tool_call("agent", "Agent", r#"{"prompt":"do it"}"#),
+                    Message::assistant_text("done"),
+                ],
+            )
+            .await
+            .unwrap();
+        assert_eq!(runner.diagnostics_snapshot().subagents_started, 0);
+        assert!(runner.messages.iter().any(|message| {
+            message.role == Role::Tool && message.content.contains("权限规则拒绝")
+        }));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn enter_plan_mode_blocks_agent_in_same_tool_batch() {
+        let (mut runner, root) = temp_runner();
+        runner.subagent_stub = Some(Arc::new(|_| panic!("read-only Agent must not start")));
+        runner
+            .run_scripted(
+                "go",
+                vec![
+                    assistant_tool_calls(&[
+                        ("plan", "EnterPlanMode", "{}"),
+                        ("agent", "Agent", r#"{"prompt":"change files"}"#),
+                    ]),
+                    Message::assistant_text("done"),
+                ],
+            )
+            .await
+            .unwrap();
+        assert!(runner.is_plan_mode());
+        assert_eq!(runner.diagnostics_snapshot().subagents_started, 0);
+        assert!(runner.messages.iter().any(|message| {
+            message.role == Role::Tool && message.content.contains("只读规划模式禁止")
+        }));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn agent_pre_hook_can_deny_or_rewrite_and_post_hook_is_applied() {
+        use crate::db::models::NativeHook;
+        let (mut runner, root) = temp_runner();
+        runner.ctx.hooks = vec![NativeHook::shell(
+            "deny-agent",
+            "pre_tool_use",
+            "Agent",
+            r#"printf '%s' '{"decision":"deny","reason":"blocked delegation"}'"#,
+            5,
+            true,
+        )];
+        runner.subagent_stub = Some(Arc::new(|spec| format!("received:{}", spec.prompt)));
+        runner
+            .run_scripted(
+                "go",
+                vec![
+                    assistant_tool_call("blocked", "Agent", r#"{"prompt":"original"}"#),
+                    Message::assistant_text("done"),
+                ],
+            )
+            .await
+            .unwrap();
+        assert_eq!(runner.diagnostics_snapshot().subagents_started, 0);
+        assert!(runner
+            .messages
+            .iter()
+            .any(|message| message.content.contains("blocked delegation")));
+        runner.ctx.hooks = vec![
+            NativeHook::shell(
+                "rewrite-agent",
+                "pre_tool_use",
+                "Agent",
+                r#"printf '%s' '{"updated_input":{"prompt":"rewritten"},"additional_context":"pre context"}'"#,
+                5,
+                true,
+            ),
+            NativeHook::shell(
+                "post-agent",
+                "post_tool_use",
+                "Agent",
+                r#"printf '%s' '{"additional_context":"post context"}'"#,
+                5,
+                true,
+            ),
+        ];
+        runner
+            .run_scripted(
+                "again",
+                vec![
+                    assistant_tool_call("rewrite", "Agent", r#"{"prompt":"original"}"#),
+                    Message::assistant_text("done"),
+                ],
+            )
+            .await
+            .unwrap();
+        let result = runner
+            .messages
+            .iter()
+            .find(|message| message.tool_call_id == "rewrite")
+            .unwrap();
+        assert!(result.content.contains("received:rewritten"));
+        assert!(result.content.contains("pre context"));
+        assert!(result.content.contains("post context"));
+        runner.ctx.hooks = vec![NativeHook::shell(
+            "failure-agent",
+            "post_tool_use_failure",
+            "Agent",
+            "printf 'failure recorded' > hook-failure.txt",
+            5,
+            true,
+        )];
+        runner
+            .run_scripted(
+                "invalid delegation",
+                vec![
+                    assistant_tool_call("invalid", "Agent", "{}"),
+                    Message::assistant_text("done"),
+                ],
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            fs::read_to_string(root.join("hook-failure.txt")).unwrap(),
+            "failure recorded"
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn foreground_and_background_share_cap_across_batches() {
+        let (mut runner, root) = temp_runner();
+        runner.max_concurrent_subagents = 1;
+        let live = Arc::new(AtomicU32::new(0));
+        let peak = Arc::new(AtomicU32::new(0));
+        let live_stub = live.clone();
+        let peak_stub = peak.clone();
+        runner.subagent_stub = Some(Arc::new(move |spec| {
+            let current = live_stub.fetch_add(1, Ordering::SeqCst) + 1;
+            peak_stub.fetch_max(current, Ordering::SeqCst);
+            std::thread::sleep(Duration::from_millis(100));
+            live_stub.fetch_sub(1, Ordering::SeqCst);
+            spec.description.clone()
+        }));
+        runner
+            .run_scripted(
+                "go",
+                vec![
+                    assistant_tool_call(
+                        "bg1",
+                        "Agent",
+                        r#"{"prompt":"one","run_in_background":true}"#,
+                    ),
+                    assistant_tool_call(
+                        "bg2",
+                        "Agent",
+                        r#"{"prompt":"two","run_in_background":true}"#,
+                    ),
+                    assistant_tool_call("fg", "Agent", r#"{"prompt":"three"}"#),
+                    Message::assistant_text("done"),
+                ],
+            )
+            .await
+            .unwrap();
+        for task in runner.background.list() {
+            let status = runner
+                .background
+                .wait(&task.id, Duration::from_secs(5))
+                .await
+                .unwrap();
+            assert!(matches!(
+                status,
+                super::super::background::TaskStatus::Done(_)
+            ));
+        }
+        assert_eq!(peak.load(Ordering::SeqCst), 1);
+        assert_eq!(live.load(Ordering::SeqCst), 0);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn queued_background_task_can_be_cancelled_without_starting() {
+        let (mut runner, root) = temp_runner();
+        let semaphore = Arc::new(Semaphore::new(1));
+        let held = semaphore.clone().acquire_owned().await.unwrap();
+        runner.subagent_semaphore = Some(semaphore.clone());
+        runner.subagent_stub = Some(Arc::new(|_| panic!("cancelled queued task started")));
+        runner
+            .run_scripted(
+                "go",
+                vec![
+                    assistant_tool_call(
+                        "bg",
+                        "Agent",
+                        r#"{"prompt":"blocked","run_in_background":true}"#,
+                    ),
+                    Message::assistant_text("done"),
+                ],
+            )
+            .await
+            .unwrap();
+        assert_eq!(runner.background.snapshots()[0].status, "queued");
+        assert_eq!(runner.background.stop("task-1"), Some(true));
+        tokio::time::sleep(Duration::from_millis(60)).await;
+        drop(held);
+        tokio::time::sleep(Duration::from_millis(60)).await;
+        assert_eq!(runner.background.snapshots()[0].status, "stopped");
+        assert_eq!(semaphore.available_permits(), 1);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn background_cancellation_terminates_bash_descendants() {
+        use serde_json::json;
+        for cancel_parent in [false, true] {
+            let (mut runner, root) = temp_runner();
+            runner.max_concurrent_subagents = 1;
+            runner.model_turn = Some(ModelTurnCfg {
+                model: "test-model".to_string(),
+                effort: None,
+                max_output_tokens: Some(1024),
+                thinking_enabled: false,
+            });
+            let command = concat!(
+                "sh -c 'printf ready > started.txt; attempt=0; ",
+                "while [ ! -f release.txt ] && [ \"$attempt\" -lt 500 ]; do ",
+                "sleep 0.01; attempt=$((attempt + 1)); done; ",
+                "if [ -f release.txt ]; then printf leaked > leaked.txt; fi' & wait"
+            );
+            let response = json!({"choices":[{"message":{
+                "role":"assistant","content":null,"tool_calls":[{
+                    "id":"bash","type":"function","function":{
+                        "name":"Bash","arguments":json!({"command":command}).to_string()
+                    }
+                }]
+            }}]});
+            let (client, server) = mock_child_model(
+                runner.background.clone(),
+                "task-1".to_string(),
+                vec![(response, None)],
+            )
+            .await;
+            runner
+                .run_agent_batch(
+                    &[ToolCall {
+                        id: "background".to_string(),
+                        name: "Agent".to_string(),
+                        arguments: r#"{"prompt":"run command","run_in_background":true}"#
+                            .to_string(),
+                    }],
+                    Some(&client),
+                )
+                .await
+                .unwrap();
+            tokio::time::timeout(Duration::from_secs(5), async {
+                while !root.join("started.txt").exists() {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .expect("Bash descendant must start before cancellation");
+            assert!(!root.join("leaked.txt").exists());
+            if cancel_parent {
+                runner.cancel();
+            } else {
+                assert_eq!(runner.background.stop("task-1"), Some(true));
+            }
+            let semaphore = runner.subagent_semaphore.as_ref().unwrap();
+            tokio::time::timeout(Duration::from_secs(3), async {
+                while semaphore.available_permits() == 0 {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .expect("cancelled task must release its execution permit");
+            assert_eq!(runner.background.snapshots()[0].status, "stopped");
+            // Only a surviving descendant can observe this signal and write the leak marker.
+            fs::write(root.join("release.txt"), "release").unwrap();
+            tokio::time::sleep(Duration::from_millis(750)).await;
+            assert!(
+                !root.join("leaked.txt").exists(),
+                "Bash descendant kept writing after cancellation (parent={cancel_parent})"
+            );
+            assert_eq!(server.await.unwrap().len(), 1);
+            fs::remove_dir_all(root).unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn child_model_consumes_steer_between_tools_and_before_final_return() {
+        use serde_json::json;
+        let (parent, root) = temp_runner();
+        let spec = parse_subagent_args(r#"{"prompt":"read file"}"#).unwrap();
+        let mut child = parent.spawn_child_runner(&spec, 1);
+        let (task, receiver) = parent.background.register("steer test", "general");
+        child.ctx.coordinator = Some((parent.background.clone(), task.id.clone()));
+        child.steer_rx = Some(Arc::new(Mutex::new(receiver)));
+        parent.background.mark_running(&task.id);
+        let response = |message| json!({"choices":[{"message":message}]});
+        let (client, server) = mock_child_model(
+            parent.background.clone(),
+            task.id.clone(),
+            vec![
+                (
+                    response(json!({"role":"assistant","content":null,"tool_calls":[{
+                        "id":"read","type":"function","function":{
+                            "name":"Read","arguments":"{\"file_path\":\"hello.txt\"}"
+                        }
+                    }]})),
+                    Some("during tools".to_string()),
+                ),
+                (
+                    response(json!({"role":"assistant","content":"initial final"})),
+                    Some("during final".to_string()),
+                ),
+                (
+                    response(json!({"role":"assistant","content":"updated final"})),
+                    None,
+                ),
+            ],
+        )
+        .await;
+        let output = tokio::time::timeout(
+            Duration::from_secs(10),
+            child.run_child_with_client(
+                Some(&client),
+                &client,
+                &spec.prompt,
+                "test-model",
+                None,
+                Some(1024),
+                false,
+                Some(&spec),
+            ),
+        )
+        .await
+        .expect("child must not wait forever")
+        .unwrap();
+        assert_eq!(output, "updated final");
+        let requests = server.await.unwrap();
+        assert_eq!(requests.len(), 3);
+        assert!(requests[1]["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|message| message["content"] == "during tools"));
+        assert!(requests[2]["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|message| message["content"] == "during final"));
+        assert!(parent
+            .background
+            .send_message(&task.id, "late")
+            .await
+            .is_err());
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[tokio::test]
