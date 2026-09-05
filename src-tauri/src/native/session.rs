@@ -25,6 +25,7 @@ use crate::native::agent::r#loop::AgentDiagnosticsSnapshot;
 use crate::native::agent::r#loop::{AgentRunner, NativeEvent, TranscriptCheckpoint};
 use crate::native::api_logs::sqlite_call_log_sink;
 use crate::native::channels::{fetch_channel_record, require_channel_api_key};
+use crate::native::input_queue::{NativeInputQueue, NativeInputQueueSnapshot};
 use crate::native::manager::{
     NativeAgentManager, NativeFollowup, NativeLiveSession, NativeSessionInfo, PendingPermission,
     PendingPlanApproval, PendingPlanQuestion, PermissionRequest, PlanApprovalRequest,
@@ -711,6 +712,10 @@ async fn forward_native_events(
                     break;
                 };
                 match event {
+                    NativeEvent::Flush(reply) => {
+                        deltas.flush();
+                        let _ = reply.send(());
+                    }
                     NativeEvent::Line(line) => {
                         deltas.flush();
                         emit_native_line(
@@ -1320,7 +1325,7 @@ async fn enqueue_live_input(
     session_record_id: &str,
     input: &str,
     image_paths: Option<&[String]>,
-) -> Result<Option<NativeSessionInfo>, String> {
+) -> Result<Option<(NativeSessionInfo, NativeInputQueueSnapshot)>, String> {
     let trimmed = input.trim();
     let loaded = crate::native::images::load_native_images(image_paths);
     crate::native::images::cleanup_staged_loaded_images(&loaded);
@@ -1334,15 +1339,9 @@ async fn enqueue_live_input(
     if session.closing {
         return Err("内置 Agent 正在结束，请稍后重试".to_string());
     }
-    session
-        .followup_tx
-        .try_send(NativeFollowup::input_with_images(
-            trimmed.to_string(),
-            loaded.images,
-        ))
-        .map_err(|error| format!("无法发送输入，队列已满或会话已结束: {error}"))?;
+    let snapshot = session.input_queue.enqueue(trimmed, loaded.images)?;
     session.working.store(true, Ordering::SeqCst);
-    Ok(Some(session.info.clone()))
+    Ok(Some((session.info.clone(), snapshot)))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1597,7 +1596,7 @@ pub(crate) async fn start_native_with_manager(
                 None
             }
         };
-        if let Some(info) = enqueue_live_input(
+        if let Some((info, queue)) = enqueue_live_input(
             manager_state.as_ref(),
             resume_id,
             &payload.prompt,
@@ -1607,6 +1606,7 @@ pub(crate) async fn start_native_with_manager(
         {
             let started = AgentSessionStarted {
                 runtime,
+                input_queue_id: Some(queue.queue_id),
                 profile_id: info.profile_id,
                 workspace_id: info.workspace_id.unwrap_or_else(|| workspace_id.clone()),
                 session_kind: info.session_kind,
@@ -1755,8 +1755,14 @@ pub(crate) async fn start_native_with_manager(
         permission_mode: permission_mode.clone(),
         plan_mode,
     };
+    let input_queue = Arc::new(NativeInputQueue::new(&session_record_id));
+    let queue_app = app.clone();
+    input_queue.set_on_change(Arc::new(move |snapshot| {
+        let _ = queue_app.emit("native-input-queue", snapshot);
+    }));
     let started = AgentSessionStarted {
         runtime: Some(runtime.clone()),
+        input_queue_id: Some(input_queue.id.clone()),
         profile_id: String::new(),
         workspace_id: workspace_id.clone(),
         session_kind: kind.clone(),
@@ -1792,6 +1798,7 @@ pub(crate) async fn start_native_with_manager(
     let image_paths = payload.image_paths.clone();
     let resume_run = payload.resume_session_id.clone();
     let rules_run = permission_rules.clone();
+    let queue_run = input_queue.clone();
     let join = tokio::spawn(async move {
         let _ = loop_ready_rx.await;
         run_native_loop(
@@ -1806,6 +1813,7 @@ pub(crate) async fn start_native_with_manager(
             working_run,
             rules_run,
             followup_rx,
+            queue_run,
             session_spawn,
             profile_spawn,
             workspace_spawn,
@@ -1831,6 +1839,7 @@ pub(crate) async fn start_native_with_manager(
         },
         cancel,
         followup_tx,
+        input_queue,
         join,
         allow_all_high_risk,
         working,
@@ -1887,6 +1896,7 @@ async fn run_native_loop(
     working: Arc<AtomicBool>,
     permission_rules: crate::native::permission_rules::SharedPermissionRules,
     followup_rx: mpsc::Receiver<NativeFollowup>,
+    input_queue: Arc<NativeInputQueue>,
     session_record_id: String,
     profile_id: String,
     workspace_id: String,
@@ -2542,6 +2552,9 @@ async fn run_native_loop(
     let mut plan_pending = plan_mode;
     let await_followups = true;
     while let Some(prompt) = next.take() {
+        if cancel.is_cancelled() {
+            break;
+        }
         emit_turn_state(&app, &session_record_id, &working, "working");
         let images = std::mem::take(&mut pending_images);
         emit_native_output(
@@ -2596,6 +2609,13 @@ async fn run_native_loop(
                 break;
             }
         };
+        // Drain the completed answer before a queued input creates the next UI turn.
+        if let Some(events) = &runner.on_event {
+            let (reply, done) = tokio::sync::oneshot::channel();
+            if events.send(NativeEvent::Flush(reply)).is_ok() {
+                let _ = done.await;
+            }
+        }
         persist_runner_transcript(
             &app,
             &session_record_id,
@@ -2666,7 +2686,15 @@ async fn run_native_loop(
                 emit_turn_state(&app, &session_record_id, &working, "waiting_input");
                 // 等待输入时收到 /compact：立刻压缩、写回 transcript，然后继续等待，不算用户回合。
                 let followup = loop {
-                    match followup_rx.lock().await.recv().await {
+                    let mut controls = followup_rx.lock().await;
+                    let followup = tokio::select! {
+                        biased;
+                        control = controls.recv() => control,
+                        input = input_queue.recv(&cancel, &working) => input.map(|input|
+                            NativeFollowup::input_with_images(input.text, input.images)),
+                    };
+                    drop(controls);
+                    match followup {
                         Some(NativeFollowup::Compact(instructions)) => {
                             emit_turn_state(&app, &session_record_id, &working, "working");
                             if runner
@@ -2720,6 +2748,7 @@ async fn run_native_loop(
         }
     }
 
+    input_queue.close();
     persist_runner_transcript(
         &app,
         &session_record_id,
@@ -2865,6 +2894,7 @@ async fn stop_native_process(
         return Ok(true);
     };
     session.cancel.cancel();
+    session.input_queue.close();
     let _ = session.followup_tx.send(NativeFollowup::Finish).await;
     let _ = session.join.await;
     Ok(true)
@@ -3210,16 +3240,56 @@ pub async fn send_native_input(
     state: State<'_, Arc<Mutex<NativeAgentManager>>>,
     session_record_id: String,
     input: String,
-) -> Result<(), String> {
-    if enqueue_live_input(state.inner().as_ref(), &session_record_id, &input, None)
+) -> Result<NativeInputQueueSnapshot, String> {
+    enqueue_live_input(state.inner().as_ref(), &session_record_id, &input, None)
         .await?
-        .is_none()
-    {
-        return Err(format!(
-            "会话 {session_record_id} 当前没有运行中的内置 Agent"
-        ));
+        .map(|(_, snapshot)| snapshot)
+        .ok_or_else(|| format!("会话 {session_record_id} 当前没有运行中的内置 Agent"))
+}
+
+#[tauri::command]
+pub async fn list_native_queued_inputs(
+    state: State<'_, Arc<Mutex<NativeAgentManager>>>,
+    session_record_id: String,
+) -> Result<NativeInputQueueSnapshot, String> {
+    let manager = state.lock().await;
+    let session = manager
+        .get_session(&session_record_id)
+        .ok_or_else(|| "会话已结束".to_string())?;
+    Ok(session.input_queue.snapshot())
+}
+
+#[tauri::command]
+pub async fn update_native_queued_input(
+    state: State<'_, Arc<Mutex<NativeAgentManager>>>,
+    session_record_id: String,
+    input_id: String,
+    input: Option<String>,
+    editing: bool,
+) -> Result<NativeInputQueueSnapshot, String> {
+    let manager = state.lock().await;
+    let session = manager
+        .get_session(&session_record_id)
+        .ok_or_else(|| "会话已结束".to_string())?;
+    if session.closing {
+        return Err("会话正在结束".to_string());
     }
-    Ok(())
+    session
+        .input_queue
+        .update(&input_id, input.as_deref(), editing)
+}
+
+#[tauri::command]
+pub async fn remove_native_queued_input(
+    state: State<'_, Arc<Mutex<NativeAgentManager>>>,
+    session_record_id: String,
+    input_id: String,
+) -> Result<NativeInputQueueSnapshot, String> {
+    let manager = state.lock().await;
+    let session = manager
+        .get_session(&session_record_id)
+        .ok_or_else(|| "会话已结束".to_string())?;
+    session.input_queue.remove(&input_id)
 }
 
 fn emit_request_resolved(app: &AppHandle, session_record_id: &str, request_id: &str, kind: &str) {
@@ -3392,6 +3462,7 @@ mod tests {
     };
     use crate::native::agent::compact::{BudgetSnapshot, ContextWindow};
     use crate::native::agent::r#loop::AgentDiagnosticsSnapshot;
+    use crate::native::input_queue::NativeInputQueue;
 
     #[test]
     fn live_followup_rejects_silently_ignored_configuration_changes() {
@@ -3537,6 +3608,7 @@ mod tests {
             closing: false,
             cancel,
             followup_tx: tx,
+            input_queue: Arc::new(NativeInputQueue::new("sess-1")),
             join,
             allow_all_high_risk: Arc::new(AtomicBool::new(false)),
             working: Arc::new(AtomicBool::new(false)),
@@ -3880,8 +3952,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn enqueue_live_input_sends_followup_without_reactivate() {
-        use crate::native::manager::{NativeAgentManager, NativeFollowup, NativeLiveSession};
+    async fn enqueue_live_input_queues_without_steering_the_active_turn() {
+        use crate::native::manager::{NativeAgentManager, NativeLiveSession};
         use crate::native::tools::CancelFlag;
         use std::collections::VecDeque;
         use std::sync::atomic::AtomicBool;
@@ -3902,6 +3974,7 @@ mod tests {
             closing: false,
             cancel: CancelFlag::new(),
             followup_tx: tx,
+            input_queue: Arc::new(NativeInputQueue::new("sess-1")),
             join: tokio::spawn(async {}),
             allow_all_high_risk: Arc::new(AtomicBool::new(false)),
             working: Arc::new(AtomicBool::new(false)),
@@ -3913,21 +3986,29 @@ mod tests {
         });
         let manager = tokio::sync::Mutex::new(manager);
 
-        let info = super::enqueue_live_input(&manager, "sess-1", "  下一条  ", None)
+        let (info, snapshot) = super::enqueue_live_input(&manager, "sess-1", "  下一条  ", None)
             .await
             .expect("enqueue")
             .expect("live");
         assert_eq!(info.session_record_id, "sess-1");
-        match rx.recv().await {
-            Some(NativeFollowup::Input { text, images }) => {
-                assert_eq!(text, "下一条");
-                assert!(images.is_empty());
-            }
-            Some(NativeFollowup::Finish) | Some(NativeFollowup::Compact(_)) => {
-                panic!("unexpected finish")
-            }
-            None => panic!("channel closed"),
-        }
+        assert!(matches!(
+            rx.try_recv(),
+            Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+        ));
+        assert_eq!(snapshot.items[0].text, "下一条");
+        let queue = manager
+            .lock()
+            .await
+            .get_session("sess-1")
+            .unwrap()
+            .input_queue
+            .clone();
+        let item = queue
+            .recv(&CancelFlag::new(), &AtomicBool::new(false))
+            .await
+            .unwrap();
+        assert_eq!(item.text, "下一条");
+        assert!(item.images.is_empty());
         assert!(super::enqueue_live_input(&manager, "missing", "x", None)
             .await
             .expect("missing")
@@ -3936,7 +4017,7 @@ mod tests {
 
     #[tokio::test]
     async fn enqueue_live_input_allows_images_without_text() {
-        use crate::native::manager::{NativeAgentManager, NativeFollowup, NativeLiveSession};
+        use crate::native::manager::{NativeAgentManager, NativeLiveSession};
         use crate::native::tools::CancelFlag;
         use std::collections::VecDeque;
         use std::sync::atomic::AtomicBool;
@@ -3965,6 +4046,7 @@ mod tests {
             closing: false,
             cancel: CancelFlag::new(),
             followup_tx: tx,
+            input_queue: Arc::new(NativeInputQueue::new("sess-1")),
             join: tokio::spawn(async {}),
             allow_all_high_risk: Arc::new(AtomicBool::new(false)),
             working: Arc::new(AtomicBool::new(false)),
@@ -3980,14 +4062,27 @@ mod tests {
             .await
             .expect("enqueue")
             .expect("live");
-        match rx.recv().await {
-            Some(NativeFollowup::Input { text, images }) => {
-                assert!(text.is_empty());
-                assert_eq!(images.len(), 1);
-                assert_eq!(images[0].name, path.file_name().unwrap().to_string_lossy());
-            }
-            other => panic!("unexpected followup: {other:?}"),
-        }
+        assert!(matches!(
+            rx.try_recv(),
+            Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+        ));
+        let queue = manager
+            .lock()
+            .await
+            .get_session("sess-1")
+            .unwrap()
+            .input_queue
+            .clone();
+        let item = queue
+            .recv(&CancelFlag::new(), &AtomicBool::new(false))
+            .await
+            .unwrap();
+        assert!(item.text.is_empty());
+        assert_eq!(item.images.len(), 1);
+        assert_eq!(
+            item.images[0].name,
+            path.file_name().unwrap().to_string_lossy()
+        );
         let _ = std::fs::remove_file(path);
     }
 

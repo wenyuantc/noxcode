@@ -106,6 +106,7 @@ pub struct NativeLiveSession {
     pub closing: bool,
     pub cancel: CancelFlag,
     pub followup_tx: mpsc::Sender<NativeFollowup>,
+    pub input_queue: Arc<crate::native::input_queue::NativeInputQueue>,
     pub join: JoinHandle<()>,
     pub allow_all_high_risk: Arc<AtomicBool>,
     pub working: Arc<AtomicBool>,
@@ -153,7 +154,7 @@ impl NativeAgentManager {
             return Ok(None);
         };
         if !session.closing
-            && (session.working.load(Ordering::SeqCst)
+            && (session.input_queue.is_busy(&session.working)
                 || session.followup_tx.capacity() < session.followup_tx.max_capacity())
         {
             return Err("Agent 正在工作，请先停止当前回合".to_string());
@@ -393,6 +394,7 @@ impl NativeAgentManager {
 pub async fn shutdown_all_sessions(manager: &tokio::sync::Mutex<NativeAgentManager>) {
     let sessions = manager.lock().await.take_all();
     for mut session in sessions {
+        session.input_queue.close();
         if session.working.load(Ordering::SeqCst) {
             session.cancel.cancel();
         }
@@ -429,6 +431,7 @@ mod tests {
             closing: false,
             cancel: CancelFlag::new(),
             followup_tx: tx,
+            input_queue: Arc::new(crate::native::input_queue::NativeInputQueue::new("s1")),
             join: tokio::spawn(async {}),
             allow_all_high_risk: Arc::new(AtomicBool::new(false)),
             working: Arc::new(AtomicBool::new(true)),
@@ -467,6 +470,7 @@ mod tests {
             closing: false,
             cancel: CancelFlag::new(),
             followup_tx: tx,
+            input_queue: Arc::new(crate::native::input_queue::NativeInputQueue::new(id)),
             join: tokio::spawn(async {}),
             allow_all_high_risk: Arc::new(AtomicBool::new(false)),
             working: Arc::new(AtomicBool::new(false)),
@@ -599,6 +603,22 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn graceful_finish_rejects_a_pending_or_edited_input() {
+        let mut manager = NativeAgentManager::new();
+        let mut session = live_session("sess-1");
+        let (tx, _rx) = mpsc::channel(8);
+        session.followup_tx = tx;
+        let queue = session.input_queue.clone();
+        manager.add_session(session);
+        let snapshot = queue.enqueue("pending", vec![]).unwrap();
+        assert!(manager.begin_finish("sess-1").is_err());
+        queue.update(&snapshot.items[0].id, None, true).unwrap();
+        assert!(manager.begin_finish("sess-1").is_err());
+        queue.remove(&snapshot.items[0].id).unwrap();
+        assert!(manager.begin_finish("sess-1").unwrap().is_some());
+    }
+
+    #[tokio::test]
     async fn shutdown_idle_sessions_preserves_normal_completion() {
         let mut manager = NativeAgentManager::new();
         let mut session = live_session("sess-1");
@@ -644,6 +664,7 @@ mod tests {
             closing: false,
             cancel: CancelFlag::new(),
             followup_tx: tx,
+            input_queue: Arc::new(crate::native::input_queue::NativeInputQueue::new("s1")),
             join,
             allow_all_high_risk: Arc::new(AtomicBool::new(false)),
             working: Arc::new(AtomicBool::new(true)),

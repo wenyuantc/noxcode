@@ -49,6 +49,7 @@ import type {
   NativeAutomation,
   NativeBackgroundTask,
   NativeBackgroundTasks,
+  NativeInputQueue,
   NativeRequestResolved,
   NativeContextUsage,
   CreateNativeSkillInput,
@@ -420,8 +421,34 @@ export function resumeNativeSession(
   return invoke("resume_native_session", { payload, resumeSessionId });
 }
 
-export function sendNativeInput(sessionRecordId: string, input: string): Promise<void> {
+export function sendNativeInput(sessionRecordId: string, input: string): Promise<NativeInputQueue> {
   return invoke("send_native_input", { sessionRecordId, input });
+}
+
+export function listNativeQueuedInputs(sessionRecordId: string): Promise<NativeInputQueue> {
+  return invoke("list_native_queued_inputs", { sessionRecordId });
+}
+
+export function updateNativeQueuedInput(
+  sessionRecordId: string,
+  inputId: string,
+  input: string | null,
+  editing: boolean,
+): Promise<NativeInputQueue> {
+  return invoke("update_native_queued_input", { sessionRecordId, inputId, input, editing });
+}
+
+export function removeNativeQueuedInput(
+  sessionRecordId: string,
+  inputId: string,
+): Promise<NativeInputQueue> {
+  return invoke("remove_native_queued_input", { sessionRecordId, inputId });
+}
+
+export function onNativeInputQueue(
+  callback: (payload: NativeInputQueue) => void,
+): Promise<UnlistenFn> {
+  return listen<NativeInputQueue>("native-input-queue", (event) => callback(event.payload));
 }
 
 export function finishNativeInput(sessionRecordId: string): Promise<void> {

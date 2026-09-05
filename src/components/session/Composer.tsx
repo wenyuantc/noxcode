@@ -1,6 +1,6 @@
 import { convertFileSrc, isTauri } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
-import { ArrowUp, Loader2, Square, Check } from "lucide-react";
+import { ArrowUp, Loader2, Square } from "lucide-react";
 import { useEffect, useRef, useState, type ClipboardEvent, type DragEvent } from "react";
 import { useTranslation } from "react-i18next";
 
@@ -68,6 +68,7 @@ import { ContextCapacity } from "./ContextCapacity";
 import { PermissionModePicker } from "./PermissionModePicker";
 import { ThinkingLevelPicker } from "./ThinkingLevelPicker";
 import { WorkspacePicker } from "./WorkspacePicker";
+import { QueuedInputs } from "./QueuedInputs";
 
 const IMAGE_DIALOG_FILTERS = [
   { name: "Images", extensions: ["png", "jpg", "jpeg", "gif", "webp"] },
@@ -127,6 +128,9 @@ export function Composer({ compact = false }: { compact?: boolean }) {
   );
   const turnState = useSessionStore((state) =>
     live ? state.turnState[live.session_record_id] : undefined,
+  );
+  const pendingCount = useSessionStore((state) =>
+    selectedSessionId ? (state.inputQueueBySession[selectedSessionId]?.items.length ?? 0) : 0,
   );
   const effectiveChannelId = runtime?.ai_channel_id ?? channelId;
   const channel = channels.find((item) => item.id === effectiveChannelId);
@@ -271,7 +275,8 @@ export function Composer({ compact = false }: { compact?: boolean }) {
     if (active instanceof HTMLElement) active.scrollIntoView({ block: "nearest" });
   }, [activeMentionIndex, pickerItems.length]);
 
-  const working = Boolean(live) && turnState !== "waiting_input" && turnState !== "ended";
+  const working =
+    Boolean(live) && (pendingCount > 0 || (turnState !== "waiting_input" && turnState !== "ended"));
   const sendBusy = sending;
 
   const skipMessage = (skip: ComposerImageSkip) => {
@@ -419,7 +424,9 @@ export function Composer({ compact = false }: { compact?: boolean }) {
       sendingRef.current = true;
       setError(null);
       try {
-        await sendNativeInput(live.session_record_id, prompt);
+        useSessionStore
+          .getState()
+          .onInputQueue(await sendNativeInput(live.session_record_id, prompt));
         setDraft("");
       } catch (reason) {
         setError(String(reason));
@@ -580,6 +587,9 @@ export function Composer({ compact = false }: { compact?: boolean }) {
           <BranchPicker />
         </div>
       ) : null}
+      {selectedSessionId ? (
+        <QueuedInputs key={selectedSessionId} sessionId={selectedSessionId} />
+      ) : null}
       <div
         className={cn(
           "rounded-2xl border border-border/70 bg-card/95 shadow-sm transition-all duration-150 focus-within:border-ring/60 focus-within:ring-2 focus-within:ring-ring/10",
@@ -715,72 +725,60 @@ export function Composer({ compact = false }: { compact?: boolean }) {
             onPick={(item) => insertToken(item.token)}
           />
         ) : null}
-        <div className="flex flex-wrap items-center gap-1.5 border-t border-border/50 px-3 py-2 text-xs">
-          <ComposerPlusMenu
-            onAddAttachment={() => void pickAttachments()}
-            onInsertTrigger={insertTrigger}
-          />
-          <PermissionModePicker disabled={working || sending} onError={setError} />
-          <ChannelModelPicker disabled={working || sending} onError={setError} />
-          {composerThinkingEnabled(selectedModel) && efforts.length > 0 ? (
-            <ThinkingLevelPicker
-              value={live?.runtime?.reasoning_effort ?? resolvedEffort}
-              levels={efforts}
-              disabled={working || sending}
-              onChange={(value) => {
-                void changeSessionConfiguration(selectedSessionId, { reasoning_effort: value })
-                  .then(() => setEffort(value))
-                  .catch((reason) => setError(String(reason)));
-              }}
+        <div className="grid grid-cols-[minmax(0,1fr)_auto] items-end gap-2 border-t border-border/50 px-3 py-2 text-xs">
+          <div className="flex min-w-0 flex-wrap items-center gap-1.5">
+            <ComposerPlusMenu
+              onAddAttachment={() => void pickAttachments()}
+              onInsertTrigger={insertTrigger}
             />
-          ) : null}
-          <ContextCapacity usage={usage} />
-          <span className="flex-1" />
-          {working && live ? (
+            <PermissionModePicker disabled={working || sending} onError={setError} />
+            <ChannelModelPicker disabled={working || sending} onError={setError} />
+            {composerThinkingEnabled(selectedModel) && efforts.length > 0 ? (
+              <ThinkingLevelPicker
+                value={live?.runtime?.reasoning_effort ?? resolvedEffort}
+                levels={efforts}
+                disabled={working || sending}
+                onChange={(value) => {
+                  void changeSessionConfiguration(selectedSessionId, { reasoning_effort: value })
+                    .then(() => setEffort(value))
+                    .catch((reason) => setError(String(reason)));
+                }}
+              />
+            ) : null}
+            <ContextCapacity usage={usage} />
+          </div>
+          <div className="flex shrink-0 items-center gap-1.5 self-end">
+            {working && live ? (
+              <Button
+                size="icon"
+                variant="outline"
+                className="size-8 rounded-lg border-destructive/40 text-destructive hover:bg-destructive/10"
+                title={t("sessions:stop")}
+                aria-label={t("sessions:stop")}
+                onClick={() =>
+                  void stopNativeSession(live.session_record_id).catch((reason) =>
+                    setError(String(reason)),
+                  )
+                }
+              >
+                <Square className="size-3.5" />
+              </Button>
+            ) : null}
             <Button
-              size="sm"
-              variant="outline"
-              className="h-7 gap-1.5 rounded-lg border-destructive/40 px-2.5 text-xs text-destructive hover:bg-destructive/10"
-              onClick={() =>
-                void stopNativeSession(live.session_record_id).catch((reason) =>
-                  setError(String(reason)),
-                )
-              }
+              size="icon"
+              className="size-8 cursor-pointer rounded-lg shadow-2xs transition-all hover:opacity-95 active:scale-[0.98]"
+              title={working ? t("sessions:queuedInput.add") : t("sessions:send")}
+              aria-label={working ? t("sessions:queuedInput.add") : t("sessions:send")}
+              onClick={() => void send()}
+              disabled={sendBusy || (!draft.trim() && attachments.length === 0)}
             >
-              <Square className="size-3.5" />
-              {t("sessions:stop")}
+              {sendBusy ? (
+                <Loader2 className="size-3.5 animate-spin" />
+              ) : (
+                <ArrowUp className="size-3.5" />
+              )}
             </Button>
-          ) : null}
-          {!working && live ? (
-            <Button
-              size="sm"
-              variant="outline"
-              disabled={sending}
-              title="正常结束会话"
-              onClick={() => {
-                setSending(true);
-                void finishIdleSession(live.session_record_id)
-                  .catch((reason) => setError(String(reason)))
-                  .finally(() => setSending(false));
-              }}
-            >
-              <Check className="size-3.5" />
-              结束会话
-            </Button>
-          ) : null}
-          <Button
-            size="sm"
-            className="h-7 cursor-pointer gap-1.5 rounded-lg px-3 text-xs font-medium shadow-2xs transition-all hover:opacity-95 active:scale-[0.98]"
-            onClick={() => void send()}
-            disabled={sendBusy}
-          >
-            {sendBusy ? (
-              <Loader2 className="size-3.5 animate-spin" />
-            ) : (
-              <ArrowUp className="size-3.5" />
-            )}
-            {working ? "追加指令" : t("sessions:send")}
-          </Button>
+          </div>
         </div>
       </div>
       {error ? <p className="mt-2 text-sm text-destructive">{error}</p> : null}

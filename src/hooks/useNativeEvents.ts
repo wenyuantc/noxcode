@@ -13,6 +13,7 @@ import {
   onNativeTurnState,
   onNativeBackgroundTasks,
   onNativeRequestResolved,
+  onNativeInputQueue,
 } from "@/lib/backend";
 import { useSessionStore } from "@/stores/sessionStore";
 import { useWorkspaceStore } from "@/stores/workspaceStore";
@@ -37,6 +38,7 @@ export function useNativeEvents() {
       }),
     );
     track(onNativeStdout((output) => useSessionStore.getState().onStdout(output)));
+    track(onNativeInputQueue((payload) => useSessionStore.getState().onInputQueue(payload)));
     track(
       onNativeBackgroundTasks((payload) => useSessionStore.getState().onBackgroundTasks(payload)),
     );

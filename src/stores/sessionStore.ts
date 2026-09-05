@@ -16,6 +16,7 @@ import type {
   NativeBackgroundTask,
   NativeBackgroundTasks,
   NativeSessionRuntime,
+  NativeInputQueue,
 } from "@/lib/types";
 import { useChannelStore } from "@/stores/channelStore";
 import { useWorkspaceStore } from "@/stores/workspaceStore";
@@ -51,6 +52,7 @@ interface SessionState {
   historyLoaded: Record<string, boolean>;
   configurationBySession: Record<string, NativeSessionRuntime>;
   backgroundBySession: Record<string, NativeBackgroundTask[]>;
+  inputQueueBySession: Record<string, NativeInputQueue>;
   turnState: Record<string, string>;
   usage: Record<string, NativeContextUsage>;
   stream: Record<string, { kind: string; text: string }>;
@@ -72,6 +74,7 @@ interface SessionState {
   setPlanApproval: (request: NativePlanApprovalRequest) => void;
   resolveRequest: (request: NativeRequestResolved) => void;
   onBackgroundTasks: (payload: NativeBackgroundTasks) => void;
+  onInputQueue: (payload: NativeInputQueue) => void;
   setConfiguration: (sessionId: string, runtime: NativeSessionRuntime) => void;
 }
 
@@ -85,6 +88,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
   historyLoaded: {},
   configurationBySession: {},
   backgroundBySession: {},
+  inputQueueBySession: {},
   turnState: {},
   usage: {},
   stream: {},
@@ -163,11 +167,16 @@ export const useSessionStore = create<SessionState>((set, get) => ({
   onStarted: (session) => {
     const id = session.session_record_id;
     const current = get();
+    const inputQueueBySession = { ...current.inputQueueBySession };
+    if (inputQueueBySession[id]?.queue_id !== session.input_queue_id) {
+      delete inputQueueBySession[id];
+    }
     const planModeBySession = Object.prototype.hasOwnProperty.call(current.planModeBySession, id)
       ? current.planModeBySession
       : { ...current.planModeBySession, [id]: session.session_kind === "plan" };
     set({
       liveBySession: { ...current.liveBySession, [id]: session },
+      inputQueueBySession,
       planModeBySession: session.runtime
         ? { ...planModeBySession, [id]: session.runtime.plan_mode }
         : planModeBySession,
@@ -245,12 +254,15 @@ export const useSessionStore = create<SessionState>((set, get) => ({
     delete permissions[exit.session_record_id];
     delete planQuestions[exit.session_record_id];
     delete planApprovals[exit.session_record_id];
+    const inputQueueBySession = { ...get().inputQueueBySession };
+    delete inputQueueBySession[exit.session_record_id];
     set({
       liveBySession,
       stream,
       permissions,
       planQuestions,
       planApprovals,
+      inputQueueBySession,
       backgroundBySession: {
         ...get().backgroundBySession,
         [exit.session_record_id]: (get().backgroundBySession[exit.session_record_id] ?? []).map(
@@ -261,6 +273,16 @@ export const useSessionStore = create<SessionState>((set, get) => ({
         ),
       },
       turnState: { ...get().turnState, [exit.session_record_id]: "ended" },
+    });
+  },
+  onInputQueue: (payload) => {
+    const state = get();
+    const live = state.liveBySession[payload.session_record_id];
+    if (!live || (live.input_queue_id && live.input_queue_id !== payload.queue_id)) return;
+    const current = state.inputQueueBySession[payload.session_record_id];
+    if (current?.queue_id === payload.queue_id && current.revision >= payload.revision) return;
+    set({
+      inputQueueBySession: { ...state.inputQueueBySession, [payload.session_record_id]: payload },
     });
   },
   setPermission: (request) =>

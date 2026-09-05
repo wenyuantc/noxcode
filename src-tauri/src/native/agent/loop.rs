@@ -218,8 +218,9 @@ pub struct ContextUsageSnapshot {
     pub cached_tokens: usize,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug)]
 pub enum NativeEvent {
+    Flush(tokio::sync::oneshot::Sender<()>),
     Line(String),
     UserInput {
         text: String,
@@ -4298,6 +4299,94 @@ mod tests {
             assert_eq!(server.await.unwrap().len(), 1);
             fs::remove_dir_all(root).unwrap();
         }
+    }
+
+    #[tokio::test]
+    async fn queued_inputs_wait_for_parent_summary_after_subagent_completion() {
+        use crate::native::input_queue::NativeInputQueue;
+        use serde_json::json;
+
+        let (mut runner, root) = temp_runner();
+        let queue = NativeInputQueue::new("session");
+        queue.enqueue("deep rule analysis", vec![]).unwrap();
+        queue.enqueue("review risks", vec![]).unwrap();
+        let (_control_tx, control_rx) = mpsc::channel(8);
+        runner.steer_rx = Some(Arc::new(Mutex::new(control_rx)));
+        let response = |message| json!({"choices":[{"message":message}]});
+        let (client, server) = mock_child_model(
+            runner.background.clone(),
+            String::new(),
+            vec![
+                (response(json!({"role":"assistant","content":null,"tool_calls":[{
+                    "id":"agent","type":"function","function":{
+                        "name":"Agent","arguments": "{\"prompt\":\"inspect project\",\"subagent_type\":\"explore\"}"
+                    }
+                }]})), None),
+                (response(json!({"role":"assistant","content":"subagent project report"})), None),
+                (response(json!({"role":"assistant","content":"complete project summary"})), None),
+                (response(json!({"role":"assistant","content":"rule analysis result"})), None),
+                (response(json!({"role":"assistant","content":"risk review result"})), None),
+            ],
+        ).await;
+
+        let first = runner
+            .run_with_client(
+                &client,
+                "analyze project",
+                "test-model",
+                None,
+                Some(1024),
+                false,
+                vec![],
+            )
+            .await
+            .unwrap();
+        assert_eq!(first, "complete project summary");
+        assert_eq!(queue.snapshot().items.len(), 2);
+        assert!(!runner
+            .messages
+            .iter()
+            .any(|message| message.content == "deep rule analysis"));
+        for expected in ["rule analysis result", "risk review result"] {
+            let input = queue
+                .recv(
+                    &runner.ctx.cancel,
+                    &std::sync::atomic::AtomicBool::new(false),
+                )
+                .await
+                .unwrap();
+            let result = runner
+                .run_with_client(
+                    &client,
+                    &input.text,
+                    "test-model",
+                    None,
+                    Some(1024),
+                    false,
+                    input.images,
+                )
+                .await
+                .unwrap();
+            assert_eq!(result, expected);
+        }
+        let requests = server.await.unwrap();
+        assert_eq!(requests.len(), 5);
+        for request in &requests[..3] {
+            assert!(!request.to_string().contains("deep rule analysis"));
+        }
+        let messages = requests[3]["messages"].as_array().unwrap();
+        let summary = messages
+            .iter()
+            .position(|message| message["content"] == "complete project summary")
+            .unwrap();
+        let next = messages
+            .iter()
+            .position(|message| message["content"] == "deep rule analysis")
+            .unwrap();
+        assert!(summary < next);
+        assert!(!requests[3].to_string().contains("review risks"));
+        assert!(requests[4].to_string().contains("rule analysis result"));
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[tokio::test]

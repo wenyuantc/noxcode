@@ -152,9 +152,9 @@ export function SubagentRow({ segment, running, nowMs }: SubagentRowProps) {
       <button
         type="button"
         onClick={toggleOpen}
-        className="flex w-full cursor-pointer items-center justify-between gap-2.5 px-3.5 py-2.5 text-left transition-colors hover:bg-muted/30"
+        className="flex w-full cursor-pointer flex-wrap items-center justify-between gap-2.5 px-3.5 py-2.5 text-left transition-colors hover:bg-muted/30"
       >
-        <div className="flex min-w-0 flex-1 items-center gap-2">
+        <div className="flex min-w-0 flex-1 basis-44 items-center gap-2">
           {/* Bot Icon with status indicator */}
           <div className="relative shrink-0">
             <div className={cn("flex size-6 items-center justify-center rounded-lg", botIconClass)}>
@@ -169,14 +169,14 @@ export function SubagentRow({ segment, running, nowMs }: SubagentRowProps) {
           </div>
 
           {/* Index badge */}
-          <span className="rounded-md border border-border/60 bg-muted/40 px-1.5 py-0.5 font-mono text-[10px] font-semibold text-muted-foreground">
+          <span className="shrink-0 rounded-md border border-border/60 bg-muted/40 px-1.5 py-0.5 font-mono text-[10px] font-semibold text-muted-foreground">
             #{parsedTag?.index ?? 1}
           </span>
 
           {/* Kind badge */}
           <span
             className={cn(
-              "rounded-md border px-1.5 py-0.5 font-mono text-[10px] font-semibold uppercase tracking-wider",
+              "max-w-24 shrink-0 truncate rounded-md border px-1.5 py-0.5 font-mono text-[10px] font-semibold uppercase tracking-wider",
               badgeColorClass,
             )}
           >
@@ -197,7 +197,7 @@ export function SubagentRow({ segment, running, nowMs }: SubagentRowProps) {
         </div>
 
         {/* Right side status / duration / chevron */}
-        <div className="flex shrink-0 items-center gap-2">
+        <div className="ml-auto flex max-w-full shrink-0 flex-wrap items-center justify-end gap-2">
           {isRunning ? (
             <span className="flex items-center gap-1 text-[11px] font-medium text-amber-600 dark:text-amber-400">
               <span className="size-1.5 animate-pulse rounded-full bg-amber-500" />

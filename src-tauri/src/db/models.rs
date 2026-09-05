@@ -655,6 +655,8 @@ pub struct AgentSessionStarted {
     pub session_record_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub runtime: Option<NativeSessionRuntime>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_queue_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

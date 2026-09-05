@@ -22,7 +22,7 @@ P4 把进程内编程 Agent 接到渠道 + 工作区外壳。数据流仍是 `Re
 2. 解析工作区执行上下文（本地目录或 SSH 远端路径）。
 3. 读取渠道，允许本次覆盖 model / effort / system_prompt / permission_mode。`AgentSessionStarted.runtime` 返回实际生效的渠道、模型、强度、权限与计划模式；live 续聊拒绝静默忽略配置变化。前端工作中锁定配置，空闲修改时先等待旧 runtime 正常结束，再从同一 transcript 恢复。
 4. 建 `ModelClient`（渠道密钥 + 网络设置 + SQLite call log）。
-5. 无 `resume_session_id` 时插入 `agent_sessions`（`status=running`），并写出一次启动状态（渠道 banner / 权限说明 / MCP 状态）。有 `resume_session_id` 时：runtime 仍在则把 prompt 投到同一 live 的 `followup_tx`；runtime 已不在则校验工作区后原位重激活（刷新 `started_at` / 渠道 / 执行上下文，清空 `ended_at` / `exit_code`，保留 ID、标题、置顶、`created_at`、累计 token、旧事件和 checkpoint），并静默从同一 ID 的 transcript 恢复。冷启动不把「续聊 / 已恢复」或重复启动状态写进聊天；MCP 连接失败仍写出。发出 `native-session`。
+5. 无 `resume_session_id` 时插入 `agent_sessions`（`status=running`），并写出一次启动状态（渠道 banner / 权限说明 / MCP 状态）。有 `resume_session_id` 时：runtime 仍在则把 prompt 放入同一 live 的 `input_queue`，在当前回合完整结束后执行；runtime 已不在则校验工作区后原位重激活（刷新 `started_at` / 渠道 / 执行上下文，清空 `ended_at` / `exit_code`，保留 ID、标题、置顶、`created_at`、累计 token、旧事件和 checkpoint），并静默从同一 ID 的 transcript 恢复。冷启动不把「续聊 / 已恢复」或重复启动状态写进聊天；MCP 连接失败仍写出。发出 `native-session`。
 6. 组装系统提示：identity → 子 Agent 策略 → 环境 → Git → 全局模板 → `AGENTS.md` / `CLAUDE.md` → skills。
 7. 若工作区是 git 仓：`create_checkpoint(kind=session_start)`，失败只打日志。
 8. `auto_checkpoint_after_tool_call=true` 时，`Write` / `Edit` / `ApplyPatch` 成功后异步 `create_checkpoint(kind=after_tool_call)`，同一会话同时只允许一个在途打点；关闭开关不影响会话开始或回滚前检查点。
@@ -44,7 +44,11 @@ P4 把进程内编程 Agent 接到渠道 + 工作区外壳。数据流仍是 `Re
 
 `send_native_input` / `finish_native_input` 按 `session_record_id` 寻址。`resume_native_session` 若源会话仍在跑，则向同一 live 投递输入；进程不在则原位静默恢复 transcript。同一会话继续发送不是单独的「续聊」产品流程。手动停止写「收到停止请求」，`已取消` 不算失败、不写 `[ERROR] 已取消`。
 
-`finish_native_input` 只正常结束空闲且无排队输入的会话，保留自动记忆抽取机会，并等待资源释放；结束期间拒绝追加输入与配置重启。前端空闲时提供「结束会话」，`/fork` 会先正常结束再载入分叉历史。工作中可追加 steer，队列满立即报错。权限、提问和计划审批按会话与请求 ID 隔离，IPC 成功后才移除请求，失败保留重试；历史计划不附着新请求的审批按钮。后台会话启动不改变当前选中会话。
+`finish_native_input` 只正常结束空闲且无排队输入的会话，保留自动记忆抽取机会，并等待资源释放；结束期间拒绝追加输入与配置重启。它用于配置切换、`/fork` 和应用退出时的内部收尾，输入栏不再提供常驻「结束会话」按钮。工作中保留停止按钮，空闲时直接继续发送即可。
+
+运行中通过 `send_native_input` 追加的消息进入后端 FIFO 队列（最多 8 条），不作为即时 steer 注入当前模型上下文。主 Agent 汇总当前工具及子 Agent 结果、完成回答并排空输出事件后，才按顺序逐条执行下一回合。输入框上方显示「待执行指令」，开始执行时才将该条写入聊天记录。`list_native_queued_inputs` / `update_native_queued_input` / `remove_native_queued_input` 支持查看、编辑和移除；编辑中的队首会暂停出队，保存或取消编辑后继续，不能跳过队首执行后续条目。出队与编辑在同一锁内判定，已开始的条目拒绝编辑。队列仅属于当前 runtime，停止或退出时清空，不跨应用重启保存。
+
+`native-session.input_queue_id` 区分同一会话的运行实例；队列 IPC 和 `native-input-queue` 返回带单调 `revision` 的完整快照，前端忽略旧运行实例及过期快照。`/compact` 仍走独立控制通道，可在运行中处理；后台子 Agent 的 `SendMessage` 仍是定向 steer，不受主会话排队语义影响。权限、提问和计划审批按会话与请求 ID 隔离，IPC 成功后才移除请求，失败保留重试；历史计划不附着新请求的审批按钮。后台会话启动不改变当前选中会话。
 
 ## 上下文持久化
 
@@ -53,7 +57,7 @@ P4 把进程内编程 Agent 接到渠道 + 工作区外壳。数据流仍是 `Re
 顶层 runner 在这些边界同步 UPSERT transcript（fingerprint 未变则跳过）：
 
 - 用户消息进入 `messages` 之后、下一次模型调用之前
-- live followup / steer 注入之后
+- 新回合输入或子 Agent 定向 steer 注入之后（未执行的排队消息不进入 transcript）
 - 每一轮 assistant 文本，或 assistant + 对应 tool 结果写完整之后
 - `run_native_loop` 退出前再 flush 一次（覆盖错误 / 取消）
 
@@ -150,6 +154,7 @@ P4 把进程内编程 Agent 接到渠道 + 工作区外壳。数据流仍是 `Re
 | 事件 | 载荷 |
 | --- | --- |
 | `native-session` | `AgentSessionStarted` |
+| `native-input-queue` | `session_record_id` + `queue_id` + `revision` + `items(id/text/image_count/editing)`，待执行指令完整快照。 |
 | `native-request-resolved` | `session_record_id` + `request_id` + `kind(permission/question/plan_approval)`，仅清除对应请求。 |
 | `native-background-tasks` | `session_record_id` + `tasks`，后台任务完整快照。 |
 | `native-stdout` | `AgentSessionOutput`（已写入 `agent_session_events`）。工具 start/result 带可选 `tool`（`call_id` / `name` / `title` / `ok` / `duration_ms` 等）和 live-only `images`；落库 `message` 为 `{"nox":1,"line":"...","tool":{...}}` 信封，旧纯文本行仍可回放。 |

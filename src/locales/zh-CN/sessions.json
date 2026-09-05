@@ -2,6 +2,17 @@
   "newSession": "新会话",
   "stop": "停止",
   "send": "发送",
+  "queuedInput": {
+    "title": "待执行指令",
+    "add": "追加指令",
+    "edit": "编辑指令",
+    "save": "保存指令",
+    "cancelEdit": "取消编辑",
+    "remove": "移除指令",
+    "editing": "编辑中",
+    "saving": "处理中",
+    "images": "{{count}} 张图片"
+  },
   "waiting": "等待输入",
   "working": "工作中",
   "ended": "已结束",

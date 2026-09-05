@@ -520,6 +520,21 @@ export interface AgentSessionStarted {
   session_kind: string;
   session_record_id: string;
   runtime?: NativeSessionRuntime | null;
+  input_queue_id?: string | null;
+}
+
+export interface NativeQueuedInput {
+  id: string;
+  text: string;
+  image_count: number;
+  editing: boolean;
+}
+
+export interface NativeInputQueue {
+  session_record_id: string;
+  queue_id: string;
+  revision: number;
+  items: NativeQueuedInput[];
 }
 
 export interface NativeSessionRuntime {

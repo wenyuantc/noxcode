@@ -63,6 +63,7 @@ describe("sessionStore history", () => {
       historyLoaded: {},
       configurationBySession: {},
       backgroundBySession: {},
+      inputQueueBySession: {},
       permissions: {},
       planQuestions: {},
       planApprovals: {},
@@ -73,6 +74,44 @@ describe("sessionStore history", () => {
       activeChannelId: null,
       activeModelId: null,
     });
+  });
+
+  it("keeps queued input separate from history and rejects stale snapshots", () => {
+    useSessionStore.getState().onStarted({ ...started("s1", "execution"), input_queue_id: "q1" });
+    useSessionStore.getState().onStarted({ ...started("s2", "execution"), input_queue_id: "q2" });
+    const payload = {
+      session_record_id: "s1",
+      queue_id: "q1",
+      revision: 2,
+      items: [{ id: "i1", text: "pending", image_count: 0, editing: false }],
+    };
+    useSessionStore.getState().onInputQueue(payload);
+    useSessionStore.getState().onInputQueue({ ...payload, revision: 1, items: [] });
+    useSessionStore
+      .getState()
+      .onInputQueue({ ...payload, queue_id: "old-runtime", revision: 100, items: [] });
+    expect(useSessionStore.getState().inputQueueBySession.s1.items[0].text).toBe("pending");
+    expect(useSessionStore.getState().inputQueueBySession.s2).toBeUndefined();
+    expect(useSessionStore.getState().lines.s1).toBeUndefined();
+    useSessionStore.getState().onInputQueue({ ...payload, revision: 3, items: [] });
+    useSessionStore.getState().onInputQueue(payload);
+    expect(useSessionStore.getState().inputQueueBySession.s1.items).toEqual([]);
+  });
+
+  it("clears queued input on exit and rejects old runtime events after restart", () => {
+    const session = { ...started("s1", "execution"), input_queue_id: "q1" };
+    const payload = { session_record_id: "s1", queue_id: "q1", revision: 1, items: [] };
+    useSessionStore.getState().onStarted(session);
+    useSessionStore.getState().onInputQueue(payload);
+    useSessionStore.getState().onExit({ ...session, code: 0 });
+    useSessionStore.getState().onInputQueue({ ...payload, revision: 2 });
+    expect(useSessionStore.getState().inputQueueBySession.s1).toBeUndefined();
+    useSessionStore.getState().onStarted({ ...session, input_queue_id: "q2" });
+    useSessionStore.getState().onInputQueue({ ...payload, revision: 3 });
+    expect(useSessionStore.getState().inputQueueBySession.s1).toBeUndefined();
+    useSessionStore.getState().onInputQueue({ ...payload, queue_id: "q2" });
+    useSessionStore.getState().onStarted({ ...session, input_queue_id: "q2" });
+    expect(useSessionStore.getState().inputQueueBySession.s1.queue_id).toBe("q2");
   });
 
   it("selects immediately before history returns", async () => {

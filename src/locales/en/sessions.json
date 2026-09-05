@@ -2,6 +2,17 @@
   "newSession": "New session",
   "stop": "Stop",
   "send": "Send",
+  "queuedInput": {
+    "title": "Queued messages",
+    "add": "Queue message",
+    "edit": "Edit message",
+    "save": "Save message",
+    "cancelEdit": "Cancel editing",
+    "remove": "Remove message",
+    "editing": "Editing",
+    "saving": "Processing",
+    "images": "{{count}} images"
+  },
   "waiting": "Waiting for input",
   "working": "Working",
   "ended": "Ended",
