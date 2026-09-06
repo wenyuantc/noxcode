@@ -91,6 +91,7 @@ pub fn run() {
             git::restore_git_paths,
             git::commit_git_changes,
             git::push_git_branch,
+            git::pull_git_branch,
             git::list_git_branches,
             git::create_git_branch,
             git::checkout_git_branch,

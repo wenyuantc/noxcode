@@ -2,7 +2,9 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
+use super::repo::{head_oid, in_progress_operation};
 use super::runner::{git, git_with, with_repo_lock, GitError, GitRunOptions, GitTarget, IndexMode};
+use super::status::get_status;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GitCommitResult {
@@ -15,6 +17,12 @@ pub struct GitPushResult {
     pub remote: Option<String>,
     pub branch: Option<String>,
     pub set_upstream: bool,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GitPullResult {
+    pub updated: bool,
     pub message: String,
 }
 
@@ -107,6 +115,63 @@ pub(crate) async fn push_branch(
         set_upstream,
         message: output.stderr_lossy(),
     })
+}
+
+pub(crate) async fn pull_branch(target: &GitTarget) -> Result<GitPullResult, GitError> {
+    with_repo_lock(target, || async {
+        let status = get_status(target, Some("no")).await?;
+        if let Some(operation) = in_progress_operation(target).await? {
+            return Err(GitError::Blocked(format!(
+                "仓库有未完成的 {operation} 操作，请先完成或中止后再拉取"
+            )));
+        }
+        if status.entries.iter().any(|entry| entry.kind == "unmerged") {
+            return Err(GitError::Blocked(
+                "存在未解决的冲突，请先处理后再拉取".to_string(),
+            ));
+        }
+        if status.branch.head.is_none() {
+            return Err(GitError::Blocked(
+                "当前处于游离 HEAD，请先切换到分支后再拉取".to_string(),
+            ));
+        }
+        let before = status
+            .branch
+            .oid
+            .ok_or_else(|| GitError::Blocked("当前分支尚无提交，无法安全快进拉取".to_string()))?;
+        if status.branch.upstream.is_none() {
+            return Err(GitError::Blocked(
+                "当前分支未配置上游，请先设置跟踪分支后再拉取".to_string(),
+            ));
+        }
+
+        let args = ["pull", "--ff-only", "--no-rebase", "--no-autostash"];
+        let output = git_with(
+            target,
+            &args,
+            &IndexMode::user(),
+            GitRunOptions {
+                timeout: Some(Duration::from_secs(300)),
+                ..GitRunOptions::default()
+            },
+        )
+        .await?;
+        output.require_success(&args)?;
+        let after = head_oid(target)
+            .await?
+            .ok_or_else(|| GitError::Parse("拉取完成，但无法读取当前提交".to_string()))?;
+        Ok(GitPullResult {
+            updated: before != after,
+            message: [output.stdout_lossy(), output.stderr_lossy()]
+                .into_iter()
+                .filter(|part| !part.trim().is_empty())
+                .collect::<Vec<_>>()
+                .join("\n")
+                .trim()
+                .to_string(),
+        })
+    })
+    .await
 }
 
 pub(crate) async fn list_branches(target: &GitTarget) -> Result<Vec<GitBranch>, GitError> {

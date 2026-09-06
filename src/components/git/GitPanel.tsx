@@ -3,12 +3,13 @@ import {
   CheckCheck,
   CheckCircle2,
   ChevronRight,
-  FileDiff,
+  Download,
   FolderGit2,
   GitBranch,
   GitCommit,
   GitFork,
   History,
+  Loader2,
   Minus,
   Plus,
   RefreshCw,
@@ -17,7 +18,7 @@ import {
   UploadCloud,
   X,
 } from "lucide-react";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 
 import { Button } from "@/components/ui/button";
@@ -27,7 +28,6 @@ import { Textarea } from "@/components/ui/textarea";
 import {
   clearGitCheckpoints,
   commitGitChanges,
-  getGitFileDiff,
   getGitStatus,
   listActivityLogs,
   listGitCheckpoints,
@@ -42,80 +42,98 @@ import { groupGitStatus } from "@/lib/gitHelpers";
 import type {
   ActivityLog,
   GitCheckpoint,
-  GitFileDiff,
   GitRestorePreview,
   GitStatus,
   GitStatusEntry,
 } from "@/lib/types";
 import { cn, formatRelativeTime } from "@/lib/utils";
+import { useGitStore } from "@/stores/gitStore";
 import { useSessionStore } from "@/stores/sessionStore";
 import { useUiStore } from "@/stores/uiStore";
 import { useWorkspaceStore } from "@/stores/workspaceStore";
 import { CheckpointTimeline } from "./CheckpointTimeline";
-import { DiffView } from "./DiffView";
+import { GitDiffDialog, type GitDiffTarget } from "./GitDiffDialog";
 import { RestoreCheckpointDialog } from "./RestoreCheckpointDialog";
 
 export function GitPanel() {
-  const { t, i18n } = useTranslation("git");
   const workspaceId = useWorkspaceStore((state) => state.activeWorkspaceId);
+  return <GitWorkspacePanel key={workspaceId ?? "no-workspace"} workspaceId={workspaceId} />;
+}
+
+function GitWorkspacePanel({ workspaceId }: { workspaceId: string | null }) {
+  const { t, i18n } = useTranslation("git");
   const sessionId = useSessionStore((state) => state.selectedSessionId);
   const gitFocusPath = useUiStore((state) => state.gitFocusPath);
   const [status, setStatus] = useState<GitStatus | null>(null);
   const [checkpoints, setCheckpoints] = useState<GitCheckpoint[]>([]);
   const [activityLogs, setActivityLogs] = useState<ActivityLog[]>([]);
   const [selected, setSelected] = useState<Set<string>>(new Set());
-  const [diff, setDiff] = useState<GitFileDiff | null>(null);
-  const [diffScope, setDiffScope] = useState<"worktree" | "staged" | null>(null);
+  const [diff, setDiff] = useState<GitDiffTarget | null>(null);
+  const diffScope = diff?.scope ?? null;
   const [message, setMessage] = useState("");
   const [restoreTarget, setRestoreTarget] = useState<GitCheckpoint | null>(null);
   const [preview, setPreview] = useState<GitRestorePreview | null>(null);
-  const [busy, setBusy] = useState(false);
+  const [localBusy, setLocalBusy] = useState(false);
+  const busyRef = useRef(false);
+  const mounted = useRef(false);
+  const reloadId = useRef(0);
+  const [refreshError, setRefreshError] = useState<string | null>(null);
+  const pullState = useGitStore((state) => (workspaceId ? state.pulls[workspaceId] : undefined));
+  const pulling = pullState?.status === "pulling";
+  const busy = localBusy || pulling;
+  const setBusy = (value: boolean) => {
+    busyRef.current = value;
+    setLocalBusy(value);
+  };
+  const isBusy = () =>
+    busyRef.current ||
+    Boolean(workspaceId && useGitStore.getState().pulls[workspaceId]?.status === "pulling");
   const [checkpointNotice, setCheckpointNotice] = useState<string | null>(null);
   const [checkpointError, setCheckpointError] = useState<string | null>(null);
 
-  const reloadStatus = useCallback(async () => {
-    if (!workspaceId) return;
-    setStatus(await getGitStatus(workspaceId));
-  }, [workspaceId]);
-
-  const reloadCheckpoints = useCallback(async () => {
-    if (!workspaceId || !sessionId) {
-      setCheckpoints([]);
-      return;
-    }
-    setCheckpoints(await listGitCheckpoints(workspaceId, sessionId));
-  }, [sessionId, workspaceId]);
-
-  const reloadActivityLogs = useCallback(async () => {
-    if (!workspaceId) {
-      setActivityLogs([]);
-      return;
-    }
-    setActivityLogs(await listActivityLogs(workspaceId, 20));
-  }, [workspaceId]);
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+    };
+  }, []);
 
   const reload = useCallback(async () => {
-    await Promise.all([reloadStatus(), reloadCheckpoints(), reloadActivityLogs()]);
-  }, [reloadActivityLogs, reloadCheckpoints, reloadStatus]);
+    if (!workspaceId) return;
+    const requestId = ++reloadId.current;
+    const isCurrent = () =>
+      mounted.current &&
+      requestId === reloadId.current &&
+      workspaceId === useWorkspaceStore.getState().activeWorkspaceId &&
+      sessionId === useSessionStore.getState().selectedSessionId;
+    const results = await Promise.allSettled([
+      getGitStatus(workspaceId).then((next) => {
+        if (isCurrent()) setStatus(next);
+      }),
+      (sessionId ? listGitCheckpoints(workspaceId, sessionId) : Promise.resolve([])).then(
+        (next) => {
+          if (isCurrent()) setCheckpoints(next);
+        },
+      ),
+      listActivityLogs(workspaceId, 20).then((next) => {
+        if (isCurrent()) setActivityLogs(next);
+      }),
+    ]);
+    if (!isCurrent()) return;
+    const failures = results.flatMap((result) =>
+      result.status === "rejected" ? [String(result.reason)] : [],
+    );
+    setRefreshError(failures.length ? failures.join("\n") : null);
+  }, [sessionId, workspaceId]);
 
   useEffect(() => {
-    void reloadStatus();
-  }, [reloadStatus]);
-
-  useEffect(() => {
-    void reloadCheckpoints();
-  }, [reloadCheckpoints]);
-
-  useEffect(() => {
-    void reloadActivityLogs();
-  }, [reloadActivityLogs]);
+    if (pullState?.status !== "pulling") void reload();
+  }, [reload, pullState]);
 
   useEffect(() => {
     if (!workspaceId || !gitFocusPath) return;
-    void getGitFileDiff(workspaceId, gitFocusPath, "worktree").then((next) => {
-      setDiff(next);
-      setDiffScope("worktree");
-    });
+    setDiff({ workspaceId, path: gitFocusPath, scope: "worktree" });
+    useUiStore.getState().clearGitPreview();
   }, [gitFocusPath, workspaceId]);
 
   const groups = groupGitStatus(status);
@@ -153,25 +171,15 @@ export function GitPanel() {
 
   const closeDiff = () => {
     setDiff(null);
-    setDiffScope(null);
   };
 
   const showDiff = (entry: GitStatusEntry, scope: "worktree" | "staged") => {
     if (!workspaceId) return;
-    if (diff?.path === entry.path && diffScope === scope) {
-      closeDiff();
-      return;
-    }
-    void getGitFileDiff(workspaceId, entry.path, scope, entry.orig_path ?? undefined).then(
-      (next) => {
-        setDiff(next);
-        setDiffScope(scope);
-      },
-    );
+    setDiff({ workspaceId, path: entry.path, scope, oldPath: entry.orig_path ?? undefined });
   };
 
   const handleStageAll = async () => {
-    if (!workspaceId || allUnstagedPaths.length === 0) return;
+    if (!workspaceId || allUnstagedPaths.length === 0 || isBusy()) return;
     setBusy(true);
     try {
       await stageGitPaths(workspaceId, allUnstagedPaths);
@@ -182,7 +190,7 @@ export function GitPanel() {
   };
 
   const handleStageSelected = async () => {
-    if (!workspaceId || selectedUnstagedPaths.length === 0) return;
+    if (!workspaceId || selectedUnstagedPaths.length === 0 || isBusy()) return;
     setBusy(true);
     try {
       await stageGitPaths(workspaceId, selectedUnstagedPaths);
@@ -198,7 +206,7 @@ export function GitPanel() {
   };
 
   const handleUnstageSelected = async () => {
-    if (!workspaceId || selectedStagedPaths.length === 0) return;
+    if (!workspaceId || selectedStagedPaths.length === 0 || isBusy()) return;
     setBusy(true);
     try {
       await unstageGitPaths(workspaceId, selectedStagedPaths);
@@ -214,12 +222,12 @@ export function GitPanel() {
   };
 
   const handleDiscardSelected = async () => {
-    if (!workspaceId || selectedUnstagedPaths.length === 0) return;
+    if (!workspaceId || selectedUnstagedPaths.length === 0 || isBusy()) return;
     const accepted = await confirm(t("discardConfirm"), {
       title: t("discard"),
       kind: "warning",
     });
-    if (!accepted) return;
+    if (!accepted || isBusy()) return;
     setBusy(true);
     try {
       await restoreGitPaths(workspaceId, selectedUnstagedPaths);
@@ -238,7 +246,7 @@ export function GitPanel() {
   };
 
   const handleStageSingle = async (path: string) => {
-    if (!workspaceId || busy) return;
+    if (!workspaceId || isBusy()) return;
     setBusy(true);
     try {
       await stageGitPaths(workspaceId, [path]);
@@ -254,7 +262,7 @@ export function GitPanel() {
   };
 
   const handleUnstageSingle = async (path: string) => {
-    if (!workspaceId || busy) return;
+    if (!workspaceId || isBusy()) return;
     setBusy(true);
     try {
       await unstageGitPaths(workspaceId, [path]);
@@ -270,12 +278,12 @@ export function GitPanel() {
   };
 
   const handleDiscardSingle = async (path: string) => {
-    if (!workspaceId || busy) return;
+    if (!workspaceId || isBusy()) return;
     const accepted = await confirm(t("discardFileConfirm"), {
       title: t("discard"),
       kind: "warning",
     });
-    if (!accepted) return;
+    if (!accepted || isBusy()) return;
     setBusy(true);
     try {
       await restoreGitPaths(workspaceId, [path]);
@@ -294,7 +302,7 @@ export function GitPanel() {
   };
 
   const handleCommit = async () => {
-    if (!workspaceId || !message.trim() || busy) return;
+    if (!workspaceId || !message.trim() || isBusy()) return;
     setBusy(true);
     try {
       await commitGitChanges(workspaceId, message.trim());
@@ -307,7 +315,7 @@ export function GitPanel() {
   };
 
   const handlePush = async (setUpstream = false) => {
-    if (!workspaceId || busy) return;
+    if (!workspaceId || isBusy()) return;
     setBusy(true);
     try {
       await pushGitBranch(workspaceId, undefined, undefined, setUpstream);
@@ -318,12 +326,12 @@ export function GitPanel() {
   };
 
   const clearAllCheckpoints = async () => {
-    if (!workspaceId) return;
+    if (!workspaceId || isBusy()) return;
     const accepted = await confirm(t("clearAllConfirm"), {
       title: t("clearAllTitle"),
       kind: "warning",
     });
-    if (!accepted) return;
+    if (!accepted || isBusy()) return;
     setBusy(true);
     setCheckpointNotice(null);
     setCheckpointError(null);
@@ -341,14 +349,14 @@ export function GitPanel() {
   const restoreLogs = activityLogs.filter((log) => log.kind.startsWith("git_checkpoint_restore"));
 
   return (
-    <div className="flex h-full min-h-0 flex-col bg-background/50">
+    <div className="flex h-full min-h-0 min-w-0 flex-col bg-background/50">
       {/* Panel Header */}
-      <div className="flex h-10 shrink-0 items-center justify-between border-b border-border/70 px-3">
+      <div className="flex h-10 shrink-0 items-center justify-between gap-2 border-b border-border/70 px-3">
         <div className="flex min-w-0 items-center gap-2">
           <FolderGit2 className="size-3.5 shrink-0 text-muted-foreground" />
-          <span className="text-xs font-semibold tracking-tight text-foreground">{t("panel")}</span>
+          <span className="text-xs font-semibold text-foreground">{t("panel")}</span>
           {status?.branch?.head ? (
-            <div className="flex max-w-[140px] items-center gap-1 truncate rounded-md bg-accent/60 px-1.5 py-0.5 text-[11px] font-medium text-muted-foreground">
+            <div className="flex min-w-0 max-w-[140px] items-center gap-1 truncate rounded-md bg-accent/60 px-1.5 py-0.5 text-[11px] font-medium text-muted-foreground">
               <GitBranch className="size-3 shrink-0" />
               <span className="truncate">{status.branch.head}</span>
               {Boolean(status.branch.ahead) && (
@@ -364,31 +372,77 @@ export function GitPanel() {
             </div>
           ) : null}
         </div>
-        <div className="flex items-center gap-0.5">
+        <div className="flex shrink-0 items-center gap-0.5">
+          <Button
+            size="icon-xs"
+            variant="ghost"
+            className="text-muted-foreground hover:text-foreground"
+            title={t(pulling ? "pulling" : "pull")}
+            aria-label={t("pull")}
+            disabled={!workspaceId || busy}
+            onClick={() => {
+              if (workspaceId && !isBusy()) void useGitStore.getState().pull(workspaceId);
+            }}
+          >
+            {pulling ? (
+              <Loader2 className="size-3 animate-spin" />
+            ) : (
+              <Download className="size-3" />
+            )}
+          </Button>
           <Button
             size="icon-xs"
             variant="ghost"
             className="text-muted-foreground hover:text-foreground"
             title={t("refresh")}
+            aria-label={t("refresh")}
             disabled={busy}
             onClick={() => {
+              if (isBusy()) return;
               setBusy(true);
               void reload().finally(() => setBusy(false));
             }}
           >
-            <RefreshCw className={cn("size-3", busy && "animate-spin")} />
+            <RefreshCw className={cn("size-3", localBusy && "animate-spin")} />
           </Button>
           <Button
             size="icon-xs"
             variant="ghost"
             className="text-muted-foreground hover:text-foreground"
             title={t("close")}
+            aria-label={t("close")}
             onClick={() => useUiStore.getState().toggleGit()}
           >
             <X className="size-3" />
           </Button>
         </div>
       </div>
+
+      {pullState?.status === "success" ? (
+        <div
+          role="status"
+          className="shrink-0 border-b px-3 py-2 text-xs text-emerald-700 dark:text-emerald-400"
+        >
+          {t(pullState.result.updated ? "pullSuccess" : "pullUpToDate")}
+        </div>
+      ) : null}
+      {pullState?.status === "error" ? (
+        <div
+          role="alert"
+          className="max-h-32 shrink-0 overflow-auto whitespace-pre-wrap break-words border-b px-3 py-2 text-xs text-destructive"
+        >
+          <p className="font-medium">{t("pullFailed")}</p>
+          {pullState.error}
+        </div>
+      ) : null}
+      {refreshError ? (
+        <div
+          role="alert"
+          className="max-h-24 shrink-0 overflow-auto whitespace-pre-wrap break-words border-b px-3 py-2 text-xs text-destructive"
+        >
+          {t("refreshFailed")} {refreshError}
+        </div>
+      ) : null}
 
       <Tabs defaultValue="changes" className="flex min-h-0 flex-1 flex-col">
         <div className="px-3 pt-2">
@@ -470,7 +524,7 @@ export function GitPanel() {
             </div>
 
             {/* Quick Action Toolbar */}
-            <div className="flex items-center justify-between gap-1 border-y border-border/50 py-1.5">
+            <div className="flex flex-wrap items-center justify-between gap-1 border-y border-border/50 py-1.5">
               <Button
                 size="xs"
                 variant="secondary"
@@ -524,6 +578,7 @@ export function GitPanel() {
             {/* File Changes Groups */}
             <div className="space-y-2">
               <FileGroup
+                disabled={busy}
                 title={t("staged")}
                 entries={groups.staged}
                 selected={selected}
@@ -535,7 +590,7 @@ export function GitPanel() {
                 onOpen={(entry) => showDiff(entry, "staged")}
                 onUnstageSingle={handleUnstageSingle}
                 onActionAll={() => {
-                  if (!workspaceId) return;
+                  if (!workspaceId || isBusy()) return;
                   setBusy(true);
                   void unstageGitPaths(
                     workspaceId,
@@ -548,6 +603,7 @@ export function GitPanel() {
               />
 
               <FileGroup
+                disabled={busy}
                 title={t("unstaged")}
                 entries={groups.unstaged}
                 selected={selected}
@@ -559,7 +615,7 @@ export function GitPanel() {
                 onStageSingle={handleStageSingle}
                 onDiscardSingle={handleDiscardSingle}
                 onActionAll={() => {
-                  if (!workspaceId) return;
+                  if (!workspaceId || isBusy()) return;
                   setBusy(true);
                   void stageGitPaths(
                     workspaceId,
@@ -572,6 +628,7 @@ export function GitPanel() {
               />
 
               <FileGroup
+                disabled={busy}
                 title={t("untracked")}
                 entries={groups.untracked}
                 selected={selected}
@@ -583,7 +640,7 @@ export function GitPanel() {
                 onStageSingle={handleStageSingle}
                 onDiscardSingle={handleDiscardSingle}
                 onActionAll={() => {
-                  if (!workspaceId) return;
+                  if (!workspaceId || isBusy()) return;
                   setBusy(true);
                   void stageGitPaths(
                     workspaceId,
@@ -603,32 +660,6 @@ export function GitPanel() {
                 </div>
               ) : null}
             </div>
-
-            {/* Diff Preview Drawer */}
-            {diff ? (
-              <div className="mt-3 overflow-hidden rounded-xl border border-border/80 bg-card/60 shadow-2xs">
-                <div className="flex items-center justify-between border-b border-border/60 bg-muted/40 px-3 py-1.5">
-                  <div className="flex min-w-0 items-center gap-1.5">
-                    <FileDiff className="size-3.5 shrink-0 text-muted-foreground" />
-                    <span className="truncate text-xs font-medium text-foreground">
-                      {diff.path}
-                    </span>
-                  </div>
-                  <Button
-                    size="icon-xs"
-                    variant="ghost"
-                    className="size-5 text-muted-foreground hover:text-foreground"
-                    onClick={closeDiff}
-                    title={t("close")}
-                  >
-                    <X className="size-3" />
-                  </Button>
-                </div>
-                <div className="max-h-[300px] overflow-auto">
-                  <DiffView diff={diff} />
-                </div>
-              </div>
-            ) : null}
           </div>
         </TabsContent>
 
@@ -658,8 +689,9 @@ export function GitPanel() {
           ) : null}
           <CheckpointTimeline
             checkpoints={checkpoints}
+            disabled={busy}
             onRestore={(checkpoint) => {
-              if (!workspaceId) return;
+              if (!workspaceId || isBusy()) return;
               setRestoreTarget(checkpoint);
               void previewGitCheckpointRestore(workspaceId, checkpoint.id).then(setPreview);
             }}
@@ -694,6 +726,8 @@ export function GitPanel() {
         </TabsContent>
       </Tabs>
 
+      <GitDiffDialog target={diff} onClose={closeDiff} />
+
       <RestoreCheckpointDialog
         open={Boolean(restoreTarget)}
         checkpoint={restoreTarget}
@@ -706,7 +740,7 @@ export function GitPanel() {
           }
         }}
         onConfirm={(deleteNewPaths) => {
-          if (!workspaceId || !restoreTarget) return;
+          if (!workspaceId || !restoreTarget || isBusy()) return;
           setBusy(true);
           void restoreGitCheckpoint(workspaceId, restoreTarget.id, deleteNewPaths)
             .then(() => {
@@ -757,6 +791,7 @@ function StatusBadge({ xy, side }: { xy: string; side: "index" | "worktree" }) {
 }
 
 function FileGroup({
+  disabled,
   title,
   entries,
   selected,
@@ -772,6 +807,7 @@ function FileGroup({
   onActionAll,
   actionAllTooltip,
 }: {
+  disabled: boolean;
   title: string;
   entries: GitStatusEntry[];
   selected: Set<string>;
@@ -831,6 +867,7 @@ function FileGroup({
             variant="ghost"
             className="size-5 text-muted-foreground hover:text-foreground"
             onClick={onActionAll}
+            disabled={disabled}
             title={actionAllTooltip}
           >
             {isStagedGroup ? <Minus className="size-3" /> : <Plus className="size-3" />}
@@ -867,6 +904,7 @@ function FileGroup({
                 <button
                   type="button"
                   className="flex min-w-0 flex-1 items-baseline gap-1 text-left truncate"
+                  title={entry.path}
                   onClick={() => onOpen(entry)}
                 >
                   <span className="truncate text-xs text-foreground">{fileName}</span>
@@ -889,6 +927,7 @@ function FileGroup({
                         onUnstageSingle?.(entry.path);
                       }}
                       title="Unstage"
+                      disabled={disabled}
                     >
                       <Minus className="size-3" />
                     </Button>
@@ -903,6 +942,7 @@ function FileGroup({
                           onStageSingle?.(entry.path);
                         }}
                         title="Stage"
+                        disabled={disabled}
                       >
                         <Plus className="size-3" />
                       </Button>
@@ -915,6 +955,7 @@ function FileGroup({
                           onDiscardSingle?.(entry.path);
                         }}
                         title="Discard"
+                        disabled={disabled}
                       >
                         <RotateCcw className="size-3" />
                       </Button>

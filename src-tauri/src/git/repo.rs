@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 use super::preflight::{evaluate_git_version_output, GitVersion, MIN_GIT_VERSION};
-use super::runner::{git, split_nul_strings, GitError, GitTarget, IndexMode};
+use super::runner::{git, git_path_exists, split_nul_strings, GitError, GitTarget, IndexMode};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GitRepoInfo {
@@ -109,6 +109,16 @@ async fn abbrev_ref(target: &GitTarget, spec: &str) -> Result<Option<String>, Gi
 }
 
 pub(crate) async fn in_progress_operation(target: &GitTarget) -> Result<Option<String>, GitError> {
+    // A paused rebase or sequencer does not always leave a *_HEAD ref.
+    for (name, path) in [
+        ("rebase", "rebase-merge"),
+        ("rebase/am", "rebase-apply"),
+        ("cherry-pick/revert", "sequencer"),
+    ] {
+        if git_path_exists(target, path).await? {
+            return Ok(Some(name.to_string()));
+        }
+    }
     for (name, spec) in [
         ("merge", "MERGE_HEAD"),
         ("rebase", "REBASE_HEAD"),

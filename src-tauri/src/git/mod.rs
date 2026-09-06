@@ -30,8 +30,8 @@ use self::checkpoint::{
     list_checkpoints, preview_restore, prune_expired_checkpoints, sweep_orphan_refs,
 };
 use self::commit::{
-    checkout_branch, commit_changes, create_branch, list_branches, push_branch, GitBranch,
-    GitCommitResult, GitPushResult,
+    checkout_branch, commit_changes, create_branch, list_branches, pull_branch, push_branch,
+    GitBranch, GitCommitResult, GitPullResult, GitPushResult,
 };
 use self::diff::{
     get_file_diff, get_numstat, GitFileDiff, GitFileDiffScope, GitNumstatEntry, GitNumstatScope,
@@ -209,6 +209,23 @@ pub(crate) async fn push_git_branch<R: Runtime>(
     push_branch(&target, remote.as_deref(), branch.as_deref(), set_upstream)
         .await
         .map_err(Into::into)
+}
+
+#[tauri::command]
+pub(crate) async fn pull_git_branch<R: Runtime>(
+    app: AppHandle<R>,
+    state: State<'_, Arc<Mutex<NativeAgentManager>>>,
+    workspace_id: String,
+) -> Result<GitPullResult, String> {
+    if state
+        .lock()
+        .await
+        .has_working_workspace_processes(&workspace_id)
+    {
+        return Err("该工作区有正在执行的会话，请等待本轮结束或停止后再拉取".to_string());
+    }
+    let target = resolve_git_target(&app, &workspace_id).await?;
+    pull_branch(&target).await.map_err(Into::into)
 }
 
 #[tauri::command]

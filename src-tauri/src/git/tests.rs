@@ -12,7 +12,9 @@ use super::checkpoint::{
     create_checkpoint, delete_checkpoints_for_session, list_checkpoints, preview_restore,
     prune_expired_checkpoints, restore_checkpoint,
 };
-use super::commit::{checkout_branch, commit_changes, create_branch, list_branches, push_branch};
+use super::commit::{
+    checkout_branch, commit_changes, create_branch, list_branches, pull_branch, push_branch,
+};
 use super::diff::{get_file_diff, get_numstat, GitFileDiffScope, GitNumstatScope};
 use super::repo::{list_repo_files, load_repo_info};
 use super::runner::{fixture_git, git, GitTarget, IndexMode, ScratchIndex};
@@ -247,6 +249,280 @@ async fn repo_status_stage_commit_push_and_branch() {
         push_branch(&target, Some("origin"), Some("feature"), true)
             .await
             .expect("push");
+    })
+    .await;
+}
+
+struct PullRemote {
+    _remote: tempfile::TempDir,
+    peer: tempfile::TempDir,
+    target: GitTarget,
+}
+
+async fn pull_remote(target: &GitTarget) -> PullRemote {
+    let remote = tempfile::tempdir().unwrap();
+    fixture_git(
+        &GitTarget::Local(remote.path().to_path_buf()),
+        &["init", "--bare"],
+    )
+    .await
+    .unwrap();
+    fixture_git(
+        target,
+        &["remote", "add", "upstream", remote.path().to_str().unwrap()],
+    )
+    .await
+    .unwrap();
+    push_branch(target, Some("upstream"), Some("main"), true)
+        .await
+        .unwrap();
+    let peer = tempfile::tempdir().unwrap();
+    let peer_target = GitTarget::Local(peer.path().to_path_buf());
+    fixture_git(
+        &peer_target,
+        &[
+            "clone",
+            "--branch",
+            "main",
+            remote.path().to_str().unwrap(),
+            ".",
+        ],
+    )
+    .await
+    .unwrap();
+    fixture_git(&peer_target, &["config", "user.name", "tester"])
+        .await
+        .unwrap();
+    fixture_git(&peer_target, &["config", "user.email", "tester@local"])
+        .await
+        .unwrap();
+    PullRemote {
+        _remote: remote,
+        peer,
+        target: peer_target,
+    }
+}
+
+async fn advance_remote(remote: &PullRemote, path: &str, content: &str) {
+    std::fs::write(remote.peer.path().join(path), content).unwrap();
+    fixture_git(&remote.target, &["add", "--", path])
+        .await
+        .unwrap();
+    fixture_git(&remote.target, &["commit", "-m", "remote update"])
+        .await
+        .unwrap();
+    fixture_git(&remote.target, &["push"]).await.unwrap();
+}
+
+async fn enable_automatic_pull_options(target: &GitTarget) {
+    for key in ["pull.rebase", "rebase.autoStash", "merge.autoStash"] {
+        fixture_git(target, &["config", key, "true"]).await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn pull_fast_forwards_and_preserves_staged_unstaged_and_untracked_changes() {
+    run_on_targets(|target, dir| async move {
+        let remote = pull_remote(&target).await;
+        enable_automatic_pull_options(&target).await;
+        assert!(!pull_branch(&target).await.unwrap().updated);
+        std::fs::write(dir.join("README.md"), "staged change\n").unwrap();
+        stage_paths(&target, &["README.md".to_string()])
+            .await
+            .unwrap();
+        std::fs::write(dir.join("README.md"), "unstaged change\n").unwrap();
+        std::fs::write(dir.join("untracked.txt"), "keep me\n").unwrap();
+        let staged_before = get_file_diff(&target, "README.md", &GitFileDiffScope::Staged, None)
+            .await
+            .unwrap()
+            .patch;
+        advance_remote(&remote, "remote.txt", "new remote code\n").await;
+
+        let result = pull_branch(&target).await.unwrap();
+        assert!(result.updated);
+        assert!(!result.message.is_empty());
+        assert_eq!(
+            std::fs::read_to_string(dir.join("remote.txt")).unwrap(),
+            "new remote code\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.join("README.md")).unwrap(),
+            "unstaged change\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.join("untracked.txt")).unwrap(),
+            "keep me\n"
+        );
+        assert_eq!(
+            get_file_diff(&target, "README.md", &GitFileDiffScope::Staged, None)
+                .await
+                .unwrap()
+                .patch,
+            staged_before
+        );
+        assert_eq!(
+            get_status(&target, None).await.unwrap().branch.behind,
+            Some(0)
+        );
+        assert!(fixture_git(&target, &["stash", "list"])
+            .await
+            .unwrap()
+            .stdout
+            .is_empty());
+        assert!(!pull_branch(&target).await.unwrap().updated);
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn pull_fetches_a_missing_tracking_ref_from_the_configured_upstream() {
+    run_on_targets(|target, dir| async move {
+        let remote = pull_remote(&target).await;
+        advance_remote(&remote, "remote.txt", "new code\n").await;
+        fixture_git(&target, &["update-ref", "-d", "refs/remotes/upstream/main"])
+            .await
+            .unwrap();
+        assert!(pull_branch(&target).await.unwrap().updated);
+        assert_eq!(
+            std::fs::read_to_string(dir.join("remote.txt")).unwrap(),
+            "new code\n"
+        );
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn pull_refuses_overwrites_and_divergence_without_stashing_or_changing_head() {
+    run_on_targets(|target, dir| async move {
+        let remote = pull_remote(&target).await;
+        enable_automatic_pull_options(&target).await;
+        advance_remote(&remote, "README.md", "remote change\n").await;
+        std::fs::write(dir.join("README.md"), "local staged\n").unwrap();
+        stage_paths(&target, &["README.md".to_string()])
+            .await
+            .unwrap();
+        std::fs::write(dir.join("README.md"), "local unstaged\n").unwrap();
+        let before = visible_log(&target).await;
+        let staged = get_file_diff(&target, "README.md", &GitFileDiffScope::Staged, None)
+            .await
+            .unwrap()
+            .patch;
+        assert!(pull_branch(&target).await.is_err());
+        assert_eq!(visible_log(&target).await, before);
+        assert_eq!(
+            std::fs::read_to_string(dir.join("README.md")).unwrap(),
+            "local unstaged\n"
+        );
+        assert_eq!(
+            get_file_diff(&target, "README.md", &GitFileDiffScope::Staged, None)
+                .await
+                .unwrap()
+                .patch,
+            staged
+        );
+        assert!(fixture_git(&target, &["stash", "list"])
+            .await
+            .unwrap()
+            .stdout
+            .is_empty());
+        assert_eq!(
+            get_status(&target, None).await.unwrap().branch.behind,
+            Some(1)
+        );
+
+        commit_changes(&target, "local commit", None).await.unwrap();
+        let before = visible_log(&target).await;
+        assert!(pull_branch(&target).await.is_err());
+        assert_eq!(visible_log(&target).await, before);
+        assert_eq!(
+            std::fs::read_to_string(dir.join("README.md")).unwrap(),
+            "local unstaged\n"
+        );
+        assert!(fixture_git(&target, &["stash", "list"])
+            .await
+            .unwrap()
+            .stdout
+            .is_empty());
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn pull_rejects_missing_upstream_detached_head_and_in_progress_operations() {
+    run_on_targets(|target, dir| async move {
+        let before = visible_log(&target).await;
+        assert!(pull_branch(&target)
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("上游"));
+        fixture_git(&target, &["checkout", "--detach"])
+            .await
+            .unwrap();
+        assert!(pull_branch(&target)
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("游离 HEAD"));
+        fixture_git(&target, &["checkout", "main"]).await.unwrap();
+        for path in ["rebase-merge", "rebase-apply", "sequencer"] {
+            let path = dir.join(".git").join(path);
+            std::fs::create_dir(&path).unwrap();
+            assert!(pull_branch(&target)
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("未完成"));
+            std::fs::remove_dir(path).unwrap();
+        }
+        let oid = super::repo::head_oid(&target).await.unwrap().unwrap();
+        std::fs::write(dir.join(".git/MERGE_HEAD"), format!("{oid}\n")).unwrap();
+        assert!(pull_branch(&target)
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("merge"));
+        std::fs::remove_file(dir.join(".git/MERGE_HEAD")).unwrap();
+        assert_eq!(visible_log(&target).await, before);
+        fixture_git(&target, &["checkout", "--orphan", "empty"])
+            .await
+            .unwrap();
+        assert!(pull_branch(&target)
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("尚无提交"));
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn pull_reports_remote_failure_without_changing_local_files() {
+    run_on_targets(|target, dir| async move {
+        let _remote = pull_remote(&target).await;
+        let before = visible_log(&target).await;
+        std::fs::write(dir.join("README.md"), "local change\n").unwrap();
+        fixture_git(
+            &target,
+            &[
+                "remote",
+                "set-url",
+                "upstream",
+                dir.join("missing.git").to_str().unwrap(),
+            ],
+        )
+        .await
+        .unwrap();
+        assert!(pull_branch(&target)
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("git 命令失败"));
+        assert_eq!(visible_log(&target).await, before);
+        assert_eq!(
+            std::fs::read_to_string(dir.join("README.md")).unwrap(),
+            "local change\n"
+        );
     })
     .await;
 }

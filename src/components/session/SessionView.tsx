@@ -2,7 +2,7 @@ import { Loader2 } from "lucide-react";
 import { useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 
-import { GitPanel } from "@/components/git/GitPanel";
+import { GitSidebar } from "@/components/git/GitSidebar";
 import { cn } from "@/lib/utils";
 import { useSessionStore } from "@/stores/sessionStore";
 import { useUiStore } from "@/stores/uiStore";
@@ -30,6 +30,7 @@ export function SessionView() {
   );
   const gitOpen = useUiStore((state) => state.gitOpen);
   const streamRef = useRef<HTMLDivElement>(null);
+  const containerRef = useRef<HTMLDivElement>(null);
   const [viewedId, setViewedId] = useState(() => cachedSessionIds(sessionId)[0] ?? null);
   const [mountedIds, setMountedIds] = useState(() => cachedSessionIds(sessionId));
   const historyReady = Boolean(sessionId && hasSelectedLines);
@@ -41,7 +42,7 @@ export function SessionView() {
 
   if (!sessionId) return null;
   return (
-    <div className="flex h-full min-h-0">
+    <div ref={containerRef} className="relative flex h-full min-h-0 min-w-0">
       <div className="flex min-h-0 min-w-0 flex-1 flex-col">
         <SessionHeader />
         <div ref={streamRef} className="relative min-h-0 flex-1">
@@ -65,11 +66,7 @@ export function SessionView() {
           <Composer compact />
         </div>
       </div>
-      {gitOpen ? (
-        <div className="w-[380px] shrink-0 border-l">
-          <GitPanel />
-        </div>
-      ) : null}
+      {gitOpen ? <GitSidebar containerRef={containerRef} /> : null}
     </div>
   );
 }

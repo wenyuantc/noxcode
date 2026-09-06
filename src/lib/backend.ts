@@ -27,6 +27,7 @@ import type {
   GitNumstatEntry,
   GitNumstatScope,
   GitPushResult,
+  GitPullResult,
   GitRepoInfo,
   GitRestorePreview,
   GitRestoreResult,
@@ -229,6 +230,10 @@ export function pushGitBranch(
 
 export function listGitBranches(workspaceId: string): Promise<GitBranch[]> {
   return invoke("list_git_branches", { workspaceId });
+}
+
+export function pullGitBranch(workspaceId: string): Promise<GitPullResult> {
+  return invoke("pull_git_branch", { workspaceId });
 }
 
 export function createGitBranch(

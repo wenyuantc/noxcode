@@ -8,9 +8,11 @@ import { formatRelativeTime } from "@/lib/utils";
 
 export function CheckpointTimeline({
   checkpoints,
+  disabled = false,
   onRestore,
 }: {
   checkpoints: GitCheckpoint[];
+  disabled?: boolean;
   onRestore: (checkpoint: GitCheckpoint) => void;
 }) {
   const { t, i18n } = useTranslation("git");
@@ -52,6 +54,7 @@ export function CheckpointTimeline({
                 variant="outline"
                 className="h-6.5 gap-1 text-[11px]"
                 onClick={() => onRestore(checkpoint)}
+                disabled={disabled}
               >
                 <RotateCcw className="size-3" />
                 {t("restore")}

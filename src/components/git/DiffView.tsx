@@ -16,7 +16,7 @@ function lineAccent(type: DiffLineInfo["type"]): string {
   return "";
 }
 
-export function DiffView({ diff }: { diff: GitFileDiff | null }) {
+export function DiffView({ diff, className }: { diff: GitFileDiff | null; className?: string }) {
   const { t } = useTranslation("git");
   const isDark = useUiStore((state) => state.isDark);
   const codeThemeLight = useUiStore((state) => state.codeThemeLight);
@@ -50,7 +50,12 @@ export function DiffView({ diff }: { diff: GitFileDiff | null }) {
   }
   if (diff.is_binary) {
     return (
-      <div className="flex items-center justify-center gap-2 py-6 text-xs text-muted-foreground">
+      <div
+        className={cn(
+          "flex items-center justify-center gap-2 py-6 text-xs text-muted-foreground",
+          className,
+        )}
+      >
         <FileCode2 className="size-4 opacity-50" />
         {t("binary")}
       </div>
@@ -59,7 +64,7 @@ export function DiffView({ diff }: { diff: GitFileDiff | null }) {
 
   return (
     <div
-      className="code-surface overflow-auto"
+      className={cn("code-surface min-h-0 min-w-0 overflow-auto", className)}
       data-wrap={softWrap ? "1" : "0"}
       style={{
         fontSize,

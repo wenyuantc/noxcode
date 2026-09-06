@@ -32,13 +32,13 @@ flowchart LR
 
 | 路径 | 职责 |
 | --- | --- |
-| [`src-tauri/src/git/mod.rs`](../src-tauri/src/git/mod.rs) | 18 个 Tauri 命令、`workspace_id` → `GitTarget`、运行会话拦截与活动审计 |
+| [`src-tauri/src/git/mod.rs`](../src-tauri/src/git/mod.rs) | 19 个 Tauri 命令、`workspace_id` → `GitTarget`、运行会话拦截与活动审计 |
 | [`runner.rs`](../src-tauri/src/git/runner.rs) | `GitTarget` / `IndexMode` / `ScratchIndex` / 守卫 / per-repo 锁 |
 | [`repo.rs`](../src-tauri/src/git/repo.rs) | rev-parse 四参数、版本、中间态 |
 | [`status.rs`](../src-tauri/src/git/status.rs) | `status --porcelain=v2 --branch -z` |
 | [`diff.rs`](../src-tauri/src/git/diff.rs) | numstat / name-status / 单文件 diff |
 | [`stage.rs`](../src-tauri/src/git/stage.rs) | 用户暂存 / 取消暂存 / 丢弃工作区 |
-| [`commit.rs`](../src-tauri/src/git/commit.rs) | commit / push / 分支 |
+| [`commit.rs`](../src-tauri/src/git/commit.rs) | commit / push / pull / 分支 |
 | [`checkpoint.rs`](../src-tauri/src/git/checkpoint.rs) | 快照、预览、回滚、清扫 |
 | [`preflight.rs`](../src-tauri/src/git/preflight.rs) | 启动时本地 git ≥ 2.23 |
 
@@ -47,7 +47,7 @@ flowchart LR
 | 模式 | 操作 | 行为 |
 | --- | --- | --- |
 | `ReadOnly` | status / diff / log / rev-parse / restore --worktree | 自动加 `--no-optional-locks`，禁止写 index |
-| `UserIndex` | GitPanel 暂存 / 取消暂存 / commit / switch | 写真实 `.git/index` |
+| `UserIndex` | GitPanel 暂存 / 取消暂存 / commit / pull / switch | 写真实 `.git/index` |
 | `Scratch` | checkpoint 的 `add -A` / `write-tree` | `GIT_INDEX_FILE` 临时索引，不碰用户暂存区 |
 
 `UserIndexToken` 只能在 `git/` 内构造。runner 运行期守卫：`ReadOnly` 撞上写 index 子命令直接失败。所有调用注入 `GIT_TERMINAL_PROMPT=0`、`LC_ALL=C`。
@@ -89,6 +89,7 @@ ref：`refs/noxcode/checkpoints/<session_id>/<seq>`。author / committer 固定 
 | `restore_git_paths` | 丢弃工作区改动 |
 | `commit_git_changes` | `commit -m [-- paths]` |
 | `push_git_branch` | 含 `--set-upstream`，超时 300s |
+| `pull_git_branch` | 当前分支上游的 `pull --ff-only --no-rebase --no-autostash`，超时 300s |
 | `list_git_branches` / `create_git_branch` / `checkout_git_branch` | `for-each-ref` / `check-ref-format` + `switch -c` / `switch` |
 | `list_git_files` | `ls-files --cached --others --exclude-standard -z`，供 ⌘K / `@` |
 | `create_git_checkpoint` / `list_git_checkpoints` | 打点；列表带 `ref_valid` |
@@ -97,7 +98,15 @@ ref：`refs/noxcode/checkpoints/<session_id>/<seq>`。author / committer 固定 
 
 前端对应函数在 `backend.ts`：`getGitRepoInfo`、`getGitStatus`、`getGitFileDiff`、`getGitNumstat`、`stageGitPaths`、`unstageGitPaths`、`restoreGitPaths`、`commitGitChanges`、`pushGitBranch`、`listGitBranches`、`createGitBranch`、`checkoutGitBranch`、`listGitFiles`、`createGitCheckpoint`、`listGitCheckpoints`、`previewGitCheckpointRestore`、`restoreGitCheckpoint`、`clearGitCheckpoints`；恢复历史另通过 `listActivityLogs` 读取。
 
+## 安全拉取
+
+`pullGitBranch(workspaceId)` 返回 `GitPullResult { updated: boolean, message: string }`，`updated` 通过拉取前后的 HEAD 判断，不解析 Git 提示文本。后端沿用工作区解析、per-repo 锁与 `UserIndex`，本地和 SSH 共用实现；runner 的只读守卫禁止 `pull`。
+
+拉取前拦截运行中的 Native 会话、游离 / unborn HEAD、未配置上游、未解决冲突和未完成的 merge / rebase / sequencer。仅跟随当前分支上游，不推断 origin；显式参数覆盖自动变基与自动 stash 配置。允许带未提交改动拉取，但覆盖本地文件或分支分叉时由 Git 拒绝，不执行清理或回滚。
+
 ## 测试
+
+拉取回归使用本地 temp 仓库和进程内 SSH 各跑一遍，覆盖已经最新、安全快进、非冲突暂存 / 未暂存 / 未跟踪文件保留、覆盖风险、分支分叉、无上游、游离 HEAD、中间态、远端失败及自动 rebase / stash 配置覆盖。
 
 `cargo test --manifest-path src-tauri/Cargo.toml`。本地 temp 仓库与进程内 russh `real_shell` 各跑一遍。
 

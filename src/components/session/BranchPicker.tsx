@@ -7,6 +7,7 @@ import type { GitBranch as GitBranchType } from "@/lib/types";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { useDismissible } from "@/hooks/useDismissible";
+import { useGitStore } from "@/stores/gitStore";
 import { useWorkspaceStore } from "@/stores/workspaceStore";
 
 function errorMessage(error: unknown): string {
@@ -22,7 +23,11 @@ export function BranchPicker() {
   const [creating, setCreating] = useState(false);
   const [name, setName] = useState("");
   const [error, setError] = useState<string | null>(null);
-  const [busy, setBusy] = useState(false);
+  const [localBusy, setBusy] = useState(false);
+  const pulling = useGitStore((state) =>
+    workspaceId ? state.pulls[workspaceId]?.status === "pulling" : false,
+  );
+  const busy = localBusy || pulling;
   const rootRef = useRef<HTMLDivElement>(null);
   const closeMenu = useCallback(() => setOpen(false), []);
   useDismissible(open, closeMenu, rootRef);
@@ -49,6 +54,7 @@ export function BranchPicker() {
   );
 
   const toggleOpen = () => {
+    if (busy) return;
     setOpen((value) => {
       const next = !value;
       if (next) {
@@ -81,6 +87,7 @@ export function BranchPicker() {
       <button
         type="button"
         onClick={toggleOpen}
+        disabled={busy}
         className="inline-flex h-7 cursor-pointer items-center gap-1.5 rounded-lg border border-border/70 bg-background/80 px-2 text-xs font-medium text-foreground/90 shadow-2xs transition-all duration-150 outline-none hover:bg-muted/40"
       >
         <GitBranch className="size-3.5 shrink-0 text-muted-foreground" />
@@ -126,6 +133,7 @@ export function BranchPicker() {
                   size="sm"
                   disabled={!name.trim() || busy}
                   onClick={() => {
+                    if (busy) return;
                     setError(null);
                     setBusy(true);
                     void createGitBranch(workspaceId, name.trim(), true)
@@ -147,6 +155,7 @@ export function BranchPicker() {
                 type="button"
                 className="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-sm hover:bg-accent"
                 onClick={() => setCreating(true)}
+                disabled={busy}
               >
                 <Plus className="size-3.5" />
                 {t("git:createBranch")}

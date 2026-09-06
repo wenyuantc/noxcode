@@ -246,6 +246,11 @@ export interface GitPushResult {
   message: string;
 }
 
+export interface GitPullResult {
+  updated: boolean;
+  message: string;
+}
+
 export type AiChannelProtocol = "openai" | "anthropic" | "codex";
 
 export const CHANNEL_INPUT_TYPES = ["text", "image", "video"] as const;

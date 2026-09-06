@@ -9,6 +9,7 @@ import {
   type CodeAppearance,
 } from "@/lib/codeAppearance";
 import type { CodeThemeId } from "@/lib/codeThemes";
+import { clampGitPanelWidth, GIT_PANEL_DEFAULT_WIDTH } from "@/lib/gitPanelLayout";
 import {
   applyTheme,
   cycleTheme,
@@ -18,6 +19,7 @@ import {
 } from "@/lib/theme";
 
 const WIDTH_KEY = "noxcode:sidebar-width";
+const GIT_WIDTH_KEY = "noxcode:git-panel-width";
 const COLLAPSED_KEY = "noxcode:sidebar-collapsed";
 const PLAN_MODE_KEY = "noxcode:composer-plan-mode";
 const THINKING_LEVEL_KEY = "noxcode:composer-thinking-level";
@@ -41,6 +43,7 @@ interface UiState extends CodeAppearance {
   sidebarCollapsed: boolean;
   commandOpen: boolean;
   gitOpen: boolean;
+  gitPanelWidth: number;
   gitFocusPath: string | null;
   composerDraft: string;
   composerPlanMode: boolean;
@@ -51,6 +54,8 @@ interface UiState extends CodeAppearance {
   toggleSidebar: () => void;
   setCommandOpen: (open: boolean) => void;
   toggleGit: () => void;
+  setGitPanelWidth: (width: number) => void;
+  clearGitPreview: () => void;
   openGitPreview: (path: string | null) => void;
   setComposerDraft: (value: string) => void;
   setComposerPlanMode: (value: boolean) => void;
@@ -91,6 +96,7 @@ export const useUiStore = create<UiState>((set, get) => ({
   sidebarCollapsed: typeof window !== "undefined" && localStorage.getItem(COLLAPSED_KEY) === "1",
   commandOpen: false,
   gitOpen: false,
+  gitPanelWidth: clampGitPanelWidth(readNumber(GIT_WIDTH_KEY, GIT_PANEL_DEFAULT_WIDTH)),
   gitFocusPath: null,
   composerDraft: "",
   composerPlanMode: typeof window !== "undefined" && localStorage.getItem(PLAN_MODE_KEY) === "1",
@@ -109,7 +115,16 @@ export const useUiStore = create<UiState>((set, get) => ({
     set({ sidebarCollapsed: next });
   },
   setCommandOpen: (open) => set({ commandOpen: open }),
-  toggleGit: () => set({ gitOpen: !get().gitOpen }),
+  toggleGit: () => {
+    const gitOpen = !get().gitOpen;
+    set({ gitOpen, gitFocusPath: gitOpen ? get().gitFocusPath : null });
+  },
+  setGitPanelWidth: (width) => {
+    const next = clampGitPanelWidth(width);
+    localStorage.setItem(GIT_WIDTH_KEY, String(next));
+    set({ gitPanelWidth: next });
+  },
+  clearGitPreview: () => set({ gitFocusPath: null }),
   openGitPreview: (path) => set({ gitOpen: true, gitFocusPath: path }),
   setComposerDraft: (value) => set({ composerDraft: value }),
   setComposerPlanMode: (value) => {

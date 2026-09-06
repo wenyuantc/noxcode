@@ -31,6 +31,7 @@ const INDEX_WRITING_SUBCOMMANDS: &[&str] = &[
     "am",
     "cherry-pick",
     "merge",
+    "pull",
     "rebase",
     "revert",
 ];
@@ -527,6 +528,41 @@ pub(crate) fn wrap_ssh_script(script: &str) -> String {
     )
 }
 
+pub(crate) async fn git_path_exists(target: &GitTarget, name: &str) -> Result<bool, GitError> {
+    let output = git(
+        target,
+        &["rev-parse", "--git-path", name],
+        &IndexMode::ReadOnly,
+    )
+    .await?;
+    output.require_success(&["rev-parse", "--git-path", name])?;
+    let path = output.stdout_lossy().trim_end_matches('\n').to_string();
+    match target {
+        GitTarget::Local(repo) => match std::fs::symlink_metadata(repo.join(path)) {
+            Ok(_) => Ok(true),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
+            Err(error) => Err(error.into()),
+        },
+        GitTarget::Ssh {
+            pool,
+            params,
+            repo_path,
+        } => {
+            let script = format!(
+                "cd {} && test -e {}",
+                shell_escape_single_quoted(repo_path),
+                shell_escape_single_quoted(&path),
+            );
+            let output = ssh_exec(pool, params, &script, GitRunOptions::default()).await?;
+            match output.exit_code {
+                0 => Ok(true),
+                1 => Ok(false),
+                _ => Err(output.command_error(&["test", "-e", &path])),
+            }
+        }
+    }
+}
+
 async fn ssh_exec(
     pool: &SshPool,
     params: &ConnectParams,
@@ -662,6 +698,8 @@ mod tests {
         assert!(guard(&["status"], &IndexMode::ReadOnly).is_ok());
         assert!(writes_index(&["-c", "foo.bar=1", "commit", "-m", "x"]));
         assert!(!writes_index(&["--no-optional-locks", "status"]));
+        assert!(guard(&["pull", "--ff-only"], &IndexMode::ReadOnly).is_err());
+        assert!(guard(&["pull", "--ff-only"], &IndexMode::user()).is_ok());
     }
 
     #[test]
