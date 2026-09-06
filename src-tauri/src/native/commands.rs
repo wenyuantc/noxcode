@@ -11,7 +11,8 @@
 //! （30 秒超时，输出截断到 8k 字符）。
 //!
 //! 内置命令（`/compact /init /fork /mode /model /effort /goal /skill /memory /mcp /plugins
-//! /new /help`）由前端注册表处理，不在这里出现。
+//! /new /help /clear /plan /permissions /diff /context /review /create-skill /create-subagent`）
+//! 由前端注册表处理，不在这里出现。
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -24,7 +25,8 @@ use tauri::{AppHandle, Manager, Runtime};
 use crate::native::plugins::{load_enabled_plugins, plugin_command_dirs, NativePlugin};
 
 pub const GLOBAL_COMMANDS_DIR_NAME: &str = "native-commands";
-pub const WORKSPACE_COMMAND_DIRS: &[&str] = &[".noxcode/commands", ".claude/commands"];
+pub const WORKSPACE_COMMAND_DIRS: &[&str] =
+    &[".noxcode/commands", ".claude/commands", ".zcode/commands"];
 pub const MAX_COMMANDS: usize = 200;
 const MAX_DESCRIPTION_CHARS: usize = 200;
 const INLINE_BASH_TIMEOUT: Duration = Duration::from_secs(30);
@@ -35,6 +37,7 @@ const INLINE_BASH_MAX_CHARS: usize = 8_000;
 pub enum SlashCommandSource {
     WorkspaceNoxcode,
     WorkspaceClaude,
+    WorkspaceZcode,
     Plugin,
     Global,
 }
@@ -44,8 +47,9 @@ impl SlashCommandSource {
         match self {
             Self::WorkspaceNoxcode => 0,
             Self::WorkspaceClaude => 1,
-            Self::Plugin => 2,
-            Self::Global => 3,
+            Self::WorkspaceZcode => 2,
+            Self::Plugin => 3,
+            Self::Global => 4,
         }
     }
 
@@ -53,6 +57,7 @@ impl SlashCommandSource {
         match self {
             Self::WorkspaceNoxcode => "工作区 .noxcode",
             Self::WorkspaceClaude => "工作区 .claude",
+            Self::WorkspaceZcode => "工作区 .zcode",
             Self::Plugin => "插件",
             Self::Global => "全局",
         }
@@ -337,18 +342,23 @@ pub fn discover_commands(
 ) -> Vec<NativeSlashCommand> {
     let mut out = Vec::new();
     if let Some(root) = workspace_root {
-        collect_command_dir(
-            &root.join(WORKSPACE_COMMAND_DIRS[0]),
-            SlashCommandSource::WorkspaceNoxcode,
-            None,
-            &mut out,
-        );
-        collect_command_dir(
-            &root.join(WORKSPACE_COMMAND_DIRS[1]),
-            SlashCommandSource::WorkspaceClaude,
-            None,
-            &mut out,
-        );
+        const WORKSPACE_SOURCES: &[(SlashCommandSource, &str)] = &[
+            (
+                SlashCommandSource::WorkspaceNoxcode,
+                WORKSPACE_COMMAND_DIRS[0],
+            ),
+            (
+                SlashCommandSource::WorkspaceClaude,
+                WORKSPACE_COMMAND_DIRS[1],
+            ),
+            (
+                SlashCommandSource::WorkspaceZcode,
+                WORKSPACE_COMMAND_DIRS[2],
+            ),
+        ];
+        for (source, dir) in WORKSPACE_SOURCES {
+            collect_command_dir(&root.join(dir), *source, None, &mut out);
+        }
     }
     for (plugin, dir) in plugin_command_dirs(plugins) {
         collect_command_dir(&dir, SlashCommandSource::Plugin, Some(&plugin), &mut out);
@@ -750,6 +760,35 @@ mod tests {
         assert!(find_command(&commands, "bad name").is_err());
         let _ = fs::remove_dir_all(&workspace);
         let _ = fs::remove_dir_all(&config);
+    }
+
+    #[test]
+    fn zcode_commands_are_discovered_below_noxcode() {
+        let workspace = temp_root();
+        write(
+            &workspace.join(".zcode/commands/review.md"),
+            "---\ndescription: zcode review\n---\nReview",
+        );
+        write(
+            &workspace.join(".zcode/commands/only-z.md"),
+            "---\ndescription: z only\n---\nOnly z",
+        );
+        write(
+            &workspace.join(".noxcode/commands/review.md"),
+            "---\ndescription: nox review\n---\nNox",
+        );
+        let commands = discover_commands(Some(&workspace), None, &[]);
+        let names: Vec<&str> = commands.iter().map(|item| item.name.as_str()).collect();
+        assert_eq!(names, vec!["only-z", "review"]);
+        assert_eq!(
+            find_command(&commands, "review").expect("review").source,
+            SlashCommandSource::WorkspaceNoxcode
+        );
+        assert_eq!(
+            find_command(&commands, "only-z").expect("only-z").source,
+            SlashCommandSource::WorkspaceZcode
+        );
+        let _ = fs::remove_dir_all(&workspace);
     }
 
     #[test]

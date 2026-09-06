@@ -68,7 +68,7 @@ export function ComposerSlashMenu({
                       ? `/${item.name}`
                       : item.name
                 }
-                description={item.description}
+                description={item.argumentHint || item.description}
                 sourceLabel={item.sourceLabel}
                 onMouseEnter={() => onHover(index)}
                 onClick={() => onPick(item)}

@@ -2,15 +2,28 @@ import { describe, expect, it } from "vitest";
 
 import {
   builtinSlashCommands,
+  buildCreateSkillPrompt,
+  buildCreateSubagentPrompt,
+  buildGoalPrompt,
+  buildInitPrompt,
+  buildReviewPrompt,
   filterComposerSlashItems,
   groupComposerSlashItems,
   isBuiltinSlashName,
   parseComposerTrigger,
+  parseGoalSlashArgs,
   parseLeadingSlash,
+  parseNamedSlashArgs,
   parseSkillInvocation,
   skillInvocationPrompt,
   subagentDelegationPrompt,
+  type BuiltinSlashName,
 } from "./composerSlash";
+
+const labels = (name: BuiltinSlashName) => ({
+  description: `${name} desc`,
+  hint: name === "init" ? "AGENTS.md" : undefined,
+});
 
 describe("parseComposerTrigger", () => {
   it("detects @ / and $ on the last token", () => {
@@ -23,7 +36,7 @@ describe("parseComposerTrigger", () => {
 
 describe("filter and group slash items", () => {
   const items = [
-    ...builtinSlashCommands({ init: "init repo", fork: "fork", compact: "compact" }),
+    ...builtinSlashCommands(labels),
     {
       group: "skills" as const,
       key: "skill:review",
@@ -40,8 +53,8 @@ describe("filter and group slash items", () => {
     },
   ];
 
-  it("filters by name or description", () => {
-    expect(filterComposerSlashItems(items, "rev").map((item) => item.name)).toEqual(["review"]);
+  it("filters by name, description or argument hint", () => {
+    expect(filterComposerSlashItems(items, "AGENTS.md").map((item) => item.name)).toEqual(["init"]);
     expect(filterComposerSlashItems(items, "init").map((item) => item.name)).toEqual(["init"]);
   });
 
@@ -53,6 +66,12 @@ describe("filter and group slash items", () => {
       "skills",
       "subagents",
     ]);
+  });
+
+  it("lists all builtin commands", () => {
+    expect(builtinSlashCommands(labels).map((item) => item.name)).toContain("create-skill");
+    expect(builtinSlashCommands(labels).map((item) => item.name)).toContain("create-subagent");
+    expect(builtinSlashCommands(labels).map((item) => item.name)).toContain("help");
   });
 });
 
@@ -73,6 +92,14 @@ describe("send parsers", () => {
     });
   });
 
+  it("parses create-skill / create-subagent names", () => {
+    expect(parseNamedSlashArgs("code-review 审查 diff")).toEqual({
+      name: "code-review",
+      rest: "审查 diff",
+    });
+    expect(parseNamedSlashArgs("")).toBeNull();
+  });
+
   it("builds skill and subagent prompts", () => {
     expect(skillInvocationPrompt("review", "pr 12")).toContain("`review`");
     expect(skillInvocationPrompt("review", "pr 12")).toContain("pr 12");
@@ -82,6 +109,30 @@ describe("send parsers", () => {
   it("recognizes builtin slash names", () => {
     expect(isBuiltinSlashName("init")).toBe(true);
     expect(isBuiltinSlashName("skill")).toBe(true);
+    expect(isBuiltinSlashName("create-skill")).toBe(true);
+    expect(isBuiltinSlashName("create-subagent")).toBe(true);
     expect(isBuiltinSlashName("frontend:component")).toBe(false);
+  });
+});
+
+describe("prompt builders", () => {
+  it("builds init / goal / review / create prompts", () => {
+    expect(buildInitPrompt("补充")).toContain("AGENTS.md");
+    expect(buildInitPrompt("补充")).toContain("补充要求：补充");
+    expect(buildGoalPrompt("clear")).toContain("Goal(action=clear)");
+    expect(buildGoalPrompt("修登录")).toContain("修登录");
+    expect(buildReviewPrompt("src/lib")).toContain("src/lib");
+    expect(buildCreateSkillPrompt("code-review", "审 diff")).toContain(
+      ".noxcode/skills/code-review/SKILL.md",
+    );
+    expect(buildCreateSkillPrompt("code-review")).toContain("when-to-use");
+    expect(buildCreateSubagentPrompt("explore", "只读")).toContain(".noxcode/agents/explore.md");
+    expect(buildCreateSubagentPrompt("explore")).toContain("injectAgentsMd");
+  });
+
+  it("parses goal args", () => {
+    expect(parseGoalSlashArgs("clear")).toEqual({ action: "clear" });
+    expect(parseGoalSlashArgs("set 修登录")).toEqual({ action: "set", title: "修登录" });
+    expect(parseGoalSlashArgs("修登录")).toEqual({ action: "set", title: "修登录" });
   });
 });
