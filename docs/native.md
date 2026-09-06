@@ -100,6 +100,7 @@ P4 把进程内编程 Agent 接到渠道 + 工作区外壳。数据流仍是 `Re
 - 目标（[`goals.rs`](../src-tauri/src/native/goals.rs)）：`Goal(action=set|update|complete|clear, title, checklist, note)` 维护会话的当前目标与进度清单，`GoalRead` 读取；每次变更写 `[GOAL] {json}` 行，前端渲染为 `GoalRow`。
 - `ReadSessionContext`：不带 `session_id` 列出同工作区最近会话（标题、时间、轮数、最后回复摘录）；带 `session_id` 仍校验工作区归属，再返回最近的用户 / 助手对话摘录。
 - `/fork [checkpoint_id]` → `fork_native_session`：把已结束会话的 transcript 复制到一条新的会话记录（标题加「（分叉）」，`resume_session_id` 指向源会话），可选先回滚到某个 Git 检查点；新会话可直接续聊。
+- Composer 斜杠：自定义命令来自工作区 `.noxcode/commands`、`.claude/commands`、`.zcode/commands`、已启用插件 `commands/` 与 `$APPCONFIG/native-commands/`。内置 `/mode` `/model` `/effort` `/plan` `/new` `/clear` `/help` `/diff` `/context` `/permissions` `/memory` `/mcp` `/plugins` 由前端执行；`/init` `/goal` `/review` `/create-skill` `/create-subagent` 展开成提示词后走普通 Agent 回合。`/create-skill name` 写入 `.noxcode/skills/<name>/SKILL.md`；`/create-subagent name` 写入 `.noxcode/agents/<name>.md`。
 - 以上工具通过 `ToolCtx.session_scope`（数据库池、工作区、渠道、模型）访问数据库，只对主 Agent 可见（`ReadSessionContext` 子 Agent 也可用）。
 
 ## 记忆（MEMORY.md）

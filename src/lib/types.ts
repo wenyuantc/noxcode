@@ -971,7 +971,7 @@ export interface ImportExternalSkillsResult {
 }
 
 export type NativeSlashCommandSource =
-  "workspace_noxcode" | "workspace_claude" | "plugin" | "global";
+  "workspace_noxcode" | "workspace_claude" | "workspace_zcode" | "plugin" | "global";
 
 /** 自定义斜杠命令（Markdown 文件）。 */
 export interface NativeSlashCommand {

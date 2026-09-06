@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 
 import { getCurrentAppLocale } from "@/lib/i18n/locale";
@@ -18,20 +18,38 @@ function tokenOf(usage: NativeContextUsage, key: (typeof CATEGORIES)[number]["ke
   return usage[key] ?? 0;
 }
 
-export function ContextCapacity({ usage }: { usage?: NativeContextUsage }) {
+export function ContextCapacity({
+  usage,
+  open: openProp,
+  onOpenChange,
+}: {
+  usage?: NativeContextUsage;
+  open?: boolean;
+  onOpenChange?: (open: boolean) => void;
+}) {
   const { t } = useTranslation("sessions");
-  const [open, setOpen] = useState(false);
+  const [uncontrolled, setUncontrolled] = useState(false);
+  const open = openProp ?? uncontrolled;
+  const close = useCallback(() => {
+    onOpenChange?.(false);
+    if (openProp === undefined) setUncontrolled(false);
+  }, [onOpenChange, openProp]);
+  const toggleOpen = () => {
+    const next = !open;
+    onOpenChange?.(next);
+    if (openProp === undefined) setUncontrolled(next);
+  };
   const rootRef = useRef<HTMLDivElement>(null);
   const locale = getCurrentAppLocale();
 
   useEffect(() => {
     if (!open) return;
     const onPointer = (event: PointerEvent) => {
-      if (!rootRef.current?.contains(event.target as Node)) setOpen(false);
+      if (!rootRef.current?.contains(event.target as Node)) close();
     };
     window.addEventListener("pointerdown", onPointer);
     return () => window.removeEventListener("pointerdown", onPointer);
-  }, [open]);
+  }, [open, close]);
 
   if (!usage || usage.limit_tokens <= 0) return null;
 
@@ -54,7 +72,7 @@ export function ContextCapacity({ usage }: { usage?: NativeContextUsage }) {
       <button
         type="button"
         className="inline-flex h-7 cursor-pointer items-center gap-1.5 rounded-lg border border-border/50 bg-background/60 px-2 font-mono text-[11px] text-muted-foreground shadow-2xs transition-all duration-150 outline-none hover:bg-muted/40 hover:text-foreground"
-        onClick={() => setOpen((value) => !value)}
+        onClick={toggleOpen}
       >
         <span className="tabular-nums">
           {usedLabel} / {limitLabel}

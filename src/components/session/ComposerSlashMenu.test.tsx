@@ -14,7 +14,8 @@ const items: ComposerSlashItem[] = [
     group: "commands",
     name: "init",
     token: "/init",
-    description: "AGENTS.md",
+    description: "Generate AGENTS.md",
+    argumentHint: "AGENTS.md",
   },
   {
     key: "skill:review",
@@ -51,6 +52,7 @@ describe("composer suggestions", () => {
     expect(html).toMatch(/id="suggestions-1"[^>]*aria-selected="true"/);
     expect(html.match(/tabindex="-1"/g)).toHaveLength(3);
     expect(html).toContain("/init");
+    expect(html).toContain("AGENTS.md");
     expect(html).toContain("$review");
     expect(html).toContain("architect");
     expect(html).toContain("Review workspace changes");

@@ -11,21 +11,27 @@ import {
   type DragEvent,
 } from "react";
 import { useTranslation } from "react-i18next";
+import { useNavigate } from "react-router-dom";
 
 import { Button } from "@/components/ui/button";
+import { SkillCreateDialog } from "@/components/settings/SkillCreateDialog";
+import { SubagentEditorDialog } from "@/components/settings/SubagentEditorDialog";
 import {
   compactNativeSession,
   deleteComposerImages,
   expandNativeSlashCommand,
   forkNativeSession,
   listGitFiles,
+  listNativePlugins,
   listNativeSkills,
   listNativeSlashCommands,
   listNativeSubagents,
+  openNativePluginsDir,
   stageComposerImage,
   stageComposerImageFromPath,
   stopNativeSession,
   sendNativeInput,
+  updateNativeSettings,
 } from "@/lib/backend";
 import {
   appendComposerTrigger,
@@ -46,17 +52,24 @@ import { clampMentionIndex, resolveComposerMentionKey } from "@/lib/composerMent
 import {
   builtinSlashCommands,
   filterComposerSlashItems,
-  isBuiltinSlashName,
   parseComposerTrigger,
-  parseLeadingSlash,
-  parseSkillInvocation,
   skillInvocationPrompt,
   subagentDelegationPrompt,
+  type BuiltinSlashName,
   type ComposerSlashItem,
 } from "@/lib/composerSlash";
+import {
+  isExpandingSlashIntent,
+  isLocalSlashIntent,
+  matchComposerEffort,
+  matchComposerModel,
+  resolveComposerSlash,
+  type SlashIntent,
+} from "@/lib/composerSlashActions";
 import { applyComposerPlanMode, resolveComposerPlanMode } from "@/lib/planMode";
 import { submitSessionPrompt } from "@/lib/sessionSubmission";
 import { changeSessionConfiguration, finishIdleSession } from "@/lib/sessionConfiguration";
+import { isNativePermissionMode } from "@/lib/types";
 import {
   composerThinkingEnabled,
   composerThinkingLevels,
@@ -66,6 +79,7 @@ import { cn } from "@/lib/utils";
 import { ComposerSlashMenu } from "./ComposerSlashMenu";
 import { useChannelStore } from "@/stores/channelStore";
 import { useSessionStore } from "@/stores/sessionStore";
+import { useSettingsStore } from "@/stores/settingsStore";
 import { useUiStore } from "@/stores/uiStore";
 import { useWorkspaceStore } from "@/stores/workspaceStore";
 import { BranchPicker } from "./BranchPicker";
@@ -96,20 +110,9 @@ async function readFileAsBase64(file: File): Promise<string> {
   });
 }
 
-/** `/init [补充要求]` 展开成的提示词：Agent 摸底仓库后生成或补充 AGENTS.md。 */
-export function buildInitPrompt(extra?: string): string {
-  const lines = [
-    "请为当前仓库生成或补充 AGENTS.md（若已有 AGENTS.md / CLAUDE.md 则在其基础上补充，不要重复已有内容）。",
-    "先用 Glob / Read / Grep 摸底：项目结构与模块职责、构建 / 测试 / lint 命令、编码约定、关键架构约束、常见陷阱。",
-    "输出要求：简洁、面向编程 Agent、只写能从仓库验证的事实；每条命令都注明来源文件；不超过 150 行。",
-    "完成后用 Write 写入仓库根目录的 AGENTS.md，并在回复里列出你新增或修改的段落。",
-  ];
-  if (extra?.trim()) lines.push(`补充要求：${extra.trim()}`);
-  return lines.join("\n");
-}
-
 export function Composer({ compact = false }: { compact?: boolean }) {
   const { t } = useTranslation(["sessions", "layout"]);
+  const navigate = useNavigate();
   const draft = useUiStore((state) => state.composerDraft);
   const setDraft = useUiStore((state) => state.setComposerDraft);
   const workspaceId = useWorkspaceStore((state) => state.activeWorkspaceId);
@@ -119,6 +122,8 @@ export function Composer({ compact = false }: { compact?: boolean }) {
   const defaultPlanMode = useUiStore((state) => state.composerPlanMode);
   const effort = useUiStore((state) => state.composerThinkingLevel);
   const setEffort = useUiStore((state) => state.setComposerThinkingLevel);
+  const native = useSettingsStore((state) => state.native);
+  const setNative = useSettingsStore((state) => state.setNative);
   const selectedSessionId = useSessionStore((state) => state.selectedSessionId);
   const runtime = useSessionStore((state) =>
     selectedSessionId ? state.configurationBySession[selectedSessionId] : undefined,
@@ -145,6 +150,11 @@ export function Composer({ compact = false }: { compact?: boolean }) {
   const channel = channels.find((item) => item.id === effectiveChannelId);
   const model = runtime?.model ?? activeModelId ?? "";
   const [error, setError] = useState<string | null>(null);
+  const [info, setInfo] = useState<string | null>(null);
+  const [helpOpen, setHelpOpen] = useState(false);
+  const [contextOpen, setContextOpen] = useState(false);
+  const [skillDialogOpen, setSkillDialogOpen] = useState(false);
+  const [subagentDialogOpen, setSubagentDialogOpen] = useState(false);
   const [files, setFiles] = useState<string[]>([]);
   const [slashItems, setSlashItems] = useState<ComposerSlashItem[]>([]);
   const [mentionOpen, setMentionOpen] = useState<"@" | "/" | "$" | null>(null);
@@ -227,11 +237,10 @@ export function Composer({ compact = false }: { compact?: boolean }) {
   useEffect(() => {
     if (mentionOpen !== "/" && mentionOpen !== "$") return;
     let cancelled = false;
-    const labels = {
-      init: "AGENTS.md",
-      fork: "checkpoint",
-      compact: "context",
-    };
+    const labels = (name: BuiltinSlashName) => ({
+      description: t(`slashBuiltin.${name}.description`),
+      hint: t(`slashBuiltin.${name}.hint`),
+    });
     void Promise.all([
       listNativeSlashCommands(workspaceId).catch(() => []),
       listNativeSkills(workspaceId).catch(() => null),
@@ -248,6 +257,7 @@ export function Composer({ compact = false }: { compact?: boolean }) {
           key: `command:${command.path}`,
           name: command.name,
           description: command.description,
+          argumentHint: command.argument_hint ?? undefined,
           sourceLabel: command.plugin ?? command.source,
           token: `/${command.name}`,
         })),
@@ -276,7 +286,7 @@ export function Composer({ compact = false }: { compact?: boolean }) {
     return () => {
       cancelled = true;
     };
-  }, [mentionOpen, workspaceId]);
+  }, [mentionOpen, workspaceId, t]);
 
   const mentionQuery = trigger?.query ?? "";
   useEffect(() => {
@@ -431,107 +441,295 @@ export function Composer({ compact = false }: { compact?: boolean }) {
     }
   };
 
+  const fail = (message: string) => {
+    setInfo(null);
+    setError(message);
+  };
+
+  const note = (message: string) => {
+    setError(null);
+    setInfo(message);
+  };
+
+  const writePlanMode = (enabled: boolean) => {
+    applyComposerPlanMode({
+      enabled,
+      sessionId: selectedSessionId,
+      setDefault: useUiStore.getState().setComposerPlanMode,
+      setSession: (id, next) => useSessionStore.getState().onPlanMode(id, next),
+    });
+  };
+
+  const applyPermissionMode = async (mode: "default" | "edit" | "build" | "plan" | "yolo") => {
+    const persisted = isNativePermissionMode(runtime?.permission_mode ?? native?.permission_mode)
+      ? (runtime?.permission_mode ?? native?.permission_mode)
+      : "default";
+    if (selectedSessionId) await finishIdleSession(selectedSessionId);
+    if (mode === "plan") {
+      await changeSessionConfiguration(selectedSessionId, { plan_mode: true });
+      writePlanMode(true);
+      return;
+    }
+    if (!runtime && mode !== persisted) {
+      setNative(await updateNativeSettings({ permission_mode: mode }));
+    }
+    await changeSessionConfiguration(selectedSessionId, {
+      permission_mode: mode,
+      plan_mode: false,
+    });
+    writePlanMode(false);
+  };
+
+  const expandIntentPrompt = async (intent: SlashIntent, fallback: string) => {
+    if (intent.type === "expand") return intent.prompt;
+    if (intent.type === "skill") return skillInvocationPrompt(intent.name, intent.args);
+    if (intent.type === "custom") {
+      try {
+        const expanded = await expandNativeSlashCommand(workspaceId, intent.name, intent.args);
+        return expanded.prompt;
+      } catch {
+        return fallback;
+      }
+    }
+    return fallback;
+  };
+
+  const runLocalIntent = async (intent: SlashIntent): Promise<boolean> => {
+    switch (intent.type) {
+      case "new-session":
+        useSessionStore.getState().selectSession(null);
+        setDraft("");
+        setHelpOpen(false);
+        setError(null);
+        setInfo(null);
+        return true;
+      case "mode-help":
+        fail(t("sessions:slashModeOptions"));
+        return true;
+      case "set-mode":
+        try {
+          await applyPermissionMode(intent.mode);
+          note(
+            t("sessions:slashModeSet", {
+              mode: t(`sessions:permission.${intent.mode}.title`),
+            }),
+          );
+          setDraft("");
+        } catch (reason) {
+          fail(String(reason));
+        }
+        return true;
+      case "open-models":
+        setDraft("");
+        void navigate("/settings/channels");
+        return true;
+      case "set-model": {
+        const matched = matchComposerModel(channels, intent.query);
+        if (!matched) {
+          fail(t("sessions:slashModelMissing", { query: intent.query }));
+          return true;
+        }
+        try {
+          await changeSessionConfiguration(selectedSessionId, {
+            ai_channel_id: matched.channelId,
+            model: matched.modelId,
+          });
+          useChannelStore.getState().setSelection(matched.channelId, matched.modelId);
+          note(t("sessions:slashModelSet", { model: matched.modelId }));
+          setDraft("");
+        } catch (reason) {
+          fail(String(reason));
+        }
+        return true;
+      }
+      case "effort-help":
+        fail(
+          efforts.length === 0
+            ? t("sessions:slashEffortUnavailable")
+            : t("sessions:slashEffortOptions", { levels: efforts.join(", ") }),
+        );
+        return true;
+      case "set-effort": {
+        if (efforts.length === 0) {
+          fail(t("sessions:slashEffortUnavailable"));
+          return true;
+        }
+        const matched = matchComposerEffort(efforts, intent.level);
+        if (!matched) {
+          fail(t("sessions:slashEffortOptions", { levels: efforts.join(", ") }));
+          return true;
+        }
+        try {
+          await changeSessionConfiguration(selectedSessionId, { reasoning_effort: matched });
+          setEffort(matched);
+          note(t("sessions:slashEffortSet", { level: matched }));
+          setDraft("");
+        } catch (reason) {
+          fail(String(reason));
+        }
+        return true;
+      }
+      case "plan":
+        if (intent.task) return false;
+        try {
+          await applyPermissionMode("plan");
+          note(t("sessions:slashPlanOn"));
+          setDraft("");
+        } catch (reason) {
+          fail(String(reason));
+        }
+        return true;
+      case "navigate":
+        setDraft("");
+        void navigate(intent.path);
+        return true;
+      case "plugins":
+        try {
+          const view = await listNativePlugins(workspaceId);
+          const enabled = view.plugins.filter((item) => item.enabled).length;
+          note(
+            view.plugins.length === 0
+              ? t("sessions:slashPluginsNone")
+              : t("sessions:slashPluginsStatus", { enabled, total: view.plugins.length }),
+          );
+          await openNativePluginsDir().catch(() => undefined);
+          setDraft("");
+        } catch (reason) {
+          fail(String(reason));
+        }
+        return true;
+      case "diff":
+        useUiStore.getState().openGitPreview(null);
+        setDraft("");
+        return true;
+      case "context":
+        if (!usage || usage.limit_tokens <= 0) {
+          fail(t("sessions:slashContextEmpty"));
+        } else {
+          setContextOpen(true);
+          setDraft("");
+        }
+        return true;
+      case "help":
+        setHelpOpen(true);
+        setDraft("");
+        return true;
+      case "open-dialog":
+        setDraft("");
+        if (intent.dialog === "skill") setSkillDialogOpen(true);
+        else setSubagentDialogOpen(true);
+        return true;
+      case "skill-help":
+        fail(t("sessions:slashSkillNeedName"));
+        return true;
+      default:
+        return false;
+    }
+  };
+
   const send = async () => {
     if (sendingRef.current || sending) return;
     const prompt = draft.trim();
     if (!prompt && attachments.length === 0) {
-      setError(t("sessions:emptyPrompt"));
+      fail(t("sessions:emptyPrompt"));
       return;
     }
     if (!workspaceId) {
-      setError(t("sessions:needWorkspace"));
+      fail(t("sessions:needWorkspace"));
       return;
     }
-    if (working && live && !/^\/(?:compact|fork|init)(?:\s|$)/i.test(prompt)) {
-      if (attachments.length) {
-        setError("运行中追加指令暂不支持附件");
-        return;
-      }
-      setSending(true);
-      sendingRef.current = true;
-      setError(null);
-      try {
-        useSessionStore
-          .getState()
-          .onInputQueue(await sendNativeInput(live.session_record_id, prompt));
-        setDraft("");
-      } catch (reason) {
-        setError(String(reason));
-      } finally {
-        setSending(false);
-        sendingRef.current = false;
-      }
+    const intent = prompt ? resolveComposerSlash(prompt) : { type: "plain" as const, prompt: "" };
+    if (prompt && isLocalSlashIntent(intent)) {
+      await runLocalIntent(intent);
       return;
     }
-    if (!effectiveChannelId || !model) {
-      setError(t("sessions:needChannel"));
-      return;
-    }
-    // `/init`：让 Agent 分析仓库并生成 / 补充 AGENTS.md（作为普通提示词提交）。
-    const initMatch = /^\/init(?:\s+([\s\S]*))?$/i.exec(prompt);
-    if (initMatch) {
-      setDraft(buildInitPrompt(initMatch[1]));
-      return;
-    }
-    // `/fork [checkpoint_id]`：复制当前会话上下文到新会话（可选先回滚到检查点）。
-    const forkMatch = /^\/fork(?:\s+(\S+))?$/i.exec(prompt);
-    if (forkMatch) {
+    if (intent.type === "fork") {
       if (!selectedSessionId) {
-        setError(t("sessions:forkNeedsSession"));
+        fail(t("sessions:forkNeedsSession"));
         return;
       }
       setError(null);
       setSending(true);
       try {
         await finishIdleSession(selectedSessionId);
-        const forked = await forkNativeSession(selectedSessionId, forkMatch[1]);
+        const forked = await forkNativeSession(selectedSessionId, intent.checkpointId);
         await useWorkspaceStore.getState().refreshSessions();
         await useSessionStore.getState().loadHistory(forked);
         setDraft("");
       } catch (err) {
-        setError(err instanceof Error ? err.message : String(err));
+        fail(err instanceof Error ? err.message : String(err));
       } finally {
         setSending(false);
       }
       return;
     }
-    // `/compact [指令]`：对运行中的会话请求上下文压缩，不算一条用户输入。
-    const compactMatch = /^\/compact(?:\s+([\s\S]*))?$/i.exec(prompt);
-    if (compactMatch) {
+    if (intent.type === "compact") {
       if (!live) {
-        setError(t("sessions:compactNeedsLiveSession"));
+        fail(t("sessions:compactNeedsLiveSession"));
         return;
       }
       setError(null);
       setSending(true);
       try {
-        const accepted = await compactNativeSession(live.session_record_id, compactMatch[1]);
-        if (!accepted) setError(t("sessions:compactNeedsLiveSession"));
+        const accepted = await compactNativeSession(live.session_record_id, intent.instructions);
+        if (!accepted) fail(t("sessions:compactNeedsLiveSession"));
         else setDraft("");
       } catch (err) {
-        setError(err instanceof Error ? err.message : String(err));
+        fail(err instanceof Error ? err.message : String(err));
       } finally {
         setSending(false);
       }
       return;
     }
-    if (sendBusy) return;
+
     let nextPrompt = prompt;
-    const skillCall = parseSkillInvocation(prompt);
-    if (skillCall) {
-      nextPrompt = skillInvocationPrompt(skillCall.name, skillCall.args);
-    } else {
-      const slash = parseLeadingSlash(prompt);
-      if (slash && !isBuiltinSlashName(slash.name)) {
-        try {
-          const expanded = await expandNativeSlashCommand(workspaceId, slash.name, slash.args);
-          nextPrompt = expanded.prompt;
-        } catch {
-          // 未注册的自定义命令按普通文本发送。
-        }
+    if (intent.type === "plan" && intent.task) {
+      try {
+        await applyPermissionMode("plan");
+      } catch (reason) {
+        fail(String(reason));
+        return;
       }
+      nextPrompt = intent.task;
+    } else if (intent.type === "expand") {
+      nextPrompt = intent.prompt;
+      if (!working) {
+        setDraft(nextPrompt);
+        return;
+      }
+    } else if (isExpandingSlashIntent(intent)) {
+      nextPrompt = await expandIntentPrompt(intent, prompt);
+    }
+
+    if (working && live) {
+      if (attachments.length) {
+        fail("运行中追加指令暂不支持附件");
+        return;
+      }
+      setSending(true);
+      sendingRef.current = true;
+      setError(null);
+      setInfo(null);
+      try {
+        useSessionStore
+          .getState()
+          .onInputQueue(await sendNativeInput(live.session_record_id, nextPrompt));
+        setDraft("");
+      } catch (reason) {
+        fail(String(reason));
+      } finally {
+        setSending(false);
+        sendingRef.current = false;
+      }
+      return;
+    }
+    if (sendBusy) return;
+    if (!effectiveChannelId || !model) {
+      fail(t("sessions:needChannel"));
+      return;
     }
     setError(null);
+    setInfo(null);
     setSending(true);
     sendingRef.current = true;
     const thinkingOn = composerThinkingEnabled(selectedModel);
@@ -545,7 +743,7 @@ export function Composer({ compact = false }: { compact?: boolean }) {
         prompt: nextPrompt,
         model: model || null,
         reasoningEffort: thinkingOn ? resolvedEffort || null : null,
-        planMode: composerPlanMode,
+        planMode: composerPlanMode || intent.type === "plan",
         permissionMode: runtime?.permission_mode,
         imagePaths,
       });
@@ -559,7 +757,7 @@ export function Composer({ compact = false }: { compact?: boolean }) {
       setDraft("");
       setAttachments([]);
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      fail(err instanceof Error ? err.message : String(err));
     } finally {
       sendingRef.current = false;
       setSending(false);
@@ -612,6 +810,37 @@ export function Composer({ compact = false }: { compact?: boolean }) {
         <div className="mb-2 flex items-center gap-2">
           <WorkspacePicker />
           <BranchPicker />
+        </div>
+      ) : null}
+      {helpOpen ? (
+        <div className="mb-2 rounded-xl border border-border/70 bg-card/95 p-3 text-xs shadow-sm">
+          <div className="flex items-start justify-between gap-2">
+            <div>
+              <p className="font-medium text-foreground">{t("sessions:slashHelpTitle")}</p>
+              <p className="mt-0.5 text-muted-foreground">{t("sessions:slashHelpHint")}</p>
+            </div>
+            <button
+              type="button"
+              className="text-muted-foreground hover:text-foreground"
+              onClick={() => setHelpOpen(false)}
+            >
+              {t("sessions:planAskClose")}
+            </button>
+          </div>
+          <ul className="mt-2 max-h-48 space-y-1 overflow-y-auto">
+            {builtinSlashCommands((name) => ({
+              description: t(`slashBuiltin.${name}.description`),
+              hint: t(`slashBuiltin.${name}.hint`),
+            })).map((item) => (
+              <li key={item.key} className="flex gap-2">
+                <span className="shrink-0 font-mono text-foreground">/{item.name}</span>
+                <span className="min-w-0 truncate text-muted-foreground">
+                  {item.argumentHint ? `${item.argumentHint} · ` : ""}
+                  {item.description}
+                </span>
+              </li>
+            ))}
+          </ul>
         </div>
       ) : null}
       {selectedSessionId ? (
@@ -752,7 +981,7 @@ export function Composer({ compact = false }: { compact?: boolean }) {
                 }}
               />
             ) : null}
-            <ContextCapacity usage={usage} />
+            <ContextCapacity usage={usage} open={contextOpen} onOpenChange={setContextOpen} />
           </div>
           <div className="flex shrink-0 items-center gap-1.5 self-end">
             {working && live ? (
@@ -829,6 +1058,13 @@ export function Composer({ compact = false }: { compact?: boolean }) {
         )}
       </ComposerMentionMenu>
       {error ? <p className="mt-2 text-sm text-destructive">{error}</p> : null}
+      {info ? <p className="mt-2 text-sm text-muted-foreground">{info}</p> : null}
+      <SkillCreateDialog
+        open={skillDialogOpen}
+        onOpenChange={setSkillDialogOpen}
+        onCreated={() => undefined}
+      />
+      <SubagentEditorDialog open={subagentDialogOpen} onOpenChange={setSubagentDialogOpen} />
     </div>
   );
 }
