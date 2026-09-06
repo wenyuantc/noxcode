@@ -116,7 +116,7 @@ P4 把进程内编程 Agent 接到渠道 + 工作区外壳。数据流仍是 `Re
 
 ## 模型角色与调用日志
 
-渠道可配置 `lite_model`（必须在该渠道模型列表内）。压缩摘要、记忆抽取 / 整理、`agent` 钩子判定优先用它。`native_api_call_logs` 新增 `operation`（`agent_step` / `compact` / `memory_extract` / `memory_dream` / `hook_agent` / `subagent` / `one_shot`）与 `model_role`（`main` / `lite`）两列，`CallLogContext::with_operation / with_model_role` 写入。
+渠道可配置 `lite_model`（必须在该渠道模型列表内）。压缩摘要、记忆抽取 / 整理、`agent` 钩子判定优先用它。`native_api_call_logs` 新增 `operation`（`agent_step` / `compact` / `memory_extract` / `memory_dream` / `hook_agent` / `subagent` / `one_shot` / `commit_message` / `session_title`）与 `model_role`（`main` / `lite`）两列，`CallLogContext::with_operation / with_model_role` 写入。
 
 ## 上下文压缩
 

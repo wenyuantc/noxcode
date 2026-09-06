@@ -12,6 +12,7 @@ import {
   Loader2,
   Minus,
   Plus,
+  Sparkles,
   RefreshCw,
   RotateCcw,
   Trash2,
@@ -28,6 +29,7 @@ import { Textarea } from "@/components/ui/textarea";
 import {
   clearGitCheckpoints,
   commitGitChanges,
+  generateGitCommitMessage,
   getGitStatus,
   listActivityLogs,
   listGitCheckpoints,
@@ -49,6 +51,7 @@ import type {
 import { cn, formatRelativeTime } from "@/lib/utils";
 import { useGitStore } from "@/stores/gitStore";
 import { useSessionStore } from "@/stores/sessionStore";
+import { useSettingsStore } from "@/stores/settingsStore";
 import { useUiStore } from "@/stores/uiStore";
 import { useWorkspaceStore } from "@/stores/workspaceStore";
 import { CheckpointTimeline } from "./CheckpointTimeline";
@@ -90,6 +93,14 @@ function GitWorkspacePanel({ workspaceId }: { workspaceId: string | null }) {
     Boolean(workspaceId && useGitStore.getState().pulls[workspaceId]?.status === "pulling");
   const [checkpointNotice, setCheckpointNotice] = useState<string | null>(null);
   const [checkpointError, setCheckpointError] = useState<string | null>(null);
+  const [generatingCommit, setGeneratingCommit] = useState(false);
+  const [generateError, setGenerateError] = useState<string | null>(null);
+  const commitAiEnabled = useSettingsStore((state) => state.ai?.commit_message.enabled) === true;
+
+  useEffect(() => {
+    if (useSettingsStore.getState().ai) return;
+    void useSettingsStore.getState().load();
+  }, []);
 
   useEffect(() => {
     mounted.current = true;
@@ -443,6 +454,14 @@ function GitWorkspacePanel({ workspaceId }: { workspaceId: string | null }) {
           {t("refreshFailed")} {refreshError}
         </div>
       ) : null}
+      {generateError ? (
+        <div
+          role="alert"
+          className="max-h-24 shrink-0 overflow-auto whitespace-pre-wrap break-words border-b px-3 py-2 text-xs text-destructive"
+        >
+          {t("generateCommitFailed")} {generateError}
+        </div>
+      ) : null}
 
       <Tabs defaultValue="changes" className="flex min-h-0 flex-1 flex-col">
         <div className="px-3 pt-2">
@@ -475,8 +494,8 @@ function GitWorkspacePanel({ workspaceId }: { workspaceId: string | null }) {
                 <Textarea
                   value={message}
                   placeholder={t("commitMessage")}
-                  className="h-20 min-h-20 max-h-20 w-full resize-none rounded-lg border border-input/60 bg-background/80 p-2 font-sans text-xs leading-relaxed shadow-2xs transition-all placeholder:text-muted-foreground/50 focus-visible:border-ring/60 focus-visible:ring-1"
-                  disabled={!workspaceId || busy}
+                  className="h-20 min-h-20 max-h-20 w-full resize-none rounded-lg border border-input/60 bg-background/80 p-2 pr-10 font-sans text-xs leading-relaxed shadow-2xs transition-all placeholder:text-muted-foreground/50 focus-visible:border-ring/60 focus-visible:ring-1"
+                  disabled={!workspaceId || busy || generatingCommit}
                   onChange={(event) => setMessage(event.target.value)}
                   onKeyDown={(event) => {
                     if ((event.metaKey || event.ctrlKey) && event.key === "Enter") {
@@ -485,6 +504,38 @@ function GitWorkspacePanel({ workspaceId }: { workspaceId: string | null }) {
                     }
                   }}
                 />
+                {commitAiEnabled ? (
+                  <Button
+                    type="button"
+                    size="icon-sm"
+                    variant="ghost"
+                    className="absolute top-1.5 right-1.5 size-7 rounded-md bg-foreground text-background hover:bg-foreground/90 hover:text-background"
+                    title={t(generatingCommit ? "generatingCommit" : "generateCommit")}
+                    aria-label={t(generatingCommit ? "generatingCommit" : "generateCommit")}
+                    disabled={!workspaceId || busy || generatingCommit}
+                    onClick={() => {
+                      if (!workspaceId || isBusy() || generatingCommit) return;
+                      setGeneratingCommit(true);
+                      setGenerateError(null);
+                      void generateGitCommitMessage(workspaceId)
+                        .then((next) => {
+                          if (mounted.current) setMessage(next);
+                        })
+                        .catch((reason: unknown) => {
+                          if (mounted.current) setGenerateError(String(reason));
+                        })
+                        .finally(() => {
+                          if (mounted.current) setGeneratingCommit(false);
+                        });
+                    }}
+                  >
+                    {generatingCommit ? (
+                      <Loader2 className="size-3.5 animate-spin" />
+                    ) : (
+                      <Sparkles className="size-3.5" />
+                    )}
+                  </Button>
+                ) : null}
                 <span className="pointer-events-none absolute bottom-1.5 right-2 text-[10px] font-sans text-muted-foreground/40">
                   ⌘↵
                 </span>

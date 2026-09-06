@@ -49,14 +49,14 @@ src/components/git/      GitPanel · DiffView · CheckpointTimeline
 | `workspaceStore` | `noxcode:active-workspace` | 工作区列表、会话树、健康检查 |
 | `channelStore` | `noxcode:active-model` | 渠道列表、当前渠道/模型 |
 | `sessionStore` | — | live 会话、事件行、turn-state、按会话计划模式、权限/提问 |
-| `settingsStore` | — | native / network / 快捷提示 |
+| `settingsStore` | — | native / network / AI 功能 / 快捷提示 |
 | `updateStore` | — | 桌面更新检查 / 下载 / 重启；侧栏按钮与关于页共用 |
 
 ## 会话接线
 
 `useNativeEvents` 在 `App` 挂一次，把 native 事件写入 `sessionStore`：
 
-`native-session` / `native-stdout` / `native-text-delta` / `native-context-usage` / `native-turn-state` / `native-plan-mode` / `native-exit` / `native-permission-request` / `native-plan-question` / `native-plan-approval-request`。
+`native-session` / `native-session-title` / `native-stdout` / `native-text-delta` / `native-context-usage` / `native-turn-state` / `native-plan-mode` / `native-exit` / `native-permission-request` / `native-plan-question` / `native-plan-approval-request`。
 
 打开历史会话立即改 `selectedSessionId`（侧栏高亮）；`lines` 已缓存则不重拉，无缓存拉最近 200 条。事件流只在当前选中会话的 `lines` 就绪后切换；加载期间隐藏旧会话流并显示加载态，避免侧栏、标题和输入框指向 A、内容仍显示 B。已打开的流保活最近 3 个（`hidden` 不卸 DOM）。live 行只走 `onStdout`（payload 可带 `tool` / `images`），历史结果不得覆盖已有缓存。`ensureHistory` 会解开 `{"nox":1,...}` 信封；旧会话仍按中文前缀文本兜底（FIFO + 子 Agent 分桶）。
 
@@ -82,7 +82,7 @@ Composer / 编辑重发 / 重试走 `submitSessionPrompt`：有选中会话则 `
 
 ## 设置
 
-左导航三组：基础设置（general / appearance / channels / ssh）、Agent 能力（runtime / subagents / mcp / skills / hooks）、数据与统计（usage / database / about）。使用统计顶部提供 7 天 / 30 天 / 自定义筛选，概览展示总 Token（k/M）与缓存率，并有活跃热力图、按天 Token 趋势、模型用量三张卡，数据来自 `get_native_usage_analytics`。开关即时生效，文本输入配「保存」。通用设置提供桌面通知开关；Native runtime 提供工具后自动 checkpoint 开关和保留天数（`0` 不清理）；SSH 编辑弹窗提供 KEX / Host Key / Cipher / MAC 高级算法区，以及旧服务器预设 / 恢复默认；MCP 卡片可在全部工作区和指定工作区之间切换并勾选绑定工作区。
+左导航三组：基础设置（general / appearance / channels / ai / ssh）、Agent 能力（runtime / subagents / mcp / skills / hooks）、数据与统计（usage / database / about）。`/settings/ai` 提供两张卡：Git 提交信息与会话标题，各有开关和独立的渠道 / 模型 / 推理强度；点「保存配置」写入 `$APPCONFIG/ai-settings.json`。开启提交信息后，Git 抽屉提交框右上角显示 Sparkles 按钮，调用 `generate_git_commit_message` 覆盖 textarea，不自动提交。开启会话标题后，新建会话在 INSERT 截断标题之后异步 one-shot 生成标题，经 `native-session-title` 刷新侧栏；续聊 / 恢复 / 分叉不重生成。使用统计顶部提供 7 天 / 30 天 / 自定义筛选，概览展示总 Token（k/M）与缓存率，并有活跃热力图、按天 Token 趋势、模型用量三张卡，数据来自 `get_native_usage_analytics`。开关即时生效，文本输入配「保存」。通用设置提供桌面通知开关；Native runtime 提供工具后自动 checkpoint 开关和保留天数（`0` 不清理）；SSH 编辑弹窗提供 KEX / Host Key / Cipher / MAC 高级算法区，以及旧服务器预设 / 恢复默认；MCP 卡片可在全部工作区和指定工作区之间切换并勾选绑定工作区。
 
 渠道删除时若有 live session 则后端拒绝，错误原文展示。子智能体是列表 + 弹窗 CRUD，可配模型、工具与工作区作用域。MCP 还支持备注、删除、Playwright 预设和导出片段。数据库维护展示路径与迁移版本、备份范围（SQL 本体 vs 配置目录/密钥环），并提供导出 / 导入 SQL 与打开数据库目录。关于页用 `getVersion()` 显示真实版本；进入该页会自动检查更新，也可手动再检查 / 下载 / 重启。开发模式会提示无法检查。应用启动后静默检查；有新版本时首页侧栏底部显示「更新 / 下载中 / 重启更新」，与关于页共用 `updateStore`。
 
@@ -94,7 +94,7 @@ Composer / 编辑重发 / 重试走 `submitSessionPrompt`：有选中会话则 `
 
 顶部刷新左侧为“拉取最新代码”。`gitStore` 按工作区保存进行中和结果状态，关闭再打开侧栏不会重复拉取；拉取期间禁用 Git 写操作和刷新。拉取成功与失败都会重新加载状态、领先 / 落后计数、检查点和活动记录，刷新错误单独显示，不覆盖拉取结果。仅安全快进，不自动合并、变基或 stash；非冲突的本地改动保持原样。
 
-会话页 `⌘⇧G` / SessionHeader 打开。变更 Tab：已暂存 / 未暂存 / 未跟踪，勾选后暂存、取消暂存、丢弃，`DiffView` 按行着色，提交 + 推送。检查点 Tab：`ref_valid=false` 标失效；可经确认清除本仓库全部 checkpoint，并在可折叠的「回滚记录」中查看回滚成功 / 失败审计。回滚先 `previewGitCheckpointRestore`，展示将覆盖 / 将重建 / 不会自动删除；同工作区有 `working` 会话时预览和执行都会被后端拦截。删除新建文件默认不勾，确认按钮危险色且非默认焦点，gitignore 文件后端永不删。
+会话页 `⌘⇧G` / SessionHeader 打开。变更 Tab：已暂存 / 未暂存 / 未跟踪，勾选后暂存、取消暂存、丢弃，`DiffView` 按行着色，提交 + 推送。设置 → AI 开启「Git 提交信息」后，提交说明框右上角出现 Sparkles 按钮，生成结果写入输入框，不自动提交。检查点 Tab：`ref_valid=false` 标失效；可经确认清除本仓库全部 checkpoint，并在可折叠的「回滚记录」中查看回滚成功 / 失败审计。回滚先 `previewGitCheckpointRestore`，展示将覆盖 / 将重建 / 不会自动删除；同工作区有 `working` 会话时预览和执行都会被后端拦截。删除新建文件默认不勾，确认按钮危险色且非默认焦点，gitignore 文件后端永不删。
 
 ## 快捷键
 

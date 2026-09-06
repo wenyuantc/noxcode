@@ -9,6 +9,7 @@
     "general": "常规",
     "appearance": "外观",
     "channels": "AI 渠道",
+    "ai": "AI",
     "ssh": "SSH 连接",
     "runtime": "内置 Agent 运行时",
     "subagents": "子智能体",
@@ -785,5 +786,30 @@
     "next": "下次：{{time}}",
     "last": "上次：{{time}}",
     "started": "已启动会话 {{session}}。"
+  },
+  "ai": {
+    "description": "为 Git 提交说明和会话标题单独配置模型与推理强度。",
+    "channel": "AI 渠道",
+    "channelPlaceholder": "选择渠道",
+    "modelPlaceholder": "选择模型",
+    "effortPlaceholder": "选择推理强度",
+    "effortHint": "思考等级随所选渠道模型配置",
+    "needChannel": "还没有可用渠道，请先到",
+    "save": "保存配置",
+    "disabledHint": "功能已关闭。开启后可单独配置渠道、模型与推理强度。",
+    "commitMessage": {
+      "title": "Git 提交信息",
+      "description": "控制 AI 自动生成 Git 提交信息时使用的渠道、模型和推理强度。",
+      "hint": "为 Git 提交信息生成单独配置模型与推理强度",
+      "model": "Git AI 模型",
+      "effort": "Git AI 推理强度"
+    },
+    "sessionTitle": {
+      "title": "会话标题",
+      "description": "开启后，新建会话会用配置的模型根据首条用户输入生成标题。",
+      "hint": "为会话标题生成单独配置模型与推理强度",
+      "model": "标题模型",
+      "effort": "标题推理强度"
+    }
   }
 }

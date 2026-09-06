@@ -9,6 +9,7 @@
     "general": "General",
     "appearance": "Appearance",
     "channels": "AI channels",
+    "ai": "AI",
     "ssh": "SSH connections",
     "runtime": "Native runtime",
     "subagents": "Subagents",
@@ -785,5 +786,30 @@
     "next": "Next: {{time}}",
     "last": "Last: {{time}}",
     "started": "Started session {{session}}."
+  },
+  "ai": {
+    "description": "Configure a separate channel, model, and thinking level for Git commit messages and session titles.",
+    "channel": "AI channel",
+    "channelPlaceholder": "Select a channel",
+    "modelPlaceholder": "Select a model",
+    "effortPlaceholder": "Select thinking level",
+    "effortHint": "Thinking level follows the selected channel model.",
+    "needChannel": "No enabled channel yet. Go to",
+    "save": "Save configuration",
+    "disabledHint": "This feature is off. Turn it on to configure a channel, model, and thinking level.",
+    "commitMessage": {
+      "title": "Git commit message",
+      "description": "Controls the channel, model, and thinking level used when AI generates Git commit messages.",
+      "hint": "Configure a separate model and thinking level for Git commit messages",
+      "model": "Git AI model",
+      "effort": "Git AI thinking level"
+    },
+    "sessionTitle": {
+      "title": "Session title",
+      "description": "When enabled, new sessions generate a title from the first user prompt with the configured model.",
+      "hint": "Configure a separate model and thinking level for session titles",
+      "model": "Title model",
+      "effort": "Title thinking level"
+    }
   }
 }
