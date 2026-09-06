@@ -34,6 +34,9 @@ export function UserBubble({
   const [sending, setSending] = useState(false);
   const copiedTimer = useRef<number>(0);
   const workspaceId = useWorkspaceStore((state) => state.activeWorkspaceId);
+  const archived = useWorkspaceStore((state) =>
+    Boolean(state.sessions.find((item) => item.id === sessionId)?.archived),
+  );
   const channelId = useChannelStore((state) => state.activeChannelId);
   const modelId = useChannelStore((state) => state.activeModelId);
   const defaultPlanMode = useUiStore((state) => state.composerPlanMode);
@@ -58,7 +61,7 @@ export function UserBubble({
 
   const resend = async () => {
     const prompt = draft.trim();
-    if (!prompt || working || sending) return;
+    if (!prompt || working || sending || archived) return;
     setSending(true);
     try {
       if (!workspaceId || !channelId) return;
@@ -76,7 +79,7 @@ export function UserBubble({
     }
   };
 
-  if (editing) {
+  if (editing && !archived) {
     return (
       <div className="ml-auto flex w-full max-w-[80%] flex-col items-end gap-1.5">
         <SessionImageThumbs images={images} />
@@ -148,7 +151,7 @@ export function UserBubble({
             >
               {copied ? <Check className="size-3 text-emerald-500" /> : <Copy className="size-3" />}
             </button>
-            {editable ? (
+            {editable && !archived ? (
               <button
                 type="button"
                 className="cursor-pointer rounded-md p-1 transition-colors hover:bg-muted hover:text-foreground disabled:opacity-40"

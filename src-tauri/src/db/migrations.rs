@@ -411,6 +411,16 @@ pub fn get_all_migrations() -> Vec<Migration> {
             "#,
             kind: tauri_plugin_sql::MigrationKind::Up,
         },
+        Migration {
+            version: 10,
+            description: "agent_sessions soft archive",
+            sql: r#"
+                ALTER TABLE agent_sessions ADD COLUMN archived INTEGER NOT NULL DEFAULT 0;
+                CREATE INDEX idx_agent_sessions_archived_started
+                    ON agent_sessions(archived, pinned DESC, started_at DESC, id);
+            "#,
+            kind: tauri_plugin_sql::MigrationKind::Up,
+        },
     ]
 }
 
@@ -456,7 +466,7 @@ mod tests {
         for (index, migration) in get_all_migrations().iter().enumerate() {
             assert_eq!(migration.version, index as i64 + 1);
         }
-        assert_eq!(latest_migration_version(), 9);
+        assert_eq!(latest_migration_version(), 10);
         assert_eq!(
             get_all_migrations()
                 .last()
@@ -480,6 +490,28 @@ mod tests {
             .collect();
             assert_eq!(columns, vec!["title"]);
         });
+    }
+
+    #[tokio::test]
+    async fn archive_migration_preserves_existing_session_data() {
+        let pool = SqlitePool::connect("sqlite::memory:").await.unwrap();
+        let migrations = get_all_migrations();
+        for migration in &migrations[..9] {
+            sqlx::raw_sql(migration.sql).execute(&pool).await.unwrap();
+        }
+        sqlx::query("INSERT INTO agent_sessions (id, title, pinned, total_tokens) VALUES ('old', 'existing', 1, 42)")
+            .execute(&pool).await.unwrap();
+        sqlx::raw_sql(migrations[9].sql)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let row: (String, i32, i64, i32) = sqlx::query_as(
+            "SELECT title, pinned, total_tokens, archived FROM agent_sessions WHERE id = 'old'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(row, ("existing".to_string(), 1, 42, 0));
     }
 
     #[test]

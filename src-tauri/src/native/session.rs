@@ -9,7 +9,9 @@ use tauri::{AppHandle, Emitter, Manager, State};
 use tokio::sync::{mpsc, Mutex};
 
 use crate::app::network_settings::{load_network_settings, proxy_env_vars};
-use crate::app::sessions::persist_context_usage_with;
+use crate::app::sessions::{
+    lock_agent_session_operation, persist_context_usage_with, require_unarchived_session_with,
+};
 use crate::app::shared::{new_id, now_sqlite, sqlite_pool, EXECUTION_TARGET_SSH};
 use crate::app::ssh::configs::fetch_ssh_config_record_by_id;
 use crate::db::models::{
@@ -27,9 +29,9 @@ use crate::native::api_logs::sqlite_call_log_sink;
 use crate::native::channels::{fetch_channel_record, require_channel_api_key};
 use crate::native::input_queue::{NativeInputQueue, NativeInputQueueSnapshot};
 use crate::native::manager::{
-    NativeAgentManager, NativeFollowup, NativeLiveSession, NativeSessionInfo, PendingPermission,
-    PendingPlanApproval, PendingPlanQuestion, PermissionRequest, PlanApprovalRequest,
-    PlanQuestionRequest,
+    NativeAgentManager, NativeCompactionRequest, NativeFollowup, NativeLiveSession,
+    NativeSessionInfo, PendingPermission, PendingPlanApproval, PendingPlanQuestion,
+    PermissionRequest, PlanApprovalRequest, PlanQuestionRequest,
 };
 use crate::native::mcp_servers::resolve_session_mcp_servers;
 use crate::native::model::call_log::{
@@ -1281,6 +1283,7 @@ async fn resolve_insert_title(
 #[allow(clippy::too_many_arguments)]
 async fn insert_agent_session(
     pool: &sqlx::SqlitePool,
+    id: &str,
     ai_channel_id: &str,
     workspace_id: &str,
     working_dir: &str,
@@ -1291,7 +1294,6 @@ async fn insert_agent_session(
     resume_session_id: Option<&str>,
     prompt: &str,
 ) -> Result<String, String> {
-    let id = new_id();
     let now = now_sqlite();
     let title = resolve_insert_title(pool, prompt, resume_session_id).await?;
     sqlx::query(
@@ -1303,7 +1305,7 @@ async fn insert_agent_session(
         ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'running', $9, $10, $9, $11)
         "#,
     )
-    .bind(&id)
+    .bind(id)
     .bind(ai_channel_id)
     .bind(workspace_id)
     .bind(working_dir)
@@ -1317,7 +1319,7 @@ async fn insert_agent_session(
     .execute(pool)
     .await
     .map_err(|error| format!("创建会话失败: {error}"))?;
-    Ok(id)
+    Ok(id.to_string())
 }
 
 async fn enqueue_live_input(
@@ -1356,6 +1358,7 @@ async fn reactivate_agent_session(
     target_host_label: Option<&str>,
     kind: &str,
 ) -> Result<String, String> {
+    require_unarchived_session_with(pool, session_id).await?;
     let session = sqlx::query_as::<_, AgentSessionRecord>(
         "SELECT * FROM agent_sessions WHERE id = $1 LIMIT 1",
     )
@@ -1569,6 +1572,22 @@ pub(crate) async fn start_native_with_manager(
     manager_state: Arc<Mutex<NativeAgentManager>>,
     payload: StartNativeSessionInput,
 ) -> Result<AgentSessionStarted, String> {
+    let _operation = match payload.resume_session_id.as_deref().map(str::trim) {
+        Some(id) if !id.is_empty() => {
+            let guard = lock_agent_session_operation(&manager_state, id).await;
+            require_unarchived_session_with(&sqlite_pool(&app).await?, id).await?;
+            Some(guard)
+        }
+        _ => None,
+    };
+    start_native_session_locked(app, manager_state, payload).await
+}
+
+async fn start_native_session_locked(
+    app: AppHandle,
+    manager_state: Arc<Mutex<NativeAgentManager>>,
+    payload: StartNativeSessionInput,
+) -> Result<AgentSessionStarted, String> {
     let plan_mode = payload.plan_mode.unwrap_or(false);
     let kind = session_kind(plan_mode);
     let workspace_id = payload.workspace_id.trim().to_string();
@@ -1656,6 +1675,12 @@ pub(crate) async fn start_native_with_manager(
         payload.prompt.clone()
     };
 
+    let session_record_id = resume_id.clone().unwrap_or_else(new_id);
+    let _new_operation = if resume_id.is_none() {
+        Some(lock_agent_session_operation(&manager_state, &session_record_id).await)
+    } else {
+        None
+    };
     let session_record_id = if let Some(resume_id) = resume_id.as_deref() {
         reactivate_agent_session(
             &pool,
@@ -1672,6 +1697,7 @@ pub(crate) async fn start_native_with_manager(
     } else {
         insert_agent_session(
             &pool,
+            &session_record_id,
             &channel_id,
             &workspace_id,
             &run_cwd,
@@ -1843,6 +1869,7 @@ pub(crate) async fn start_native_with_manager(
         join,
         allow_all_high_risk,
         working,
+        pending_compactions: Arc::default(),
         permission_rules,
         workspace_root: local_workspace_root,
         pending_permission: std::collections::VecDeque::new(),
@@ -2695,10 +2722,10 @@ async fn run_native_loop(
                     };
                     drop(controls);
                     match followup {
-                        Some(NativeFollowup::Compact(instructions)) => {
+                        Some(NativeFollowup::Compact(mut request)) => {
                             emit_turn_state(&app, &session_record_id, &working, "working");
                             if runner
-                                .compact_now(&run.client, instructions)
+                                .compact_now(&run.client, request.instructions.take())
                                 .await
                                 .is_none()
                             {
@@ -3122,10 +3149,13 @@ pub async fn dream_native_memory(
 /// `/compact [指令]`：向运行中的会话投递压缩请求；等待输入时立即执行，工作中则在下一次模型调用前执行。
 #[tauri::command]
 pub async fn compact_native_session(
+    app: AppHandle,
     state: State<'_, Arc<Mutex<NativeAgentManager>>>,
     session_record_id: String,
     instructions: Option<String>,
 ) -> Result<bool, String> {
+    let _operation = lock_agent_session_operation(&state, &session_record_id).await;
+    require_unarchived_session_with(&sqlite_pool(&app).await?, &session_record_id).await?;
     let instructions = instructions
         .map(|item| item.trim().to_string())
         .filter(|item| !item.is_empty());
@@ -3138,7 +3168,10 @@ pub async fn compact_native_session(
     }
     session
         .followup_tx
-        .try_send(NativeFollowup::Compact(instructions))
+        .try_send(NativeFollowup::Compact(NativeCompactionRequest::new(
+            instructions,
+            session.pending_compactions.clone(),
+        )))
         .map_err(|error| format!("无法压缩，输入队列已满或会话已结束: {error}"))?;
     session.working.store(true, Ordering::SeqCst);
     Ok(true)
@@ -3201,6 +3234,7 @@ pub async fn stop_native_session(
     state: State<'_, Arc<Mutex<NativeAgentManager>>>,
     session_record_id: String,
 ) -> Result<(), String> {
+    let _operation = lock_agent_session_operation(&state, &session_record_id).await;
     if !stop_native_process(
         &app,
         state.inner(),
@@ -3223,6 +3257,7 @@ pub async fn stop_native(
 ) -> Result<(), String> {
     let processes = state.lock().await.get_profile_processes(&profile_id);
     for process in processes {
+        let _operation = lock_agent_session_operation(&state, &process.session_record_id).await;
         let _ = stop_native_process(
             &app,
             state.inner(),
@@ -3237,10 +3272,13 @@ pub async fn stop_native(
 
 #[tauri::command]
 pub async fn send_native_input(
+    app: AppHandle,
     state: State<'_, Arc<Mutex<NativeAgentManager>>>,
     session_record_id: String,
     input: String,
 ) -> Result<NativeInputQueueSnapshot, String> {
+    let _operation = lock_agent_session_operation(&state, &session_record_id).await;
+    require_unarchived_session_with(&sqlite_pool(&app).await?, &session_record_id).await?;
     enqueue_live_input(state.inner().as_ref(), &session_record_id, &input, None)
         .await?
         .map(|(_, snapshot)| snapshot)
@@ -3413,7 +3451,9 @@ pub async fn restart_native_session(
         .map(str::trim)
         .filter(|item| !item.is_empty())
         .map(ToOwned::to_owned);
-    if let Some(session_id) = restart_id {
+    let _operation = if let Some(session_id) = restart_id {
+        let guard = lock_agent_session_operation(&state, &session_id).await;
+        require_unarchived_session_with(&sqlite_pool(&app).await?, &session_id).await?;
         let _ = stop_native_process(
             &app,
             state.inner(),
@@ -3422,8 +3462,11 @@ pub async fn restart_native_session(
             "收到重启请求",
         )
         .await?;
-    }
-    start_native_with_manager(app, state.inner().clone(), payload).await
+        Some(guard)
+    } else {
+        None
+    };
+    start_native_session_locked(app, state.inner().clone(), payload).await
 }
 
 #[tauri::command]
@@ -3612,6 +3655,7 @@ mod tests {
             join,
             allow_all_high_risk: Arc::new(AtomicBool::new(false)),
             working: Arc::new(AtomicBool::new(false)),
+            pending_compactions: Arc::default(),
             permission_rules: crate::native::permission_rules::shared_rules(Default::default()),
             workspace_root: None,
             pending_permission: Default::default(),
@@ -3906,6 +3950,7 @@ mod tests {
         let prompt = "一二三四五六七八九十一二三四五六七八九十一二三四五六七八九十超出";
         let source = super::insert_agent_session(
             &pool,
+            &crate::app::shared::new_id(),
             "ch-t",
             "ws-t",
             "/tmp",
@@ -3926,6 +3971,7 @@ mod tests {
                 .expect("source title");
         let resumed = super::insert_agent_session(
             &pool,
+            &crate::app::shared::new_id(),
             "ch-t",
             "ws-t",
             "/tmp",
@@ -3978,6 +4024,7 @@ mod tests {
             join: tokio::spawn(async {}),
             allow_all_high_risk: Arc::new(AtomicBool::new(false)),
             working: Arc::new(AtomicBool::new(false)),
+            pending_compactions: Arc::default(),
             pending_permission: VecDeque::new(),
             pending_question: VecDeque::new(),
             permission_rules: crate::native::permission_rules::shared_rules(Default::default()),
@@ -4050,6 +4097,7 @@ mod tests {
             join: tokio::spawn(async {}),
             allow_all_high_risk: Arc::new(AtomicBool::new(false)),
             working: Arc::new(AtomicBool::new(false)),
+            pending_compactions: Arc::default(),
             pending_permission: VecDeque::new(),
             pending_question: VecDeque::new(),
             permission_rules: crate::native::permission_rules::shared_rules(Default::default()),
@@ -4190,6 +4238,42 @@ mod tests {
         assert!(row.ended_at.is_none());
         assert!(row.exit_code.is_none());
         assert_ne!(row.started_at, "2026-01-01 00:00:00");
+    }
+
+    #[tokio::test]
+    async fn reactivate_archived_session_is_rejected_without_changing_metadata() {
+        let pool = crate::db::test_support::setup_migrated_pool().await;
+        sqlx::query(
+            "INSERT INTO agent_sessions (id, title, archived, pinned, status, working_dir) VALUES ('archived', '保留名称', 1, 1, 'exited', '/old')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        let error = super::reactivate_agent_session(
+            &pool,
+            "archived",
+            "workspace",
+            "channel",
+            "/new",
+            "local",
+            None,
+            None,
+            "plan",
+        )
+        .await
+        .unwrap_err();
+        assert!(error.contains("已归档"));
+        let row = sqlx::query_as::<_, crate::db::models::AgentSessionRecord>(
+            "SELECT * FROM agent_sessions WHERE id = 'archived'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(row.archived, 1);
+        assert_eq!(row.pinned, 1);
+        assert_eq!(row.title.as_deref(), Some("保留名称"));
+        assert_eq!(row.working_dir.as_deref(), Some("/old"));
+        assert_eq!(row.status, "exited");
     }
 
     #[tokio::test]

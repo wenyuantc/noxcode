@@ -716,11 +716,11 @@ mod tests {
             let status = fetch_database_migration_status(&pool)
                 .await
                 .expect("fetch migration status");
-            assert_eq!(status.current_version, Some(9));
-            assert_eq!(status.applied_count, 9);
+            assert_eq!(status.current_version, Some(10));
+            assert_eq!(status.applied_count, 10);
             assert_eq!(
                 status.current_description.as_deref(),
-                Some("cron automations and session goals")
+                Some("agent_sessions soft archive")
             );
         });
     }
@@ -742,10 +742,10 @@ mod tests {
             assert!(script.contains("-- noxcode SQL backup"));
             assert!(script.contains("INSERT INTO \"ai_channels\""));
 
-            let (_, status) = validate_sql_backup_script(script, 9)
+            let (_, status) = validate_sql_backup_script(script, 10)
                 .await
                 .expect("validate backup script");
-            assert_eq!(status.current_version, Some(9));
+            assert_eq!(status.current_version, Some(10));
         });
     }
 }

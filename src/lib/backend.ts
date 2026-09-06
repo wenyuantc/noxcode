@@ -365,8 +365,13 @@ export function ensureScratchWorkspace(): Promise<Workspace> {
   return invoke("ensure_scratch_workspace");
 }
 
-export function listAgentSessions(workspaceId?: string, limit?: number): Promise<AgentSession[]> {
-  return invoke("list_agent_sessions", { workspaceId, limit });
+export function listAgentSessions(
+  workspaceId?: string,
+  limit?: number,
+  archived?: boolean,
+  offset?: number,
+): Promise<AgentSession[]> {
+  return invoke("list_agent_sessions", { workspaceId, limit, archived, offset });
 }
 
 export function getAgentSessionLogLines(
@@ -383,6 +388,21 @@ export function prepareAgentSessionResume(sessionId: string): Promise<AgentSessi
 
 export function setAgentSessionPinned(sessionId: string, pinned: boolean): Promise<void> {
   return invoke("set_agent_session_pinned", { sessionId, pinned });
+}
+
+export function renameAgentSession(sessionId: string, title: string): Promise<AgentSession> {
+  return invoke("rename_agent_session", { sessionId, title });
+}
+
+export function setAgentSessionArchived(
+  sessionId: string,
+  archived: boolean,
+): Promise<AgentSession> {
+  return invoke("set_agent_session_archived", { sessionId, archived });
+}
+
+export function openAgentSessionDirectory(sessionId: string): Promise<void> {
+  return invoke("open_agent_session_directory", { sessionId });
 }
 
 export function deleteAgentSession(sessionId: string): Promise<void> {

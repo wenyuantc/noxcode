@@ -1,8 +1,8 @@
 #![allow(dead_code)]
 
 use std::collections::{HashMap, VecDeque};
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, Weak};
 
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
@@ -32,8 +32,30 @@ pub enum NativeFollowup {
         images: Vec<NativeImage>,
     },
     /// `/compact [指令]`：在等待输入或下一次模型调用前压缩上下文。
-    Compact(Option<String>),
+    Compact(NativeCompactionRequest),
     Finish,
+}
+
+#[derive(Debug)]
+pub struct NativeCompactionRequest {
+    pub instructions: Option<String>,
+    pending: Arc<AtomicUsize>,
+}
+
+impl NativeCompactionRequest {
+    pub fn new(instructions: Option<String>, pending: Arc<AtomicUsize>) -> Self {
+        pending.fetch_add(1, Ordering::SeqCst);
+        Self {
+            instructions,
+            pending,
+        }
+    }
+}
+
+impl Drop for NativeCompactionRequest {
+    fn drop(&mut self) {
+        self.pending.fetch_sub(1, Ordering::SeqCst);
+    }
 }
 
 impl NativeFollowup {
@@ -110,6 +132,7 @@ pub struct NativeLiveSession {
     pub join: JoinHandle<()>,
     pub allow_all_high_risk: Arc<AtomicBool>,
     pub working: Arc<AtomicBool>,
+    pub pending_compactions: Arc<AtomicUsize>,
     /// 与 `ToolCtx` 共享的规则；「总是允许」写入后即时生效。
     pub permission_rules: SharedPermissionRules,
     /// 本地工作区目录（工作区规则文件的落点）；SSH 工作区为 `None`。
@@ -122,11 +145,47 @@ pub struct NativeLiveSession {
 #[derive(Default)]
 pub struct NativeAgentManager {
     sessions: HashMap<String, NativeLiveSession>,
+    operation_locks: HashMap<String, Weak<tokio::sync::Mutex<()>>>,
 }
 
 impl NativeAgentManager {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    // Serialize archive/resume/input without holding the manager lock during session startup.
+    pub(crate) fn session_operation_lock(
+        &mut self,
+        session_id: &str,
+    ) -> Arc<tokio::sync::Mutex<()>> {
+        if let Some(lock) = self.operation_locks.get(session_id).and_then(Weak::upgrade) {
+            return lock;
+        }
+        self.operation_locks
+            .retain(|_, lock| lock.strong_count() > 0);
+        let lock = Arc::new(tokio::sync::Mutex::new(()));
+        self.operation_locks
+            .insert(session_id.to_string(), Arc::downgrade(&lock));
+        lock
+    }
+
+    pub(crate) fn session_is_busy(&self, session_id: &str) -> bool {
+        self.get_session(session_id).is_some_and(|session| {
+            session.closing
+                // Keep compact requests busy across queue handoff and execution.
+                || session.pending_compactions.load(Ordering::SeqCst) > 0
+                || session.input_queue.is_busy(&session.working)
+                || session.followup_tx.capacity() < session.followup_tx.max_capacity()
+                || !session.pending_permission.is_empty()
+                || !session.pending_question.is_empty()
+                || !session.pending_plan_approval.is_empty()
+                || session.background.as_ref().is_some_and(|registry| {
+                    registry
+                        .list()
+                        .iter()
+                        .any(|task| !task.status().is_finished())
+                })
+        })
     }
 
     pub fn add_session(&mut self, session: NativeLiveSession) {
@@ -435,6 +494,7 @@ mod tests {
             join: tokio::spawn(async {}),
             allow_all_high_risk: Arc::new(AtomicBool::new(false)),
             working: Arc::new(AtomicBool::new(true)),
+            pending_compactions: Arc::default(),
             pending_permission: VecDeque::new(),
             pending_question: VecDeque::new(),
             permission_rules: crate::native::permission_rules::shared_rules(Default::default()),
@@ -474,12 +534,129 @@ mod tests {
             join: tokio::spawn(async {}),
             allow_all_high_risk: Arc::new(AtomicBool::new(false)),
             working: Arc::new(AtomicBool::new(false)),
+            pending_compactions: Arc::default(),
             pending_permission: VecDeque::new(),
             pending_question: VecDeque::new(),
             permission_rules: crate::native::permission_rules::shared_rules(Default::default()),
             workspace_root: None,
             pending_plan_approval: VecDeque::new(),
         }
+    }
+
+    #[tokio::test]
+    async fn compaction_stays_busy_after_dequeue_until_the_request_finishes() {
+        let pool = crate::db::test_support::setup_migrated_pool().await;
+        sqlx::query("INSERT INTO agent_sessions (id) VALUES ('compact')")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let mut manager = NativeAgentManager::new();
+        let mut session = live_session("compact");
+        let (tx, mut rx) = mpsc::channel(1);
+        session.followup_tx = tx;
+        session
+            .followup_tx
+            .try_send(NativeFollowup::Compact(NativeCompactionRequest::new(
+                None,
+                session.pending_compactions.clone(),
+            )))
+            .unwrap();
+        manager.add_session(session);
+        let request = rx.recv().await.unwrap();
+        assert!(manager.session_is_busy("compact"));
+        let manager = tokio::sync::Mutex::new(manager);
+        assert!(crate::app::sessions::set_agent_session_archived_with(
+            &pool, &manager, "compact", true,
+        )
+        .await
+        .is_err());
+        drop(request);
+        assert!(!manager.lock().await.session_is_busy("compact"));
+        crate::app::sessions::set_agent_session_archived_with(&pool, &manager, "compact", true)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn archive_busy_check_covers_runtime_queue_requests_and_background() {
+        let mut manager = NativeAgentManager::new();
+        manager.add_session(live_session("archive"));
+        assert!(!manager.session_is_busy("archive"));
+        let session = manager.get_session("archive").unwrap();
+        session.working.store(true, Ordering::SeqCst);
+        assert!(manager.session_is_busy("archive"));
+        manager
+            .get_session("archive")
+            .unwrap()
+            .working
+            .store(false, Ordering::SeqCst);
+        let snapshot = manager
+            .get_session("archive")
+            .unwrap()
+            .input_queue
+            .enqueue("queued", vec![])
+            .unwrap();
+        assert!(manager.session_is_busy("archive"));
+        manager
+            .get_session("archive")
+            .unwrap()
+            .input_queue
+            .remove(&snapshot.items[0].id)
+            .unwrap();
+        assert!(!manager.session_is_busy("archive"));
+        let (permission, _reply) = pending("permission", "Write");
+        manager
+            .get_session_mut("archive")
+            .unwrap()
+            .pending_permission
+            .push_back(permission);
+        assert!(manager.session_is_busy("archive"));
+        manager
+            .get_session_mut("archive")
+            .unwrap()
+            .pending_permission
+            .clear();
+        let registry = Arc::new(crate::native::agent::background::BackgroundTaskRegistry::new());
+        let (task, _receiver) = registry.register("background", "agent");
+        manager.get_session_mut("archive").unwrap().background = Some(registry.clone());
+        assert!(manager.session_is_busy("archive"));
+        registry.finish(&task.id, Ok("done".to_string()));
+        assert!(!manager.session_is_busy("archive"));
+        manager.get_session_mut("archive").unwrap().closing = true;
+        assert!(manager.session_is_busy("archive"));
+    }
+
+    #[tokio::test]
+    async fn busy_session_archive_is_rejected_without_changing_or_stopping_it() {
+        let pool = crate::db::test_support::setup_migrated_pool().await;
+        sqlx::query("INSERT INTO agent_sessions (id, title) VALUES ('busy', 'working')")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let mut manager = NativeAgentManager::new();
+        let session = live_session("busy");
+        session.working.store(true, Ordering::SeqCst);
+        manager.add_session(session);
+        let manager = tokio::sync::Mutex::new(manager);
+        assert!(crate::app::sessions::set_agent_session_archived_with(
+            &pool, &manager, "busy", true
+        )
+        .await
+        .is_err());
+        let archived: i32 =
+            sqlx::query_scalar("SELECT archived FROM agent_sessions WHERE id = 'busy'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(archived, 0);
+        assert!(manager.lock().await.session_is_busy("busy"));
+        assert!(!manager
+            .lock()
+            .await
+            .get_session("busy")
+            .unwrap()
+            .cancel
+            .is_cancelled());
     }
 
     fn pending(
@@ -668,6 +845,7 @@ mod tests {
             join,
             allow_all_high_risk: Arc::new(AtomicBool::new(false)),
             working: Arc::new(AtomicBool::new(true)),
+            pending_compactions: Arc::default(),
             pending_permission: VecDeque::new(),
             pending_question: VecDeque::new(),
             permission_rules: crate::native::permission_rules::shared_rules(Default::default()),

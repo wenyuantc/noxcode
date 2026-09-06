@@ -10,7 +10,7 @@ React (UI) → Tauri IPC commands → Rust service layer → SQLite
 
 | 路径 | 职责 |
 | --- | --- |
-| [`src-tauri/src/db/migrations.rs`](../src-tauri/src/db/migrations.rs) | 迁移清单（version 1 baseline + version 2 去掉档案 + version 3 `agent_sessions.title` + version 4 `agent_sessions.pinned` + version 5 `agent_sessions.context_usage_json` + version 6 `ssh_configs.algorithms_json` + version 7 `activity_logs` + version 8 `native_tool_artifacts` / call log `operation`、`model_role` / `ai_channels.lite_model` + version 9 `native_automations`、`native_goals`） |
+| [`src-tauri/src/db/migrations.rs`](../src-tauri/src/db/migrations.rs) | 迁移清单（version 1 baseline + version 2 去掉档案 + version 3 `agent_sessions.title` + version 4 `agent_sessions.pinned` + version 5 `agent_sessions.context_usage_json` + version 6 `ssh_configs.algorithms_json` + version 7 `activity_logs` + version 8 `native_tool_artifacts` / call log `operation`、`model_role` / `ai_channels.lite_model` + version 9 `native_automations`、`native_goals` + version 10 `agent_sessions.archived`） |
 | [`src-tauri/src/db/models.rs`](../src-tauri/src/db/models.rs) | 行模型与 IPC DTO |
 | [`src-tauri/src/app/shared.rs`](../src-tauri/src/app/shared.rs) | `sqlite_pool` / `database_path` / `now_sqlite` / `new_id` |
 | [`src-tauri/src/app/database.rs`](../src-tauri/src/app/database.rs) | 健康检查、备份、恢复 |
@@ -32,9 +32,9 @@ React (UI) → Tauri IPC commands → Rust service layer → SQLite
 
 ## 迁移
 
-`tauri-plugin-sql` 在启动时按 `get_all_migrations()` 升级。版本号必须连续 `1..N`，由 `migration_versions_are_contiguous` 强制。当前最新版本是 **9**：version 6 只为 `ssh_configs` 增加 `algorithms_json`，不增加表；version 7 新增 `activity_logs`；version 8 新增 `native_tool_artifacts`，并给 `native_api_call_logs` 加 `operation`（默认 `agent_step`）与 `model_role`（默认 `main`）、给 `ai_channels` 加 `lite_model`；version 9 新增 `native_automations`（Cron 自动化）与 `native_goals`（会话目标），业务表共 12 张。
+`tauri-plugin-sql` 在启动时按 `get_all_migrations()` 升级。版本号必须连续 `1..N`，由 `migration_versions_are_contiguous` 强制。当前最新版本是 **10**：version 6 只为 `ssh_configs` 增加 `algorithms_json`，不增加表；version 7 新增 `activity_logs`；version 8 新增 `native_tool_artifacts`，并给 `native_api_call_logs` 加 `operation`（默认 `agent_step`）与 `model_role`（默认 `main`）、给 `ai_channels` 加 `lite_model`；version 9 新增 `native_automations`（Cron 自动化）与 `native_goals`（会话目标）；version 10 增加 `agent_sessions.archived`（默认 `0`）及列表索引，业务表仍为 12 张。
 
-后续只能追加 `version: 10`……，禁止改已发布的 SQL，禁止插队。
+后续只能追加 `version: 11`……，禁止改已发布的 SQL，禁止插队。
 
 应用的 `_sqlx_migrations` 表记录已应用版本。debug 启动会打印：
 
@@ -121,8 +121,9 @@ SSH 连接配置。密码与密钥口令只存 keyring 引用（`password_ref` /
 | `status` | 默认 `pending` |
 | `started_at` / `ended_at` / `exit_code` | 生命周期 |
 | `resume_session_id` | 旧数据里的续聊来源。现运行时不再为续聊插入新行，此列仅兼容历史记录 |
-| `title` | 会话标题。新建取首句最多 30 个 Unicode 字；续聊继承来源会话，不覆盖。version 3 从最早一条 `[USER_INPUT]` / `[用户输入]` 回填 |
+| `title` | 会话标题。新建取首句最多 30 个 Unicode 字；续聊继承来源会话，不覆盖。用户重命名时保存去除首尾空白后的完整非空名称，不截断。version 3 从最早一条 `[USER_INPUT]` / `[用户输入]` 回填 |
 | `pinned` | 侧栏置顶。`0` 未置顶，`1` 已置顶。version 4 新增，默认 `0`。取消置顶后仍按 `workspace_id` 归队 |
+| `archived` | version 10 新增，默认 `0`。`1` 为已归档，保留置顶标记、上下文、历史、用量和附件；取消归档后可继续输入。普通列表在 SQL 分页前排除已归档记录 |
 | `input_tokens` / `output_tokens` / `total_tokens` / `reasoning_tokens` / `cached_tokens` | 累计计费用量 |
 | `context_usage_json` | 最后一次 `NativeContextUsage` 快照。version 5 新增，供历史会话 Composer 显示 `used/limit` 与缓存率 |
 
@@ -216,4 +217,4 @@ sqlite3 "$HOME/Library/Application Support/com.wenyuan.noxcode/noxcode.db" \
   "SELECT version, description, success FROM _sqlx_migrations;"
 ```
 
-应看到 12 张业务表加 `_sqlx_migrations`，且 version 9 成功。
+应看到 12 张业务表加 `_sqlx_migrations`，且 version 10 成功。

@@ -192,6 +192,9 @@ pub fn run() {
             app::sessions::get_agent_session_log_lines,
             app::sessions::prepare_agent_session_resume,
             app::sessions::set_agent_session_pinned,
+            app::sessions::rename_agent_session,
+            app::sessions::set_agent_session_archived,
+            app::sessions::open_agent_session_directory,
             app::sessions::delete_agent_session,
             tray::show_main_window,
         ])

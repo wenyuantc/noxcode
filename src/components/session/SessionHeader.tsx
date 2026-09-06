@@ -10,6 +10,7 @@ import { useUiStore } from "@/stores/uiStore";
 import { useWorkspaceStore } from "@/stores/workspaceStore";
 import { BranchPicker } from "./BranchPicker";
 import { WorkspacePicker } from "./WorkspacePicker";
+import { SessionMenu } from "./SessionMenu";
 
 export function SessionHeader() {
   const { t } = useTranslation("nav");
@@ -42,6 +43,7 @@ export function SessionHeader() {
         </Button>
         <WorkspacePicker />
         <BranchPicker />
+        {session ? <SessionMenu key={session.id} session={session} /> : null}
       </div>
       <span className="min-w-0 flex-1 truncate px-3 text-center text-xs font-medium tracking-tight text-muted-foreground/75">
         {title}

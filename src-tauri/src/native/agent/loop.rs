@@ -12,7 +12,7 @@ use tokio::task::JoinSet;
 use crate::db::models::{NativeToolEvent, NativeToolPhase};
 use crate::engine::UsageDelta;
 use crate::native::artifacts::{bound_with_artifact, ArtifactStore};
-use crate::native::manager::NativeFollowup;
+use crate::native::manager::{NativeCompactionRequest, NativeFollowup};
 use crate::native::model::call_log::{
     CALL_KIND_COMPACT, CALL_KIND_SUBAGENT, MODEL_ROLE_LITE, MODEL_ROLE_MAIN, OPERATION_COMPACT,
     OPERATION_SUBAGENT,
@@ -168,7 +168,7 @@ pub struct AgentRunner {
     last_tool_repeat: u32,
     stop_hook_continues: u32,
     /// `/compact [指令]` 请求，下一次模型调用前执行。
-    pending_manual_compact: Option<Option<String>>,
+    pending_manual_compact: Option<NativeCompactionRequest>,
     /// 下一条用户消息末尾要附加的文本（记忆回忆等），用后即清。
     turn_suffix: Option<String>,
     /// 会话恢复到更小窗口的模型时置位，超阈值即以 downshift 触发压缩。
@@ -381,8 +381,8 @@ impl AgentRunner {
                     self.messages.push(Message::user_with_images(text, images));
                     injected = true;
                 }
-                NativeFollowup::Compact(instructions) => {
-                    self.pending_manual_compact = Some(instructions);
+                NativeFollowup::Compact(request) => {
+                    self.pending_manual_compact = Some(request);
                 }
                 NativeFollowup::Finish => {
                     self.pending_steer_finish = true;
@@ -394,7 +394,8 @@ impl AgentRunner {
 
     /// `/compact [指令]`：下一次模型调用前压缩。
     pub fn request_manual_compaction(&mut self, instructions: Option<String>) {
-        self.pending_manual_compact = Some(instructions);
+        self.pending_manual_compact =
+            Some(NativeCompactionRequest::new(instructions, Arc::default()));
     }
 
     /// 给下一条用户消息附加文本（记忆回忆）；不影响事件流里的 `[USER_INPUT]` 行。
@@ -1282,9 +1283,9 @@ impl AgentRunner {
                 append_user_note(&mut self.messages, &notice);
             }
         }
-        if let Some(instructions) = self.pending_manual_compact.take() {
+        if let Some(mut request) = self.pending_manual_compact.take() {
             if self
-                .run_compaction(client, CompactTrigger::Manual, instructions)
+                .run_compaction(client, CompactTrigger::Manual, request.instructions.take())
                 .await
                 .is_none()
             {

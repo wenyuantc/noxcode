@@ -2,7 +2,8 @@ use std::sync::Arc;
 
 use sqlx::SqlitePool;
 use tauri::{AppHandle, Manager, Runtime, State};
-use tokio::sync::Mutex;
+use tauri_plugin_opener::OpenerExt;
+use tokio::sync::{Mutex, OwnedMutexGuard};
 
 use crate::app::shared::sqlite_pool;
 use crate::db::models::{
@@ -16,22 +17,128 @@ pub(crate) async fn list_agent_sessions_with(
     pool: &SqlitePool,
     workspace_id: Option<&str>,
     limit: Option<i64>,
+    archived: Option<bool>,
+    offset: Option<i64>,
 ) -> Result<Vec<AgentSessionRecord>, String> {
     let limit = limit.unwrap_or(50).clamp(1, 200);
     let rows = sqlx::query_as::<_, AgentSessionRecord>(
         r#"
         SELECT * FROM agent_sessions
-        WHERE ($1 IS NULL OR workspace_id = $1)
-        ORDER BY pinned DESC, started_at DESC
-        LIMIT $2
+        WHERE ($1 IS NULL OR workspace_id = $1) AND archived = $3
+        ORDER BY pinned DESC, started_at DESC, id ASC
+        LIMIT $2 OFFSET $4
         "#,
     )
     .bind(workspace_id)
     .bind(limit)
+    .bind(i32::from(archived.unwrap_or(false)))
+    .bind(offset.unwrap_or(0).max(0))
     .fetch_all(pool)
     .await
     .map_err(|error| format!("读取会话列表失败: {error}"))?;
     Ok(rows)
+}
+
+pub(crate) async fn lock_agent_session_operation(
+    manager: &Mutex<NativeAgentManager>,
+    session_id: &str,
+) -> OwnedMutexGuard<()> {
+    let lock = manager.lock().await.session_operation_lock(session_id);
+    lock.lock_owned().await
+}
+
+pub(crate) async fn require_unarchived_session_with(
+    pool: &SqlitePool,
+    session_id: &str,
+) -> Result<(), String> {
+    let archived: i32 = sqlx::query_scalar("SELECT archived FROM agent_sessions WHERE id = $1")
+        .bind(session_id)
+        .fetch_optional(pool)
+        .await
+        .map_err(|error| format!("读取会话失败: {error}"))?
+        .ok_or_else(|| format!("会话不存在: {session_id}"))?;
+    if archived != 0 {
+        return Err("会话已归档，请先取消归档任务".to_string());
+    }
+    Ok(())
+}
+
+async fn fetch_agent_session_with(
+    pool: &SqlitePool,
+    session_id: &str,
+) -> Result<AgentSessionRecord, String> {
+    sqlx::query_as("SELECT * FROM agent_sessions WHERE id = $1")
+        .bind(session_id)
+        .fetch_optional(pool)
+        .await
+        .map_err(|error| format!("读取会话失败: {error}"))?
+        .ok_or_else(|| format!("会话不存在: {session_id}"))
+}
+
+pub(crate) async fn rename_agent_session_with(
+    pool: &SqlitePool,
+    session_id: &str,
+    title: &str,
+) -> Result<AgentSessionRecord, String> {
+    let title = title.trim();
+    if title.is_empty() {
+        return Err("任务名称不能为空".to_string());
+    }
+    sqlx::query("UPDATE agent_sessions SET title = $1 WHERE id = $2")
+        .bind(title)
+        .bind(session_id)
+        .execute(pool)
+        .await
+        .map_err(|error| format!("重命名任务失败: {error}"))?;
+    fetch_agent_session_with(pool, session_id).await
+}
+
+pub(crate) async fn set_agent_session_archived_with(
+    pool: &SqlitePool,
+    manager: &Mutex<NativeAgentManager>,
+    session_id: &str,
+    archived: bool,
+) -> Result<AgentSessionRecord, String> {
+    let _operation = lock_agent_session_operation(manager, session_id).await;
+    let manager = manager.lock().await;
+    if archived && manager.session_is_busy(session_id) {
+        return Err("任务仍在工作或等待处理，请先停止当前回合或等待结束".to_string());
+    }
+    sqlx::query("UPDATE agent_sessions SET archived = $1 WHERE id = $2")
+        .bind(i32::from(archived))
+        .bind(session_id)
+        .execute(pool)
+        .await
+        .map_err(|error| format!("更新任务归档状态失败: {error}"))?;
+    fetch_agent_session_with(pool, session_id).await
+}
+
+async fn local_agent_session_directory_with(
+    pool: &SqlitePool,
+    session_id: &str,
+) -> Result<std::path::PathBuf, String> {
+    let session = fetch_agent_session_with(pool, session_id).await?;
+    if session.execution_target != crate::app::shared::EXECUTION_TARGET_LOCAL {
+        return Err("远程任务目录无法在本机文件管理器中打开".to_string());
+    }
+    let path = match session.working_dir.filter(|path| !path.trim().is_empty()) {
+        Some(path) => Some(path),
+        None => sqlx::query_scalar::<_, Option<String>>(
+            "SELECT repo_path FROM workspaces WHERE id = $1 AND workspace_type = 'local'",
+        )
+        .bind(session.workspace_id)
+        .fetch_optional(pool)
+        .await
+        .map_err(|error| format!("读取工作区目录失败: {error}"))?
+        .flatten(),
+    }
+    .filter(|path| !path.trim().is_empty())
+    .ok_or_else(|| "任务没有可用的项目目录".to_string())?;
+    let path = std::path::PathBuf::from(path);
+    if !path.is_absolute() || !path.is_dir() {
+        return Err(format!("项目目录不存在或不可访问: {}", path.display()));
+    }
+    Ok(path)
 }
 
 pub(crate) async fn get_agent_session_log_lines_with(
@@ -91,7 +198,7 @@ pub(crate) async fn prepare_agent_session_resume_with(
     .await
     .map_err(|error| format!("读取会话失败: {error}"))?
     .ok_or_else(|| format!("会话不存在: {session_id}"))?;
-    let resumable = has_transcript(pool, session_id).await?;
+    let resumable = session.archived == 0 && has_transcript(pool, session_id).await?;
     let meta = sqlx::query_as::<_, (Option<String>, Option<i64>)>(
         "SELECT model, turns FROM native_session_transcripts WHERE session_record_id = $1 AND deleted_at IS NULL",
     )
@@ -105,7 +212,9 @@ pub(crate) async fn prepare_agent_session_resume_with(
         resumable,
         model: meta.as_ref().and_then(|item| item.0.clone()),
         turns: meta.as_ref().and_then(|item| item.1),
-        message: if resumable {
+        message: if session.archived != 0 {
+            "会话已归档，请先取消归档任务".to_string()
+        } else if resumable {
             "可以续聊".to_string()
         } else {
             "没有可恢复的上下文".to_string()
@@ -118,12 +227,14 @@ pub(crate) async fn set_agent_session_pinned_with(
     session_id: &str,
     pinned: bool,
 ) -> Result<(), String> {
-    let result = sqlx::query("UPDATE agent_sessions SET pinned = $1 WHERE id = $2")
-        .bind(if pinned { 1i32 } else { 0 })
-        .bind(session_id)
-        .execute(pool)
-        .await
-        .map_err(|error| format!("更新会话置顶失败: {error}"))?;
+    require_unarchived_session_with(pool, session_id).await?;
+    let result =
+        sqlx::query("UPDATE agent_sessions SET pinned = $1 WHERE id = $2 AND archived = 0")
+            .bind(if pinned { 1i32 } else { 0 })
+            .bind(session_id)
+            .execute(pool)
+            .await
+            .map_err(|error| format!("更新会话置顶失败: {error}"))?;
     if result.rows_affected() == 0 {
         return Err(format!("会话不存在: {session_id}"));
     }
@@ -165,9 +276,41 @@ pub async fn list_agent_sessions<R: Runtime>(
     app: AppHandle<R>,
     workspace_id: Option<String>,
     limit: Option<i64>,
+    archived: Option<bool>,
+    offset: Option<i64>,
 ) -> Result<Vec<AgentSessionRecord>, String> {
     let pool = sqlite_pool(&app).await?;
-    list_agent_sessions_with(&pool, workspace_id.as_deref(), limit).await
+    list_agent_sessions_with(&pool, workspace_id.as_deref(), limit, archived, offset).await
+}
+
+#[tauri::command]
+pub async fn rename_agent_session<R: Runtime>(
+    app: AppHandle<R>,
+    session_id: String,
+    title: String,
+) -> Result<AgentSessionRecord, String> {
+    rename_agent_session_with(&sqlite_pool(&app).await?, &session_id, &title).await
+}
+
+#[tauri::command]
+pub async fn set_agent_session_archived<R: Runtime>(
+    app: AppHandle<R>,
+    state: State<'_, Arc<Mutex<NativeAgentManager>>>,
+    session_id: String,
+    archived: bool,
+) -> Result<AgentSessionRecord, String> {
+    set_agent_session_archived_with(&sqlite_pool(&app).await?, &state, &session_id, archived).await
+}
+
+#[tauri::command]
+pub async fn open_agent_session_directory<R: Runtime>(
+    app: AppHandle<R>,
+    session_id: String,
+) -> Result<(), String> {
+    let path = local_agent_session_directory_with(&sqlite_pool(&app).await?, &session_id).await?;
+    app.opener()
+        .open_path(path.to_string_lossy().to_string(), None::<&str>)
+        .map_err(|error| format!("打开项目目录失败: {error}"))
 }
 
 #[tauri::command]
@@ -206,6 +349,7 @@ pub async fn delete_agent_session<R: Runtime>(
     state: State<'_, Arc<Mutex<NativeAgentManager>>>,
     session_id: String,
 ) -> Result<(), String> {
+    let _operation = lock_agent_session_operation(&state, &session_id).await;
     if state.lock().await.get_session(&session_id).is_some() {
         return Err("会话仍在运行，无法删除".to_string());
     }
@@ -242,6 +386,197 @@ mod tests {
     use crate::app::shared::{new_id, now_sqlite};
     use crate::db::test_support::setup_migrated_pool;
 
+    async fn seed_session(pool: &SqlitePool, id: &str) {
+        sqlx::query("INSERT OR IGNORE INTO workspaces (id, name, workspace_type, repo_path) VALUES ('ws-1', 'workspace', 'local', '/project')")
+            .execute(pool).await.unwrap();
+        sqlx::query("INSERT INTO agent_sessions (id, workspace_id, title, pinned, status) VALUES ($1, 'ws-1', 'original', 1, 'exited')")
+            .bind(id).execute(pool).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn renames_full_unicode_title_and_rejects_empty_or_missing() {
+        let pool = setup_migrated_pool().await;
+        seed_session(&pool, "rename").await;
+        let title = "任务标题".repeat(30);
+        let renamed = rename_agent_session_with(&pool, "rename", &format!("  {title}  "))
+            .await
+            .unwrap();
+        assert_eq!(renamed.title.as_deref(), Some(title.as_str()));
+        assert_eq!(renamed.pinned, 1);
+        assert!(rename_agent_session_with(&pool, "rename", " \n ")
+            .await
+            .is_err());
+        assert_eq!(
+            fetch_agent_session_with(&pool, "rename")
+                .await
+                .unwrap()
+                .title,
+            Some(title)
+        );
+        assert!(rename_agent_session_with(&pool, "missing", "title")
+            .await
+            .is_err());
+    }
+
+    #[tokio::test]
+    async fn archive_retains_history_metadata_and_pin_and_can_be_restored() {
+        let pool = setup_migrated_pool().await;
+        let manager = Mutex::new(NativeAgentManager::new());
+        seed_session(&pool, "archive").await;
+        sqlx::query("INSERT INTO agent_session_events (id, session_id, event_type, message) VALUES ('event', 'archive', 'input', 'history')")
+            .execute(&pool).await.unwrap();
+        sqlx::query("UPDATE agent_sessions SET input_tokens = 123, context_usage_json = '{}' WHERE id = 'archive'")
+            .execute(&pool).await.unwrap();
+        let archived = set_agent_session_archived_with(&pool, &manager, "archive", true)
+            .await
+            .unwrap();
+        assert_eq!(archived.archived, 1);
+        assert_eq!(archived.pinned, 1);
+        assert_eq!(archived.input_tokens, Some(123));
+        assert_eq!(archived.context_usage_json.as_deref(), Some("{}"));
+        assert!(list_agent_sessions_with(&pool, None, None, None, None)
+            .await
+            .unwrap()
+            .is_empty());
+        assert_eq!(
+            get_agent_session_log_lines_with(&pool, "archive", None, None)
+                .await
+                .unwrap()[0]
+                .message
+                .as_deref(),
+            Some("history")
+        );
+        assert!(require_unarchived_session_with(&pool, "archive")
+            .await
+            .is_err());
+        assert!(set_agent_session_pinned_with(&pool, "archive", false)
+            .await
+            .is_err());
+        let resume = prepare_agent_session_resume_with(&pool, "archive")
+            .await
+            .unwrap();
+        assert!(!resume.resumable);
+        assert!(resume.message.contains("已归档"));
+        let restored = set_agent_session_archived_with(&pool, &manager, "archive", false)
+            .await
+            .unwrap();
+        assert_eq!(restored.archived, 0);
+        assert_eq!(restored.pinned, 1);
+        require_unarchived_session_with(&pool, "archive")
+            .await
+            .unwrap();
+        assert_eq!(
+            list_agent_sessions_with(&pool, None, None, None, None)
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+        assert!(
+            set_agent_session_archived_with(&pool, &manager, "missing", true)
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn archive_filter_precedes_limit_and_pagination_is_stable() {
+        let pool = setup_migrated_pool().await;
+        for index in 0..52 {
+            seed_session(&pool, &format!("session-{index:02}")).await;
+        }
+        sqlx::query("UPDATE agent_sessions SET archived = 1 WHERE id != 'session-51'")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let active = list_agent_sessions_with(&pool, Some("ws-1"), Some(1), None, None)
+            .await
+            .unwrap();
+        assert_eq!(active[0].id, "session-51");
+        let first = list_agent_sessions_with(&pool, None, Some(50), Some(true), Some(0))
+            .await
+            .unwrap();
+        let next = list_agent_sessions_with(&pool, None, Some(50), Some(true), Some(50))
+            .await
+            .unwrap();
+        assert_eq!(first.len(), 50);
+        assert_eq!(next.len(), 1);
+        assert!(!first.iter().any(|session| session.id == next[0].id));
+        assert!(
+            list_agent_sessions_with(&pool, Some("other"), None, Some(true), None)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn archive_waits_for_inflight_session_operation_and_guard_rejects_later_input() {
+        let pool = setup_migrated_pool().await;
+        seed_session(&pool, "serialized").await;
+        let manager = Arc::new(Mutex::new(NativeAgentManager::new()));
+        let operation = lock_agent_session_operation(&manager, "serialized").await;
+        let archive = {
+            let pool = pool.clone();
+            let manager = manager.clone();
+            tokio::spawn(async move {
+                set_agent_session_archived_with(&pool, &manager, "serialized", true).await
+            })
+        };
+        tokio::task::yield_now().await;
+        assert!(!archive.is_finished());
+        drop(operation);
+        archive.await.unwrap().unwrap();
+        let _next = lock_agent_session_operation(&manager, "serialized").await;
+        assert!(require_unarchived_session_with(&pool, "serialized")
+            .await
+            .unwrap_err()
+            .contains("已归档"));
+    }
+
+    #[tokio::test]
+    async fn resolves_session_directory_before_workspace_and_rejects_remote_or_missing() {
+        let pool = setup_migrated_pool().await;
+        seed_session(&pool, "directory").await;
+        let workspace = tempfile::tempdir().unwrap();
+        let session = tempfile::tempdir().unwrap();
+        sqlx::query("UPDATE workspaces SET repo_path = $1 WHERE id = 'ws-1'")
+            .bind(workspace.path().to_str().unwrap())
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            local_agent_session_directory_with(&pool, "directory")
+                .await
+                .unwrap(),
+            workspace.path()
+        );
+        sqlx::query("UPDATE agent_sessions SET working_dir = $1 WHERE id = 'directory'")
+            .bind(session.path().to_str().unwrap())
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            local_agent_session_directory_with(&pool, "directory")
+                .await
+                .unwrap(),
+            session.path()
+        );
+        sqlx::query("UPDATE agent_sessions SET execution_target = 'ssh' WHERE id = 'directory'")
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert!(local_agent_session_directory_with(&pool, "directory")
+            .await
+            .unwrap_err()
+            .contains("远程"));
+        sqlx::query("UPDATE agent_sessions SET execution_target = 'local', working_dir = $1 WHERE id = 'directory'")
+            .bind(session.path().join("missing").to_str().unwrap()).execute(&pool).await.unwrap();
+        assert!(local_agent_session_directory_with(&pool, "directory")
+            .await
+            .is_err());
+    }
+
     #[tokio::test]
     async fn lists_and_deletes_session() {
         let pool = setup_migrated_pool().await;
@@ -259,7 +594,7 @@ mod tests {
         .execute(&pool)
         .await
         .expect("session");
-        let listed = list_agent_sessions_with(&pool, Some("ws-1"), Some(10))
+        let listed = list_agent_sessions_with(&pool, Some("ws-1"), Some(10), None, None)
             .await
             .expect("list");
         assert_eq!(listed.len(), 1);
@@ -270,10 +605,12 @@ mod tests {
         delete_agent_session_row(&pool, "sess-1")
             .await
             .expect("delete");
-        assert!(list_agent_sessions_with(&pool, Some("ws-1"), None)
-            .await
-            .expect("empty")
-            .is_empty());
+        assert!(
+            list_agent_sessions_with(&pool, Some("ws-1"), None, None, None)
+                .await
+                .expect("empty")
+                .is_empty()
+        );
         let _ = new_id();
     }
 
@@ -303,7 +640,7 @@ mod tests {
         .await
         .expect("new session");
 
-        let listed = list_agent_sessions_with(&pool, Some("ws-1"), Some(10))
+        let listed = list_agent_sessions_with(&pool, Some("ws-1"), Some(10), None, None)
             .await
             .expect("list");
         assert_eq!(
@@ -318,7 +655,7 @@ mod tests {
         set_agent_session_pinned_with(&pool, "sess-old", true)
             .await
             .expect("pin");
-        let pinned_first = list_agent_sessions_with(&pool, Some("ws-1"), Some(10))
+        let pinned_first = list_agent_sessions_with(&pool, Some("ws-1"), Some(10), None, None)
             .await
             .expect("list pinned");
         assert_eq!(
@@ -332,7 +669,7 @@ mod tests {
         set_agent_session_pinned_with(&pool, "sess-old", false)
             .await
             .expect("unpin");
-        let unpinned = list_agent_sessions_with(&pool, Some("ws-1"), Some(10))
+        let unpinned = list_agent_sessions_with(&pool, Some("ws-1"), Some(10), None, None)
             .await
             .expect("list unpinned");
         assert_eq!(
@@ -386,7 +723,7 @@ mod tests {
         .await
         .expect("persist");
 
-        let listed = list_agent_sessions_with(&pool, Some("ws-1"), Some(10))
+        let listed = list_agent_sessions_with(&pool, Some("ws-1"), Some(10), None, None)
             .await
             .expect("list");
         let json = listed[0]

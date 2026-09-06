@@ -94,7 +94,7 @@ flowchart LR
 | `list_model_catalog` | `native::model_catalog` |
 | `get_network_settings` / `update_network_settings` | `app::network_settings` |
 | `list/create/update/delete_workspace` / `check_workspace_health` / `ensure_scratch_workspace` | `app::workspaces` |
-| `list_agent_sessions` / `get_agent_session_log_lines` / `prepare_agent_session_resume` / `set_agent_session_pinned` / `delete_agent_session` | `app::sessions` |
+| `list_agent_sessions` / `get_agent_session_log_lines` / `prepare_agent_session_resume` / `set_agent_session_pinned` / `rename_agent_session` / `set_agent_session_archived` / `open_agent_session_directory` / `delete_agent_session` | `app::sessions` |
 | `start/stop/restart/resume_native_session` / `stop_native` / `send/finish_native_input` | `native::session` |
 | `resolve_native_tool_permission` / `answer_native_plan_question` | `native::session` |
 | `get/update_native_settings` | `native::settings` |

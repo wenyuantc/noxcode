@@ -140,7 +140,8 @@ export function CommandPalette({
     () =>
       sessions
         .filter((item) => {
-          const title = displaySessionTitle(item.title).toLowerCase();
+          if (item.archived) return false;
+          const title = (item.title ?? "").trim().toLowerCase();
           const q = query.toLowerCase();
           return (
             item.id.includes(query) || title.includes(q) || (item.working_dir ?? "").includes(query)

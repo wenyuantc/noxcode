@@ -481,6 +481,7 @@ export interface AgentSession {
   resume_session_id: string | null;
   title?: string | null;
   pinned: number;
+  archived: number;
   input_tokens: number | null;
   output_tokens: number | null;
   total_tokens: number | null;

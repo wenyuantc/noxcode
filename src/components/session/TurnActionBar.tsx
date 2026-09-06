@@ -40,6 +40,9 @@ export function TurnActionBar({
   const [copied, setCopied] = useState(false);
   const copiedTimer = useRef<number>(0);
   const workspaceId = useWorkspaceStore((state) => state.activeWorkspaceId);
+  const archived = useWorkspaceStore((state) =>
+    Boolean(state.sessions.find((item) => item.id === sessionId)?.archived),
+  );
   const channelId = useChannelStore((state) => state.activeChannelId);
   const modelId = useChannelStore((state) => state.activeModelId);
   const defaultPlanMode = useUiStore((state) => state.composerPlanMode);
@@ -59,7 +62,7 @@ export function TurnActionBar({
 
   const retry = () => {
     const prompt = userText?.trim();
-    if (!prompt || working) return;
+    if (!prompt || working || archived) return;
     if (!workspaceId || !channelId) return;
     void submitSessionPrompt({
       sessionId,
@@ -109,7 +112,7 @@ export function TurnActionBar({
           type="button"
           className="cursor-pointer rounded-md p-1 transition-colors hover:bg-muted hover:text-foreground disabled:opacity-40"
           title={t("retry")}
-          disabled={working || !userText?.trim()}
+          disabled={working || archived || !userText?.trim()}
           onClick={retry}
         >
           <RotateCcw className="size-3" />

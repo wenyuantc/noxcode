@@ -1,5 +1,6 @@
 import { confirm, message } from "@tauri-apps/plugin-dialog";
 import {
+  Archive,
   ChevronDown,
   Folder,
   MoreHorizontal,
@@ -8,9 +9,8 @@ import {
   Plus,
   Sparkle,
   Trash2,
-  X,
 } from "lucide-react";
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { useTranslation } from "react-i18next";
 
 import { Button } from "@/components/ui/button";
@@ -28,7 +28,7 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { Input } from "@/components/ui/input";
-import { deleteAgentSession, setAgentSessionPinned } from "@/lib/backend";
+import { SessionMenu } from "@/components/session/SessionMenu";
 import { displaySessionTitle } from "@/lib/sessionLines";
 import { formatRelativeTime } from "@/lib/utils";
 import { getCurrentAppLocale, getDateLocale } from "@/lib/i18n/locale";
@@ -53,135 +53,61 @@ function SessionRow({
   const loadHistory = useSessionStore((state) => state.loadHistory);
   const working = useSessionStore((state) => state.turnState[session.id] === "working");
   const pinned = session.pinned !== 0;
-  const [confirmDelete, setConfirmDelete] = useState(false);
-
-  useEffect(() => {
-    if (!confirmDelete) return;
-    const timer = window.setTimeout(() => setConfirmDelete(false), 4000);
-    return () => window.clearTimeout(timer);
-  }, [confirmDelete]);
 
   return (
-    <div
-      role="button"
-      tabIndex={0}
-      className={cn(
-        "group relative flex cursor-pointer items-center justify-between gap-2 rounded-lg px-2.5 py-1.5 select-none transition-all duration-150",
-        indent && "ml-2.5",
-        selected
-          ? "bg-sidebar-accent text-sidebar-accent-foreground font-medium shadow-2xs before:absolute before:top-1.5 before:bottom-1.5 before:left-0 before:w-0.5 before:rounded-r before:bg-primary"
-          : "text-sidebar-foreground/80 hover:bg-sidebar-accent/60 hover:text-sidebar-foreground",
-      )}
-      onClick={() => void loadHistory(session.id)}
-      onMouseLeave={() => setConfirmDelete(false)}
-      onKeyDown={(event) => {
-        if (event.key !== "Enter" && event.key !== " ") return;
-        event.preventDefault();
-        void loadHistory(session.id);
-      }}
-    >
-      <div className="flex min-w-0 flex-1 items-center gap-2">
-        {working ? (
-          <Sparkle
-            className="size-3.5 shrink-0 animate-spin text-amber-500 dark:text-amber-400"
-            aria-label={t("sessionWorking")}
-          />
-        ) : null}
-        <span className="min-w-0 flex-1 truncate text-left text-xs leading-tight">
-          {displaySessionTitle(session.title) ||
-            (session.session_kind === "plan" ? "Plan" : t("sessions"))}
-        </span>
-      </div>
-
-      <div className="flex shrink-0 items-center gap-1">
-        {/* 常态时间戳：悬浮时或处于确认删除状态时隐藏 */}
-        <span
-          className={cn(
-            "text-[10px] tabular-nums text-muted-foreground/75 transition-opacity",
-            "group-hover:hidden",
-            (pinned || confirmDelete) && "hidden",
-          )}
-        >
-          {formatRelativeTime(session.started_at, locale)}
-        </span>
-
-        {/* 仅置顶且未处于确认删除时显示固定的置顶小徽章 */}
-        {pinned && !confirmDelete ? (
-          <Pin className="size-3 shrink-0 fill-amber-500/90 text-amber-500/90 group-hover:hidden" />
-        ) : null}
-
-        {/* 悬浮操作按钮组 / 确认删除组 */}
+    <SessionMenu session={session}>
+      {(menuButton) => (
         <div
-          className={cn("items-center gap-0.5", confirmDelete ? "flex" : "hidden group-hover:flex")}
-        >
-          {confirmDelete ? (
-            <div className="flex items-center gap-1 duration-150 animate-in fade-in zoom-in-95">
-              <button
-                type="button"
-                className="cursor-pointer rounded bg-destructive px-1.5 py-0.5 text-[10.5px] font-medium text-destructive-foreground shadow-2xs transition-all hover:bg-destructive/90 active:scale-95"
-                title={t("common:confirm", { defaultValue: "确认" })}
-                aria-label={t("common:confirm", { defaultValue: "确认" })}
-                onClick={(event) => {
-                  event.stopPropagation();
-                  void deleteAgentSession(session.id).then(() => {
-                    if (useSessionStore.getState().selectedSessionId === session.id) {
-                      useSessionStore.getState().selectSession(null);
-                    }
-                    return useWorkspaceStore.getState().refreshSessions();
-                  });
-                }}
-              >
-                {t("common:confirm", { defaultValue: "确认" })}
-              </button>
-              <button
-                type="button"
-                className="cursor-pointer rounded p-0.5 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
-                title={t("common:cancel", { defaultValue: "取消" })}
-                aria-label={t("common:cancel", { defaultValue: "取消" })}
-                onClick={(event) => {
-                  event.stopPropagation();
-                  setConfirmDelete(false);
-                }}
-              >
-                <X className="size-3" />
-              </button>
-            </div>
-          ) : (
-            <>
-              <button
-                type="button"
-                className={cn(
-                  "cursor-pointer rounded p-1 text-muted-foreground transition-colors hover:text-foreground",
-                  pinned && "text-amber-500/90",
-                )}
-                title={pinned ? t("unpinSession") : t("pinSession")}
-                aria-label={pinned ? t("unpinSession") : t("pinSession")}
-                onClick={(event) => {
-                  event.stopPropagation();
-                  void setAgentSessionPinned(session.id, !pinned).then(() =>
-                    useWorkspaceStore.getState().refreshSessions(),
-                  );
-                }}
-              >
-                <Pin className={cn("size-3", pinned && "fill-current")} />
-              </button>
-              <button
-                type="button"
-                className="cursor-pointer rounded p-1 text-muted-foreground transition-colors hover:text-destructive"
-                title={t("common:delete")}
-                aria-label={t("common:delete")}
-                onClick={(event) => {
-                  event.stopPropagation();
-                  setConfirmDelete(true);
-                }}
-              >
-                <Trash2 className="size-3" />
-              </button>
-            </>
+          role="button"
+          data-session-row={session.id}
+          tabIndex={0}
+          title={session.title ?? undefined}
+          className={cn(
+            "group relative flex cursor-pointer items-center justify-between gap-2 rounded-lg px-2.5 py-1.5 select-none transition-all duration-150",
+            indent && "ml-2.5",
+            selected
+              ? "bg-sidebar-accent text-sidebar-accent-foreground font-medium shadow-2xs before:absolute before:top-1.5 before:bottom-1.5 before:left-0 before:w-0.5 before:rounded-r before:bg-primary"
+              : "text-sidebar-foreground/80 hover:bg-sidebar-accent/60 hover:text-sidebar-foreground",
           )}
+          onClick={() => void loadHistory(session.id)}
+          onKeyDown={(event) => {
+            if (event.target !== event.currentTarget) return;
+            if (event.key !== "Enter" && event.key !== " ") return;
+            event.preventDefault();
+            void loadHistory(session.id);
+          }}
+        >
+          <div className="flex min-w-0 flex-1 items-center gap-2">
+            {working ? (
+              <Sparkle
+                className="size-3.5 shrink-0 animate-spin text-amber-500 dark:text-amber-400"
+                aria-label={t("sessionWorking")}
+              />
+            ) : null}
+            <span className="min-w-0 flex-1 truncate text-left text-xs leading-tight">
+              {displaySessionTitle(session.title) ||
+                (session.session_kind === "plan" ? "Plan" : t("sessions"))}
+            </span>
+          </div>
+
+          <div className="flex shrink-0 items-center gap-1">
+            <span
+              className={cn(
+                "text-[10px] tabular-nums text-muted-foreground/75 transition-opacity",
+                pinned && "hidden",
+              )}
+            >
+              {formatRelativeTime(session.started_at, locale)}
+            </span>
+
+            {pinned ? (
+              <Pin className="size-3 shrink-0 fill-amber-500/90 text-amber-500/90" />
+            ) : null}
+            {menuButton}
+          </div>
         </div>
-      </div>
-    </div>
+      )}
+    </SessionMenu>
   );
 }
 
@@ -189,6 +115,12 @@ export function SidebarTree() {
   const { t } = useTranslation(["layout", "common"]);
   const workspaces = useWorkspaceStore((state) => state.workspaces);
   const sessions = useWorkspaceStore((state) => state.sessions);
+  const archivedSessionIds = useWorkspaceStore((state) => state.archivedSessionIds);
+  const archivedLoading = useWorkspaceStore((state) => state.archivedLoading);
+  const archivedHasMore = useWorkspaceStore((state) => state.archivedHasMore);
+  const archivedError = useWorkspaceStore((state) => state.archivedError);
+  const loadArchivedSessions = useWorkspaceStore((state) => state.loadArchivedSessions);
+  const [archivesOpen, setArchivesOpen] = useState(false);
   const expanded = useWorkspaceStore((state) => state.expanded);
   const shownCount = useWorkspaceStore((state) => state.shownCount);
   const toggleExpand = useWorkspaceStore((state) => state.toggleExpand);
@@ -203,7 +135,7 @@ export function SidebarTree() {
   const selectedSessionId = useSessionStore((state) => state.selectedSessionId);
   const locale = getDateLocale(getCurrentAppLocale());
   const pinnedSessions = sessions
-    .filter((session) => session.pinned !== 0)
+    .filter((session) => session.pinned !== 0 && !session.archived)
     .sort((a, b) => b.started_at.localeCompare(a.started_at));
 
   const openRename = (workspace: Workspace) => {
@@ -269,7 +201,10 @@ export function SidebarTree() {
         ) : null}
         {workspaces.map((workspace) => {
           const items = sessions
-            .filter((session) => session.workspace_id === workspace.id && session.pinned === 0)
+            .filter(
+              (session) =>
+                session.workspace_id === workspace.id && session.pinned === 0 && !session.archived,
+            )
             .sort((a, b) => b.started_at.localeCompare(a.started_at));
           const limit = shownCount[workspace.id] ?? 5;
           const visible = items.slice(0, limit);
@@ -371,6 +306,66 @@ export function SidebarTree() {
             </div>
           );
         })}
+        <div className="mt-3 border-t border-sidebar-border/60 pt-2">
+          <button
+            type="button"
+            className="flex w-full items-center gap-1.5 rounded-lg px-2 py-1.5 text-left text-xs font-semibold text-muted-foreground hover:bg-sidebar-accent/50 hover:text-sidebar-foreground"
+            aria-expanded={archivesOpen}
+            onClick={() => {
+              setArchivesOpen(!archivesOpen);
+              if (!archivesOpen) void loadArchivedSessions();
+            }}
+          >
+            <ChevronDown
+              className={cn(
+                "size-3.5 shrink-0 transition-transform",
+                !archivesOpen && "-rotate-90",
+              )}
+            />
+            <Archive className="size-3.5 shrink-0" />
+            {t("sessionMenu.archivedSection")}
+          </button>
+          {archivesOpen ? (
+            <div className="mt-1 space-y-0.5">
+              {archivedSessionIds.map((id) => {
+                const session = sessions.find((item) => item.id === id && item.archived);
+                return session ? (
+                  <SessionRow
+                    key={id}
+                    session={session}
+                    selected={selectedSessionId === id}
+                    locale={locale}
+                    indent
+                  />
+                ) : null;
+              })}
+              {archivedError ? (
+                <div role="alert" className="px-3 py-2 text-xs break-words text-destructive">
+                  <p>{archivedError}</p>
+                  <Button variant="ghost" size="sm" onClick={() => void loadArchivedSessions()}>
+                    {t("common:retry")}
+                  </Button>
+                </div>
+              ) : archivedLoading ? (
+                <p role="status" className="px-5 py-2 text-xs text-muted-foreground">
+                  {t("common:loading")}
+                </p>
+              ) : archivedSessionIds.length === 0 ? (
+                <p className="px-5 py-2 text-xs text-muted-foreground">
+                  {t("sessionMenu.archivedEmpty")}
+                </p>
+              ) : archivedHasMore ? (
+                <button
+                  type="button"
+                  className="ml-5 rounded px-2 py-1 text-[11px] text-muted-foreground hover:bg-sidebar-accent/50"
+                  onClick={() => void loadArchivedSessions(true)}
+                >
+                  {t("moreSessions")}
+                </button>
+              ) : null}
+            </div>
+          ) : null}
+        </div>
       </div>
       <Dialog
         open={Boolean(renameTarget)}

@@ -6,9 +6,11 @@ import { GitSidebar } from "@/components/git/GitSidebar";
 import { cn } from "@/lib/utils";
 import { useSessionStore } from "@/stores/sessionStore";
 import { useUiStore } from "@/stores/uiStore";
+import { useWorkspaceStore } from "@/stores/workspaceStore";
 import { Composer } from "./Composer";
 import { EventStream } from "./EventStream";
 import { SessionHeader } from "./SessionHeader";
+import { RestoreSessionButton } from "./SessionMenu";
 import { TodoProcessPanel } from "./TodoProcessPanel";
 
 const KEEP_ALIVE = 3;
@@ -25,6 +27,9 @@ function rememberSession(ids: string[], sessionId: string): string[] {
 export function SessionView() {
   const { t } = useTranslation("common");
   const sessionId = useSessionStore((state) => state.selectedSessionId);
+  const archived = useWorkspaceStore((state) =>
+    Boolean(state.sessions.find((item) => item.id === sessionId)?.archived),
+  );
   const hasSelectedLines = useSessionStore((state) =>
     sessionId ? Boolean(state.lines[sessionId]) : false,
   );
@@ -63,7 +68,11 @@ export function SessionView() {
           ) : null}
         </div>
         <div className="border-t px-4 py-3">
-          <Composer compact />
+          {archived ? (
+            <RestoreSessionButton key={sessionId} sessionId={sessionId} />
+          ) : (
+            <Composer compact />
+          )}
         </div>
       </div>
       {gitOpen ? <GitSidebar containerRef={containerRef} /> : null}
