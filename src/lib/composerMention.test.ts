@@ -76,6 +76,15 @@ describe("resolveComposerMentionKey", () => {
     expect(resolveComposerMentionKey({ ...base, key: "Escape" })).toEqual({ type: "dismiss" });
   });
 
+  it("dismisses an empty list with Escape without consuming it when closed", () => {
+    expect(resolveComposerMentionKey({ ...base, key: "Escape", itemCount: 0 })).toEqual({
+      type: "dismiss",
+    });
+    expect(resolveComposerMentionKey({ ...base, key: "Escape", mentionVisible: false })).toEqual({
+      type: "none",
+    });
+  });
+
   it("toggles plan mode with Shift+Tab even while the list is open", () => {
     expect(resolveComposerMentionKey({ ...base, key: "Tab", shiftKey: true })).toEqual({
       type: "togglePlanMode",

@@ -22,6 +22,7 @@ export function resolveComposerMentionKey(input: {
   activeIndex: number;
 }): ComposerMentionKeyAction {
   if (input.isComposing) return { type: "none" };
+  if (input.mentionVisible && input.key === "Escape") return { type: "dismiss" };
 
   const canNavigate = input.mentionVisible && input.itemCount > 0;
   if (canNavigate) {
@@ -39,7 +40,6 @@ export function resolveComposerMentionKey(input: {
     }
     if (input.key === "Enter" && !input.shiftKey) return { type: "confirm" };
     if (input.key === "Tab" && !input.shiftKey) return { type: "confirm" };
-    if (input.key === "Escape") return { type: "dismiss" };
   }
 
   if (input.key === "Tab" && input.shiftKey) return { type: "togglePlanMode" };

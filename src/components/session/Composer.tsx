@@ -1,7 +1,15 @@
 import { convertFileSrc, isTauri } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
-import { ArrowUp, Loader2, Square } from "lucide-react";
-import { useEffect, useRef, useState, type ClipboardEvent, type DragEvent } from "react";
+import { ArrowUp, FileIcon, Loader2, Square } from "lucide-react";
+import {
+  useEffect,
+  useId,
+  useLayoutEffect,
+  useRef,
+  useState,
+  type ClipboardEvent,
+  type DragEvent,
+} from "react";
 import { useTranslation } from "react-i18next";
 
 import { Button } from "@/components/ui/button";
@@ -63,6 +71,7 @@ import { useWorkspaceStore } from "@/stores/workspaceStore";
 import { BranchPicker } from "./BranchPicker";
 import { ChannelModelPicker } from "./ChannelModelPicker";
 import { ComposerImageStrip } from "./ComposerImageStrip";
+import { ComposerMentionMenu, ComposerMentionOption } from "./ComposerMentionMenu";
 import { ComposerPlusMenu } from "./ComposerPlusMenu";
 import { ContextCapacity } from "./ContextCapacity";
 import { PermissionModePicker } from "./PermissionModePicker";
@@ -143,8 +152,11 @@ export function Composer({ compact = false }: { compact?: boolean }) {
   const [sending, setSending] = useState(false);
   const [attachments, setAttachments] = useState<ComposerImageItem[]>([]);
   const [dragging, setDragging] = useState(false);
+  const composerRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const mentionListRef = useRef<HTMLDivElement>(null);
+  const mentionListId = useId();
+  const focusAfterInsertRef = useRef(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const attachmentsRef = useRef<ComposerImageItem[]>([]);
   const dragDepthRef = useRef(0);
@@ -181,13 +193,28 @@ export function Composer({ compact = false }: { compact?: boolean }) {
 
   const trigger = parseComposerTrigger(draft);
 
+  useLayoutEffect(() => {
+    const input = textareaRef.current;
+    if (!focusAfterInsertRef.current || !input) return;
+    focusAfterInsertRef.current = false;
+    input.focus();
+    input.setSelectionRange(draft.length, draft.length);
+  }, [draft]);
+
   useEffect(() => {
     if (trigger?.kind === "@" && workspaceId) {
+      let cancelled = false;
       setMentionOpen("@");
       void listGitFiles(workspaceId, trigger.query, 30)
-        .then(setFiles)
-        .catch(() => setFiles([]));
-      return;
+        .then((items) => {
+          if (!cancelled) setFiles(items);
+        })
+        .catch(() => {
+          if (!cancelled) setFiles([]);
+        });
+      return () => {
+        cancelled = true;
+      };
     }
     if (trigger?.kind === "/" || trigger?.kind === "$") {
       setMentionOpen(trigger.kind);
@@ -542,14 +569,14 @@ export function Composer({ compact = false }: { compact?: boolean }) {
   const insertToken = (token: string) => {
     const parts = draft.split(/\s/);
     parts[parts.length - 1] = token;
+    focusAfterInsertRef.current = true;
     setDraft(`${parts.join(" ")} `);
     setMentionOpen(null);
-    textareaRef.current?.focus();
   };
 
   const insertTrigger = (trigger: ComposerTriggerChar) => {
+    focusAfterInsertRef.current = true;
     setDraft(appendComposerTrigger(draft, trigger));
-    textareaRef.current?.focus();
   };
 
   const handlePaste = (event: ClipboardEvent<HTMLDivElement>) => {
@@ -591,6 +618,7 @@ export function Composer({ compact = false }: { compact?: boolean }) {
         <QueuedInputs key={selectedSessionId} sessionId={selectedSessionId} />
       ) : null}
       <div
+        ref={composerRef}
         className={cn(
           "rounded-2xl border border-border/70 bg-card/95 shadow-sm transition-all duration-150 focus-within:border-ring/60 focus-within:ring-2 focus-within:ring-ring/10",
           dragging && "border-ring ring-2 ring-ring/20",
@@ -652,6 +680,17 @@ export function Composer({ compact = false }: { compact?: boolean }) {
         />
         <textarea
           ref={textareaRef}
+          role="combobox"
+          aria-label={t("layout:composerPlaceholder")}
+          aria-autocomplete="list"
+          aria-haspopup="listbox"
+          aria-expanded={mentionOpen !== null}
+          aria-controls={mentionOpen ? mentionListId : undefined}
+          aria-activedescendant={
+            mentionOpen && pickerItems.length > 0
+              ? `${mentionListId}-${activeMentionIndex}`
+              : undefined
+          }
           value={draft}
           onChange={(event) => setDraft(event.target.value)}
           onKeyDown={(event) => {
@@ -659,7 +698,7 @@ export function Composer({ compact = false }: { compact?: boolean }) {
               key: event.key,
               shiftKey: event.shiftKey,
               isComposing: event.nativeEvent.isComposing || event.keyCode === 229,
-              mentionVisible: pickerItems.length > 0,
+              mentionVisible: mentionOpen !== null,
               itemCount: pickerItems.length,
               activeIndex: activeMentionIndex,
             });
@@ -693,38 +732,6 @@ export function Composer({ compact = false }: { compact?: boolean }) {
           placeholder={t("layout:composerPlaceholder")}
           className="min-h-24 w-full resize-none bg-transparent px-4 py-3 text-sm leading-relaxed outline-none placeholder:text-muted-foreground/60"
         />
-        {mentionOpen === "@" && mentionItems.length > 0 ? (
-          <div
-            ref={mentionListRef}
-            className="mx-3 mb-2 max-h-40 overflow-y-auto rounded-xl border border-border/60 bg-popover p-1 text-sm shadow-md"
-          >
-            {mentionItems.map((item, index) => (
-              <button
-                key={item.key}
-                type="button"
-                data-mention-active={index === activeMentionIndex ? "true" : undefined}
-                className={cn(
-                  "block w-full truncate rounded-lg px-2.5 py-1.5 text-left text-xs font-medium transition-colors",
-                  index === activeMentionIndex
-                    ? "bg-accent text-accent-foreground"
-                    : "hover:bg-accent/70",
-                )}
-                onMouseEnter={() => setMentionIndex(index)}
-                onClick={() => insertToken(item.token)}
-              >
-                {item.label}
-              </button>
-            ))}
-          </div>
-        ) : mentionOpen === "/" || mentionOpen === "$" ? (
-          <ComposerSlashMenu
-            items={visibleSlashItems}
-            activeIndex={activeMentionIndex}
-            listRef={mentionListRef}
-            onHover={setMentionIndex}
-            onPick={(item) => insertToken(item.token)}
-          />
-        ) : null}
         <div className="grid grid-cols-[minmax(0,1fr)_auto] items-end gap-2 border-t border-border/50 px-3 py-2 text-xs">
           <div className="flex min-w-0 flex-wrap items-center gap-1.5">
             <ComposerPlusMenu
@@ -781,6 +788,46 @@ export function Composer({ compact = false }: { compact?: boolean }) {
           </div>
         </div>
       </div>
+      <ComposerMentionMenu
+        open={mentionOpen !== null}
+        anchorRef={composerRef}
+        inputRef={textareaRef}
+        listRef={mentionListRef}
+        id={mentionListId}
+        label={t(
+          mentionOpen === "@" ? "atContext" : mentionOpen === "$" ? "slashSkills" : "slashTitle",
+        )}
+        onDismiss={() => setMentionOpen(null)}
+      >
+        {mentionOpen === "@" ? (
+          mentionItems.length > 0 ? (
+            mentionItems.map((item, index) => (
+              <ComposerMentionOption
+                key={item.key}
+                id={`${mentionListId}-${index}`}
+                active={index === activeMentionIndex}
+                icon={FileIcon}
+                label={item.label}
+                onMouseEnter={() => setMentionIndex(index)}
+                onClick={() => insertToken(item.token)}
+              />
+            ))
+          ) : (
+            <p role="status" className="px-2.5 py-2 text-xs text-muted-foreground">
+              {t("noFiles")}
+            </p>
+          )
+        ) : (
+          <ComposerSlashMenu
+            items={visibleSlashItems}
+            activeIndex={activeMentionIndex}
+            listId={mentionListId}
+            emptyLabel={t(mentionOpen === "$" ? "slashEmptySkills" : "slashEmpty")}
+            onHover={setMentionIndex}
+            onPick={(item) => insertToken(item.token)}
+          />
+        )}
+      </ComposerMentionMenu>
       {error ? <p className="mt-2 text-sm text-destructive">{error}</p> : null}
     </div>
   );

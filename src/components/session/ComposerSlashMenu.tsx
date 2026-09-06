@@ -1,8 +1,9 @@
+import { Bot, CircleSlash, Sparkles } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
 import type { ComposerSlashGroup, ComposerSlashItem } from "@/lib/composerSlash";
 import { groupComposerSlashItems } from "@/lib/composerSlash";
-import { cn } from "@/lib/utils";
+import { ComposerMentionOption } from "./ComposerMentionMenu";
 
 const GROUP_LABEL: Record<ComposerSlashGroup, "slashCommands" | "slashSkills" | "slashSubagents"> =
   {
@@ -14,7 +15,8 @@ const GROUP_LABEL: Record<ComposerSlashGroup, "slashCommands" | "slashSkills" | 
 interface ComposerSlashMenuProps {
   items: ComposerSlashItem[];
   activeIndex: number;
-  listRef: React.RefObject<HTMLDivElement | null>;
+  listId: string;
+  emptyLabel: string;
   onHover: (index: number) => void;
   onPick: (item: ComposerSlashItem) => void;
 }
@@ -22,7 +24,8 @@ interface ComposerSlashMenuProps {
 export function ComposerSlashMenu({
   items,
   activeIndex,
-  listRef,
+  listId,
+  emptyLabel,
   onHover,
   onPick,
 }: ComposerSlashMenuProps) {
@@ -32,64 +35,48 @@ export function ComposerSlashMenu({
 
   if (items.length === 0) {
     return (
-      <div className="mx-3 mb-2 rounded-xl border border-border/60 bg-popover p-2 text-sm shadow-md">
-        <p className="text-xs text-muted-foreground">{t("slashEmpty")}</p>
-      </div>
+      <p role="status" className="px-2.5 py-2 text-xs text-muted-foreground">
+        {emptyLabel}
+      </p>
     );
   }
 
   return (
-    <div
-      ref={listRef}
-      className="mx-3 mb-2 max-h-64 overflow-y-auto rounded-xl border border-border/60 bg-popover p-1 text-sm shadow-md"
-    >
-      <p className="px-2.5 py-1 text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
-        {t("slashTitle")}
-      </p>
+    <>
       {grouped.map((section) => (
-        <div key={section.group} className="mb-1">
-          <p className="px-2.5 py-1 text-[10px] text-muted-foreground">
-            {t(GROUP_LABEL[section.group])}
-          </p>
+        <div
+          key={section.group}
+          role="group"
+          aria-label={t(GROUP_LABEL[section.group])}
+          className="not-first:mt-1 not-first:border-t not-first:border-border/50 not-first:pt-1"
+        >
           {section.items.map((item) => {
             cursor += 1;
             const index = cursor;
             return (
-              <button
+              <ComposerMentionOption
                 key={item.key}
-                type="button"
-                data-mention-active={index === activeIndex ? "true" : undefined}
-                className={cn(
-                  "block w-full rounded-lg px-2.5 py-1.5 text-left transition-colors",
-                  index === activeIndex ? "bg-accent text-accent-foreground" : "hover:bg-accent/70",
-                )}
+                id={`${listId}-${index}`}
+                active={index === activeIndex}
+                icon={
+                  item.group === "skills" ? Sparkles : item.group === "commands" ? CircleSlash : Bot
+                }
+                label={
+                  item.group === "skills"
+                    ? `$${item.name}`
+                    : item.group === "commands"
+                      ? `/${item.name}`
+                      : item.name
+                }
+                description={item.description}
+                sourceLabel={item.sourceLabel}
                 onMouseEnter={() => onHover(index)}
                 onClick={() => onPick(item)}
-              >
-                <span className="flex items-center gap-2">
-                  <span className="truncate text-xs font-medium">
-                    {item.group === "skills"
-                      ? `$${item.name}`
-                      : item.group === "commands"
-                        ? `/${item.name}`
-                        : item.name}
-                  </span>
-                  {item.sourceLabel ? (
-                    <span className="truncate text-[10px] text-muted-foreground">
-                      {item.sourceLabel}
-                    </span>
-                  ) : null}
-                </span>
-                {item.description ? (
-                  <span className="block truncate text-[11px] text-muted-foreground">
-                    {item.description}
-                  </span>
-                ) : null}
-              </button>
+              />
             );
           })}
         </div>
       ))}
-    </div>
+    </>
   );
 }
