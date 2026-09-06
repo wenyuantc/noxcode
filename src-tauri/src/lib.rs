@@ -85,6 +85,7 @@ pub fn run() {
             git::get_git_repo_info,
             git::get_git_status,
             git::get_git_file_diff,
+            git::get_git_file_preview,
             git::get_git_numstat,
             git::stage_git_paths,
             git::unstage_git_paths,

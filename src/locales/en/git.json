@@ -57,5 +57,16 @@
   "noChanges": "No uncommitted changes",
   "refresh": "Refresh",
   "close": "Close",
-  "diffTitle": "File diff"
+  "diffTitle": "File diff",
+  "filePreviewTitle": "File preview",
+  "currentContent": "Current contents",
+  "loadingPreview": "Loading file",
+  "fileMissing": "File was deleted or does not exist",
+  "fileEmpty": "File is empty",
+  "contentTruncated": "File contents truncated (256 KiB maximum)",
+  "previewReason": {
+    "ignored": "This file is ignored by Git; no diff is available",
+    "unchanged": "No uncommitted Git differences",
+    "not_repository": "This workspace is not a Git repository"
+  }
 }

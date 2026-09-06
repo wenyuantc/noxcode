@@ -59,6 +59,7 @@ pub(crate) async fn get_file_diff(
 
     let compare_path = old_path.unwrap_or(path);
     let mut args = vec![
+        "--literal-pathspecs".to_string(),
         "diff".to_string(),
         "--no-ext-diff".to_string(),
         "--no-color".to_string(),
@@ -80,15 +81,8 @@ pub(crate) async fn get_file_diff(
 
     let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
     let output = git(target, &arg_refs, &IndexMode::ReadOnly).await?;
-    if !output.success() && !output.stdout.is_empty() {
-        // diff 在有差异时仍可能 exit 0；非 0 且无 stdout 才算失败
-    }
-    if !output.success() && output.stdout.is_empty() && !is_untracked_exit(&output.stderr_lossy()) {
-        if matches!(scope, GitFileDiffScope::Worktree) {
-            return untracked_file_diff(target, path).await;
-        }
-        let refs: Vec<&str> = args.iter().map(String::as_str).collect();
-        return Err(output.command_error(&refs));
+    if !(output.success() || output.exit_code == 1 && !output.stdout.is_empty()) {
+        return Err(output.command_error(&arg_refs));
     }
 
     let mut patch = if output.stdout.is_empty() && matches!(scope, GitFileDiffScope::Worktree) {
@@ -116,7 +110,11 @@ async fn untracked_file_diff(target: &GitTarget, path: &str) -> Result<GitFileDi
         });
     }
 
-    let dev_null = if cfg!(windows) { "NUL" } else { "/dev/null" };
+    let dev_null = if cfg!(windows) && matches!(target, GitTarget::Local(_)) {
+        "NUL"
+    } else {
+        "/dev/null"
+    };
     let output = git(
         target,
         &[
@@ -132,12 +130,11 @@ async fn untracked_file_diff(target: &GitTarget, path: &str) -> Result<GitFileDi
         &IndexMode::ReadOnly,
     )
     .await?;
+    if !matches!(output.exit_code, 0 | 1) {
+        return Err(output.command_error(&["diff", "--no-index", "--", dev_null, path]));
+    }
     let mut patch = String::from_utf8_lossy(&output.stdout).into_owned();
     classify_patch(path, None, &mut patch)
-}
-
-fn is_untracked_exit(stderr: &str) -> bool {
-    stderr.contains("does not exist") || stderr.contains("no such path")
 }
 
 fn classify_patch(
@@ -160,7 +157,11 @@ fn classify_patch(
     }
     let truncated = patch.len() > MAX_DIFF_BYTES;
     if truncated {
-        patch.truncate(MAX_DIFF_BYTES);
+        let mut end = MAX_DIFF_BYTES;
+        while !patch.is_char_boundary(end) {
+            end -= 1;
+        }
+        patch.truncate(end);
     }
     Ok(GitFileDiff {
         path: path.to_string(),
@@ -341,6 +342,16 @@ mod tests {
         assert_eq!(entries[0].status, "M");
         assert_eq!(entries[1].status, "D");
         assert_eq!(entries[2].status, "A");
+    }
+
+    #[test]
+    fn text_patch_truncation_preserves_utf8_boundaries() {
+        let original = "界".repeat(MAX_DIFF_BYTES / 3 + 1);
+        let diff = classify_patch("large.txt", None, &mut original.clone()).unwrap();
+        assert!(diff.truncated);
+        assert!(!diff.is_binary);
+        assert!(diff.patch.len() <= MAX_DIFF_BYTES);
+        assert!(original.starts_with(&diff.patch));
     }
 
     #[test]

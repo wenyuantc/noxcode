@@ -24,6 +24,7 @@ import type {
   GitCommitResult,
   GitFileDiff,
   GitFileDiffScope,
+  GitFilePreview,
   GitNumstatEntry,
   GitNumstatScope,
   GitPushResult,
@@ -197,6 +198,10 @@ export function getGitNumstat(
   scope: GitNumstatScope,
 ): Promise<GitNumstatEntry[]> {
   return invoke("get_git_numstat", { workspaceId, scope });
+}
+
+export function getGitFilePreview(workspaceId: string, path: string): Promise<GitFilePreview> {
+  return invoke("get_git_file_preview", { workspaceId, path });
 }
 
 export function stageGitPaths(workspaceId: string, paths: string[]): Promise<void> {

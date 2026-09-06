@@ -4,6 +4,7 @@ pub(crate) mod runner;
 mod checkpoint;
 mod commit;
 mod diff;
+mod preview;
 mod repo;
 mod stage;
 mod status;
@@ -36,6 +37,7 @@ use self::commit::{
 use self::diff::{
     get_file_diff, get_numstat, GitFileDiff, GitFileDiffScope, GitNumstatEntry, GitNumstatScope,
 };
+use self::preview::{get_file_preview, GitFilePreview};
 use self::repo::{list_repo_files, GitRepoInfo};
 use self::stage::{restore_paths, stage_paths, unstage_paths};
 use self::status::{get_status, GitStatus};
@@ -142,6 +144,16 @@ pub(crate) async fn get_git_file_diff<R: Runtime>(
     get_file_diff(&target, &path, &scope, old_path.as_deref())
         .await
         .map_err(Into::into)
+}
+
+#[tauri::command]
+pub(crate) async fn get_git_file_preview<R: Runtime>(
+    app: AppHandle<R>,
+    workspace_id: String,
+    path: String,
+) -> Result<GitFilePreview, String> {
+    let target = resolve_git_target(&app, &workspace_id).await?;
+    get_file_preview(&target, &path).await.map_err(Into::into)
 }
 
 #[tauri::command]

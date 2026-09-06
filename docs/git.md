@@ -84,6 +84,7 @@ ref：`refs/noxcode/checkpoints/<session_id>/<seq>`。author / committer 固定 
 | `get_git_repo_info` | 四参数 rev-parse + 分支 / upstream + 远端版本校验 + 孤儿清扫 |
 | `get_git_status` | porcelain v2 |
 | `get_git_file_diff` | 工作区 / 暂存 / 两个 commit；二进制截掉 base85；超过 2MB 截断 |
+| `get_git_file_preview` | 会话文件入口：工作区差异 → 暂存差异 → 当前内容；区分忽略、无差异、非 Git、文件不存在 |
 | `get_git_numstat` | 工作区 / 暂存 / vs upstream |
 | `stage_git_paths` / `unstage_git_paths` | 用户暂存；unborn HEAD 用 `rm --cached` |
 | `restore_git_paths` | 丢弃工作区改动 |
@@ -97,6 +98,10 @@ ref：`refs/noxcode/checkpoints/<session_id>/<seq>`。author / committer 固定 
 | `clear_git_checkpoints` | 清本仓库全部检查点并写活动审计 |
 
 前端对应函数在 `backend.ts`：`getGitRepoInfo`、`getGitStatus`、`getGitFileDiff`、`getGitNumstat`、`stageGitPaths`、`unstageGitPaths`、`restoreGitPaths`、`commitGitChanges`、`pushGitBranch`、`listGitBranches`、`createGitBranch`、`checkoutGitBranch`、`listGitFiles`、`createGitCheckpoint`、`listGitCheckpoints`、`previewGitCheckpointRestore`、`restoreGitCheckpoint`、`clearGitCheckpoints`；恢复历史另通过 `listActivityLogs` 读取。
+
+## 文件预览
+
+会话文件预览只读，不修改 index 或忽略规则。当前内容最多读取 256 KiB + 1 字节，UTF-8 截断不切断字符；非文本仅显示二进制状态。本地读取校验规范化后的物理路径，SSH 校验物理父目录且拒绝最终文件符号链接，均禁止越出工作区。Git 命令失败保留为错误，不伪装成空差异；单文件 diff 使用 literal pathspec，避免文件名中的通配符匹配其它文件。
 
 ## 安全拉取
 

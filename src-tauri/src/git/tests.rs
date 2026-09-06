@@ -16,6 +16,7 @@ use super::commit::{
     checkout_branch, commit_changes, create_branch, list_branches, pull_branch, push_branch,
 };
 use super::diff::{get_file_diff, get_numstat, GitFileDiffScope, GitNumstatScope};
+use super::preview::{get_file_preview, FilePreviewReason, GitFilePreview};
 use super::repo::{list_repo_files, load_repo_info};
 use super::runner::{fixture_git, git, GitTarget, IndexMode, ScratchIndex};
 use super::stage::{restore_paths, stage_paths, unstage_paths};
@@ -147,6 +148,139 @@ where
     let _ssh_guard = SSH_TARGET_TEST_LOCK.lock().await;
     let ssh = ssh_env().await;
     test(ssh.target.clone(), ssh.dir.path().to_path_buf()).await;
+}
+
+#[tokio::test]
+async fn file_preview_selects_live_diff_and_preserves_index() {
+    run_on_targets(|target, dir| async move {
+        std::fs::write(dir.join("README.md"), "staged change\n").unwrap();
+        stage_paths(&target, &["README.md".to_string()])
+            .await
+            .unwrap();
+        let before = index_bytes(&dir);
+        let preview = get_file_preview(&target, "README.md").await.unwrap();
+        assert!(matches!(preview, GitFilePreview::Diff {
+            scope: GitFileDiffScope::Staged, ref diff,
+        } if diff.patch.contains("+staged change")));
+
+        std::fs::write(dir.join("README.md"), "worktree change\n").unwrap();
+        let preview = get_file_preview(&target, "./README.md").await.unwrap();
+        assert!(matches!(preview, GitFilePreview::Diff {
+            scope: GitFileDiffScope::Worktree, ref diff,
+        } if diff.patch.contains("+worktree change")));
+
+        std::fs::write(dir.join("new.txt"), "new file\n").unwrap();
+        let preview = get_file_preview(&target, "new.txt").await.unwrap();
+        assert!(matches!(preview, GitFilePreview::Diff {
+            scope: GitFileDiffScope::Worktree, ref diff,
+        } if diff.patch.contains("+new file")));
+        std::fs::remove_file(dir.join("README.md")).unwrap();
+        assert!(matches!(
+            get_file_preview(&target, "README.md").await.unwrap(),
+            GitFilePreview::Diff {
+                scope: GitFileDiffScope::Worktree,
+                ..
+            }
+        ));
+        assert_eq!(before, index_bytes(&dir));
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn file_preview_reads_ignored_unchanged_and_missing_files() {
+    run_on_targets(|target, dir| async move {
+        std::fs::write(dir.join(".gitignore"), ".workflow/\n").unwrap();
+        std::fs::create_dir_all(dir.join(".workflow/.scratchpad")).unwrap();
+        let path = ".workflow/.scratchpad/level-scope.json";
+        let content = "{\"scope\":\"审查\"}\n";
+        std::fs::write(dir.join(path), content).unwrap();
+        let before = index_bytes(&dir);
+        for input in [
+            path.to_string(),
+            dir.join(path).to_string_lossy().into_owned(),
+        ] {
+            let preview = get_file_preview(&target, &input).await.unwrap();
+            assert!(matches!(preview, GitFilePreview::Content {
+                content: ref text, reason: FilePreviewReason::Ignored,
+                is_binary: false, truncated: false, ..
+            } if text == content));
+        }
+        let preview = get_file_preview(&target, "README.md").await.unwrap();
+        assert!(matches!(preview, GitFilePreview::Content {
+            ref content, reason: FilePreviewReason::Unchanged, ..
+        } if content == "hello\n"));
+        std::fs::remove_file(dir.join(path)).unwrap();
+        assert!(matches!(
+            get_file_preview(&target, path).await.unwrap(),
+            GitFilePreview::Missing { .. }
+        ));
+
+        std::fs::write(dir.join(path), "").unwrap();
+        assert!(matches!(get_file_preview(&target, path).await.unwrap(),
+            GitFilePreview::Content { ref content, is_binary: false, .. } if content.is_empty()));
+        std::fs::write(dir.join(path), [0, 1, 2, 255]).unwrap();
+        assert!(matches!(get_file_preview(&target, path).await.unwrap(),
+            GitFilePreview::Content { ref content, is_binary: true, .. } if content.is_empty()));
+        let large = "界".repeat(100_000);
+        std::fs::write(dir.join(path), &large).unwrap();
+        assert!(matches!(get_file_preview(&target, path).await.unwrap(),
+            GitFilePreview::Content { ref content, is_binary: false, truncated: true, .. }
+            if content.len() <= 256 * 1024 && large.starts_with(content) && !content.is_empty()));
+        assert_eq!(before, index_bytes(&dir));
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn file_preview_uses_literal_paths_and_surfaces_git_errors() {
+    run_on_targets(|target, dir| async move {
+        std::fs::write(dir.join("[a].txt"), "literal\n").unwrap();
+        std::fs::write(dir.join("a.txt"), "other\n").unwrap();
+        stage_paths(&target, &["[a].txt".to_string(), "a.txt".to_string()])
+            .await
+            .unwrap();
+        commit_changes(&target, "files", None).await.unwrap();
+        std::fs::write(dir.join("a.txt"), "unrelated change\n").unwrap();
+        let preview = get_file_preview(&target, "[a].txt").await.unwrap();
+        assert!(
+            matches!(preview, GitFilePreview::Content { ref content, .. } if content == "literal\n")
+        );
+        std::fs::write(dir.join(".git/index"), "invalid index").unwrap();
+        assert!(get_file_preview(&target, "[a].txt").await.is_err());
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn file_preview_rejects_unsafe_paths_and_directories() {
+    run_on_targets(|target, dir| async move {
+        std::fs::create_dir(dir.join("folder")).unwrap();
+        for path in ["../secret", "/etc/passwd", "a\0b", ".", "folder"] {
+            assert!(get_file_preview(&target, path).await.is_err(), "{path}");
+        }
+        #[cfg(unix)]
+        {
+            let outside = tempfile::tempdir().unwrap();
+            std::fs::write(outside.path().join("secret"), "private").unwrap();
+            std::os::unix::fs::symlink(outside.path(), dir.join("external")).unwrap();
+            std::fs::write(dir.join(".gitignore"), "external\n").unwrap();
+            assert!(get_file_preview(&target, "external/secret").await.is_err());
+        }
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn file_preview_supports_workspaces_without_git() {
+    run_on_targets(|target, dir| async move {
+        std::fs::remove_dir_all(dir.join(".git")).unwrap();
+        let preview = get_file_preview(&target, "README.md").await.unwrap();
+        assert!(matches!(preview, GitFilePreview::Content {
+            ref content, reason: FilePreviewReason::NotRepository, ..
+        } if content == "hello\n"));
+    })
+    .await;
 }
 
 #[tokio::test]

@@ -69,7 +69,7 @@ function GitWorkspacePanel({ workspaceId }: { workspaceId: string | null }) {
   const [activityLogs, setActivityLogs] = useState<ActivityLog[]>([]);
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [diff, setDiff] = useState<GitDiffTarget | null>(null);
-  const diffScope = diff?.scope ?? null;
+  const diffScope = diff?.scope === "auto" ? null : (diff?.scope ?? null);
   const [message, setMessage] = useState("");
   const [restoreTarget, setRestoreTarget] = useState<GitCheckpoint | null>(null);
   const [preview, setPreview] = useState<GitRestorePreview | null>(null);
@@ -132,7 +132,7 @@ function GitWorkspacePanel({ workspaceId }: { workspaceId: string | null }) {
 
   useEffect(() => {
     if (!workspaceId || !gitFocusPath) return;
-    setDiff({ workspaceId, path: gitFocusPath, scope: "worktree" });
+    setDiff({ workspaceId, path: gitFocusPath, scope: "auto" });
     useUiStore.getState().clearGitPreview();
   }, [gitFocusPath, workspaceId]);
 

@@ -57,5 +57,16 @@
   "noChanges": "没有未提交的更改",
   "refresh": "刷新",
   "close": "关闭",
-  "diffTitle": "文件差异"
+  "diffTitle": "文件差异",
+  "filePreviewTitle": "文件预览",
+  "currentContent": "当前内容",
+  "loadingPreview": "正在加载文件",
+  "fileMissing": "文件已删除或不存在",
+  "fileEmpty": "文件内容为空",
+  "contentTruncated": "文件内容已截断（最多 256 KiB）",
+  "previewReason": {
+    "ignored": "此文件被 Git 忽略，无可用差异",
+    "unchanged": "当前没有未提交的 Git 差异",
+    "not_repository": "此工作区不是 Git 仓库"
+  }
 }

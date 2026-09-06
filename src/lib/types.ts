@@ -176,6 +176,18 @@ export interface GitFileDiff {
   truncated: boolean;
 }
 
+export type GitFilePreview =
+  | { kind: "diff"; scope: "worktree" | "staged"; diff: GitFileDiff }
+  | {
+      kind: "content";
+      path: string;
+      content: string;
+      is_binary: boolean;
+      truncated: boolean;
+      reason: "ignored" | "unchanged" | "not_repository";
+    }
+  | { kind: "missing"; path: string };
+
 export interface GitNumstatEntry {
   path: string;
   orig_path: string | null;
