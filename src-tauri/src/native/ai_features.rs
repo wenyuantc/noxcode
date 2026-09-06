@@ -2,7 +2,7 @@ use serde::Serialize;
 use sqlx::SqlitePool;
 use tauri::{AppHandle, Emitter};
 
-use crate::app::ai_settings::{load_ai_settings, AiFeatureOverride};
+use crate::app::ai_settings::{load_ai_settings, AiFeatureOverride, CommitMessageStyle};
 use crate::app::sessions::rename_agent_session_with;
 use crate::app::shared::{normalize_optional_text, sqlite_pool};
 use crate::git::{collect_commit_message_context, resolve_git_target};
@@ -32,7 +32,10 @@ pub(crate) fn sanitize_generated_session_title(raw: &str) -> Option<String> {
     session_title(stripped)
 }
 
-pub(crate) fn sanitize_generated_commit_message(raw: &str) -> Result<String, String> {
+pub(crate) fn sanitize_generated_commit_message(
+    raw: &str,
+    style: CommitMessageStyle,
+) -> Result<String, String> {
     let mut text = raw.trim().to_string();
     if text.starts_with("```") {
         let mut lines = text.lines();
@@ -45,6 +48,9 @@ pub(crate) fn sanitize_generated_commit_message(raw: &str) -> Result<String, Str
             body.pop();
         }
         text = body.join("\n").trim().to_string();
+    }
+    if style == CommitMessageStyle::Concise {
+        text = text.lines().next().unwrap_or("").trim().to_string();
     }
     if text.is_empty() {
         return Err("模型未返回提交说明".to_string());
@@ -94,13 +100,24 @@ pub(crate) async fn resolve_ai_feature_target(
     ))
 }
 
-fn commit_message_prompt(context: &str) -> String {
-    format!(
-        "根据以下 Git 变更生成一条 Conventional Commit 提交说明。\n\
-只输出提交说明本身，不要解释，不要代码围栏。\n\
-首选格式：type(scope): subject\n\n\
+fn commit_message_prompt(style: CommitMessageStyle, context: &str) -> String {
+    match style {
+        CommitMessageStyle::Concise => format!(
+            "根据以下 Git 变更生成一条简约的 Conventional Commit 提交说明。\n\
+只输出一行提交说明，不要正文、不要解释、不要代码围栏。\n\
+格式：type(scope): subject\n\
+整行不超过 72 个字符。subject 用祈使语气概括最主要的变更。\n\n\
 变更：\n{context}"
-    )
+        ),
+        CommitMessageStyle::Detailed => format!(
+            "根据以下 Git 变更生成一条明细的 Conventional Commit 提交说明。\n\
+只输出提交说明本身，不要解释，不要代码围栏。\n\
+第一行格式：type(scope): subject（不超过 72 个字符）。\n\
+空一行后写正文：用项目符号列出本次变更做了什么、为什么改、影响哪些模块或文件。\n\
+条目必须来自下面的实际 diff，不要编造；变更很小也要写清具体改动，不要只给标题。\n\n\
+变更：\n{context}"
+        ),
+    }
 }
 
 fn session_title_prompt(prompt: &str) -> String {
@@ -152,14 +169,14 @@ pub async fn generate_git_commit_message(
     let result = run_feature_one_shot(
         &app,
         &pool,
-        &settings.commit_message,
+        settings.commit_message.as_override(),
         Some(&workspace_id),
         None,
-        commit_message_prompt(&context),
+        commit_message_prompt(settings.commit_message.style, &context),
         OPERATION_COMMIT_MESSAGE,
     )
     .await?;
-    sanitize_generated_commit_message(&result.text)
+    sanitize_generated_commit_message(&result.text, settings.commit_message.style)
 }
 
 pub(crate) fn spawn_session_title_generation(
@@ -239,10 +256,36 @@ mod tests {
 
     #[test]
     fn sanitizes_commit_fences() {
-        let message = sanitize_generated_commit_message("```\nfeat: add button\n```").expect("ok");
+        let message = sanitize_generated_commit_message(
+            "```\nfeat: add button\n```",
+            CommitMessageStyle::Detailed,
+        )
+        .expect("ok");
         assert_eq!(message, "feat: add button");
-        let err = sanitize_generated_commit_message("   ").expect_err("empty");
+        let err = sanitize_generated_commit_message("   ", CommitMessageStyle::Detailed)
+            .expect_err("empty");
         assert!(err.contains("提交说明"));
+    }
+
+    #[test]
+    fn concise_keeps_first_line_only() {
+        let message = sanitize_generated_commit_message(
+            "feat(ui): add button\n\n- keep extra body",
+            CommitMessageStyle::Concise,
+        )
+        .expect("ok");
+        assert_eq!(message, "feat(ui): add button");
+    }
+
+    #[test]
+    fn commit_message_prompt_differs_by_style() {
+        let concise = commit_message_prompt(CommitMessageStyle::Concise, "diff a");
+        let detailed = commit_message_prompt(CommitMessageStyle::Detailed, "diff a");
+        assert!(concise.contains("简约"));
+        assert!(concise.contains("不要正文"));
+        assert!(detailed.contains("明细"));
+        assert!(detailed.contains("项目符号"));
+        assert_ne!(concise, detailed);
     }
 
     #[tokio::test]

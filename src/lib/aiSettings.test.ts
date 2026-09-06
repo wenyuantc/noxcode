@@ -1,10 +1,12 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  EMPTY_AI_COMMIT_MESSAGE,
   EMPTY_AI_FEATURE_OVERRIDE,
   fillOverrideDefaults,
   selectOverrideChannel,
   selectOverrideModel,
+  withCommitMessageDefaults,
   withEnabledOverride,
 } from "./aiSettings";
 import type { AiChannel, AiChannelModel } from "./types";
@@ -73,6 +75,25 @@ describe("aiSettings helpers", () => {
       model: null,
       reasoning_effort: null,
     });
+  });
+
+  it("keeps commit message style when filling defaults", () => {
+    const next = fillOverrideDefaults(
+      { ...EMPTY_AI_COMMIT_MESSAGE, enabled: true, style: "concise" },
+      channels,
+    );
+    expect(next.style).toBe("concise");
+    expect(next.channel_id).toBe("alpha");
+  });
+
+  it("defaults missing commit message style to detailed", () => {
+    const next = withCommitMessageDefaults({
+      enabled: true,
+      channel_id: "alpha",
+      model: "gpt-a",
+      reasoning_effort: "medium",
+    });
+    expect(next.style).toBe("detailed");
   });
 
   it("resets model when switching channel", () => {

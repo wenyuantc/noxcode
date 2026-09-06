@@ -1,12 +1,24 @@
 import { GitCommitHorizontal, MessageSquareText, Save } from "lucide-react";
-import { useEffect, useState } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 
 import { Button } from "@/components/ui/button";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
 import { updateAiSettings } from "@/lib/backend";
-import { EMPTY_AI_FEATURE_OVERRIDE, withEnabledOverride } from "@/lib/aiSettings";
-import type { AiChannel, AiFeatureOverride, AiSettings } from "@/lib/types";
+import {
+  EMPTY_AI_COMMIT_MESSAGE,
+  EMPTY_AI_FEATURE_OVERRIDE,
+  normalizeAiSettings,
+  withEnabledOverride,
+} from "@/lib/aiSettings";
+import type { AiChannel, AiFeatureOverride, AiSettings, CommitMessageStyle } from "@/lib/types";
 import { useChannelStore } from "@/stores/channelStore";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { AiModelOverrideFields } from "./AiModelOverrideFields";
@@ -14,7 +26,7 @@ import { SettingCard } from "./SettingCard";
 import { SettingFeedbackCallout } from "./SettingFeedbackCallout";
 
 const EMPTY_AI_SETTINGS: AiSettings = {
-  commit_message: EMPTY_AI_FEATURE_OVERRIDE,
+  commit_message: EMPTY_AI_COMMIT_MESSAGE,
   session_title: EMPTY_AI_FEATURE_OVERRIDE,
 };
 
@@ -31,10 +43,10 @@ export function AiFeaturesSection() {
   } | null>(null);
 
   useEffect(() => {
-    if (stored) setDraft(stored);
+    if (stored) setDraft(normalizeAiSettings(stored));
   }, [stored]);
 
-  const patch = (key: keyof AiSettings, next: AiFeatureOverride) => {
+  const patch = <K extends keyof AiSettings>(key: K, next: AiSettings[K]) => {
     setDraft((current) => ({ ...current, [key]: next }));
   };
 
@@ -74,10 +86,17 @@ export function AiFeaturesSection() {
         channels={channels}
         saving={saving === "commit_message"}
         disabled={saving !== null}
+        extraFields={
+          <CommitMessageStyleField
+            value={draft.commit_message.style}
+            disabled={saving !== null}
+            onChange={(style) => patch("commit_message", { ...draft.commit_message, style })}
+          />
+        }
         onToggle={(enabled) =>
           patch("commit_message", withEnabledOverride(draft.commit_message, channels, enabled))
         }
-        onChange={(next) => patch("commit_message", next)}
+        onChange={(next) => patch("commit_message", { ...draft.commit_message, ...next })}
         onSave={() => void save("commit_message")}
       />
 
@@ -113,6 +132,7 @@ function AiFeatureCard({
   channels,
   saving,
   disabled,
+  extraFields,
   onToggle,
   onChange,
   onSave,
@@ -127,6 +147,7 @@ function AiFeatureCard({
   channels: AiChannel[];
   saving: boolean;
   disabled: boolean;
+  extraFields?: ReactNode;
   onToggle: (enabled: boolean) => void;
   onChange: (next: AiFeatureOverride) => void;
   onSave: () => void;
@@ -149,6 +170,7 @@ function AiFeatureCard({
       {value.enabled ? (
         <div className="space-y-4">
           <p className="text-xs text-muted-foreground">{hint}</p>
+          {extraFields}
           <AiModelOverrideFields
             value={value}
             channels={channels}
@@ -172,5 +194,48 @@ function AiFeatureCard({
         </div>
       )}
     </SettingCard>
+  );
+}
+
+function CommitMessageStyleField({
+  value,
+  disabled,
+  onChange,
+}: {
+  value: CommitMessageStyle;
+  disabled: boolean;
+  onChange: (style: CommitMessageStyle) => void;
+}) {
+  const { t } = useTranslation("settings");
+  return (
+    <div className="space-y-1.5">
+      <label className="text-xs font-medium text-foreground">
+        {t("settings:ai.commitMessage.style")}
+      </label>
+      <Select
+        value={value}
+        disabled={disabled}
+        onValueChange={(next) => {
+          if (next === "concise" || next === "detailed") onChange(next);
+        }}
+      >
+        <SelectTrigger className="w-full bg-background">
+          <SelectValue>
+            {(selected) =>
+              selected === "concise"
+                ? t("settings:ai.commitMessage.styleConcise")
+                : t("settings:ai.commitMessage.styleDetailed")
+            }
+          </SelectValue>
+        </SelectTrigger>
+        <SelectContent>
+          <SelectItem value="concise">{t("settings:ai.commitMessage.styleConcise")}</SelectItem>
+          <SelectItem value="detailed">{t("settings:ai.commitMessage.styleDetailed")}</SelectItem>
+        </SelectContent>
+      </Select>
+      <p className="text-[11px] leading-relaxed text-muted-foreground">
+        {t("settings:ai.commitMessage.styleHint")}
+      </p>
+    </div>
   );
 }

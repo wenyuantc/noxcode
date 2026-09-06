@@ -796,13 +796,17 @@
     "effortHint": "Thinking level follows the selected channel model.",
     "needChannel": "No enabled channel yet. Go to",
     "save": "Save configuration",
-    "disabledHint": "This feature is off. Turn it on to configure a channel, model, and thinking level.",
+    "disabledHint": "This feature is off. Turn it on to configure a channel, model, thinking level, and commit message style.",
     "commitMessage": {
       "title": "Git commit message",
-      "description": "Controls the channel, model, and thinking level used when AI generates Git commit messages.",
-      "hint": "Configure a separate model and thinking level for Git commit messages",
+      "description": "Controls the channel, model, thinking level, and style used when AI generates Git commit messages.",
+      "hint": "Configure a separate model, thinking level, and style for Git commit messages",
       "model": "Git AI model",
-      "effort": "Git AI thinking level"
+      "effort": "Git AI thinking level",
+      "style": "Commit message style",
+      "styleConcise": "Concise",
+      "styleDetailed": "Detailed",
+      "styleHint": "Concise writes a single Conventional Commit line. Detailed adds a body that lists the actual changes."
     },
     "sessionTitle": {
       "title": "Session title",
