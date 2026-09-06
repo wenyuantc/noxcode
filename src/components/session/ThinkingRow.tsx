@@ -9,7 +9,7 @@ import { cn } from "@/lib/utils";
 
 export function ThinkingRow({ items, nowMs }: { items: GroupedSessionItem[]; nowMs?: number }) {
   const { t } = useTranslation("sessions");
-  const [open, setOpen] = useState(true);
+  const [open, setOpen] = useState(false);
   const seconds = thinkingDurationSeconds(items, nowMs);
   const label =
     seconds < 1
@@ -21,6 +21,7 @@ export function ThinkingRow({ items, nowMs }: { items: GroupedSessionItem[]; now
     <div className="rounded-xl border border-border/60 bg-muted/15 transition-all duration-150 hover:border-border/80">
       <button
         type="button"
+        aria-expanded={open}
         className="flex w-full cursor-pointer items-center gap-2 px-3 py-2 text-xs font-medium text-muted-foreground transition-colors hover:text-foreground"
         onClick={() => setOpen((value) => !value)}
       >
