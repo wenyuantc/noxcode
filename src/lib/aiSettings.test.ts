@@ -62,7 +62,7 @@ describe("aiSettings helpers", () => {
       channels,
     );
     expect(next.model).toBe("gpt-b");
-    expect(next.reasoning_effort).toBe("high");
+    expect(next.reasoning_effort).toBe("low");
   });
 
   it("clears model fields when enabling without channels", () => {
@@ -103,6 +103,6 @@ describe("aiSettings helpers", () => {
       "gpt-b",
     );
     expect(next.model).toBe("gpt-b");
-    expect(next.reasoning_effort).toBe("high");
+    expect(next.reasoning_effort).toBe("low");
   });
 });
