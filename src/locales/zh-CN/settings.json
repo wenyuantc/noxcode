@@ -796,13 +796,17 @@
     "effortHint": "思考等级随所选渠道模型配置",
     "needChannel": "还没有可用渠道，请先到",
     "save": "保存配置",
-    "disabledHint": "功能已关闭。开启后可单独配置渠道、模型与推理强度。",
+    "disabledHint": "功能已关闭。开启后可单独配置渠道、模型、推理强度与提交说明风格。",
     "commitMessage": {
       "title": "Git 提交信息",
-      "description": "控制 AI 自动生成 Git 提交信息时使用的渠道、模型和推理强度。",
-      "hint": "为 Git 提交信息生成单独配置模型与推理强度",
+      "description": "控制 AI 自动生成 Git 提交信息时使用的渠道、模型、推理强度和说明风格。",
+      "hint": "为 Git 提交信息生成单独配置模型、推理强度与说明风格",
       "model": "Git AI 模型",
-      "effort": "Git AI 推理强度"
+      "effort": "Git AI 推理强度",
+      "style": "提交说明风格",
+      "styleConcise": "简约",
+      "styleDetailed": "明细",
+      "styleHint": "简约只生成一行 Conventional Commit；明细会在标题后补充变更要点。"
     },
     "sessionTitle": {
       "title": "会话标题",

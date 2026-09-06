@@ -6,6 +6,7 @@ import {
   getNetworkSettings,
   getQuickPrompts,
 } from "@/lib/backend";
+import { normalizeAiSettings } from "@/lib/aiSettings";
 import type { AiSettings, NativeSettings, NetworkSettings, QuickPrompt } from "@/lib/types";
 
 interface SettingsState {
@@ -32,10 +33,10 @@ export const useSettingsStore = create<SettingsState>((set) => ({
       getAiSettings(),
       getQuickPrompts(),
     ]);
-    set({ native, network, ai, quickPrompts });
+    set({ native, network, ai: normalizeAiSettings(ai), quickPrompts });
   },
   setNative: (native) => set({ native }),
   setNetwork: (network) => set({ network }),
-  setAi: (ai) => set({ ai }),
+  setAi: (ai) => set({ ai: normalizeAiSettings(ai) }),
   setQuickPrompts: (quickPrompts) => set({ quickPrompts }),
 }));

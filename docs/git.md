@@ -37,7 +37,7 @@ flowchart LR
 | [`repo.rs`](../src-tauri/src/git/repo.rs) | rev-parse 四参数、版本、中间态 |
 | [`status.rs`](../src-tauri/src/git/status.rs) | `status --porcelain=v2 --branch -z` |
 | [`diff.rs`](../src-tauri/src/git/diff.rs) | numstat / name-status / 单文件 diff |
-| [`commit_message.rs`](../src-tauri/src/git/commit_message.rs) | 收集提交说明上下文（优先暂存区，截断约 32KB） |
+| [`commit_message.rs`](../src-tauri/src/git/commit_message.rs) | 收集提交说明上下文（优先暂存区，截断约 32KB）；生成风格由 `ai-settings.json` 的 `commit_message.style`（`concise` / `detailed`）决定 |
 | [`stage.rs`](../src-tauri/src/git/stage.rs) | 用户暂存 / 取消暂存 / 丢弃工作区 |
 | [`commit.rs`](../src-tauri/src/git/commit.rs) | commit / push / pull / 分支 |
 | [`checkpoint.rs`](../src-tauri/src/git/checkpoint.rs) | 快照、预览、回滚、清扫 |

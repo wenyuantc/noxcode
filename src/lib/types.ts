@@ -434,8 +434,14 @@ export interface AiFeatureOverride {
   reasoning_effort: string | null;
 }
 
+export type CommitMessageStyle = "concise" | "detailed";
+
+export interface AiCommitMessageSettings extends AiFeatureOverride {
+  style: CommitMessageStyle;
+}
+
 export interface AiSettings {
-  commit_message: AiFeatureOverride;
+  commit_message: AiCommitMessageSettings;
   session_title: AiFeatureOverride;
 }
 

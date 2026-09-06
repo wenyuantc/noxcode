@@ -12,6 +12,15 @@ use crate::native::protocol::record_to_channel;
 
 const SETTINGS_FILE_NAME: &str = "ai-settings.json";
 
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum CommitMessageStyle {
+    Concise,
+    #[default]
+    #[serde(other)]
+    Detailed,
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AiFeatureOverride {
     #[serde(default)]
@@ -25,9 +34,31 @@ pub struct AiFeatureOverride {
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AiCommitMessageSettings {
+    #[serde(flatten)]
+    pub override_fields: AiFeatureOverride,
+    #[serde(default)]
+    pub style: CommitMessageStyle,
+}
+
+impl std::ops::Deref for AiCommitMessageSettings {
+    type Target = AiFeatureOverride;
+
+    fn deref(&self) -> &Self::Target {
+        &self.override_fields
+    }
+}
+
+impl AiCommitMessageSettings {
+    pub(crate) fn as_override(&self) -> &AiFeatureOverride {
+        &self.override_fields
+    }
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AiSettings {
     #[serde(default)]
-    pub commit_message: AiFeatureOverride,
+    pub commit_message: AiCommitMessageSettings,
     #[serde(default)]
     pub session_title: AiFeatureOverride,
 }
@@ -56,9 +87,18 @@ pub(crate) fn normalize_ai_feature_override(value: AiFeatureOverride) -> AiFeatu
     }
 }
 
+pub(crate) fn normalize_commit_message_settings(
+    value: AiCommitMessageSettings,
+) -> AiCommitMessageSettings {
+    AiCommitMessageSettings {
+        override_fields: normalize_ai_feature_override(value.override_fields),
+        style: value.style,
+    }
+}
+
 pub(crate) fn normalize_ai_settings(settings: AiSettings) -> AiSettings {
     AiSettings {
-        commit_message: normalize_ai_feature_override(settings.commit_message),
+        commit_message: normalize_commit_message_settings(settings.commit_message),
         session_title: normalize_ai_feature_override(settings.session_title),
     }
 }
@@ -109,7 +149,14 @@ pub(crate) async fn validate_ai_settings(
     settings: AiSettings,
 ) -> Result<AiSettings, String> {
     Ok(AiSettings {
-        commit_message: validate_ai_feature_override(pool, settings.commit_message).await?,
+        commit_message: AiCommitMessageSettings {
+            override_fields: validate_ai_feature_override(
+                pool,
+                settings.commit_message.override_fields,
+            )
+            .await?,
+            style: settings.commit_message.style,
+        },
         session_title: validate_ai_feature_override(pool, settings.session_title).await?,
     })
 }
@@ -191,19 +238,51 @@ mod tests {
         let loaded = load_ai_settings_from(&dir).expect("load");
         assert_eq!(loaded, AiSettings::default());
         assert!(!loaded.commit_message.enabled);
+        assert_eq!(loaded.commit_message.style, CommitMessageStyle::Detailed);
         assert!(!loaded.session_title.enabled);
         cleanup(&dir);
+    }
+
+    #[test]
+    fn missing_or_unknown_style_defaults_to_detailed() {
+        let parsed: AiSettings = serde_json::from_str(
+            r#"{
+              "commit_message": {
+                "enabled": true,
+                "channel_id": "ch-1",
+                "model": "gpt-5.4",
+                "reasoning_effort": "low"
+              },
+              "session_title": {}
+            }"#,
+        )
+        .expect("legacy json");
+        assert_eq!(parsed.commit_message.style, CommitMessageStyle::Detailed);
+        assert!(parsed.commit_message.enabled);
+        assert_eq!(parsed.commit_message.channel_id.as_deref(), Some("ch-1"));
+
+        let unknown: AiSettings = serde_json::from_str(
+            r#"{
+              "commit_message": { "style": "verbose" },
+              "session_title": {}
+            }"#,
+        )
+        .expect("unknown style");
+        assert_eq!(unknown.commit_message.style, CommitMessageStyle::Detailed);
     }
 
     #[test]
     fn save_and_load_roundtrip() {
         let dir = temp_dir();
         let settings = AiSettings {
-            commit_message: AiFeatureOverride {
-                enabled: true,
-                channel_id: Some("ch-1".to_string()),
-                model: Some("gpt-5.4".to_string()),
-                reasoning_effort: Some("medium".to_string()),
+            commit_message: AiCommitMessageSettings {
+                override_fields: AiFeatureOverride {
+                    enabled: true,
+                    channel_id: Some("ch-1".to_string()),
+                    model: Some("gpt-5.4".to_string()),
+                    reasoning_effort: Some("medium".to_string()),
+                },
+                style: CommitMessageStyle::Concise,
             },
             session_title: AiFeatureOverride {
                 enabled: false,
@@ -272,11 +351,14 @@ mod tests {
     #[test]
     fn trims_empty_fields_and_drops_orphans() {
         let settings = normalize_ai_settings(AiSettings {
-            commit_message: AiFeatureOverride {
-                enabled: true,
-                channel_id: Some("   ".to_string()),
-                model: Some("gpt".to_string()),
-                reasoning_effort: Some("high".to_string()),
+            commit_message: AiCommitMessageSettings {
+                override_fields: AiFeatureOverride {
+                    enabled: true,
+                    channel_id: Some("   ".to_string()),
+                    model: Some("gpt".to_string()),
+                    reasoning_effort: Some("high".to_string()),
+                },
+                style: CommitMessageStyle::Concise,
             },
             session_title: AiFeatureOverride {
                 enabled: false,
@@ -287,11 +369,14 @@ mod tests {
         });
         assert_eq!(
             settings.commit_message,
-            AiFeatureOverride {
-                enabled: true,
-                channel_id: None,
-                model: None,
-                reasoning_effort: None,
+            AiCommitMessageSettings {
+                override_fields: AiFeatureOverride {
+                    enabled: true,
+                    channel_id: None,
+                    model: None,
+                    reasoning_effort: None,
+                },
+                style: CommitMessageStyle::Concise,
             }
         );
         assert_eq!(

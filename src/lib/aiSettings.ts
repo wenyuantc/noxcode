@@ -3,7 +3,13 @@ import {
   composerThinkingLevels,
   resolveComposerThinkingLevel,
 } from "@/lib/modelCatalog";
-import type { AiChannel, AiFeatureOverride } from "@/lib/types";
+import type {
+  AiChannel,
+  AiCommitMessageSettings,
+  AiFeatureOverride,
+  AiSettings,
+  CommitMessageStyle,
+} from "@/lib/types";
 
 export const EMPTY_AI_FEATURE_OVERRIDE: AiFeatureOverride = {
   enabled: false,
@@ -11,6 +17,36 @@ export const EMPTY_AI_FEATURE_OVERRIDE: AiFeatureOverride = {
   model: null,
   reasoning_effort: null,
 };
+
+export const DEFAULT_COMMIT_MESSAGE_STYLE: CommitMessageStyle = "detailed";
+
+export const EMPTY_AI_COMMIT_MESSAGE: AiCommitMessageSettings = {
+  ...EMPTY_AI_FEATURE_OVERRIDE,
+  style: DEFAULT_COMMIT_MESSAGE_STYLE,
+};
+
+export function normalizeCommitMessageStyle(style: string | null | undefined): CommitMessageStyle {
+  return style === "concise" ? "concise" : "detailed";
+}
+
+export function withCommitMessageDefaults(
+  value: AiFeatureOverride & { style?: string | null },
+): AiCommitMessageSettings {
+  return {
+    enabled: value.enabled,
+    channel_id: value.channel_id,
+    model: value.model,
+    reasoning_effort: value.reasoning_effort,
+    style: normalizeCommitMessageStyle(value.style),
+  };
+}
+
+export function normalizeAiSettings(settings: AiSettings): AiSettings {
+  return {
+    ...settings,
+    commit_message: withCommitMessageDefaults(settings.commit_message),
+  };
+}
 
 export function enabledAiChannels(channels: AiChannel[]): AiChannel[] {
   return channels.filter((channel) => channel.enabled);
@@ -20,22 +56,21 @@ export function channelLabel(channel: AiChannel): string {
   return `${channel.name} · ${channel.protocol}`;
 }
 
-export function withEnabledOverride(
-  current: AiFeatureOverride,
+export function withEnabledOverride<T extends AiFeatureOverride>(
+  current: T,
   channels: AiChannel[],
   enabled: boolean,
-): AiFeatureOverride {
+): T {
   if (!enabled) {
     return { ...current, enabled: false };
   }
-  const next = fillOverrideDefaults({ ...current, enabled: true }, channels);
-  return next;
+  return fillOverrideDefaults({ ...current, enabled: true }, channels);
 }
 
-export function fillOverrideDefaults(
-  current: AiFeatureOverride,
+export function fillOverrideDefaults<T extends AiFeatureOverride>(
+  current: T,
   channels: AiChannel[],
-): AiFeatureOverride {
+): T {
   const enabled = enabledAiChannels(channels);
   const selected =
     enabled.find((channel) => channel.id === current.channel_id) ?? enabled[0] ?? null;
@@ -61,11 +96,11 @@ export function fillOverrideDefaults(
   };
 }
 
-export function selectOverrideChannel(
-  current: AiFeatureOverride,
+export function selectOverrideChannel<T extends AiFeatureOverride>(
+  current: T,
   channels: AiChannel[],
   channelId: string,
-): AiFeatureOverride {
+): T {
   return fillOverrideDefaults(
     {
       ...current,
@@ -77,11 +112,11 @@ export function selectOverrideChannel(
   );
 }
 
-export function selectOverrideModel(
-  current: AiFeatureOverride,
+export function selectOverrideModel<T extends AiFeatureOverride>(
+  current: T,
   channels: AiChannel[],
   modelId: string,
-): AiFeatureOverride {
+): T {
   return fillOverrideDefaults(
     {
       ...current,
