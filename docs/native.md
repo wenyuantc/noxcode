@@ -76,6 +76,7 @@ P4 把进程内编程 Agent 接到渠道 + 工作区外壳。数据流仍是 `Re
 - `Bash`：会话开始时导出一次 login shell 快照（函数 / 别名 / shell 选项 / PATH）到 `$APPCONFIG/shell-snapshots/`，之后每次只 `source` 快照再 `eval` 命令；导出失败或关闭 `shell_snapshot_enabled` 时回退 `bash -lc`。`Grep` 在 `rg_sidecar_enabled` 且找到打包的 `tools/rg` 或 PATH 上的 `rg` 时用 ripgrep，否则用 Rust 正则遍历。
 - 未验证 Shell 命令默认需要授权；重定向覆盖、`cp/mv`、所有 `git restore` 均进入风险判断。本地 Bash 同时排空两路输出并限内存，超时或取消时终止独立进程组；SSH Bash 透传 deadline / cancel 并发送终止信号、关闭通道。超出硬上限的输出仅保留尾部，不能从 artifact 恢复被丢弃前缀。
 - 本地文件工具按真实路径及最近存在父目录检查边界，额外读写根保持各自权限，递归搜索不跟随符号链接；SSH 文件工具拒绝符号链接路径。SSH Write 支持防覆盖创建新文件，覆盖旧文件仍要求 Read 与内容指纹匹配。这些边界不等同于操作系统级 Shell 沙箱。
+- 本地会话的 `Read / Glob / Grep` 允许使用绝对路径只读访问当前有效技能目录及其附属文件，覆盖全局、插件及仓库根技能；权限按当前工具上下文的技能列表派生，遵守启停、重名覆盖和子 Agent 的技能筛选，不授权技能父目录。相对路径仍以工作区为基准，未指定路径的搜索只扫描工作区。链接导入的技能按真实目录检查边界，技能内部链接不得逃逸。此扩展不增加写权限，也不绕过 deny/ask 规则或改变 yolo、SSH 的权限边界。
 - `WebFetch` 有 15 分钟 / 50 MB 的内存缓存。
 
 ## 钩子

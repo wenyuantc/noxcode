@@ -75,7 +75,7 @@ pub fn tool_contracts() -> Vec<ToolContract> {
     let mut contracts = vec![
         contract(
             "Read",
-            "读取工作区内的文本文件或图片，不修改任何状态",
+            "读取工作区或授权读取目录内的文本文件或图片，不修改任何状态",
             true,
             false,
             true,
@@ -618,7 +618,7 @@ fn core_tool_specs() -> Vec<ToolSpec> {
     vec![
         spec(
             "Read",
-            "Read a file from the workspace. Prefer this over cat in Bash.",
+            "Read a file from the workspace or an allowed read root, including enabled skill directories in local sessions. Use absolute paths for external roots. Prefer this over cat in Bash.",
             json!({
                 "type": "object",
                 "properties": {
@@ -670,7 +670,7 @@ fn core_tool_specs() -> Vec<ToolSpec> {
         ),
         spec(
             "Glob",
-            "Find files by glob pattern, such as **/*.rs.",
+            "Find files by glob pattern, such as **/*.rs. In local sessions, an explicit absolute path may point to an allowed read root, including enabled skill directories. Omit path to search only the workspace.",
             json!({
                 "type": "object",
                 "properties": {
@@ -682,7 +682,7 @@ fn core_tool_specs() -> Vec<ToolSpec> {
         ),
         spec(
             "Grep",
-            "Search file contents. Prefer this over grep/rg in Bash.",
+            "Search file contents. In local sessions, an explicit absolute path may point to an allowed read root, including enabled skill directories. Omit path to search only the workspace. Prefer this over grep/rg in Bash.",
             json!({
                 "type": "object",
                 "properties": {
@@ -759,7 +759,7 @@ fn core_tool_specs() -> Vec<ToolSpec> {
         ),
         spec(
             "Skill",
-            "Load a discovered skill's full SKILL.md and list extra files in its directory. Use after seeing the skill in the available-skills list. Prefer this over guessing skill contents.",
+            "Load a discovered skill's full SKILL.md and list extra files in its directory. Use after seeing the skill in the available-skills list. In local sessions, read or search extra files with Read/Glob/Grep using absolute paths under the returned directory. Prefer this over guessing skill contents.",
             json!({
                 "type": "object",
                 "properties": {

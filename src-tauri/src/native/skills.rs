@@ -417,6 +417,11 @@ pub fn render_skill(skill: &NativeSkill, ssh_session: bool) -> String {
         skill.source.label_zh(),
         skill.dir
     );
+    if !ssh_session {
+        header.push_str(
+            "\n附属文件可用 Read / Glob / Grep 只读访问，请使用上述目录下的绝对路径；相对路径仍以工作区为基准。",
+        );
+    }
     if !skill.allowed_tools.is_empty() {
         header.push_str(&format!(
             "\n建议工具（allowed-tools）: {}",
@@ -1181,6 +1186,7 @@ mod tests {
         let rendered = render_skill(demo, true);
         assert!(rendered.contains("agents body"));
         assert!(!rendered.contains("附属文件不在远端"));
+        assert!(!rendered.contains("只读访问"));
         let global = find_skill(&merged, "other").expect("other");
         assert!(render_skill(global, true).contains("附属文件不在远端"));
         let _ = fs::remove_dir_all(root);

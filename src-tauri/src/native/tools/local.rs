@@ -90,7 +90,7 @@ pub struct LocalWorkspace {
     /// 可用的 ripgrep 可执行文件；无则回退到 Rust 自实现的正则遍历。
     pub rg_binary: Option<PathBuf>,
     pub bash_default_timeout: Duration,
-    /// 工作区之外允许 Read 的目录（artifact 目录、记忆目录等）。
+    /// 工作区之外允许 Read / Glob / Grep 的目录（artifact 目录、技能目录等）。
     pub extra_read_roots: Vec<PathBuf>,
     /// 工作区之外允许 Write / Edit 的目录（记忆目录）。
     pub extra_write_roots: Vec<PathBuf>,
@@ -117,6 +117,10 @@ impl LocalWorkspace {
         match resolve_under_workspace(&self.root, input) {
             Ok(path) => Ok(path),
             Err(error) => {
+                // 额外读取根要求绝对路径，不能把工作区相对路径重新解释到其他目录。
+                if !Path::new(input.trim()).is_absolute() {
+                    return Err(error);
+                }
                 for root in self.extra_read_roots.iter().chain(&self.extra_write_roots) {
                     if let Ok(path) = resolve_under_workspace(root, input) {
                         return Ok(path);
@@ -206,7 +210,7 @@ impl LocalWorkspace {
 
     pub fn glob_files(&self, pattern: &str, search_path: Option<&str>) -> Result<String, String> {
         let root = match search_path {
-            Some(path) => self.resolve(path)?,
+            Some(path) => self.resolve_for_read(path)?,
             None => self.root.clone(),
         };
         if !root.exists() {
@@ -245,13 +249,23 @@ impl LocalWorkspace {
         if pattern.trim().is_empty() {
             return Err("pattern 不能为空".to_string());
         }
+        let workspace_root = self.resolve(".")?;
         let root = match path {
-            Some(value) => self.resolve(value)?,
-            None => self.root.clone(),
+            Some(value) => self.resolve_for_read(value)?,
+            None => workspace_root.clone(),
+        };
+        let is_file = root.is_file();
+        // 工作区内保留相对工作区的 glob 语义，外部目录以本次搜索根为基准。
+        let glob_root = if root.starts_with(&workspace_root) {
+            workspace_root.as_path()
+        } else if is_file {
+            root.parent().unwrap_or(&root)
+        } else {
+            &root
         };
         let limit = head_limit.unwrap_or(250).clamp(1, 1000) as usize;
         if let Some(rg) = self.rg_binary.as_ref() {
-            if let Ok(output) = grep_with_ripgrep(rg, pattern, &root, glob, limit) {
+            if let Ok(output) = grep_with_ripgrep(rg, pattern, &root, glob_root, glob, limit) {
                 return Ok(output);
             }
         }
@@ -259,8 +273,8 @@ impl LocalWorkspace {
             .build()
             .map_err(|error| format!("pattern 不是合法正则: {error}"))?;
         let mut files = Vec::new();
-        if root.is_file() {
-            files.push(root);
+        if is_file {
+            files.push(root.clone());
         } else {
             walk_files(&root, &mut files);
         }
@@ -268,7 +282,7 @@ impl LocalWorkspace {
         for file in files {
             if let Some(glob_pattern) = glob {
                 let rel = file
-                    .strip_prefix(&self.root)
+                    .strip_prefix(glob_root)
                     .unwrap_or(file.as_path())
                     .to_string_lossy()
                     .replace('\\', "/");
@@ -507,11 +521,13 @@ fn grep_with_ripgrep(
     rg: &Path,
     pattern: &str,
     root: &Path,
+    glob_root: &Path,
     glob: Option<&str>,
     limit: usize,
 ) -> Result<String, String> {
     let mut cmd = std::process::Command::new(rg);
-    cmd.arg("--line-number")
+    cmd.current_dir(glob_root)
+        .arg("--line-number")
         .arg("--no-heading")
         .arg("--color=never")
         .arg("--max-count")
@@ -1417,6 +1433,55 @@ mod tests {
             .unwrap()
             .contains("secret"));
         assert!(!ws.glob_files("**/*", None).unwrap().contains("secret"));
+    }
+
+    #[test]
+    fn extra_read_roots_do_not_rebase_relative_paths() {
+        let root = tempfile::tempdir().unwrap();
+        let workspace = root.path().join("project");
+        let skill = root.path().join("skills/demo");
+        fs::create_dir_all(&workspace).unwrap();
+        fs::create_dir_all(&skill).unwrap();
+        fs::write(skill.join("notes.md"), "skill reference").unwrap();
+        let mut ws = LocalWorkspace::new(workspace);
+        ws.extra_read_roots.push(skill.clone());
+        assert!(ws
+            .read_file("notes.md", None, None)
+            .unwrap_err()
+            .contains("文件不存在"));
+        assert!(ws
+            .resolve_for_read("../demo/notes.md")
+            .unwrap_err()
+            .contains("超出工作区"));
+        assert!(ws
+            .read_file(&skill.join("notes.md").to_string_lossy(), None, None)
+            .is_ok());
+    }
+
+    #[test]
+    fn grep_globs_keep_workspace_relative_paths_for_nested_searches() {
+        let root = tempfile::tempdir().unwrap();
+        fs::create_dir(root.path().join("src")).unwrap();
+        fs::write(root.path().join("src/example.rs"), "needle").unwrap();
+        let mut ws = LocalWorkspace::new(root.path().to_path_buf());
+        let nested = root.path().join("src").to_string_lossy().into_owned();
+        let mut backends = vec![None];
+        if let Some(rg) = locate_ripgrep(None) {
+            backends.push(Some(rg));
+        }
+        for rg in backends {
+            ws.rg_binary = rg;
+            for path in [None, Some(nested.as_str())] {
+                let result = ws
+                    .grep_files("needle", path, Some("src/*.rs"), None)
+                    .unwrap();
+                assert!(
+                    result.contains("example.rs"),
+                    "{:?}: {result}",
+                    ws.rg_binary
+                );
+            }
+        }
     }
 
     #[tokio::test]

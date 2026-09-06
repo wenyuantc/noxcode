@@ -245,6 +245,20 @@ impl ToolCtx {
             .unwrap_or_default()
     }
 
+    /// 技能只读根按当前列表派生，不写回工作区，避免子 Agent 继承已筛除技能的权限。
+    fn workspace_for_read(&self) -> LocalWorkspace {
+        let mut workspace = self.workspace.clone();
+        if self.ssh.is_none() {
+            workspace.extra_read_roots.extend(
+                self.skills
+                    .iter()
+                    .map(|skill| PathBuf::from(&skill.dir))
+                    .filter(|dir| dir.is_absolute()),
+            );
+        }
+        workspace
+    }
+
     pub fn mark_read(&self, key: impl Into<String>, fingerprint: Option<FileFingerprint>) {
         if let Ok(mut files) = self.read_files.lock() {
             files.insert(key.into(), fingerprint);
@@ -1216,9 +1230,10 @@ async fn call_read(ctx: &ToolCtx, arguments: &str) -> Result<ToolOutput, String>
         );
         return Ok(ToolOutput::text(format_read(&raw, offset, limit)));
     }
-    let resolved = ctx.workspace.resolve_for_read(&path)?;
+    let workspace = ctx.workspace_for_read();
+    let resolved = workspace.resolve_for_read(&path)?;
     if image_mime_type(&resolved).is_some() {
-        let image = ctx.workspace.read_image(&path)?;
+        let image = workspace.read_image(&path)?;
         ctx.mark_read(
             resolved.to_string_lossy().into_owned(),
             FileFingerprint::of_path(&resolved),
@@ -1235,7 +1250,7 @@ async fn call_read(ctx: &ToolCtx, arguments: &str) -> Result<ToolOutput, String>
             ok: true,
         });
     }
-    let output = ctx.workspace.read_file(&path, offset, limit)?;
+    let output = workspace.read_file(&path, offset, limit)?;
     ctx.mark_read(
         resolved.to_string_lossy().into_owned(),
         FileFingerprint::of_path(&resolved),
@@ -1413,7 +1428,7 @@ async fn call_glob(ctx: &ToolCtx, arguments: &str) -> Result<String, String> {
             hits.join("\n")
         });
     }
-    ctx.workspace.glob_files(&pattern, path)
+    ctx.workspace_for_read().glob_files(&pattern, path)
 }
 
 async fn call_grep(ctx: &ToolCtx, arguments: &str) -> Result<String, String> {
@@ -1425,7 +1440,8 @@ async fn call_grep(ctx: &ToolCtx, arguments: &str) -> Result<String, String> {
     if let Some(ssh) = ctx.ssh.as_ref() {
         return ssh.grep(&pattern, path).await;
     }
-    ctx.workspace.grep_files(&pattern, path, glob, head_limit)
+    ctx.workspace_for_read()
+        .grep_files(&pattern, path, glob, head_limit)
 }
 
 async fn call_bash(ctx: &ToolCtx, arguments: &str) -> Result<String, String> {
@@ -1495,6 +1511,8 @@ fn string_arg(args: &Value, key: &str) -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::native::skills::{NativeSkill, SkillSource};
+    use std::path::Path;
     use std::sync::Arc;
     use tokio::sync::oneshot;
 
@@ -1512,6 +1530,46 @@ mod tests {
 
     fn ctx_for(root: &std::path::Path) -> ToolCtx {
         ToolCtx::new(LocalWorkspace::new(root.to_path_buf()))
+    }
+
+    fn skill_fixture(dir: &Path, name: &str, source: SkillSource) -> NativeSkill {
+        fs::create_dir_all(dir).unwrap();
+        let body = format!("---\nname: {name}\ndescription: test skill\n---\nSkill body\n");
+        fs::write(dir.join("SKILL.md"), &body).unwrap();
+        fs::write(
+            dir.join("notes.md"),
+            "skill reference\nsecond line\nlast line\n",
+        )
+        .unwrap();
+        NativeSkill {
+            name: name.to_string(),
+            description: "test skill".to_string(),
+            source,
+            dir: dir.to_string_lossy().into_owned(),
+            skill_md_path: dir.join("SKILL.md").to_string_lossy().into_owned(),
+            body,
+            extra_files: vec!["notes.md".to_string()],
+            allowed_tools: Vec::new(),
+            argument_hint: None,
+            when_to_use: None,
+            plugin: None,
+        }
+    }
+
+    async fn assert_read_tools_reject_external_path(ctx: &ToolCtx, path: &Path) {
+        for (tool, args) in [
+            ("Read", serde_json::json!({"file_path": path})),
+            ("Glob", serde_json::json!({"path": path, "pattern": "**/*"})),
+            ("Grep", serde_json::json!({"path": path, "pattern": "."})),
+        ] {
+            let error = execute_tool(ctx, tool, &args.to_string())
+                .await
+                .unwrap_err();
+            assert!(
+                error.contains("超出工作区") || error.contains("无法解析符号链接"),
+                "{tool}: {error}"
+            );
+        }
     }
 
     fn deny_requester() -> PermissionRequester {
@@ -1799,6 +1857,372 @@ mod tests {
         .expect_err("plan");
         assert!(blocked.contains("只读"));
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn skill_files_are_readable_and_searchable_from_all_local_sources() {
+        let root = tempfile::tempdir().unwrap();
+        let skills = tempfile::tempdir().unwrap();
+        fs::write(root.path().join("project.md"), "project reference").unwrap();
+        let references = [
+            "phases/00-spec-study.md",
+            "specs/issue-classification.md",
+            "specs/review-dimensions.md",
+            "specs/review-levels.md",
+        ];
+        for (name, source) in [
+            ("global", SkillSource::Global),
+            ("plugin", SkillSource::Plugin),
+            ("repo-noxcode", SkillSource::WorkspaceNoxcode),
+            ("repo-zcode", SkillSource::WorkspaceZcode),
+            ("repo-agents", SkillSource::WorkspaceAgents),
+            ("repo-claude", SkillSource::WorkspaceClaude),
+        ] {
+            let dir = skills.path().join(name);
+            let mut skill = skill_fixture(&dir, name, source);
+            for path in references {
+                let path = dir.join(path);
+                fs::create_dir_all(path.parent().unwrap()).unwrap();
+                fs::write(path, "skill reference\nsecond line\nlast line\n").unwrap();
+            }
+            skill.extra_files = references.iter().map(|path| path.to_string()).collect();
+            let mut ctx = ctx_for(root.path());
+            ctx.skills = vec![skill];
+            for read_only in [false, true] {
+                ctx.set_read_only(read_only);
+                let loaded = execute_tool(
+                    &ctx,
+                    "Skill",
+                    &serde_json::json!({"name": name}).to_string(),
+                )
+                .await
+                .unwrap();
+                assert!(loaded.contains("Skill body"));
+                assert!(loaded.contains("绝对路径"));
+                for path in references {
+                    let file = dir.join(path);
+                    let result = execute_tool(
+                        &ctx,
+                        "Read",
+                        &serde_json::json!({"file_path": file, "offset": 2, "limit": 1})
+                            .to_string(),
+                    )
+                    .await
+                    .unwrap();
+                    assert!(result.contains("second line"), "{name}: {result}");
+                    assert!(!result.contains("skill reference"));
+                    assert!(!result.contains("last line"));
+                    assert!(ctx.has_read(&fs::canonicalize(file).unwrap().to_string_lossy()));
+                }
+                let mut backends = vec![None];
+                if let Some(rg) = super::super::local::locate_ripgrep(None) {
+                    backends.push(Some(rg));
+                }
+                for rg in backends {
+                    ctx.workspace.rg_binary = rg;
+                    for (tool, args) in [
+                        (
+                            "Glob",
+                            serde_json::json!({"path": dir, "pattern": "specs/*.md"}),
+                        ),
+                        (
+                            "Grep",
+                            serde_json::json!({"path": dir, "pattern": "reference", "glob": "specs/*.md"}),
+                        ),
+                    ] {
+                        let result = execute_tool(&ctx, tool, &args.to_string()).await.unwrap();
+                        assert!(
+                            result.contains("review-levels.md"),
+                            "{name} {tool} {:?}: {result}",
+                            ctx.workspace.rg_binary
+                        );
+                        assert!(!result.contains("00-spec-study.md"));
+                    }
+                }
+            }
+            let glob = execute_tool(&ctx, "Glob", r#"{"pattern":"**/*.md"}"#)
+                .await
+                .unwrap();
+            assert!(glob.contains("project.md"));
+            assert!(!glob.contains("notes.md"));
+            let grep = execute_tool(&ctx, "Grep", r#"{"pattern":"reference"}"#)
+                .await
+                .unwrap();
+            assert!(grep.contains("project reference"));
+            assert!(!grep.contains("skill reference"));
+            assert!(ctx.workspace.extra_read_roots.is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn skill_read_access_tracks_current_context_and_preserves_existing_roots() {
+        let root = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let mut ctx = ctx_for(root.path());
+        ctx.skills = crate::native::skills::merge_skills(vec![
+            skill_fixture(
+                &outside.path().join("keep"),
+                "keep",
+                SkillSource::WorkspaceNoxcode,
+            ),
+            skill_fixture(
+                &outside.path().join("shadowed"),
+                "keep",
+                SkillSource::Global,
+            ),
+            skill_fixture(&outside.path().join("drop"), "drop", SkillSource::Plugin),
+        ]);
+        assert_read_tools_reject_external_path(&ctx, &outside.path().join("shadowed/notes.md"))
+            .await;
+        let artifact = outside.path().join("artifacts");
+        let memory = outside.path().join("memory");
+        fs::create_dir_all(&artifact).unwrap();
+        fs::create_dir_all(&memory).unwrap();
+        fs::write(artifact.join("output.txt"), "artifact output").unwrap();
+        fs::write(memory.join("notes.md"), "memory content").unwrap();
+        ctx.workspace.extra_read_roots.push(artifact.clone());
+        ctx.workspace.extra_write_roots.push(memory.clone());
+        let drop_args =
+            serde_json::json!({"file_path": outside.path().join("drop/notes.md")}).to_string();
+        execute_tool(&ctx, "Read", &drop_args).await.unwrap();
+        let mut child = ctx.fork_for_child();
+        child.skills.retain(|skill| skill.name == "keep");
+        for dir in [
+            outside.path().join("keep"),
+            artifact.clone(),
+            memory.clone(),
+        ] {
+            let result = execute_tool(
+                &child,
+                "Grep",
+                &serde_json::json!({"path": dir, "pattern": "."}).to_string(),
+            )
+            .await
+            .unwrap();
+            assert_ne!(result, "No matches found");
+        }
+        assert_read_tools_reject_external_path(&child, &outside.path().join("drop/notes.md")).await;
+        ctx.skills.clear();
+        assert_read_tools_reject_external_path(&ctx, &outside.path().join("keep/notes.md")).await;
+        assert_eq!(ctx.workspace.extra_read_roots, vec![artifact.clone()]);
+        for file in [artifact.join("output.txt"), memory.join("notes.md")] {
+            execute_tool(
+                &child,
+                "Read",
+                &serde_json::json!({"file_path": file}).to_string(),
+            )
+            .await
+            .unwrap();
+        }
+        child.allow_all_high_risk.store(true, Ordering::SeqCst);
+        execute_tool(
+            &child,
+            "Write",
+            &serde_json::json!({"file_path": memory.join("notes.md"), "content": "updated memory"})
+                .to_string(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            fs::read_to_string(memory.join("notes.md")).unwrap(),
+            "updated memory"
+        );
+        assert!(execute_tool(
+            &child,
+            "Write",
+            &serde_json::json!({"file_path": artifact.join("output.txt"), "content": "blocked"})
+                .to_string(),
+        )
+        .await
+        .unwrap_err()
+        .contains("超出工作区"));
+    }
+
+    #[tokio::test]
+    async fn skill_read_access_does_not_allow_yolo_writes_or_neighboring_paths() {
+        let root = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let dir = outside.path().join("demo");
+        let mut ctx = ctx_for(root.path());
+        ctx.skills = vec![skill_fixture(&dir, "demo", SkillSource::Global)];
+        skill_fixture(
+            &outside.path().join("demo-extra"),
+            "other",
+            SkillSource::Global,
+        );
+        ctx.allow_all_high_risk.store(true, Ordering::SeqCst);
+        let file = dir.join("notes.md");
+        execute_tool(
+            &ctx,
+            "Read",
+            &serde_json::json!({"file_path": file}).to_string(),
+        )
+        .await
+        .unwrap();
+        for (tool, args) in [
+            (
+                "Write",
+                serde_json::json!({"file_path": file, "content": "blocked"}),
+            ),
+            (
+                "Write",
+                serde_json::json!({"file_path": dir.join("new.md"), "content": "blocked"}),
+            ),
+            (
+                "Edit",
+                serde_json::json!({"file_path": file, "old_string": "skill", "new_string": "blocked"}),
+            ),
+            (
+                "ApplyPatch",
+                serde_json::json!({"patch": format!("*** Begin Patch\n*** Update File: {}\n@@\n-skill reference\n+blocked\n*** End Patch", file.display())}),
+            ),
+            (
+                "ApplyPatch",
+                serde_json::json!({"patch": format!("*** Begin Patch\n*** Delete File: {}\n*** End Patch", file.display())}),
+            ),
+            (
+                "ApplyPatch",
+                serde_json::json!({"patch": format!("*** Begin Patch\n*** Add File: {}\n+blocked\n*** End Patch", dir.join("new.md").display())}),
+            ),
+        ] {
+            let error = execute_tool(&ctx, tool, &args.to_string())
+                .await
+                .unwrap_err();
+            assert!(error.contains("超出工作区"), "{tool}: {error}");
+        }
+        assert_eq!(
+            fs::read_to_string(&file).unwrap(),
+            "skill reference\nsecond line\nlast line\n"
+        );
+        assert!(!dir.join("new.md").exists());
+        for path in [
+            outside.path().to_path_buf(),
+            outside.path().join("demo-extra/notes.md"),
+            dir.join("../demo-extra/notes.md"),
+        ] {
+            assert_read_tools_reject_external_path(&ctx, &path).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn skill_read_access_still_honors_deny_and_ask_rules_in_yolo() {
+        use super::super::contract::{PatternSource, PermissionCapability};
+        use super::super::permission::{PermissionRule, RuleEffect, RuleScope};
+        let root = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let mut ctx = ctx_for(root.path());
+        ctx.skills = vec![skill_fixture(outside.path(), "demo", SkillSource::Global)];
+        ctx.allow_all_high_risk.store(true, Ordering::SeqCst);
+        let asked = Arc::new(Mutex::new(0));
+        let sink = asked.clone();
+        ctx.request_permission = Some(Arc::new(move |_, reply| {
+            *sink.lock().unwrap() += 1;
+            let _ = reply.send(NativePermissionDecision::Deny);
+        }));
+        for (effect, message) in [
+            (RuleEffect::Deny, "权限规则拒绝"),
+            (RuleEffect::Ask, "不允许"),
+        ] {
+            let mut rules = PermissionRules::default();
+            rules.push(
+                effect,
+                PermissionRule {
+                    id: "skill-read".to_string(),
+                    capability: PermissionCapability::Read,
+                    pattern: "**".to_string(),
+                    source: PatternSource::Path,
+                    scope: RuleScope::Workspace,
+                    note: String::new(),
+                },
+            );
+            *ctx.permission_rules.write().unwrap() = rules;
+            for (tool, args) in [
+                (
+                    "Read",
+                    serde_json::json!({"file_path": outside.path().join("notes.md")}),
+                ),
+                (
+                    "Glob",
+                    serde_json::json!({"path": outside.path(), "pattern": "**/*"}),
+                ),
+                (
+                    "Grep",
+                    serde_json::json!({"path": outside.path(), "pattern": "."}),
+                ),
+            ] {
+                let error = execute_tool(&ctx, tool, &args.to_string())
+                    .await
+                    .unwrap_err();
+                assert!(error.contains(message), "{tool}: {error}");
+            }
+        }
+        assert_eq!(*asked.lock().unwrap(), 3);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn linked_skill_roots_allow_reads_without_following_escape_links() {
+        use std::os::unix::fs::symlink;
+        let root = tempfile::tempdir().unwrap();
+        let imported = tempfile::tempdir().unwrap();
+        let target = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        skill_fixture(target.path(), "linked", SkillSource::Global);
+        let link = imported.path().join("linked");
+        symlink(target.path(), &link).unwrap();
+        let mut ctx = ctx_for(root.path());
+        ctx.skills =
+            crate::native::skills::discover_global_skills_from(Some(imported.path()), None);
+        fs::write(outside.path().join("secret.md"), "secret content").unwrap();
+        symlink(outside.path(), target.path().join("escape")).unwrap();
+        symlink(
+            outside.path().join("secret.md"),
+            target.path().join("escaped.md"),
+        )
+        .unwrap();
+        symlink(
+            outside.path().join("missing"),
+            target.path().join("dangling"),
+        )
+        .unwrap();
+        let result = execute_tool(
+            &ctx,
+            "Read",
+            &serde_json::json!({"file_path": link.join("notes.md")}).to_string(),
+        )
+        .await
+        .unwrap();
+        assert!(result.contains("skill reference"));
+        for path in [
+            link.join("escape/secret.md"),
+            link.join("escaped.md"),
+            link.join("escape/../secret.md"),
+            link.join("dangling"),
+        ] {
+            assert_read_tools_reject_external_path(&ctx, &path).await;
+        }
+        let mut backends = vec![None];
+        if let Some(rg) = super::super::local::locate_ripgrep(None) {
+            backends.push(Some(rg));
+        }
+        for rg in backends {
+            ctx.workspace.rg_binary = rg;
+            for (tool, args) in [
+                (
+                    "Glob",
+                    serde_json::json!({"path": link, "pattern": "**/*.md"}),
+                ),
+                (
+                    "Grep",
+                    serde_json::json!({"path": link, "pattern": "reference|secret"}),
+                ),
+            ] {
+                let result = execute_tool(&ctx, tool, &args.to_string()).await.unwrap();
+                assert!(result.contains("notes.md"), "{tool}: {result}");
+                assert!(!result.contains("secret"), "{tool}: {result}");
+                assert!(!result.contains("escaped.md"), "{tool}: {result}");
+            }
+        }
     }
 
     #[tokio::test]
