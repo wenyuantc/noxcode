@@ -16,6 +16,7 @@ import {
   Sparkles,
   Terminal,
   Workflow,
+  WandSparkles,
   Wrench,
   Zap,
 } from "lucide-react";
@@ -24,6 +25,7 @@ import { cn } from "@/lib/utils";
 import { useChannelStore } from "@/stores/channelStore";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { AboutSection } from "./AboutSection";
+import { AiFeaturesSection } from "./AiFeaturesSection";
 import { AppearanceSection } from "./AppearanceSection";
 import { AutomationsSection } from "./AutomationsSection";
 import { DatabaseSection } from "./DatabaseSection";
@@ -48,6 +50,7 @@ const SECTION_META: Record<string, SectionMeta> = {
   general: { icon: Sliders, descriptionKey: "general.languageHint" },
   appearance: { icon: Palette, descriptionKey: "appearance.themeHint" },
   channels: { icon: Sparkles, descriptionKey: "channels.description" },
+  ai: { icon: WandSparkles, descriptionKey: "ai.description" },
   ssh: { icon: Terminal, descriptionKey: "ssh.description" },
   runtime: { icon: Zap, descriptionKey: "runtime.hint" },
   permissions: { icon: ShieldCheck, descriptionKey: "permissions.description" },
@@ -65,7 +68,7 @@ const SECTION_META: Record<string, SectionMeta> = {
 const GROUPS = [
   {
     id: "basic",
-    items: ["general", "appearance", "channels", "ssh"],
+    items: ["general", "appearance", "channels", "ai", "ssh"],
   },
   {
     id: "agent",
@@ -199,6 +202,7 @@ export function SettingsLayout() {
             {current === "general" ? <GeneralSection /> : null}
             {current === "appearance" ? <AppearanceSection /> : null}
             {current === "channels" ? <AiChannelsSettingsTab /> : null}
+            {current === "ai" ? <AiFeaturesSection /> : null}
             {current === "ssh" ? <SshSettingsSection /> : null}
             {current === "runtime" ? <NativeRuntimeSection /> : null}
             {current === "permissions" ? <PermissionRulesSection /> : null}

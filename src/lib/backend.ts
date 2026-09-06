@@ -13,6 +13,7 @@ import type {
   AgentSessionResumeInfo,
   AgentSessionStarted,
   AiChannel,
+  AiSettings,
   CreateAiChannelInput,
   CreateNativeAutomationInput,
   CreateNativeSubagentInput,
@@ -69,6 +70,7 @@ import type {
   NativePlanModeChanged,
   NativePlanApprovalRequest,
   NativePlanQuestionRequest,
+  NativeSessionTitle,
   NativeSettings,
   PermissionRule,
   PermissionRuleEffect,
@@ -336,6 +338,18 @@ export function getNetworkSettings(): Promise<NetworkSettings> {
 
 export function updateNetworkSettings(payload: NetworkSettings): Promise<NetworkSettings> {
   return invoke("update_network_settings", { payload });
+}
+
+export function getAiSettings(): Promise<AiSettings> {
+  return invoke("get_ai_settings");
+}
+
+export function updateAiSettings(payload: AiSettings): Promise<AiSettings> {
+  return invoke("update_ai_settings", { payload });
+}
+
+export function generateGitCommitMessage(workspaceId: string): Promise<string> {
+  return invoke("generate_git_commit_message", { workspaceId });
 }
 
 export function getQuickPrompts(): Promise<QuickPrompt[]> {
@@ -856,6 +870,14 @@ export function onNativeSession(
   callback: (session: AgentSessionStarted) => void,
 ): Promise<UnlistenFn> {
   return listen<AgentSessionStarted>("native-session", (event) => {
+    callback(event.payload);
+  });
+}
+
+export function onNativeSessionTitle(
+  callback: (payload: NativeSessionTitle) => void,
+): Promise<UnlistenFn> {
+  return listen<NativeSessionTitle>("native-session-title", (event) => {
     callback(event.payload);
   });
 }

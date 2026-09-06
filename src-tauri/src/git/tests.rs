@@ -15,6 +15,7 @@ use super::checkpoint::{
 use super::commit::{
     checkout_branch, commit_changes, create_branch, list_branches, pull_branch, push_branch,
 };
+use super::commit_message::collect_commit_message_context;
 use super::diff::{get_file_diff, get_numstat, GitFileDiffScope, GitNumstatScope};
 use super::preview::{get_file_preview, FilePreviewReason, GitFilePreview};
 use super::repo::{list_repo_files, load_repo_info};
@@ -1172,6 +1173,34 @@ async fn readonly_file_reports_failed_and_keeps_prerestore() {
         assert_eq!(result.pre_restore_checkpoint.kind, "auto_pre_restore");
     })
     .await;
+}
+
+#[tokio::test]
+async fn commit_message_context_rejects_clean_tree() {
+    let env = local_env().await;
+    let error = collect_commit_message_context(&env.target)
+        .await
+        .expect_err("clean tree");
+    assert!(
+        error.to_string().contains("没有未提交的更改"),
+        "unexpected error: {error}"
+    );
+}
+
+#[tokio::test]
+async fn commit_message_context_prefers_staged_diff() {
+    let env = local_env().await;
+    std::fs::write(env.dir.path().join("README.md"), "staged change\n").unwrap();
+    stage_paths(&env.target, &["README.md".to_string()])
+        .await
+        .unwrap();
+    std::fs::write(env.dir.path().join("README.md"), "worktree change\n").unwrap();
+    let context = collect_commit_message_context(&env.target)
+        .await
+        .expect("context");
+    assert!(context.contains("范围: 暂存区"), "{context}");
+    assert!(context.contains("staged change"), "{context}");
+    assert!(!context.contains("worktree change"), "{context}");
 }
 
 fn nix_is_root() -> bool {

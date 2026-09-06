@@ -3,6 +3,7 @@ pub(crate) mod runner;
 
 mod checkpoint;
 mod commit;
+mod commit_message;
 mod diff;
 mod preview;
 mod repo;
@@ -46,6 +47,7 @@ pub(crate) use self::checkpoint::{
     clear_workspace_checkpoints, create_checkpoint, delete_checkpoints_for_session,
     GitCheckpointInfo, GitRestorePreview, GitRestoreResult,
 };
+pub(crate) use self::commit_message::collect_commit_message_context;
 pub(crate) use self::repo::load_repo_info;
 pub(crate) use self::runner::{GitTarget, IndexMode};
 

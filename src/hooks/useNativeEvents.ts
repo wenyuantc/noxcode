@@ -8,6 +8,7 @@ import {
   onNativePlanApprovalRequest,
   onNativePlanQuestion,
   onNativeSession,
+  onNativeSessionTitle,
   onNativeStdout,
   onNativeTextDelta,
   onNativeTurnState,
@@ -34,6 +35,11 @@ export function useNativeEvents() {
     track(
       onNativeSession((session) => {
         store.onStarted(session);
+        void useWorkspaceStore.getState().refreshSessions();
+      }),
+    );
+    track(
+      onNativeSessionTitle(() => {
         void useWorkspaceStore.getState().refreshSessions();
       }),
     );

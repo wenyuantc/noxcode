@@ -38,6 +38,8 @@ pub const OPERATION_MEMORY_DREAM: &str = "memory_dream";
 pub const OPERATION_HOOK_AGENT: &str = "hook_agent";
 pub const OPERATION_SUBAGENT: &str = "subagent";
 pub const OPERATION_ONE_SHOT: &str = "one_shot";
+pub const OPERATION_COMMIT_MESSAGE: &str = "commit_message";
+pub const OPERATION_SESSION_TITLE: &str = "session_title";
 /// 模型角色：主模型或轻量模型。
 pub const MODEL_ROLE_MAIN: &str = "main";
 pub const MODEL_ROLE_LITE: &str = "lite";

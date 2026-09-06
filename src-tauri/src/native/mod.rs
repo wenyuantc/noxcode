@@ -1,6 +1,7 @@
 #![allow(dead_code)]
 
 pub(crate) mod agent;
+pub(crate) mod ai_features;
 pub(crate) mod api_logs;
 pub(crate) mod artifacts;
 pub(crate) mod channels;

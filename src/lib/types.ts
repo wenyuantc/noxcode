@@ -427,6 +427,23 @@ export interface NetworkSettings {
   ca_cert_path: string | null;
 }
 
+export interface AiFeatureOverride {
+  enabled: boolean;
+  channel_id: string | null;
+  model: string | null;
+  reasoning_effort: string | null;
+}
+
+export interface AiSettings {
+  commit_message: AiFeatureOverride;
+  session_title: AiFeatureOverride;
+}
+
+export interface NativeSessionTitle {
+  session_id: string;
+  title: string;
+}
+
 export const NATIVE_THINKING_LEVELS = [
   "none",
   "no_think",

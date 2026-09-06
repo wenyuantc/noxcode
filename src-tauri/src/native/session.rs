@@ -1048,6 +1048,17 @@ pub struct NativeOneShotResult {
     usage: Option<UsageDelta>,
 }
 
+pub(crate) struct NativeOneShotArgs<'a> {
+    pub channel_id: &'a str,
+    pub workspace_id: Option<&'a str>,
+    pub session_id: Option<&'a str>,
+    pub prompt: String,
+    pub image_paths: Option<Vec<String>>,
+    pub model: Option<&'a str>,
+    pub reasoning_effort: Option<&'a str>,
+    pub operation: Option<&'a str>,
+}
+
 fn resolve_run_model_config(
     channel_models: &[crate::db::models::ChannelModelConfig],
     model: &str,
@@ -1221,35 +1232,35 @@ async fn run_native_one_shot_with_run(
 }
 
 /// 思考模型只回 `reasoning_content` 的兜底，以及 DeepSeek `thinking.type=disabled`。
-#[allow(dead_code)]
 pub(crate) async fn run_native_one_shot(
     app: &AppHandle,
-    channel_id: &str,
-    workspace_id: Option<&str>,
-    prompt: String,
-    image_paths: Option<Vec<String>>,
+    args: NativeOneShotArgs<'_>,
 ) -> Result<NativeOneShotResult, String> {
     let pool = sqlite_pool(app).await?;
-    let mut run = load_native_client(app, &pool, channel_id, "", None).await?;
-    let execution_target = if let Some(workspace_id) = workspace_id {
+    let model = args.model.unwrap_or("");
+    let mut run =
+        load_native_client(app, &pool, args.channel_id, model, args.reasoning_effort).await?;
+    let execution_target = if let Some(workspace_id) = args.workspace_id {
         resolve_workspace_execution_context_with_pool(&pool, workspace_id)
             .await?
             .execution_target
     } else {
         crate::app::shared::EXECUTION_TARGET_LOCAL.to_string()
     };
-    run.client = run
-        .client
-        .with_call_log_context(CallLogContext::for_session(
-            Some(run.channel_id.clone()),
-            Some(run.channel_name.clone()),
-            None,
-            None,
-            workspace_id.map(ToOwned::to_owned),
-            CALL_KIND_ONE_SHOT,
-            Some(execution_target),
-        ));
-    run_native_one_shot_with_run(run, prompt, image_paths).await
+    let mut context = CallLogContext::for_session(
+        Some(run.channel_id.clone()),
+        Some(run.channel_name.clone()),
+        args.session_id.map(ToOwned::to_owned),
+        None,
+        args.workspace_id.map(ToOwned::to_owned),
+        CALL_KIND_ONE_SHOT,
+        Some(execution_target),
+    );
+    if let Some(operation) = args.operation {
+        context = context.with_operation(operation);
+    }
+    run.client = run.client.with_call_log_context(context);
+    run_native_one_shot_with_run(run, args.prompt, args.image_paths).await
 }
 
 pub(crate) fn session_title(prompt: &str) -> Option<String> {
@@ -1719,6 +1730,12 @@ async fn start_native_session_locked(
             Some("内置 Agent 会话已创建"),
         )
         .await;
+        crate::native::ai_features::spawn_session_title_generation(
+            app.clone(),
+            session_record_id.clone(),
+            workspace_id.clone(),
+            payload.prompt.clone(),
+        );
     }
 
     run.client = run
