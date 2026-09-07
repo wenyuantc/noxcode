@@ -93,6 +93,7 @@
   "permissionAllowServer": "Allow this server",
   "permissionAllowAlways": "Always allow {{pattern}} (save rule)",
   "permissionDeny": "Deny",
+  "permissionCommand": "Command to execute",
   "planQuestionTitle": "Plan question",
   "planSkip": "Skip",
   "planSubmit": "Submit",
