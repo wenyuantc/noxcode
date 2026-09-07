@@ -18,7 +18,8 @@ export type TurnSegmentKind =
   | "retry"
   | "compact"
   | "goal"
-  | "plan";
+  | "plan"
+  | "background_notice";
 
 export type CompactTrigger = "auto" | "manual" | "reactive" | "downshift";
 
@@ -169,6 +170,61 @@ export function parsePlanLine(text: string): ParsedPlanLine | null {
     body: statusText,
     questionSummary,
   };
+}
+
+export const BACKGROUND_NOTICE_PREFIX = "[后台任务提醒]";
+
+export function isBackgroundNoticeLine(text: string): boolean {
+  return sessionLineBody(text).trimStart().startsWith(BACKGROUND_NOTICE_PREFIX);
+}
+
+export type BackgroundNoticeKind = "message" | "done" | "failed" | "stopped";
+
+export interface ParsedBackgroundNoticeItem {
+  taskId: string;
+  description: string;
+  kind: BackgroundNoticeKind;
+  content: string;
+}
+
+const BG_NOTICE_GLOBAL_RE =
+  /(?:^|\n|\s+)-\s*(?:后台任务|任务)\s+([a-zA-Z0-9_-]+)\s*[（(]([^）)]*)[）)]\s*(完成|失败|已停止|留言)[：:]?\s*([\s\S]*?)(?=(?:(?:\n|\s+)-\s*(?:后台任务|任务)\s+[a-zA-Z0-9_-]+\s*[（(])|$)/g;
+
+export function parseBackgroundNotice(text: string): ParsedBackgroundNoticeItem[] {
+  const body = sessionLineBody(text).trim();
+  if (!body.startsWith(BACKGROUND_NOTICE_PREFIX)) return [];
+  const content = body.slice(BACKGROUND_NOTICE_PREFIX.length).trim();
+  if (!content) return [];
+
+  const results: ParsedBackgroundNoticeItem[] = [];
+  const matches = content.matchAll(BG_NOTICE_GLOBAL_RE);
+  for (const match of matches) {
+    const taskId = (match[1] ?? "").trim();
+    const description = (match[2] ?? "").trim();
+    const rawKind = (match[3] ?? "").trim();
+    let rawContent = (match[4] ?? "").trim();
+
+    rawContent = rawContent
+      .replace(/[。.]?\s*用\s*TaskOutput\s*读取完整结果[。.]?\s*$/i, "")
+      .trim();
+    if (rawContent === "。" || rawContent === ".") {
+      rawContent = "";
+    }
+
+    let kind: BackgroundNoticeKind = "message";
+    if (rawKind === "完成") kind = "done";
+    else if (rawKind === "失败") kind = "failed";
+    else if (rawKind === "已停止") kind = "stopped";
+    else if (rawKind === "留言") kind = "message";
+
+    results.push({
+      taskId,
+      description,
+      kind,
+      content: rawContent,
+    });
+  }
+  return results;
 }
 
 export interface ParsedUsage {
@@ -1054,6 +1110,7 @@ function segmentKey(item: GroupedSessionItem): TurnSegmentKind | "skip" | "file_
   if (isCompactBoundaryLine(body)) return "compact";
   if (isGoalLine(body)) return "goal";
   if (isPlanLine(body)) return "plan";
+  if (isBackgroundNoticeLine(body)) return "background_notice";
   if (isRetryLine(item.text)) return "retry";
   if (isThinkingItem(item)) return "thinking";
   if (isUsageItem(item)) return "usage";
@@ -1091,7 +1148,8 @@ export function buildTurnSegments(items: GroupedSessionItem[]): TurnSegment[] {
       currentKey === "usage" ||
       currentKey === "compact" ||
       currentKey === "goal" ||
-      currentKey === "plan"
+      currentKey === "plan" ||
+      currentKey === "background_notice"
     ) {
       for (const item of currentItems) {
         segments.push({ kind: currentKey, items: [item] });
@@ -1128,7 +1186,12 @@ export function buildTurnSegments(items: GroupedSessionItem[]): TurnSegment[] {
       }
     }
     const mergeable =
-      key !== "terminal" && key !== "todo" && key !== "compact" && key !== "goal" && key !== "plan";
+      key !== "terminal" &&
+      key !== "todo" &&
+      key !== "compact" &&
+      key !== "goal" &&
+      key !== "plan" &&
+      key !== "background_notice";
     const subagentMatch =
       currentKey === "subagent" && key === "subagent"
         ? subagentSegmentIdentity(currentItems[0] ?? {}) === subagentSegmentIdentity(item)

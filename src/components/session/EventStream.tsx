@@ -19,6 +19,7 @@ import { isNearBottom, pinAfterUserScroll } from "@/lib/sessionScroll";
 import { cn } from "@/lib/utils";
 import { useSessionStore } from "@/stores/sessionStore";
 import { AssistantMarkdown } from "./AssistantMarkdown";
+import { BackgroundNoticeRow } from "./BackgroundNoticeRow";
 import { CompactBoundaryRow } from "./CompactBoundaryRow";
 import { FileChangeRow } from "./FileChangeRow";
 import { GoalRow } from "./GoalRow";
@@ -117,6 +118,8 @@ function renderSegment(
       return <AssistantMarkdown text={segment.items.map((item) => item.text).join("\n\n")} />;
     case "usage":
       return <UsageRow item={segment.items[0]!} />;
+    case "background_notice":
+      return <BackgroundNoticeRow items={segment.items} sessionId={sessionId} />;
     default:
       return (
         <div className="space-y-1">

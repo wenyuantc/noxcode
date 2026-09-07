@@ -12,6 +12,8 @@ import {
   hydrateSessionLine,
   isHiddenSessionCeremonyLine,
   latestTodos,
+  isBackgroundNoticeLine,
+  parseBackgroundNotice,
   parseAgentBanner,
   parseCompactBoundary,
   parseMcpStatus,
@@ -1028,5 +1030,51 @@ describe("sessionLines", () => {
 
     expect(aggregateUsages([])).toBeNull();
     expect(aggregateUsages([null, undefined])).toBeNull();
+  });
+
+  it("parses background task notices and builds background_notice segments", () => {
+    const rawNotice = `[后台任务提醒]
+- 后台任务 task-2（审核权限和SQLite变更）完成：## 结论 **本限定范围未发现实质回归**。重点核查结果通过。用 TaskOutput 读取完整结果。
+- 任务 task-4（审核AI功能和斜杠命令）留言：已审12文件变更核心，发现确定问题。
+- 后台任务 task-5 (外部工具检查) 失败: 连接超时 5000ms。用 TaskOutput 读取完整结果。
+- 后台任务 task-6 (清理缓存) 已停止。`;
+
+    expect(isBackgroundNoticeLine(rawNotice)).toBe(true);
+    const parsed = parseBackgroundNotice(rawNotice);
+    expect(parsed).toHaveLength(4);
+
+    expect(parsed[0]).toEqual({
+      taskId: "task-2",
+      description: "审核权限和SQLite变更",
+      kind: "done",
+      content: "## 结论 **本限定范围未发现实质回归**。重点核查结果通过",
+    });
+
+    expect(parsed[1]).toEqual({
+      taskId: "task-4",
+      description: "审核AI功能和斜杠命令",
+      kind: "message",
+      content: "已审12文件变更核心，发现确定问题。",
+    });
+
+    expect(parsed[2]).toEqual({
+      taskId: "task-5",
+      description: "外部工具检查",
+      kind: "failed",
+      content: "连接超时 5000ms",
+    });
+
+    expect(parsed[3]).toEqual({
+      taskId: "task-6",
+      description: "清理缓存",
+      kind: "stopped",
+      content: "",
+    });
+
+    // Test turn segment construction
+    const grouped = groupSessionLines([line("1", rawNotice)]);
+    const blocks = buildTurnBlocks(grouped);
+    expect(blocks[0]?.segments[0]?.kind).toBe("background_notice");
+    expect(blocks[0]?.segments[0]?.items[0]?.text).toBe(rawNotice);
   });
 });
