@@ -75,7 +75,9 @@ export function RemoteConnectDialog({
 
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
-  const [testingStatus, setTestingStatus] = useState<"idle" | "testing" | "passed" | "failed">("idle");
+  const [testingStatus, setTestingStatus] = useState<"idle" | "testing" | "passed" | "failed">(
+    "idle",
+  );
   const [testingMsg, setTestingMsg] = useState<string | null>(null);
   const [pickerOpen, setPickerOpen] = useState(false);
 
@@ -103,7 +105,9 @@ export function RemoteConnectDialog({
         if (items.length > 0) {
           setSelectedHostId((prev) =>
             prev === NEW_HOST_VALUE || items.some((item) => item.id === prev)
-              ? prev === NEW_HOST_VALUE && items.length > 0 ? items[0].id : prev
+              ? prev === NEW_HOST_VALUE && items.length > 0
+                ? items[0].id
+                : prev
               : items[0].id,
           );
         } else {
@@ -251,7 +255,8 @@ export function RemoteConnectDialog({
     const isCurrent = () => generation.current === current;
 
     try {
-      const projectName = name.trim() || extractProjectName(remotePath) || (isNewHost ? form.name.trim() : "");
+      const projectName =
+        name.trim() || extractProjectName(remotePath) || (isNewHost ? form.name.trim() : "");
       if (!projectName) {
         throw new RemoteConnectionValidationError("requiredFields");
       }
@@ -373,7 +378,9 @@ export function RemoteConnectDialog({
                       ) : (
                         <>
                           <HardDrive className="h-4 w-4 text-primary shrink-0" />
-                          <span className="font-medium truncate">{currentConfig?.name || selectedHostId}</span>
+                          <span className="font-medium truncate">
+                            {currentConfig?.name || selectedHostId}
+                          </span>
                           <span className="text-xs text-muted-foreground truncate">
                             ({currentConfig?.username}@{currentConfig?.host}:{currentConfig?.port})
                           </span>
@@ -401,7 +408,9 @@ export function RemoteConnectDialog({
                         >
                           <HardDrive className="size-4 shrink-0 mt-0.5 text-muted-foreground" />
                           <span className="flex min-w-0 flex-col gap-0.5">
-                            <span className="font-medium text-sm text-foreground">{config.name}</span>
+                            <span className="font-medium text-sm text-foreground">
+                              {config.name}
+                            </span>
                             <span className="text-xs text-muted-foreground font-mono">
                               {config.username}@{config.host}:{config.port}
                             </span>
@@ -515,11 +524,19 @@ export function RemoteConnectDialog({
                               next && setForm({ ...form, auth_type: next as "key" | "password" })
                             }
                           >
-                            <DropdownMenuRadioItem value="key" closeOnClick className="py-1.5 text-xs cursor-pointer">
+                            <DropdownMenuRadioItem
+                              value="key"
+                              closeOnClick
+                              className="py-1.5 text-xs cursor-pointer"
+                            >
                               <Key className="size-3.5 shrink-0 text-muted-foreground mr-1.5" />
                               {t("ssh:key")}
                             </DropdownMenuRadioItem>
-                            <DropdownMenuRadioItem value="password" closeOnClick className="py-1.5 text-xs cursor-pointer">
+                            <DropdownMenuRadioItem
+                              value="password"
+                              closeOnClick
+                              className="py-1.5 text-xs cursor-pointer"
+                            >
                               <ShieldCheck className="size-3.5 shrink-0 text-muted-foreground mr-1.5" />
                               {t("ssh:password")}
                             </DropdownMenuRadioItem>
@@ -537,9 +554,7 @@ export function RemoteConnectDialog({
                           <Input
                             placeholder="~/.ssh/id_rsa"
                             value={form.private_key_path ?? ""}
-                            onChange={(e) =>
-                              setForm({ ...form, private_key_path: e.target.value })
-                            }
+                            onChange={(e) => setForm({ ...form, private_key_path: e.target.value })}
                             className="h-8 text-xs font-mono truncate"
                           />
                           <Button

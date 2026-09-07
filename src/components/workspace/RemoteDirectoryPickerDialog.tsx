@@ -95,9 +95,7 @@ export function RemoteDirectoryPickerDialog({
 
   const handleEnterSubDir = (dirName: string) => {
     const next =
-      currentPath === "/"
-        ? `/${dirName}`
-        : `${currentPath.replace(/\/+$/, "")}/${dirName}`;
+      currentPath === "/" ? `/${dirName}` : `${currentPath.replace(/\/+$/, "")}/${dirName}`;
     void fetchDirectory(next);
   };
 
@@ -225,11 +223,7 @@ export function RemoteDirectoryPickerDialog({
         </div>
 
         <DialogFooter className="mt-2">
-          <Button
-            type="button"
-            variant="outline"
-            onClick={() => onOpenChange(false)}
-          >
+          <Button type="button" variant="outline" onClick={() => onOpenChange(false)}>
             {t("common:cancel")}
           </Button>
           <Button
