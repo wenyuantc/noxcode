@@ -14,20 +14,43 @@ function model(partial: Partial<AiChannelModel> & { id: string }): AiChannelMode
   };
 }
 
-function renderEditor(models: AiChannelModel[]) {
+function renderEditor(models: AiChannelModel[], defaultOpen = true) {
   return renderToString(
     <I18nextProvider i18n={i18n}>
       <ChannelModelsEditor
         models={models}
         catalog={[]}
         disabled={false}
+        defaultOpen={defaultOpen}
         onChange={() => undefined}
       />
     </I18nextProvider>,
   );
 }
 
-describe("ChannelModelsEditor thinking levels", () => {
+describe("ChannelModelsEditor", () => {
+  it("defaults to collapsed view showing only model id and thinking status", () => {
+    const html = renderToString(
+      <I18nextProvider i18n={i18n}>
+        <ChannelModelsEditor
+          models={[
+            model({
+              id: "gpt-5.4",
+              thinking_enabled: true,
+            }),
+          ]}
+          catalog={[]}
+          disabled={false}
+          onChange={() => undefined}
+        />
+      </I18nextProvider>,
+    );
+    expect(html).toContain("gpt-5.4");
+    expect(html).toContain("开启思考");
+    expect(html).not.toContain("channel-model-0-input-text");
+    expect(html).not.toContain("channel-model-0-thinking-low");
+  });
+
   it("hides thinking level checkboxes when thinking is turned off", () => {
     const html = renderEditor([
       model({
@@ -41,7 +64,7 @@ describe("ChannelModelsEditor thinking levels", () => {
     expect(html).not.toContain("允许的思考等级");
   });
 
-  it("shows thinking level checkboxes when thinking is on", () => {
+  it("shows thinking level checkboxes when thinking is on and expanded", () => {
     const html = renderEditor([
       model({
         id: "composer-2.5",
