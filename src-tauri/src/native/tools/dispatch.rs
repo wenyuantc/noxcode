@@ -527,6 +527,9 @@ async fn run_with_contract_timeout(
 async fn dispatch(ctx: &ToolCtx, name: &str, arguments: &str) -> Result<ToolOutput, String> {
     match name {
         "Read" => call_read(ctx, arguments).await,
+        "SQLiteQuery" => super::sqlite::query(ctx, arguments)
+            .await
+            .map(ToolOutput::text),
         "Write" => call_write(ctx, arguments).await.map(ToolOutput::text),
         "Edit" => call_edit(ctx, arguments).await.map(ToolOutput::text),
         "ApplyPatch" => call_apply_patch(ctx, arguments).await.map(ToolOutput::text),

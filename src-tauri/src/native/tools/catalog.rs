@@ -89,6 +89,21 @@ pub fn tool_contracts() -> Vec<ToolContract> {
             ToolTimeout::fixed(30_000),
         ),
         contract(
+            "SQLiteQuery",
+            "只读查询本地 SQLite 数据库和表结构，支持计划模式及外部路径授权",
+            true,
+            false,
+            true,
+            SideEffectScope::None,
+            RiskLevel::Low,
+            false,
+            true,
+            PermissionCapability::Read,
+            &[Path, Input],
+            budget(80_000, ResultStrategy::Artifact, PreviewDirection::Head),
+            ToolTimeout::fixed(30_000),
+        ),
+        contract(
             "Write",
             "创建或覆盖工作区文件",
             false,
@@ -618,7 +633,7 @@ fn core_tool_specs() -> Vec<ToolSpec> {
     vec![
         spec(
             "Read",
-            "Read a file from the workspace or an allowed read root, including enabled skill directories in local sessions. Use absolute paths for external roots. Prefer this over cat in Bash.",
+            "Read a text file or image from the workspace or an allowed read root, including enabled skill directories in local sessions. Use absolute paths for external roots. For SQLite database contents use SQLiteQuery, not Read. Prefer this over cat in Bash.",
             json!({
                 "type": "object",
                 "properties": {
@@ -627,6 +642,20 @@ fn core_tool_specs() -> Vec<ToolSpec> {
                     "limit": {"type": "integer"}
                 },
                 "required": ["file_path"]
+            }),
+        ),
+        spec(
+            "SQLiteQuery",
+            "Query a local SQLite database in read-only mode, including during plan mode. Use this for .db/.sqlite files and API logs instead of Bash or Read. Accepts one SELECT/WITH/EXPLAIN query or a schema PRAGMA (table_info, table_xinfo, table_list, index_list, index_info, index_xinfo, foreign_key_list, database_list, compile_options). To discover tables: SELECT name, sql FROM sqlite_schema WHERE type = 'table'. Parameters bind to ? placeholders. Returns JSON columns and rows with a truncation flag; BLOB values are base64 objects. Only the specified database is accessible: writes, ATTACH, extensions and shell dot commands are forbidden. Local sessions only; external paths use normal read authorization.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "file_path": {"type": "string", "description": "Local SQLite database path, relative to the workspace or absolute."},
+                    "query": {"type": "string", "description": "One read-only SQL statement."},
+                    "parameters": {"type": "array", "items": {"type": ["string", "number", "boolean", "null"]}},
+                    "limit": {"type": "integer", "minimum": 1, "maximum": 1000, "description": "Maximum returned rows; default 200. Use SQL LIMIT/OFFSET to page through results."}
+                },
+                "required": ["file_path", "query"]
             }),
         ),
         spec(
@@ -800,6 +829,7 @@ mod tests {
     #[test]
     fn read_only_tools_exclude_writers() {
         assert!(is_read_only_native_tool("Read"));
+        assert!(is_read_only_native_tool("SQLiteQuery"));
         assert!(is_read_only_native_tool("Grep"));
         assert!(is_read_only_native_tool("TodoWrite"));
         assert!(is_read_only_native_tool("AskQuestion"));
@@ -814,6 +844,7 @@ mod tests {
             names,
             vec![
                 "Read",
+                "SQLiteQuery",
                 "Glob",
                 "Grep",
                 "TodoRead",

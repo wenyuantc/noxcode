@@ -10,7 +10,7 @@ use super::permission::{PermissionRule, RuleScope};
 pub fn is_file_tool(name: &str) -> bool {
     matches!(
         name,
-        "Read" | "Glob" | "Grep" | "Write" | "Edit" | "ApplyPatch"
+        "Read" | "SQLiteQuery" | "Glob" | "Grep" | "Write" | "Edit" | "ApplyPatch"
     )
 }
 
@@ -61,14 +61,14 @@ pub async fn collect_file_access(
         inputs.push((
             input.to_string(),
             match name {
-                "Read" => "read",
+                "Read" | "SQLiteQuery" => "read",
                 "Glob" | "Grep" => "search",
                 "Write" => "write",
                 _ => "edit",
             },
         ));
     }
-    let capability = if matches!(name, "Read" | "Glob" | "Grep") {
+    let capability = if matches!(name, "Read" | "SQLiteQuery" | "Glob" | "Grep") {
         PermissionCapability::Read
     } else {
         PermissionCapability::Edit

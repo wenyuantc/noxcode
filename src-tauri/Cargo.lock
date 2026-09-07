@@ -3177,6 +3177,7 @@ dependencies = [
  "futures-util",
  "keyring",
  "libc",
+ "libsqlite3-sys",
  "rand 0.10.2",
  "regex",
  "reqwest 0.12.28",

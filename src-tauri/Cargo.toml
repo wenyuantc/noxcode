@@ -30,7 +30,9 @@ thiserror = "2"
 tokio = { version = "1", features = ["process", "io-util", "net", "sync", "time", "macros", "rt"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
 futures-util = { version = "0.3", default-features = false, features = ["std"] }
-sqlx = { version = "0.8.6", features = ["sqlite", "runtime-tokio", "macros"] }
+# SQLiteQuery uses the locked SQLx handle for SQLite's authorizer API.
+sqlx = { version = "=0.8.6", features = ["sqlite", "runtime-tokio", "macros"] }
+libsqlite3-sys = "=0.30.1"
 libc = "0.2"
 tauri-plugin-notification = "2.4.0"
 keyring = { version = "3", features = [

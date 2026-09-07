@@ -534,6 +534,9 @@ impl AgentRunner {
 
     fn combined_tools(&self) -> Vec<ToolSpec> {
         let mut tools = tool_specs();
+        if self.ctx.ssh.is_some() {
+            tools.retain(|tool| tool.name != "SQLiteQuery");
+        }
         let read_only = self.ctx.is_read_only();
         let plan_mode = self.ctx.is_plan_mode();
         if self.depth > 0 || read_only {
@@ -2345,6 +2348,7 @@ fn tool_start_line_ex(
     let args: Value = serde_json::from_str(arguments).unwrap_or(Value::Null);
     match name {
         "Read" => format!("[读取] {}", json_string(&args, "file_path")),
+        "SQLiteQuery" => format!("[工具] SQLiteQuery {}", json_string(&args, "file_path")),
         "Write" => format!("[写入] {}", json_string(&args, "file_path")),
         "Edit" => format!("[编辑] {}", json_string(&args, "file_path")),
         "Bash" => format!("[命令] {}", json_string(&args, "command")),
@@ -2430,7 +2434,9 @@ fn tool_event_title(line: &str) -> String {
 fn tool_args_summary(name: &str, arguments: &str) -> String {
     let args: Value = serde_json::from_str(arguments).unwrap_or(Value::Null);
     match name {
-        "Read" | "Write" | "Edit" => json_opt(&args, "file_path").unwrap_or_default(),
+        "Read" | "SQLiteQuery" | "Write" | "Edit" => {
+            json_opt(&args, "file_path").unwrap_or_default()
+        }
         "Bash" => json_opt(&args, "command").unwrap_or_default(),
         "Glob" | "Grep" => json_opt(&args, "pattern").unwrap_or_default(),
         "Skill" => json_opt(&args, "name").unwrap_or_default(),
@@ -3211,6 +3217,56 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn plan_mode_advertises_sqlite_query_and_returns_database_rows_to_model() {
+        use sqlx::Connection;
+        let (mut runner, root) = temp_runner();
+        let database = root.join("logs.sqlite");
+        let mut connection = sqlx::SqliteConnection::connect_with(
+            &sqlx::sqlite::SqliteConnectOptions::new()
+                .filename(&database)
+                .create_if_missing(true),
+        )
+        .await
+        .unwrap();
+        sqlx::raw_sql(
+            "CREATE TABLE logs(message TEXT); INSERT INTO logs VALUES('request failed');",
+        )
+        .execute(&mut connection)
+        .await
+        .unwrap();
+        connection.close().await.unwrap();
+        runner.set_read_only(true);
+        runner.set_plan_mode(true);
+        assert!(runner.tool_names().iter().any(|name| name == "SQLiteQuery"));
+        assert!(!runner.tool_names().iter().any(|name| name == "Bash"));
+        runner
+            .run_scripted(
+                "查一下数据库",
+                vec![
+                    assistant_tool_call(
+                        "query-logs",
+                        "SQLiteQuery",
+                        r#"{"file_path":"logs.sqlite","query":"SELECT message FROM logs"}"#,
+                    ),
+                    Message::assistant_text("已查到失败日志"),
+                ],
+            )
+            .await
+            .unwrap();
+        assert!(runner.messages.iter().any(
+            |message| message.role == Role::Tool && message.content.contains("request failed")
+        ));
+        assert_eq!(
+            tool_args_summary(
+                "SQLiteQuery",
+                r#"{"file_path":"logs.sqlite","query":"SELECT message FROM logs"}"#
+            ),
+            "logs.sqlite"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
     async fn read_only_emits_read_and_blocks_write() {
         let (mut runner, root) = temp_runner();
         runner.set_read_only(true);
@@ -3593,6 +3649,8 @@ mod tests {
         plan.set_read_only(true);
         plan.set_plan_mode(true);
         let plan_names = plan.tool_names();
+        assert!(plan_names.iter().any(|name| name == "SQLiteQuery"));
+        assert!(!plan_names.iter().any(|name| name == "Bash"));
         assert!(plan_names.iter().any(|name| name == "AskUserQuestion"));
         assert!(plan_names.iter().any(|name| name == "ExitPlanMode"));
         assert!(!plan_names.iter().any(|name| name == "EnterPlanMode"));

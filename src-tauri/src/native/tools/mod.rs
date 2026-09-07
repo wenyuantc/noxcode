@@ -17,6 +17,7 @@ pub mod paths;
 pub mod permission;
 pub mod question;
 pub mod shell_snapshot;
+pub mod sqlite;
 pub mod ssh;
 pub mod web;
 

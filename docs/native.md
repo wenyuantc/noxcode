@@ -68,6 +68,8 @@ P4 把进程内编程 Agent 接到渠道 + 工作区外壳。数据流仍是 `Re
 
 ## 工具契约与结果预算
 
+本地会话提供 `SQLiteQuery(file_path, query, parameters?, limit?)`，在计划模式和 explore 子 Agent 中也可使用。该工具通过独立的 Rust SQLite 只读连接查询数据库，复用 `Read` 的路径授权、deny/ask 和白名单；不会使用应用的可写数据库连接。可查询 `sqlite_schema`、执行 SELECT / WITH / EXPLAIN 和表结构 PRAGMA，参数用 `?` 绑定。SQLite 自身解析并限制单条只读语句，禁止写入、ATTACH、加载扩展及 shell 点命令；WAL 模式下可读取应用已提交的最新日志。返回 `{ columns, rows, row_count, truncated }`，默认 200 行、最多 1000 行，结果约 1 MB 上限，查询有超时和取消限制。此工具只面向本地数据库，不增加运行时外部命令依赖；Bash 仍不可在计划模式使用。
+
 每个内置工具在 [`tools/catalog.rs`](../src-tauri/src/native/tools/catalog.rs) 声明一份 [`ToolContract`](../src-tauri/src/native/tools/contract.rs)：`read_only / destructive / concurrent_safe / side_effect_scope / risk_level / needs_approval / allowed_in_plan_mode / permission（能力）/ pattern_sources / result_budget / timeout`。MCP 工具按 `tools/list` 返回的 `annotations.readOnlyHint / destructiveHint` 动态生成契约，缺省视为需审批、串行。
 
 - 计划模式与 explore 子 Agent 的只读白名单来自契约的 `allowed_in_plan_mode`，不再硬编码。

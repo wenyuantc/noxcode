@@ -148,7 +148,7 @@ fn environment_block(parts: &NativePromptParts) -> String {
     ];
     if permission_mode == crate::native::settings::PERMISSION_MODE_PLAN {
         lines.push(
-            "- Plan mode: only Read/Glob/Grep/TodoRead/TodoWrite/WebFetch/WebSearch/Skill/AskUserQuestion/ExitPlanMode. Do not edit files. If a user decision is required, call AskUserQuestion. When the plan is ready, either call ExitPlanMode with the full plan to request approval, or output the plan and stop — the system then starts implementation automatically."
+            "- Plan mode: use the available read-only tools to investigate before planning. In local sessions, use SQLiteQuery for SQLite database contents and schema, including API logs; Bash is unavailable in plan mode. Read/Glob/Grep inspect files, and SQLiteQuery performs read-only SQL with normal path authorization. Do not edit files or modify databases. If a user decision is required, call AskUserQuestion. When the plan is ready, either call ExitPlanMode with the full plan to request approval, or output the plan and stop — the system then starts implementation automatically."
                 .to_string(),
         );
     }
@@ -203,7 +203,7 @@ pub fn agent_tool_description(
     lines.extend([
         "Available agent types:".to_string(),
         "- general: full tools including MCP; can edit files. (Tools: *)".to_string(),
-        "- explore: read-only research. (Tools: Read, Glob, Grep, TodoRead, TodoWrite, WebFetch, WebSearch, Skill)".to_string(),
+        "- explore: read-only research. (Tools: Read, SQLiteQuery in local sessions, Glob, Grep, TodoRead, TodoWrite, WebFetch, WebSearch, Skill)".to_string(),
     ]);
     for item in custom {
         let tools = if item.tool_mode == TOOL_MODE_ALL {
