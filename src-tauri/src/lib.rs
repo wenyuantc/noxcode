@@ -79,6 +79,7 @@ pub fn run() {
             app::ssh::import_ssh_config_file_host,
             app::ssh::resolve_ssh_host_trust,
             app::ssh::algorithms::list_ssh_supported_algorithms,
+            app::ssh::list_remote_directories,
             git::get_git_repo_info,
             git::get_git_status,
             git::get_git_file_diff,

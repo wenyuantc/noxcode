@@ -127,6 +127,12 @@ export interface SshHostKeyChanged {
   line: number;
 }
 
+export interface RemoteDirectoryList {
+  current_path: string;
+  parent_path: string | null;
+  directories: string[];
+}
+
 export interface GitRepoInfo {
   workspace_id: string;
   toplevel: string;

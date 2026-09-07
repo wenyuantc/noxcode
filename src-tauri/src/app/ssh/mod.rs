@@ -33,7 +33,7 @@ use self::configs::{
 };
 use self::exec::{ExecOptions, SshCommandOutput};
 use self::known_hosts::{default_known_hosts_path, KnownHostsPolicy};
-use self::shell::{build_remote_shell_command, expand_tilde};
+use self::shell::{build_remote_shell_command, expand_tilde, shell_escape_single_quoted};
 
 pub(crate) use self::config_file::{SshConfigFileHost, SshConfigFileImport};
 pub(crate) use self::known_hosts::{HostTrustBroker, HostTrustEvent};
@@ -374,3 +374,89 @@ pub(crate) fn resolve_ssh_host_trust<R: Runtime>(
         .trust()
         .resolve(&prompt_id, accept)
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct RemoteDirectoryList {
+    pub current_path: String,
+    pub parent_path: Option<String>,
+    pub directories: Vec<String>,
+}
+
+#[tauri::command]
+pub(crate) async fn list_remote_directories<R: Runtime>(
+    app: AppHandle<R>,
+    ssh_config_id: String,
+    path: Option<String>,
+) -> Result<RemoteDirectoryList, String> {
+    let pool = sqlite_pool(&app).await?;
+    let record = fetch_ssh_config_record_by_id(&pool, &ssh_config_id).await?;
+    let secrets = SecretStore::for_app(&app)?;
+    let ssh_pool = app.state::<SshPool>().inner().clone();
+    let params = connect_params_with_secrets(&record, &secrets)?;
+
+    let target = path.as_deref().unwrap_or("").trim();
+    let cd_target = if target.is_empty() || target == "~" {
+        "cd ~".to_string()
+    } else {
+        format!("cd {}", shell_escape_single_quoted(target))
+    };
+
+    let script = format!(
+        "{cd_target} 2>/dev/null || {{ echo \"FAILED_CD\"; exit 1; }}\n\
+         pwd -P\n\
+         echo \"NOXCODE_ENTRIES_SEPARATOR\"\n\
+         ls -1pa 2>/dev/null | grep '/$' | grep -v '^\\./$' | grep -v '^\\.\\./$' | sed 's/\\/$//' | sort || true"
+    );
+
+    let command = build_remote_shell_command(&script);
+    let output = ssh_pool
+        .exec(&params, &command, ExecOptions::default())
+        .await
+        .map_err(|e| format!("无法连接远程主机: {e}"))?;
+
+    if !output.success() {
+        let err = output.stderr_lossy();
+        let stdout = output.stdout_lossy();
+        if stdout.contains("FAILED_CD") {
+            return Err(format!("无法进入目录: {}", if target.is_empty() { "~" } else { target }));
+        }
+        return Err(if err.trim().is_empty() {
+            format!("列举远程目录失败 (退出码 {:?})", output.exit_code)
+        } else {
+            err.trim().to_string()
+        });
+    }
+
+    let stdout = output.stdout_lossy();
+    let parts: Vec<&str> = stdout.split("NOXCODE_ENTRIES_SEPARATOR").collect();
+    if parts.len() < 2 {
+        return Err(format!("解析远程目录响应失败: {stdout}"));
+    }
+
+    let current_path = parts[0].trim().to_string();
+    if current_path.is_empty() {
+        return Err("获取远程当前路径失败".to_string());
+    }
+
+    let parent_path = if current_path == "/" {
+        None
+    } else {
+        std::path::Path::new(&current_path)
+            .parent()
+            .map(|p| p.to_string_lossy().into_owned())
+    };
+
+    let directories = parts[1]
+        .lines()
+        .map(str::trim)
+        .filter(|s| !s.is_empty() && *s != "." && *s != "..")
+        .map(ToString::to_string)
+        .collect();
+
+    Ok(RemoteDirectoryList {
+        current_path,
+        parent_path,
+        directories,
+    })
+}
+

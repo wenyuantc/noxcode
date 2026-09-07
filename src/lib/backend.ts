@@ -88,6 +88,7 @@ import type {
   SshHostKeyChanged,
   SshHostTrustPrompt,
   SshPasswordProbeResult,
+  RemoteDirectoryList,
   SshSupportedAlgorithms,
   StartNativeSessionInput,
   TestAiChannelInput,
@@ -144,6 +145,13 @@ export function probeSshPasswordAuth(sshConfigId: string): Promise<SshPasswordPr
 
 export function testSshConnection(sshConfigId: string): Promise<SshConnectionTestResult> {
   return invoke("test_ssh_connection", { sshConfigId });
+}
+
+export function listRemoteDirectories(
+  sshConfigId: string,
+  path?: string,
+): Promise<RemoteDirectoryList> {
+  return invoke("list_remote_directories", { sshConfigId, path });
 }
 
 export function listSshConfigFileHosts(): Promise<SshConfigFileHost[]> {
