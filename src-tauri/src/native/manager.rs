@@ -89,6 +89,7 @@ pub struct PermissionRequest {
     pub mcp_server_id: Option<String>,
     pub suggested_rule: Option<PermissionRuleSuggestion>,
     pub file_access: Option<crate::native::tools::file_access::FileAccessPrompt>,
+    pub allow_once_only: bool,
 }
 
 pub struct PendingPermission {
@@ -127,6 +128,7 @@ pub struct PendingPlanQuestion {
 pub struct NativeLiveSession {
     pub info: NativeSessionInfo,
     pub runtime: Option<crate::db::models::NativeSessionRuntime>,
+    pub plan_mode: Arc<AtomicBool>,
     pub background: Option<Arc<crate::native::agent::background::BackgroundTaskRegistry>>,
     pub closing: bool,
     pub cancel: CancelFlag,
@@ -143,6 +145,15 @@ pub struct NativeLiveSession {
     pub pending_permission: VecDeque<PendingPermission>,
     pub pending_question: VecDeque<PendingPlanQuestion>,
     pub pending_plan_approval: VecDeque<PendingPlanApproval>,
+}
+
+impl NativeLiveSession {
+    pub fn runtime_snapshot(&self) -> Option<crate::db::models::NativeSessionRuntime> {
+        self.runtime.clone().map(|mut runtime| {
+            runtime.plan_mode = self.plan_mode.load(Ordering::SeqCst);
+            runtime
+        })
+    }
 }
 
 #[derive(Default)]
@@ -240,6 +251,9 @@ impl NativeAgentManager {
                     && !session.cancel.is_cancelled()
             })
             .ok_or_else(|| "权限确认请求已过期".to_string())?;
+        if pending.request.allow_once_only {
+            return Err("计划模式下的 Bash 命令仅允许本次授权，不能保存白名单".to_string());
+        }
         let root = session.workspace_root.as_deref();
         let scope = scope.unwrap_or(if root.is_some() {
             RuleScope::Workspace
@@ -325,6 +339,9 @@ impl NativeAgentManager {
             .sessions
             .get_mut(session_record_id)
             .ok_or_else(|| "没有运行中的内置 Agent 会话".to_string())?;
+        if pending.reply.is_closed() || session.cancel.is_cancelled() || session.closing {
+            return Err("计划审批请求已失效".to_string());
+        }
         let should_emit = session.pending_plan_approval.is_empty();
         session.pending_plan_approval.push_back(pending);
         Ok(should_emit)
@@ -340,6 +357,9 @@ impl NativeAgentManager {
             .sessions
             .get_mut(session_record_id)
             .ok_or_else(|| "没有运行中的内置 Agent 会话".to_string())?;
+        if session.cancel.is_cancelled() || session.closing {
+            return Err("会话已停止，不能批准计划".to_string());
+        }
         let pending = session
             .pending_plan_approval
             .pop_front()
@@ -356,6 +376,29 @@ impl NativeAgentManager {
             .pending_plan_approval
             .front()
             .map(|item| item.request.clone()))
+    }
+
+    pub fn expire_plan_approval(
+        &mut self,
+        session_record_id: &str,
+        request_id: &str,
+    ) -> Option<PlanApprovalRequest> {
+        let session = self.sessions.get_mut(session_record_id)?;
+        let was_front = session
+            .pending_plan_approval
+            .front()
+            .is_some_and(|pending| pending.request.request_id == request_id);
+        session
+            .pending_plan_approval
+            .retain(|pending| pending.request.request_id != request_id);
+        was_front
+            .then(|| {
+                session
+                    .pending_plan_approval
+                    .front()
+                    .map(|pending| pending.request.clone())
+            })
+            .flatten()
     }
 
     pub fn enqueue_permission(
@@ -389,6 +432,15 @@ impl NativeAgentManager {
         if pending.request.request_id != request_id {
             session.pending_permission.push_front(pending);
             return Err("权限确认请求已过期".to_string());
+        }
+        if pending.request.allow_once_only
+            && !matches!(
+                decision,
+                NativePermissionDecision::AllowOnce | NativePermissionDecision::Deny
+            )
+        {
+            session.pending_permission.push_front(pending);
+            return Err("计划模式下的 Bash 命令只能本次允许或拒绝".to_string());
         }
         if pending.request.file_access.is_some()
             && matches!(
@@ -562,6 +614,123 @@ mod tests {
     use super::*;
 
     #[tokio::test]
+    async fn runtime_snapshot_reads_the_runner_plan_state() {
+        let mut session = live_session("plan-state");
+        session.runtime = Some(crate::db::models::NativeSessionRuntime {
+            ai_channel_id: "ch".into(),
+            model: "model".into(),
+            reasoning_effort: None,
+            permission_mode: "yolo".into(),
+            plan_mode: false,
+        });
+        let root = tempfile::tempdir().unwrap();
+        let mut ctx = crate::native::tools::dispatch::ToolCtx::new(
+            crate::native::tools::local::LocalWorkspace::new(root.path().into()),
+        );
+        ctx.plan_mode = session.plan_mode.clone();
+        ctx.set_plan_mode(true);
+        assert!(session.runtime_snapshot().unwrap().plan_mode);
+        assert!(ctx.is_read_only());
+        ctx.set_plan_mode(false);
+        assert!(!session.runtime_snapshot().unwrap().plan_mode);
+        session.join.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn stale_cancelled_and_expired_plan_requests_cannot_be_approved() {
+        let mut manager = NativeAgentManager::new();
+        manager.add_session(live_session("plan"));
+        let (reply, rx) = oneshot::channel();
+        manager
+            .enqueue_plan_approval(
+                "plan",
+                PendingPlanApproval {
+                    request: PlanApprovalRequest {
+                        request_id: "current".into(),
+                        profile_id: String::new(),
+                        workspace_id: None,
+                        session_kind: "plan".into(),
+                        plan: "plan".into(),
+                    },
+                    reply,
+                },
+            )
+            .unwrap();
+        let approved = || PlanApprovalAnswer {
+            approved: true,
+            feedback: String::new(),
+        };
+        assert!(manager
+            .resolve_plan_approval("plan", "old", approved())
+            .is_err());
+        assert_eq!(
+            manager
+                .get_session("plan")
+                .unwrap()
+                .pending_plan_approval
+                .len(),
+            1
+        );
+        manager.expire_plan_approval("plan", "current");
+        assert!(rx.await.is_err());
+        assert!(manager
+            .resolve_plan_approval("plan", "current", approved())
+            .is_err());
+        manager.get_session("plan").unwrap().cancel.cancel();
+        let (reply, _rx) = oneshot::channel();
+        assert!(manager
+            .enqueue_plan_approval(
+                "plan",
+                PendingPlanApproval {
+                    request: PlanApprovalRequest {
+                        request_id: "late".into(),
+                        profile_id: String::new(),
+                        workspace_id: None,
+                        session_kind: "plan".into(),
+                        plan: "plan".into()
+                    },
+                    reply,
+                }
+            )
+            .is_err());
+        assert!(manager
+            .resolve_plan_approval("plan", "late", approved())
+            .is_err());
+    }
+
+    #[tokio::test]
+    async fn plan_bash_request_cannot_save_rules_or_enable_session_access() {
+        let mut manager = NativeAgentManager::new();
+        manager.add_session(live_session("plan"));
+        let (mut request, mut reply) = pending("bash", "Bash");
+        request.request.allow_once_only = true;
+        manager.enqueue_permission("plan", request).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        assert!(manager
+            .save_permission_rules(dir.path(), "plan", "bash", None, None)
+            .is_err());
+        for decision in [
+            NativePermissionDecision::AllowAlways,
+            NativePermissionDecision::AllowSession,
+            NativePermissionDecision::AllowServer,
+        ] {
+            assert!(manager
+                .resolve_permission("plan", "bash", decision)
+                .is_err());
+            assert!(reply.try_recv().is_err());
+            assert!(!manager
+                .get_session("plan")
+                .unwrap()
+                .allow_all_high_risk
+                .load(Ordering::SeqCst));
+        }
+        manager
+            .resolve_permission("plan", "bash", NativePermissionDecision::AllowOnce)
+            .unwrap();
+        assert_eq!(reply.await.unwrap(), NativePermissionDecision::AllowOnce);
+    }
+
+    #[tokio::test]
     async fn tracks_profile_and_workspace_sessions() {
         let mut manager = NativeAgentManager::new();
         let (tx, _rx) = mpsc::channel(1);
@@ -574,6 +743,7 @@ mod tests {
                 session_record_id: "sess-1".to_string(),
             },
             runtime: None,
+            plan_mode: std::sync::Arc::default(),
             background: None,
             closing: false,
             cancel: CancelFlag::new(),
@@ -614,6 +784,7 @@ mod tests {
                 session_record_id: id.to_string(),
             },
             runtime: None,
+            plan_mode: std::sync::Arc::default(),
             background: None,
             closing: false,
             cancel: CancelFlag::new(),
@@ -769,6 +940,7 @@ mod tests {
                     mcp_server_id: None,
                     suggested_rule: None,
                     file_access: None,
+                    allow_once_only: false,
                 },
                 reply,
             },
@@ -1052,6 +1224,7 @@ mod tests {
                 session_record_id: "sess-shutdown".to_string(),
             },
             runtime: None,
+            plan_mode: std::sync::Arc::default(),
             background: None,
             closing: false,
             cancel: CancelFlag::new(),

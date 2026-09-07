@@ -127,6 +127,29 @@ fn arg_string(arguments: &str, key: &str) -> String {
         .unwrap_or_else(|| "(unknown)".to_string())
 }
 
+pub fn classify_plan_bash_risk(arguments: &str) -> NativeToolRisk {
+    let command = arg_string(arguments, "command");
+    let risk = classify_bash(&command);
+    if risk != NativeToolRisk::Low {
+        return risk;
+    }
+    // Wrappers can write (nohup), change executable lookup (env), or invoke
+    // configured helpers (git). Keep them subject to explicit plan approval.
+    if !command.contains('#')
+        && split_shell_segments(&command).iter().all(|segment| {
+            let tokens = tokenize(segment);
+            is_known_read_command(&tokens) && tokens.first().is_some_and(|name| name != "git")
+        })
+    {
+        NativeToolRisk::Low
+    } else {
+        NativeToolRisk::High {
+            kind: NativeToolRiskKind::Opaque,
+            summary: format!("计划模式下需确认的命令：{command}"),
+        }
+    }
+}
+
 fn classify_bash(command: &str) -> NativeToolRisk {
     if is_opaque_shell(command) {
         return NativeToolRisk::High {
@@ -940,6 +963,53 @@ pub fn suggest_rule(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn plan_shell_only_auto_allows_verified_read_commands() {
+        for command in [
+            "pwd",
+            "ls -la",
+            "cat Cargo.toml | head -n 20",
+            "cd src && wc -l main.rs",
+        ] {
+            assert_eq!(
+                classify_plan_bash_risk(&serde_json::json!({"command":command}).to_string()),
+                NativeToolRisk::Low,
+                "{command}"
+            );
+        }
+        for command in [
+            "touch file",
+            "mkdir dir",
+            "chmod 600 file",
+            "rm file",
+            "echo text > file",
+            "echo text >> file",
+            "sed -i '' s/a/b/ file",
+            "find . -delete",
+            "find . -exec touch file ;",
+            "python3 read.py",
+            "node -e 'write()'",
+            "sqlite3 logs.db 'DELETE FROM logs'",
+            "npm test",
+            "curl -o file https://example.com",
+            "nohup cat file",
+            "env PATH=/tmp cat file",
+            "git diff",
+            "git push",
+            "git reset --hard",
+            "echo $(touch file)",
+            "echo #'\ntouch file\n#'",
+        ] {
+            assert!(
+                matches!(
+                    classify_plan_bash_risk(&serde_json::json!({"command":command}).to_string()),
+                    NativeToolRisk::High { .. }
+                ),
+                "{command}"
+            );
+        }
+    }
 
     fn rule(
         capability: PermissionCapability,

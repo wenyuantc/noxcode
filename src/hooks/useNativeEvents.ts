@@ -58,7 +58,9 @@ export function useNativeEvents() {
     );
     track(
       onNativePlanMode((payload) =>
-        useSessionStore.getState().onPlanMode(payload.session_record_id, payload.plan_mode),
+        useSessionStore
+          .getState()
+          .onPlanMode(payload.session_record_id, payload.plan_mode, payload.input_queue_id),
       ),
     );
     track(

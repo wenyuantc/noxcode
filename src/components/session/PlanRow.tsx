@@ -148,7 +148,7 @@ export function PendingPlanApproval({ sessionId }: { sessionId: string }) {
               void resolve(true);
             }}
           >
-            {t("planContinueTask")}
+            {t("planApprovalApprove")}
           </PlanPillButton>
           <button
             type="button"

@@ -29,7 +29,9 @@ P4 把进程内编程 Agent 接到渠道 + 工作区外壳。数据流仍是 `Re
 9. 按当前 `workspace_id` 筛选并连接 `enabled=true` 且 `scope=all` 或命中 `scope=workspaces` / `workspace_ids` 的 MCP server。
 10. `run_native_loop` 转发 stdout / delta / context usage / 权限 / 计划提问 / 计划模式变化；退出时写 tokens、status、`native-exit`，并从 manager 移除。主窗口未聚焦且 `desktop_notifications=true` 时，会话结束 / 失败、权限确认和计划问题会发桌面通知。托盘 / 进程退出走 `shutdown_all_sessions`：拒绝待确认，工作中任务 cancel，空闲任务正常 `Finish`，有限等待 join，再关 SSH pool。
 
-`session_kind` 只有 `execution` 与 `plan`。`plan_mode=true` 时先只读规划；未显式提交 `ExitPlanMode` 时本轮结束后自动放开写工具并继续实施，显式提交后则按用户批准结果决定。计划模式由启动参数决定，不写入 `native-settings.json`。运行中 `EnterPlanMode` / `ExitPlanMode` 会实际切换 runner 的共享状态，并发送 `native-plan-mode`；`ExitPlanMode` 只有在用户批准后才发送 `false`，等待审批或退回计划时保持 `true`。子 Agent 的切换不会广播到父会话。
+`session_kind` 只有 `execution` 与 `plan`，表示启动类型，不能替代当前运行模式。`plan_mode=true` 时本轮结束后保持计划模式，等待输入；不会自动注入实施指令。计划模式由启动参数决定，不写入 `native-settings.json`。`ExitPlanMode` 必须收到当前请求的用户批准才解除限制；拒绝、取消、超时或无审批通道均保持计划模式。用户也可在会话空闲后通过模式选择器切换。runner 与 manager 共享计划模式原子状态，运行配置快照从该状态读取；`native-plan-mode` 携带 `input_queue_id` 区分每次运行，前端不允许旧启动快照覆盖同次运行的模式事件。子 Agent 的切换不会广播到父会话。
+
+计划模式的本地与 SSH `Bash` 可用：可验证的只读命令直接执行；写入、高风险及无法确认只读的命令必须逐次确认，即使开启 yolo、build 或命中 allow 规则也不能跳过，批准钩子也不能代替用户。审批使用现有权限 IPC，事件中的 `allow_once_only=true` 限制为「本次允许 / 拒绝」，后端同时拒绝会话放行、服务器放行和保存白名单。仅本次命令获批，计划模式不变。命令按 PreToolUse 改写后的最终参数检查；含脚本、解释器、重定向及未验证包装器的命令保守地要求确认。Bash 不提供操作系统级只读沙箱；数据库查询优先使用 `SQLiteQuery`。`Write / Edit / ApplyPatch` 及写入型 MCP 仍被禁止，explore 子 Agent 不开放 Bash。
 
 权限模式（`permission_mode`）四档，对齐 ZCode：`default` 变更前确认；`edit` 自动放行 `Overwrite`（删除 / 推送 / 强制 Git / 不透明命令 / MCP 仍弹确认）；`build` 再放行不透明 shell 与带 `readOnlyHint` 的 MCP；`yolo` 完全访问（`allow_all_high_risk=true`，只有 ask 规则仍会确认）。旧文件的 `confirm / auto_edit / full` 与 Claude Code 的 `acceptEdits / auto / bypassPermissions / dontAsk` 读入时映射到新名；`confirm_high_risk: false` 读成 `yolo`。`plan` 是会话态：既可由 Composer 选择在启动时进入，也可由模型调用 `EnterPlanMode` 进入；`ExitPlanMode` 提交计划触发 `native-plan-approval-request`，用户批准后恢复执行模式，退回则连同反馈交回模型继续修改。
 
@@ -68,7 +70,7 @@ P4 把进程内编程 Agent 接到渠道 + 工作区外壳。数据流仍是 `Re
 
 ## 工具契约与结果预算
 
-本地会话提供 `SQLiteQuery(file_path, query, parameters?, limit?)`，在计划模式和 explore 子 Agent 中也可使用。该工具通过独立的 Rust SQLite 只读连接查询数据库，复用 `Read` 的路径授权、deny/ask 和白名单；不会使用应用的可写数据库连接。可查询 `sqlite_schema`、执行 SELECT / WITH / EXPLAIN 和表结构 PRAGMA，参数用 `?` 绑定。SQLite 自身解析并限制单条只读语句，禁止写入、ATTACH、加载扩展及 shell 点命令；WAL 模式下可读取应用已提交的最新日志。返回 `{ columns, rows, row_count, truncated }`，默认 200 行、最多 1000 行，结果约 1 MB 上限，查询有超时和取消限制。此工具只面向本地数据库，不增加运行时外部命令依赖；Bash 仍不可在计划模式使用。
+本地会话提供 `SQLiteQuery(file_path, query, parameters?, limit?)`，在计划模式和 explore 子 Agent 中也可使用。该工具通过独立的 Rust SQLite 只读连接查询数据库，复用 `Read` 的路径授权、deny/ask 和白名单；不会使用应用的可写数据库连接。可查询 `sqlite_schema`、执行 SELECT / WITH / EXPLAIN 和表结构 PRAGMA，参数用 `?` 绑定。SQLite 自身解析并限制单条只读语句，禁止写入、ATTACH、加载扩展及 shell 点命令；WAL 模式下可读取应用已提交的最新日志。返回 `{ columns, rows, row_count, truncated }`，默认 200 行、最多 1000 行，结果约 1 MB 上限，查询有超时和取消限制。此工具只面向本地数据库，不增加运行时外部命令依赖。
 
 每个内置工具在 [`tools/catalog.rs`](../src-tauri/src/native/tools/catalog.rs) 声明一份 [`ToolContract`](../src-tauri/src/native/tools/contract.rs)：`read_only / destructive / concurrent_safe / side_effect_scope / risk_level / needs_approval / allowed_in_plan_mode / permission（能力）/ pattern_sources / result_budget / timeout`。MCP 工具按 `tools/list` 返回的 `annotations.readOnlyHint / destructiveHint` 动态生成契约，缺省视为需审批、串行。
 

@@ -130,7 +130,7 @@
     },
     "plan": {
       "title": "计划模式",
-      "description": "编辑前先出计划。"
+      "description": "批准计划后实施；写入或高风险命令须单次确认。"
     },
     "yolo": {
       "title": "完全访问",

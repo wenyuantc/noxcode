@@ -726,7 +726,7 @@ describe("sessionLines", () => {
       groupSessionLines([
         line(
           "1",
-          "[PLAN] 已进入计划模式：只读摸底，本轮结束后自动开始执行",
+          "[PLAN] 已进入计划模式：等待批准后实施；写入或高风险 Bash 命令须单次确认",
           "2026-01-01T00:00:00Z",
         ),
         line("2", "[USER_INPUT] 做个方案", "2026-01-01T00:00:01Z"),

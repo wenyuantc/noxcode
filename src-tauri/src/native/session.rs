@@ -56,21 +56,9 @@ use crate::native::transcript::{
 };
 
 const ENGINE_LABEL: &str = "内置 Agent";
-const EXECUTE_AFTER_PLAN: &str =
-    "计划阶段已结束，写工具现已可用。按你刚才输出的方案立即实施，不要重新规划。";
-
-fn usable_native_plan_text(text: &str) -> Option<&str> {
-    let trimmed = text.trim();
-    if trimmed.is_empty() {
-        None
-    } else {
-        Some(trimmed)
-    }
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum NativeLoopEvent {
-    TurnFinished { plan_pending: bool },
+    TurnFinished,
     FollowupInput,
     FollowupFinish,
     Cancelled,
@@ -79,7 +67,6 @@ pub(crate) enum NativeLoopEvent {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum NativeLoopAction {
-    PersistPlanAndExecute,
     WaitFollowup,
     RunFollowup,
     Exit,
@@ -88,15 +75,8 @@ pub(crate) enum NativeLoopAction {
 pub(crate) fn next_loop_step(await_followups: bool, event: NativeLoopEvent) -> NativeLoopAction {
     match event {
         NativeLoopEvent::Cancelled | NativeLoopEvent::Error => NativeLoopAction::Exit,
-        NativeLoopEvent::TurnFinished { plan_pending: true } => {
-            NativeLoopAction::PersistPlanAndExecute
-        }
-        NativeLoopEvent::TurnFinished {
-            plan_pending: false,
-        } if await_followups => NativeLoopAction::WaitFollowup,
-        NativeLoopEvent::TurnFinished {
-            plan_pending: false,
-        } => NativeLoopAction::Exit,
+        NativeLoopEvent::TurnFinished if await_followups => NativeLoopAction::WaitFollowup,
+        NativeLoopEvent::TurnFinished => NativeLoopAction::Exit,
         NativeLoopEvent::FollowupInput => NativeLoopAction::RunFollowup,
         NativeLoopEvent::FollowupFinish => NativeLoopAction::Exit,
     }
@@ -209,6 +189,7 @@ struct NativePermissionRequestEvent {
     mcp_server_id: Option<String>,
     suggested_rule: Option<PermissionRuleSuggestion>,
     file_access: Option<crate::native::tools::file_access::FileAccessPrompt>,
+    allow_once_only: bool,
 }
 
 fn session_kind(plan_mode: bool) -> String {
@@ -236,6 +217,7 @@ fn permission_event(
         mcp_server_id: request.mcp_server_id.clone(),
         suggested_rule: request.suggested_rule.clone(),
         file_access: request.file_access.clone(),
+        allow_once_only: request.allow_once_only,
     }
 }
 
@@ -544,6 +526,7 @@ async fn approve_workspace_hooks(
             mcp_server_id: None,
             suggested_rule: None,
             file_access: None,
+            allow_once_only: false,
         },
         tx,
     );
@@ -622,12 +605,13 @@ fn emit_turn_state(app: &AppHandle, session_record_id: &str, working: &AtomicBoo
     );
 }
 
-fn emit_plan_mode(app: &AppHandle, session_record_id: &str, plan_mode: bool) {
+fn emit_plan_mode(app: &AppHandle, session_record_id: &str, input_queue_id: &str, plan_mode: bool) {
     let _ = app.emit(
         "native-plan-mode",
         NativePlanModeChanged {
             session_record_id: session_record_id.to_string(),
             plan_mode,
+            input_queue_id: Some(input_queue_id.to_string()),
         },
     );
 }
@@ -1621,10 +1605,11 @@ async fn start_native_session_locked(
                 if session.info.workspace_id.as_deref() != Some(&workspace_id) {
                     return Err("会话不属于当前工作区".to_string());
                 }
-                if let Some(runtime) = &session.runtime {
+                let runtime = session.runtime_snapshot();
+                if let Some(runtime) = &runtime {
                     validate_live_configuration(runtime, &payload)?;
                 }
-                session.runtime.clone()
+                runtime
             } else {
                 None
             }
@@ -1881,6 +1866,7 @@ async fn start_native_session_locked(
 
     manager_state.lock().await.add_session(NativeLiveSession {
         runtime: Some(runtime),
+        plan_mode: Arc::new(AtomicBool::new(plan_mode)),
         background: None,
         closing: false,
         info: NativeSessionInfo {
@@ -1987,6 +1973,7 @@ async fn run_native_loop(
         .get_session_mut(&session_record_id)
     {
         session.background = Some(runner.background.clone());
+        runner.ctx.plan_mode = session.plan_mode.clone();
     }
     runner.steer_rx = Some(followup_rx.clone());
     if plan_mode {
@@ -1995,26 +1982,19 @@ async fn run_native_loop(
     }
     let plan_mode_app = app.clone();
     let plan_mode_session = session_record_id.clone();
-    let plan_mode_manager = manager_state.clone();
+    let plan_mode_queue = input_queue.id.clone();
     runner.ctx.on_plan_mode_change = Some(Arc::new(move |value| {
-        emit_plan_mode(&plan_mode_app, &plan_mode_session, value);
-        let manager = plan_mode_manager.clone();
-        let session_id = plan_mode_session.clone();
-        tauri::async_runtime::spawn(async move {
-            if let Some(runtime) = manager
-                .lock()
-                .await
-                .get_session_mut(&session_id)
-                .and_then(|session| session.runtime.as_mut())
-            {
-                runtime.plan_mode = value;
-            }
-        });
+        emit_plan_mode(&plan_mode_app, &plan_mode_session, &plan_mode_queue, value);
     }));
     // The initial event also covers callers that start a session without the
     // Composer (for example, scheduled runs); the frontend has a session_kind
     // fallback when this event races listener registration.
-    emit_plan_mode(&app, &session_record_id, runner.is_plan_mode());
+    emit_plan_mode(
+        &app,
+        &session_record_id,
+        &input_queue.id,
+        runner.is_plan_mode(),
+    );
     attach_mutation_checkpoint(
         &app,
         &mut runner,
@@ -2097,6 +2077,7 @@ async fn run_native_loop(
                     mcp_server_id: prompt.mcp_server_id.clone(),
                     suggested_rule: prompt.suggested_rule.clone(),
                     file_access: prompt.file_access.clone(),
+                    allow_once_only: prompt.allow_once_only,
                 };
                 let should_emit = {
                     let mut manager = manager_state.lock().await;
@@ -2244,6 +2225,17 @@ async fn run_native_loop(
                 )
                 .await;
                 if should_emit {
+                    let manager = manager_state.lock().await;
+                    if !manager
+                        .get_session(&session_record_id)
+                        .and_then(|session| session.pending_plan_approval.front())
+                        .is_some_and(|pending| {
+                            pending.request.request_id == request.request_id
+                                && !pending.reply.is_closed()
+                        })
+                    {
+                        return;
+                    }
                     let _ = app.emit(
                         "native-plan-approval-request",
                         plan_approval_event(&session_record_id, &request),
@@ -2262,6 +2254,27 @@ async fn run_native_loop(
         let profile_q = profile_id.clone();
         let workspace_q = workspace_id.clone();
         let kind_q = kind.clone();
+        let expire_app = app.clone();
+        let expire_manager = manager_state.clone();
+        let expire_session = session_record_id.clone();
+        runner.ctx.expire_plan_approval = Some(Arc::new(move |request_id| {
+            let app = expire_app.clone();
+            let manager = expire_manager.clone();
+            let session_id = expire_session.clone();
+            tauri::async_runtime::spawn(async move {
+                let next = manager
+                    .lock()
+                    .await
+                    .expire_plan_approval(&session_id, &request_id);
+                emit_request_resolved(&app, &session_id, &request_id, "plan_approval");
+                if let Some(request) = next {
+                    let _ = app.emit(
+                        "native-plan-approval-request",
+                        plan_approval_event(&session_id, &request),
+                    );
+                }
+            })
+        }));
         runner.ctx.request_question = Some(std::sync::Arc::new(move |questions, reply| {
             let app = app_q.clone();
             let manager_state = manager_q.clone();
@@ -2468,7 +2481,8 @@ async fn run_native_loop(
                 &profile_id,
                 Some(&workspace_id),
                 &kind,
-                "[PLAN] 已进入计划模式：只读摸底，本轮结束后自动开始执行".to_string(),
+                "[PLAN] 已进入计划模式：等待批准后实施；写入或高风险 Bash 命令须单次确认"
+                    .to_string(),
             )
             .await;
         }
@@ -2604,7 +2618,6 @@ async fn run_native_loop(
 
     let mut next = Some(first_prompt);
     let mut last_error: Option<String> = None;
-    let mut plan_pending = plan_mode;
     let await_followups = true;
     while let Some(prompt) = next.take() {
         if cancel.is_cancelled() {
@@ -2630,7 +2643,7 @@ async fn run_native_loop(
                 runner.set_turn_suffix(crate::native::memory::format_recall_block(dir, &hits));
             }
         }
-        let plan_text = match runner
+        match runner
             .run_with_client(
                 &run.client,
                 &prompt,
@@ -2642,7 +2655,7 @@ async fn run_native_loop(
             )
             .await
         {
-            Ok(text) => text,
+            Ok(_) => {}
             Err(error) => {
                 last_error = Some(error.clone());
                 if !is_cancelled_run_error(&error) {
@@ -2681,54 +2694,7 @@ async fn run_native_loop(
             last_transcript_fingerprint.as_ref(),
         )
         .await;
-        // 初始计划只有在没有显式提交 ExitPlanMode 时才自动进入执行；被退回的
-        // 计划必须继续等待用户输入。获批时 runner 已经切出计划模式，同样不追加。
-        let plan_exit_requested = runner.take_plan_exit_requested();
-        if plan_pending && (plan_exit_requested || !runner.is_plan_mode()) {
-            plan_pending = false;
-        }
-        match next_loop_step(
-            await_followups,
-            NativeLoopEvent::TurnFinished { plan_pending },
-        ) {
-            NativeLoopAction::PersistPlanAndExecute => {
-                if let Some(plan) = usable_native_plan_text(&plan_text) {
-                    emit_native_line(
-                        &app,
-                        &session_record_id,
-                        &profile_id,
-                        Some(&workspace_id),
-                        &kind,
-                        format!("[PLAN]\n{plan}"),
-                    )
-                    .await;
-                }
-                if cancel.is_cancelled() {
-                    break;
-                }
-                plan_pending = false;
-                runner.set_read_only(false);
-                runner.set_plan_mode(false);
-                emit_native_line(
-                    &app,
-                    &session_record_id,
-                    &profile_id,
-                    Some(&workspace_id),
-                    &kind,
-                    "[PLAN] 开始执行".to_string(),
-                )
-                .await;
-                next = Some(if let Some(def) = run.bound_subagent.as_ref() {
-                    runner.required_subagent_type = Some(def.name.clone());
-                    crate::native::prompt::wrap_prompt_for_required_subagent(
-                        EXECUTE_AFTER_PLAN,
-                        &def.name,
-                    )
-                } else {
-                    EXECUTE_AFTER_PLAN.to_string()
-                });
-                continue;
-            }
+        match next_loop_step(await_followups, NativeLoopEvent::TurnFinished) {
             NativeLoopAction::WaitFollowup => {
                 if cancel.is_cancelled() {
                     let _ = next_loop_step(await_followups, NativeLoopEvent::Cancelled);
@@ -3496,8 +3462,8 @@ pub async fn resume_native_session(
 mod tests {
     use super::{
         format_native_diagnostics, is_cancelled_run_error, is_mcp_error_status,
-        native_startup_banner, next_loop_step, should_announce_session_startup,
-        usable_native_plan_text, NativeLoopAction, NativeLoopEvent,
+        native_startup_banner, next_loop_step, should_announce_session_startup, NativeLoopAction,
+        NativeLoopEvent,
     };
     use crate::native::agent::compact::{BudgetSnapshot, ContextWindow};
     use crate::native::agent::r#loop::AgentDiagnosticsSnapshot;
@@ -3643,6 +3609,7 @@ mod tests {
                 session_record_id: "finish-test".to_string(),
             },
             runtime: None,
+            plan_mode: std::sync::Arc::default(),
             background: None,
             closing: false,
             cancel,
@@ -3699,6 +3666,7 @@ mod tests {
             kind: NativeToolRiskKind::Opaque,
             summary: "rm -rf /tmp/x".to_string(),
             file_access: None,
+            allow_once_only: false,
             remote: false,
             mcp_server_id: None,
             suggested_rule: Some(PermissionRuleSuggestion {
@@ -3784,16 +3752,6 @@ mod tests {
     }
 
     #[test]
-    fn usable_native_plan_text_requires_non_empty_body() {
-        assert_eq!(
-            usable_native_plan_text("  目标与范围  "),
-            Some("目标与范围")
-        );
-        assert_eq!(usable_native_plan_text("   \n\t"), None);
-        assert_eq!(usable_native_plan_text(""), None);
-    }
-
-    #[test]
     fn runtime_effort_clamps_to_channel_allowed_levels() {
         let mut config = crate::native::model_catalog::apply_catalog_defaults("gpt-5.6-luna");
         config.thinking_enabled = Some(true);
@@ -3864,25 +3822,11 @@ mod tests {
     #[test]
     fn next_loop_step_covers_plan_followup_and_exit() {
         assert_eq!(
-            next_loop_step(false, NativeLoopEvent::TurnFinished { plan_pending: true }),
-            NativeLoopAction::PersistPlanAndExecute
-        );
-        assert_eq!(
-            next_loop_step(
-                true,
-                NativeLoopEvent::TurnFinished {
-                    plan_pending: false
-                }
-            ),
+            next_loop_step(true, NativeLoopEvent::TurnFinished),
             NativeLoopAction::WaitFollowup
         );
         assert_eq!(
-            next_loop_step(
-                false,
-                NativeLoopEvent::TurnFinished {
-                    plan_pending: false
-                }
-            ),
+            next_loop_step(false, NativeLoopEvent::TurnFinished),
             NativeLoopAction::Exit
         );
         assert_eq!(
@@ -4013,6 +3957,7 @@ mod tests {
                 session_record_id: "sess-1".to_string(),
             },
             runtime: None,
+            plan_mode: std::sync::Arc::default(),
             background: None,
             closing: false,
             cancel: CancelFlag::new(),
@@ -4086,6 +4031,7 @@ mod tests {
                 session_record_id: "sess-1".to_string(),
             },
             runtime: None,
+            plan_mode: std::sync::Arc::default(),
             background: None,
             closing: false,
             cancel: CancelFlag::new(),

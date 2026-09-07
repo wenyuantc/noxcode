@@ -763,6 +763,7 @@ export interface NativePermissionRequest {
   mcp_server_id: string | null;
   suggested_rule?: PermissionRuleSuggestion | null;
   file_access?: FileAccessPrompt | null;
+  allow_once_only?: boolean;
 }
 
 export interface NativePlanApprovalRequest {
@@ -814,6 +815,7 @@ export interface NativeTurnState {
 export interface NativePlanModeChanged {
   session_record_id: string;
   plan_mode: boolean;
+  input_queue_id?: string | null;
 }
 
 export interface QuickPrompt {

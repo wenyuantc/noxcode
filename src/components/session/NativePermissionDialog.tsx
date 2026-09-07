@@ -196,14 +196,18 @@ export function NativePermissionDialog() {
             <Button variant="outline" onClick={() => resolve("allow_once")}>
               {t("permissionAllowOnce")}
             </Button>
-            {access || pending?.tool_name === "WorkspaceHooks" ? null : pending?.kind === "mcp" ? (
+            {access ||
+            pending?.allow_once_only ||
+            pending?.tool_name === "WorkspaceHooks" ? null : pending?.kind === "mcp" ? (
               <Button onClick={() => resolve("allow_server")}>{t("permissionAllowServer")}</Button>
             ) : (
               <Button onClick={() => resolve("allow_session")}>
                 {t("permissionAllowSession")}
               </Button>
             )}
-            {(access || suggestion) && pending?.tool_name !== "WorkspaceHooks" ? (
+            {(access || suggestion) &&
+            !pending?.allow_once_only &&
+            pending?.tool_name !== "WorkspaceHooks" ? (
               <Button
                 variant="secondary"
                 className="h-auto min-h-8 whitespace-normal break-words [overflow-wrap:anywhere]"

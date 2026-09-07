@@ -48,6 +48,7 @@ interface SessionState {
   selectedSessionId: string | null;
   liveBySession: Record<string, AgentSessionStarted>;
   planModeBySession: Record<string, boolean>;
+  planModeRunBySession: Record<string, string | null>;
   lines: Record<string, RawSessionLine[]>;
   historyLoaded: Record<string, boolean>;
   configurationBySession: Record<string, NativeSessionRuntime>;
@@ -67,7 +68,7 @@ interface SessionState {
   onDelta: (delta: NativeTextDelta) => void;
   onUsage: (usage: NativeContextUsage) => void;
   onTurnState: (sessionId: string, state: string) => void;
-  onPlanMode: (sessionId: string, planMode: boolean) => void;
+  onPlanMode: (sessionId: string, planMode: boolean, inputQueueId?: string | null) => void;
   onExit: (exit: AgentSessionExit) => void;
   setPermission: (request: NativePermissionRequest) => void;
   setPlanQuestion: (request: NativePlanQuestionRequest) => void;
@@ -84,6 +85,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
   selectedSessionId: null,
   liveBySession: {},
   planModeBySession: {},
+  planModeRunBySession: {},
   lines: {},
   historyLoaded: {},
   configurationBySession: {},
@@ -171,17 +173,24 @@ export const useSessionStore = create<SessionState>((set, get) => ({
     if (inputQueueBySession[id]?.queue_id !== session.input_queue_id) {
       delete inputQueueBySession[id];
     }
-    const planModeBySession = Object.prototype.hasOwnProperty.call(current.planModeBySession, id)
-      ? current.planModeBySession
-      : { ...current.planModeBySession, [id]: session.session_kind === "plan" };
+    const planModeRunBySession = { ...current.planModeRunBySession };
+    const hasModeEvent =
+      Object.prototype.hasOwnProperty.call(planModeRunBySession, id) &&
+      planModeRunBySession[id] === (session.input_queue_id ?? null);
+    const planMode = hasModeEvent
+      ? current.planModeBySession[id]
+      : (session.runtime?.plan_mode ??
+        current.planModeBySession[id] ??
+        session.session_kind === "plan");
+    if (!hasModeEvent) delete planModeRunBySession[id];
+    const runtime = session.runtime ? { ...session.runtime, plan_mode: planMode } : session.runtime;
     set({
-      liveBySession: { ...current.liveBySession, [id]: session },
+      liveBySession: { ...current.liveBySession, [id]: { ...session, runtime } },
       inputQueueBySession,
-      planModeBySession: session.runtime
-        ? { ...planModeBySession, [id]: session.runtime.plan_mode }
-        : planModeBySession,
-      configurationBySession: session.runtime
-        ? { ...current.configurationBySession, [id]: session.runtime }
+      planModeBySession: { ...current.planModeBySession, [id]: planMode },
+      planModeRunBySession,
+      configurationBySession: runtime
+        ? { ...current.configurationBySession, [id]: runtime }
         : current.configurationBySession,
       backgroundBySession: current.liveBySession[id]
         ? current.backgroundBySession
@@ -233,15 +242,29 @@ export const useSessionStore = create<SessionState>((set, get) => ({
   },
   onUsage: (usage) => set({ usage: { ...get().usage, [usage.session_record_id]: usage } }),
   onTurnState: (sessionId, state) => set({ turnState: { ...get().turnState, [sessionId]: state } }),
-  onPlanMode: (sessionId, planMode) =>
-    set({
-      planModeBySession: { ...get().planModeBySession, [sessionId]: planMode },
-      configurationBySession: get().configurationBySession[sessionId]
-        ? {
-            ...get().configurationBySession,
-            [sessionId]: { ...get().configurationBySession[sessionId], plan_mode: planMode },
-          }
-        : get().configurationBySession,
+  onPlanMode: (sessionId, planMode, inputQueueId) =>
+    set((state) => {
+      const live = state.liveBySession[sessionId];
+      if (inputQueueId && live?.input_queue_id && inputQueueId !== live.input_queue_id) return {};
+      return {
+        planModeBySession: { ...state.planModeBySession, [sessionId]: planMode },
+        planModeRunBySession: {
+          ...state.planModeRunBySession,
+          [sessionId]: inputQueueId ?? live?.input_queue_id ?? null,
+        },
+        liveBySession: live?.runtime
+          ? {
+              ...state.liveBySession,
+              [sessionId]: { ...live, runtime: { ...live.runtime, plan_mode: planMode } },
+            }
+          : state.liveBySession,
+        configurationBySession: state.configurationBySession[sessionId]
+          ? {
+              ...state.configurationBySession,
+              [sessionId]: { ...state.configurationBySession[sessionId], plan_mode: planMode },
+            }
+          : state.configurationBySession,
+      };
     }),
   onExit: (exit) => {
     const liveBySession = { ...get().liveBySession };
@@ -256,6 +279,8 @@ export const useSessionStore = create<SessionState>((set, get) => ({
     delete planApprovals[exit.session_record_id];
     const inputQueueBySession = { ...get().inputQueueBySession };
     delete inputQueueBySession[exit.session_record_id];
+    const planModeRunBySession = { ...get().planModeRunBySession };
+    delete planModeRunBySession[exit.session_record_id];
     set({
       liveBySession,
       stream,
@@ -263,6 +288,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
       planQuestions,
       planApprovals,
       inputQueueBySession,
+      planModeRunBySession,
       backgroundBySession: {
         ...get().backgroundBySession,
         [exit.session_record_id]: (get().backgroundBySession[exit.session_record_id] ?? []).map(

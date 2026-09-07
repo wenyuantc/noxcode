@@ -774,6 +774,8 @@ pub struct NativeTurnState {
 pub struct NativePlanModeChanged {
     pub session_record_id: String,
     pub plan_mode: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_queue_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, FromRow)]

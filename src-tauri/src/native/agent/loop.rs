@@ -346,15 +346,8 @@ impl AgentRunner {
         self.ctx.set_plan_mode(plan_mode);
     }
 
-    /// 模型可能已通过 ExitPlanMode 结束计划模式，会话层据此决定是否还要自动实施。
     pub fn is_plan_mode(&self) -> bool {
         self.ctx.is_plan_mode()
-    }
-
-    /// Consume the current turn's explicit ExitPlanMode marker. A rejected
-    /// approval must leave an initially planned session in plan mode.
-    pub fn take_plan_exit_requested(&self) -> bool {
-        self.ctx.take_plan_exit_requested()
     }
 
     pub fn take_steer_finish(&mut self) -> bool {
@@ -597,7 +590,10 @@ impl AgentRunner {
             tools.retain(|tool| !disallowed.contains(&tool.name));
         }
         if read_only {
-            tools.retain(|tool| crate::native::tools::is_read_only_native_tool(&tool.name));
+            tools.retain(|tool| {
+                crate::native::tools::is_read_only_native_tool(&tool.name)
+                    || (plan_mode && tool.name == "Bash")
+            });
         }
         tools
     }
@@ -3217,6 +3213,83 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn completed_plan_and_followup_never_enable_unapproved_mutations() {
+        use crate::native::session::{next_loop_step, NativeLoopAction, NativeLoopEvent};
+        for yolo in [false, true] {
+            let (mut runner, root) = temp_runner();
+            runner.set_plan_mode(true);
+            runner.ctx.allow_all_high_risk.store(yolo, Ordering::SeqCst);
+            runner.ctx.request_permission = Some(Arc::new(|_, _| {
+                panic!("writers must be blocked before permission prompts")
+            }));
+            let original = fs::read(root.join("hello.txt")).unwrap();
+            let plan = runner
+                .run_scripted(
+                    "排查 API 日志",
+                    vec![Message::assistant_text("计划：修复请求并验证")],
+                )
+                .await
+                .unwrap();
+            assert!(!plan.is_empty());
+            assert_eq!(
+                next_loop_step(true, NativeLoopEvent::TurnFinished),
+                NativeLoopAction::WaitFollowup
+            );
+            assert!(runner.ctx.is_read_only() && runner.is_plan_mode());
+            let patch = r#"{"patch":"*** Begin Patch\n*** Update File: hello.txt\n*** Move to: moved.txt\n@@\n-hello world\n+changed\n*** Add File: new.txt\n+new\n*** End Patch"}"#;
+            runner.run_scripted("计划阶段已结束，按方案立即实施", vec![
+                assistant_tool_calls(&[
+                    ("patch", "ApplyPatch", patch),
+                    ("write", "Write", r#"{"file_path":"hello.txt","content":"changed"}"#),
+                    ("edit", "Edit", r#"{"file_path":"hello.txt","old_string":"hello","new_string":"changed"}"#),
+                    ("mcp", "mcp_fs_write", "{}"),
+                ]),
+                Message::assistant_text("等待批准"),
+            ]).await.unwrap();
+            assert!(runner.is_plan_mode());
+            assert_eq!(fs::read(root.join("hello.txt")).unwrap(), original);
+            assert!(!root.join("moved.txt").exists() && !root.join("new.txt").exists());
+            assert_eq!(
+                runner
+                    .messages
+                    .iter()
+                    .filter(|message| message.role == Role::Tool
+                        && message.content.contains("只读规划模式禁止"))
+                    .count(),
+                4
+            );
+            fs::remove_dir_all(root).unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn plan_approval_controls_later_writes_in_the_same_tool_batch() {
+        use crate::native::tools::dispatch::PlanApprovalAnswer;
+        for approved in [false, true] {
+            let (mut runner, root) = temp_runner();
+            runner.set_plan_mode(true);
+            runner.ctx.allow_all_high_risk.store(true, Ordering::SeqCst);
+            runner.ctx.request_plan_approval = Some(Arc::new(move |_, tx| {
+                tx.send(PlanApprovalAnswer {
+                    approved,
+                    feedback: String::new(),
+                })
+                .unwrap();
+            }));
+            runner.run_scripted("提出计划", vec![
+                assistant_tool_calls(&[
+                    ("exit", "ExitPlanMode", r#"{"plan":"add new.txt"}"#),
+                    ("patch", "ApplyPatch", r#"{"patch":"*** Begin Patch\n*** Add File: new.txt\n+approved\n*** End Patch"}"#),
+                ]),
+                Message::assistant_text("done"),
+            ]).await.unwrap();
+            assert_eq!(root.join("new.txt").exists(), approved);
+            assert_eq!(runner.is_plan_mode(), !approved);
+            fs::remove_dir_all(root).unwrap();
+        }
+    }
+
+    #[tokio::test]
     async fn plan_mode_advertises_sqlite_query_and_returns_database_rows_to_model() {
         use sqlx::Connection;
         let (mut runner, root) = temp_runner();
@@ -3238,7 +3311,7 @@ mod tests {
         runner.set_read_only(true);
         runner.set_plan_mode(true);
         assert!(runner.tool_names().iter().any(|name| name == "SQLiteQuery"));
-        assert!(!runner.tool_names().iter().any(|name| name == "Bash"));
+        assert!(runner.tool_names().iter().any(|name| name == "Bash"));
         runner
             .run_scripted(
                 "查一下数据库",
@@ -3650,7 +3723,7 @@ mod tests {
         plan.set_plan_mode(true);
         let plan_names = plan.tool_names();
         assert!(plan_names.iter().any(|name| name == "SQLiteQuery"));
-        assert!(!plan_names.iter().any(|name| name == "Bash"));
+        assert!(plan_names.iter().any(|name| name == "Bash"));
         assert!(plan_names.iter().any(|name| name == "AskUserQuestion"));
         assert!(plan_names.iter().any(|name| name == "ExitPlanMode"));
         assert!(!plan_names.iter().any(|name| name == "EnterPlanMode"));

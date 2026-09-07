@@ -24,8 +24,8 @@ use super::mcp::SharedMcp;
 use super::patch::{extract_patch_text, parse_patch, patch_counts, plan_mutations, FileMutation};
 use super::paths::resolve_under_workspace;
 use super::permission::{
-    classify_native_tool_risk, suggest_rule, NativePermissionDecision, NativeToolRisk,
-    NativeToolRiskKind, PermissionRuleSuggestion, PermissionRules, RuleDecision,
+    classify_native_tool_risk, classify_plan_bash_risk, suggest_rule, NativePermissionDecision,
+    NativeToolRisk, NativeToolRiskKind, PermissionRuleSuggestion, PermissionRules, RuleDecision,
 };
 use super::question::{format_ask_question_result, parse_ask_question_args, PlanQuestionAnswer};
 use super::ssh::SshToolRuntime;
@@ -87,6 +87,7 @@ pub struct PermissionPrompt {
     /// 「总是允许」时建议保存的规则。
     pub suggested_rule: Option<PermissionRuleSuggestion>,
     pub file_access: Option<FileAccessPrompt>,
+    pub allow_once_only: bool,
 }
 
 pub type PermissionRequester =
@@ -126,13 +127,11 @@ pub struct ToolCtx {
     pub permission_timeout: Duration,
     pub request_question: Option<QuestionRequester>,
     pub request_plan_approval: Option<PlanApprovalRequester>,
+    pub expire_plan_approval: Option<PermissionExpirer>,
     /// 只读（计划）模式开关；`EnterPlanMode` / `ExitPlanMode` 在运行中切换，所以用共享原子量。
     pub read_only: Arc<AtomicBool>,
-    /// 是否处于计划模式（决定 ExitPlanMode 是否可见、会话层是否等待自动实施）。
+    /// 与宿主共享的计划模式状态；只能在用户批准后解除。
     pub plan_mode: Arc<AtomicBool>,
-    /// 本回合是否明确提交过 ExitPlanMode；即使用户退回，也不能被初始计划的
-    /// 自动执行分支强行切出计划模式。
-    pub plan_exit_requested: Arc<AtomicBool>,
     /// build 模式：不透明 shell 命令免确认。
     pub auto_approve_opaque_bash: bool,
     /// build 模式：带 `readOnlyHint` 的 MCP 工具免确认。
@@ -176,9 +175,9 @@ impl ToolCtx {
             permission_timeout: Duration::ZERO,
             request_question: None,
             request_plan_approval: None,
+            expire_plan_approval: None,
             read_only: Arc::new(AtomicBool::new(false)),
             plan_mode: Arc::new(AtomicBool::new(false)),
-            plan_exit_requested: Arc::new(AtomicBool::new(false)),
             auto_approve_opaque_bash: false,
             auto_approve_readonly_mcp: false,
             permission_rules: Arc::new(RwLock::new(PermissionRules::default())),
@@ -207,7 +206,7 @@ impl ToolCtx {
     }
 
     pub fn is_read_only(&self) -> bool {
-        self.read_only.load(Ordering::SeqCst)
+        self.is_plan_mode() || self.read_only.load(Ordering::SeqCst)
     }
 
     pub fn set_read_only(&self, value: bool) {
@@ -227,12 +226,8 @@ impl ToolCtx {
         }
     }
 
-    pub fn mark_plan_exit_requested(&self) {
-        self.plan_exit_requested.store(true, Ordering::SeqCst);
-    }
-
-    pub fn take_plan_exit_requested(&self) -> bool {
-        self.plan_exit_requested.swap(false, Ordering::SeqCst)
+    fn allows_in_read_only(&self, contract: &ToolContract) -> bool {
+        contract.allowed_in_plan_mode || (self.is_plan_mode() && contract.name == "Bash")
     }
 
     /// 规则匹配用的工作区根：SSH 用远端路径，本地用工作区目录。
@@ -334,9 +329,9 @@ impl ToolCtx {
         child.mcp = SharedMcp::empty();
         child.read_only = Arc::new(AtomicBool::new(false));
         child.plan_mode = Arc::new(AtomicBool::new(false));
-        child.plan_exit_requested = Arc::new(AtomicBool::new(false));
         child.request_question = None;
         child.request_plan_approval = None;
+        child.expire_plan_approval = None;
         child.on_mutation = None;
         child.on_plan_mode_change = None;
         child.background = None;
@@ -428,7 +423,7 @@ pub(crate) async fn preflight_tool(ctx: &ToolCtx, call: &ToolCall) -> Result<Pre
         return Err("已取消".to_string());
     }
     let contract = ctx.contract_for(name).await;
-    if ctx.is_read_only() && !contract.allowed_in_plan_mode {
+    if ctx.is_read_only() && !ctx.allows_in_read_only(&contract) {
         return Err(format!("只读规划模式禁止调用工具 {name}"));
     }
     let pre = run_pre_tool_hooks(&ctx.hook_runtime(), name, arguments).await?;
@@ -443,7 +438,7 @@ pub(crate) async fn preflight_tool(ctx: &ToolCtx, call: &ToolCall) -> Result<Pre
     if ctx.cancel.is_cancelled() {
         return Err("已取消".to_string());
     }
-    if ctx.is_read_only() && !contract.allowed_in_plan_mode {
+    if ctx.is_read_only() && !ctx.allows_in_read_only(&contract) {
         return Err(format!("只读规划模式禁止调用工具 {name}"));
     }
     Ok(PreparedTool {
@@ -838,7 +833,7 @@ fn call_enter_plan_mode(ctx: &ToolCtx) -> Result<String, String> {
     }
     ctx.set_read_only(true);
     ctx.set_plan_mode(true);
-    Ok("已进入计划模式：只能使用只读工具摸底。计划写好后调用 ExitPlanMode 提交，等用户批准再实施。".to_string())
+    Ok("已进入计划模式：使用只读工具摸底；写入或高风险 Bash 命令须用户单次确认，确认后仍保持计划模式。计划写好后调用 ExitPlanMode 提交，等用户批准再实施。".to_string())
 }
 
 async fn call_exit_plan_mode(ctx: &ToolCtx, arguments: &str) -> Result<String, String> {
@@ -847,19 +842,14 @@ async fn call_exit_plan_mode(ctx: &ToolCtx, arguments: &str) -> Result<String, S
     }
     let args = parse_args(arguments)?;
     let plan = string_arg(&args, "plan")?;
-    // A rejected submission is still an explicit hand-off attempt. The session
-    // loop uses this marker to avoid its initial-plan auto-transition.
-    ctx.mark_plan_exit_requested();
     let Some(requester) = ctx.request_plan_approval.clone() else {
-        // 无交互通道（无头会话）时视为自动批准。
-        ctx.set_read_only(false);
-        ctx.set_plan_mode(false);
-        return Ok("计划已记录（无人值守，自动批准），进入实施。".to_string());
+        return Err("当前没有可用的计划审批通道，保持计划模式".to_string());
     };
+    let request_id = uuid::Uuid::new_v4().to_string();
     let (tx, rx) = oneshot::channel();
     requester(
         PlanApprovalPrompt {
-            request_id: uuid::Uuid::new_v4().to_string(),
+            request_id: request_id.clone(),
             plan: plan.clone(),
         },
         tx,
@@ -873,8 +863,24 @@ async fn call_exit_plan_mode(ctx: &ToolCtx, arguments: &str) -> Result<String, S
                 }
                 tokio::time::sleep(Duration::from_millis(50)).await;
             }
-        } => return Err("已取消".to_string()),
-        result = rx => result.map_err(|_| "已取消".to_string())?,
+        } => Err("已取消".to_string()),
+        _ = async {
+            if ctx.permission_timeout.is_zero() {
+                std::future::pending::<()>().await;
+            } else {
+                tokio::time::sleep(ctx.permission_timeout).await;
+            }
+        } => Err("计划审批超时，保持计划模式".to_string()),
+        result = rx => result.map_err(|_| "计划审批通道已关闭，保持计划模式".to_string()),
+    };
+    let answer = match answer {
+        Ok(answer) if !ctx.cancel.is_cancelled() => answer,
+        result => {
+            if let Some(expire) = &ctx.expire_plan_approval {
+                let _ = expire(request_id).await;
+            }
+            return Err(result.err().unwrap_or_else(|| "已取消".to_string()));
+        }
     };
     if answer.approved {
         ctx.set_read_only(false);
@@ -1006,6 +1012,7 @@ async fn enforce_permissions(
     arguments: &str,
 ) -> Result<(), String> {
     let root = ctx.rules_workspace_root();
+    let plan_bash = ctx.is_plan_mode() && name == "Bash";
     let decision = ctx
         .permission_rules
         .read()
@@ -1019,7 +1026,7 @@ async fn enforce_permissions(
                 rule.pattern
             ));
         }
-        RuleDecision::Allow(_) => return Ok(()),
+        RuleDecision::Allow(_) if !plan_bash => return Ok(()),
         RuleDecision::Ask(rule) => {
             return request_permission(
                 ctx,
@@ -1029,13 +1036,25 @@ async fn enforce_permissions(
                 format!(
                     "规则 `{}` 要求确认：{}",
                     rule.pattern,
-                    call_brief(name, arguments)
+                    if plan_bash {
+                        format!("Bash {}", string_arg(&parse_args(arguments)?, "command")?)
+                    } else {
+                        call_brief(name, arguments)
+                    }
                 ),
                 None,
             )
             .await;
         }
-        RuleDecision::NoMatch => {}
+        RuleDecision::NoMatch | RuleDecision::Allow(_) => {}
+    }
+    if plan_bash {
+        return match classify_plan_bash_risk(arguments) {
+            NativeToolRisk::Low => Ok(()),
+            NativeToolRisk::High { kind, summary } => {
+                request_permission(ctx, name, arguments, kind, summary, None).await
+            }
+        };
     }
     let exists = match name {
         "Write" => write_target_exists(ctx, arguments).await,
@@ -1121,15 +1140,18 @@ async fn request_permission(
     } else {
         None
     };
+    let allow_once_only = ctx.is_plan_mode() && name == "Bash";
+    // Plan Bash approvals cannot grant permission to other calls or end planning.
     // ask 规则显式要求确认，不受 yolo / 会话放行影响。
     let rule_forced = kind == NativeToolRiskKind::Rule;
-    if !rule_forced
+    if !allow_once_only
+        && !rule_forced
         && kind != NativeToolRiskKind::Mcp
         && ctx.allow_all_high_risk.load(Ordering::SeqCst)
     {
         return Ok(());
     }
-    if kind == NativeToolRiskKind::Overwrite && ctx.auto_approve_overwrite {
+    if !allow_once_only && kind == NativeToolRiskKind::Overwrite && ctx.auto_approve_overwrite {
         return Ok(());
     }
     // permission_request 钩子可以代替用户直接给出 allow / deny；ask 则继续弹窗。
@@ -1137,7 +1159,9 @@ async fn request_permission(
         run_permission_request_hooks(&ctx.hook_runtime(), name, arguments, kind, &summary).await
     {
         match hook_decision.decision {
-            HookDecision::Allow if kind != NativeToolRiskKind::ExternalPath => return Ok(()),
+            HookDecision::Allow if !allow_once_only && kind != NativeToolRiskKind::ExternalPath => {
+                return Ok(())
+            }
             HookDecision::Allow => {}
             HookDecision::Deny => {
                 return Err(match hook_decision.reason {
@@ -1149,12 +1173,16 @@ async fn request_permission(
         }
     }
     let contract = ctx.contract_for(name).await;
-    let suggested_rule = suggest_rule(
-        &contract,
-        name,
-        arguments,
-        Some(&ctx.rules_workspace_root()),
-    );
+    let suggested_rule = if allow_once_only {
+        None
+    } else {
+        suggest_rule(
+            &contract,
+            name,
+            arguments,
+            Some(&ctx.rules_workspace_root()),
+        )
+    };
     if kind == NativeToolRiskKind::Mcp {
         if let Some(server_id) = mcp_server_id.as_deref() {
             if ctx
@@ -1168,7 +1196,7 @@ async fn request_permission(
         }
     }
     let Some(requester) = ctx.request_permission.clone() else {
-        if file_access.is_some() {
+        if file_access.is_some() || allow_once_only {
             return Err("当前没有可用的权限确认通道，操作未执行".to_string());
         }
         // Setting off, or tests that skip the UI channel.
@@ -1188,6 +1216,7 @@ async fn request_permission(
         mcp_server_id,
         suggested_rule: suggested_rule.clone(),
         file_access: file_access.clone(),
+        allow_once_only,
     };
     let (tx, rx) = oneshot::channel();
     requester(prompt, tx);
@@ -1231,6 +1260,17 @@ async fn request_permission(
         }
         PermissionWait::Decision(decision) => decision,
     };
+    if ctx.cancel.is_cancelled() {
+        return Err("已取消".to_string());
+    }
+    if allow_once_only
+        && !matches!(
+            decision,
+            NativePermissionDecision::AllowOnce | NativePermissionDecision::Deny
+        )
+    {
+        return Err("计划模式下的 Bash 命令只能本次允许或拒绝".to_string());
+    }
     match decision {
         NativePermissionDecision::AllowSession | NativePermissionDecision::AllowServer
             if file_access.is_some() =>
@@ -2523,7 +2563,189 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn plan_mode_tools_toggle_read_only_and_auto_approve_headless() {
+    async fn plan_approval_failure_never_unlocks_tools() {
+        for scenario in ["closed", "cancelled", "timeout"] {
+            let root = tempfile::tempdir().unwrap();
+            let mut ctx = ctx_for(root.path());
+            ctx.set_plan_mode(true);
+            ctx.permission_timeout = Duration::from_millis(5);
+            let held = Arc::new(Mutex::new(None));
+            let held_sink = held.clone();
+            let cancel = ctx.cancel.clone();
+            ctx.request_plan_approval = Some(Arc::new(move |prompt, tx| match scenario {
+                "closed" => drop(tx),
+                "cancelled" => {
+                    tx.send(PlanApprovalAnswer {
+                        approved: true,
+                        feedback: String::new(),
+                    })
+                    .unwrap();
+                    cancel.cancel();
+                }
+                _ => *held_sink.lock().unwrap() = Some((prompt.request_id, tx)),
+            }));
+            let expired = Arc::new(Mutex::new(false));
+            let expired_sink = expired.clone();
+            ctx.expire_plan_approval = Some(Arc::new(move |_| {
+                let expired = expired_sink.clone();
+                tauri::async_runtime::spawn(async move {
+                    *expired.lock().unwrap() = true;
+                })
+            }));
+            assert!(
+                execute_tool(&ctx, "ExitPlanMode", r#"{"plan":"change files"}"#)
+                    .await
+                    .is_err(),
+                "{scenario}"
+            );
+            assert!(ctx.is_plan_mode() && ctx.is_read_only(), "{scenario}");
+            assert!(*expired.lock().unwrap(), "{scenario}");
+            let held_reply = held.lock().unwrap().take();
+            if let Some((_, tx)) = held_reply {
+                assert!(tx
+                    .send(PlanApprovalAnswer {
+                        approved: true,
+                        feedback: String::new()
+                    })
+                    .is_err());
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn plan_bash_requires_one_call_approval_despite_all_auto_allow_sources() {
+        use super::super::contract::{PatternSource, PermissionCapability};
+        use super::super::permission::{PermissionRule, RuleEffect, RuleScope};
+        let root = tempfile::tempdir().unwrap();
+        fs::write(root.path().join("keep.txt"), "original").unwrap();
+        let mut ctx = ctx_for(root.path());
+        ctx.set_plan_mode(true);
+        ctx.auto_approve_overwrite = true;
+        ctx.auto_approve_opaque_bash = true;
+        ctx.allow_all_high_risk.store(true, Ordering::SeqCst);
+        ctx.permission_rules.write().unwrap().push(
+            RuleEffect::Allow,
+            PermissionRule {
+                id: "bash-allow".into(),
+                capability: PermissionCapability::Bash,
+                pattern: "*".into(),
+                source: PatternSource::Command,
+                scope: RuleScope::Workspace,
+                note: String::new(),
+                external_path: None,
+            },
+        );
+        ctx.hooks = vec![crate::db::models::NativeHook::shell(
+            "auto-allow",
+            crate::native::settings::HOOK_EVENT_PERMISSION_REQUEST,
+            "Bash",
+            r#"printf '{"decision":"allow"}'"#,
+            10,
+            true,
+        )];
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let seen_sink = seen.clone();
+        ctx.request_permission = Some(Arc::new(move |prompt, tx| {
+            assert!(prompt.allow_once_only && prompt.suggested_rule.is_none());
+            let mut seen = seen_sink.lock().unwrap();
+            seen.push(prompt.summary);
+            tx.send(if seen.len() == 1 {
+                NativePermissionDecision::AllowOnce
+            } else {
+                NativePermissionDecision::Deny
+            })
+            .unwrap();
+        }));
+        execute_tool(&ctx, "Bash", r#"{"command":"cat keep.txt"}"#)
+            .await
+            .unwrap();
+        assert!(seen.lock().unwrap().is_empty());
+        execute_tool(&ctx, "Bash", r#"{"command":"printf approved > keep.txt"}"#)
+            .await
+            .unwrap();
+        assert_eq!(
+            fs::read_to_string(root.path().join("keep.txt")).unwrap(),
+            "approved"
+        );
+        assert!(execute_tool(&ctx, "Bash", r#"{"command":"rm keep.txt"}"#)
+            .await
+            .is_err());
+        assert_eq!(seen.lock().unwrap().len(), 2);
+        assert!(ctx.is_plan_mode() && ctx.is_read_only());
+        assert_eq!(
+            fs::read_to_string(root.path().join("keep.txt")).unwrap(),
+            "approved"
+        );
+        assert_eq!(ctx.permission_rules_snapshot().allow.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn plan_bash_checks_hook_rewrites_and_fails_closed_without_confirmation() {
+        let root = tempfile::tempdir().unwrap();
+        let mut ctx = ctx_for(root.path());
+        ctx.set_plan_mode(true);
+        ctx.hooks = vec![crate::db::models::NativeHook::shell(
+            "rewrite",
+            crate::native::settings::HOOK_EVENT_PRE_TOOL_USE,
+            "Bash",
+            r#"printf '{"updated_input":{"command":"touch changed.txt"}}'"#,
+            10,
+            true,
+        )];
+        assert!(execute_tool(&ctx, "Bash", r#"{"command":"pwd"}"#)
+            .await
+            .unwrap_err()
+            .contains("确认通道"));
+        assert!(!root.path().join("changed.txt").exists());
+        for decision in [
+            NativePermissionDecision::AllowAlways,
+            NativePermissionDecision::AllowSession,
+            NativePermissionDecision::AllowServer,
+            NativePermissionDecision::Deny,
+        ] {
+            ctx.request_permission = Some(Arc::new(move |prompt, tx| {
+                assert!(prompt.summary.contains("touch changed.txt"));
+                tx.send(decision).unwrap();
+            }));
+            assert!(execute_tool(&ctx, "Bash", r#"{"command":"pwd"}"#)
+                .await
+                .is_err());
+            assert!(ctx.is_plan_mode());
+            assert!(!ctx.allow_all_high_risk.load(Ordering::SeqCst));
+            assert!(!root.path().join("changed.txt").exists());
+        }
+    }
+
+    #[tokio::test]
+    async fn parallel_plan_bash_approvals_do_not_leak_between_calls() {
+        let root = tempfile::tempdir().unwrap();
+        let mut ctx = ctx_for(root.path());
+        ctx.set_plan_mode(true);
+        let calls = Arc::new(Mutex::new(0));
+        let calls_sink = calls.clone();
+        ctx.request_permission = Some(Arc::new(move |prompt, tx| {
+            *calls_sink.lock().unwrap() += 1;
+            tx.send(if prompt.summary.contains("allowed.txt") {
+                NativePermissionDecision::AllowOnce
+            } else {
+                NativePermissionDecision::Deny
+            })
+            .unwrap();
+        }));
+        let (allowed, denied) = tokio::join!(
+            execute_tool(&ctx, "Bash", r#"{"command":"touch allowed.txt"}"#),
+            execute_tool(&ctx, "Bash", r#"{"command":"touch denied.txt"}"#),
+        );
+        assert!(allowed.is_ok() && denied.is_err());
+        assert_eq!(*calls.lock().unwrap(), 2);
+        assert!(root.path().join("allowed.txt").exists());
+        assert!(!root.path().join("denied.txt").exists());
+        assert!(!ctx.allow_all_high_risk.load(Ordering::SeqCst));
+        assert!(ctx.permission_rules_snapshot().is_empty());
+    }
+
+    #[tokio::test]
+    async fn plan_mode_without_approval_channel_stays_read_only() {
         let root = temp_root("codex-ai-plan-tools");
         std::fs::write(root.join("a.txt"), "x").expect("write");
         let mut ctx = ctx_for(&root);
@@ -2538,7 +2760,6 @@ mod tests {
             .await
             .expect_err("not in plan mode");
         assert!(err.contains("不在计划模式"));
-        assert!(!ctx.take_plan_exit_requested());
         let entered = execute_tool(&ctx, "EnterPlanMode", "{}")
             .await
             .expect("enter");
@@ -2551,18 +2772,12 @@ mod tests {
             .await
             .expect_err("blocked in plan mode");
         assert!(blocked.contains("只读规划模式"));
-        // 无审批通道时视为自动批准。
-        let exited = execute_tool(&ctx, "ExitPlanMode", r#"{"plan":"1. 改 a.txt"}"#)
+        let error = execute_tool(&ctx, "ExitPlanMode", r#"{"plan":"1. 改 a.txt"}"#)
             .await
-            .expect("exit");
-        assert!(exited.contains("进入实施"));
-        assert!(!ctx.is_read_only() && !ctx.is_plan_mode());
-        assert!(ctx.take_plan_exit_requested());
-        assert!(!ctx.take_plan_exit_requested());
-        assert_eq!(
-            mode_changes.lock().expect("lock").as_slice(),
-            &[true, false]
-        );
+            .expect_err("approval channel required");
+        assert!(error.contains("审批通道"));
+        assert!(ctx.is_read_only() && ctx.is_plan_mode());
+        assert_eq!(mode_changes.lock().expect("lock").as_slice(), &[true]);
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -2597,14 +2812,12 @@ mod tests {
         assert!(rejected.contains("未批准"));
         assert!(rejected.contains("先补测试"));
         assert!(ctx.is_plan_mode());
-        assert!(ctx.take_plan_exit_requested());
         assert_eq!(mode_changes.lock().expect("lock").as_slice(), &[true]);
         let approved = execute_tool(&ctx, "ExitPlanMode", r#"{"plan":"v2"}"#)
             .await
             .expect("approved");
         assert!(approved.contains("已批准"));
         assert!(!ctx.is_plan_mode() && !ctx.is_read_only());
-        assert!(ctx.take_plan_exit_requested());
         assert_eq!(
             mode_changes.lock().expect("lock").as_slice(),
             &[true, false]

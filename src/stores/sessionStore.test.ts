@@ -56,6 +56,7 @@ describe("sessionStore history", () => {
       selectedSessionId: null,
       liveBySession: {},
       planModeBySession: {},
+      planModeRunBySession: {},
       lines: {},
       turnState: {},
       usage: {},
@@ -147,6 +148,57 @@ describe("sessionStore history", () => {
 
     expect(resolveComposerPlanMode("active", modes, true)).toBe(false);
     expect(resolveComposerPlanMode("background", modes, false)).toBe(true);
+  });
+
+  it("keeps mode events authoritative over delayed startup snapshots for the same run", () => {
+    const snapshot = {
+      ...started("s1", "plan"),
+      input_queue_id: "q1",
+      runtime: {
+        ai_channel_id: "ch",
+        model: "model",
+        reasoning_effort: null,
+        permission_mode: "yolo",
+        plan_mode: true,
+      },
+    };
+    useSessionStore.getState().onPlanMode("s1", false, "q1");
+    useSessionStore.getState().onStarted(snapshot);
+    useSessionStore.getState().onStarted(snapshot);
+    let state = useSessionStore.getState();
+    expect(state.planModeBySession.s1).toBe(false);
+    expect(state.configurationBySession.s1.plan_mode).toBe(false);
+    expect(state.liveBySession.s1.runtime?.plan_mode).toBe(false);
+    state.onPlanMode("s1", true, "q1");
+    state.onStarted({ ...snapshot, runtime: { ...snapshot.runtime, plan_mode: false } });
+    state = useSessionStore.getState();
+    expect(state.planModeBySession.s1).toBe(true);
+    expect(state.configurationBySession.s1.plan_mode).toBe(true);
+    expect(state.liveBySession.s1.runtime?.plan_mode).toBe(true);
+  });
+
+  it("initializes a new run from runtime and ignores mode events from the previous run", () => {
+    const snapshot = {
+      ...started("s1", "plan"),
+      input_queue_id: "q1",
+      runtime: {
+        ai_channel_id: "ch",
+        model: "model",
+        reasoning_effort: null,
+        permission_mode: "default",
+        plan_mode: false,
+      },
+    };
+    useSessionStore.getState().onStarted(snapshot);
+    useSessionStore.getState().onPlanMode("s1", true, "q1");
+    useSessionStore.getState().onExit({ ...snapshot, code: 0 });
+    useSessionStore.getState().onStarted({ ...snapshot, input_queue_id: "q2" });
+    useSessionStore.getState().onPlanMode("s1", true, "q1");
+    useSessionStore.getState().selectSession("s1");
+    const state = useSessionStore.getState();
+    expect(state.planModeBySession.s1).toBe(false);
+    expect(state.configurationBySession.s1.plan_mode).toBe(false);
+    expect(state.liveBySession.s1.runtime?.plan_mode).toBe(false);
   });
 
   it("initializes a selected historical session from its session kind", () => {

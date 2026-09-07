@@ -49,7 +49,7 @@ describe("native interaction rendering", () => {
     expect(historical).not.toContain("<button");
     const current = renderToStaticMarkup(<PendingPlanApproval sessionId="s1" />);
     expect(current).toContain("new plan");
-    expect(current).toContain("planContinueTask");
+    expect(current).toContain("planApprovalApprove");
   });
   it("renders pending messages in order with edit controls outside the transcript", () => {
     useSessionStore.getState().onStarted({

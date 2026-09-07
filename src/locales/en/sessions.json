@@ -130,7 +130,7 @@
     },
     "plan": {
       "title": "Plan mode",
-      "description": "Make a plan before editing."
+      "description": "Approve the plan to implement; writes and risky commands require one-time approval."
     },
     "yolo": {
       "title": "Full access",
