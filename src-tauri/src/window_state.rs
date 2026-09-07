@@ -2,7 +2,7 @@ use std::fs;
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
-use tauri::{AppHandle, Manager, PhysicalSize, Runtime, Window};
+use tauri::{AppHandle, LogicalSize, Manager, PhysicalSize, Runtime, Window};
 
 const MAIN_WINDOW_LABEL: &str = "main";
 const WINDOW_STATE_FILE_NAME: &str = "window-state.json";
@@ -11,6 +11,8 @@ const WINDOW_STATE_FILE_NAME: &str = "window-state.json";
 struct PersistedWindowState {
     width: u32,
     height: u32,
+    #[serde(default)]
+    logical: bool,
 }
 
 fn app_config_dir<R: Runtime>(app: &AppHandle<R>) -> Result<PathBuf, String> {
@@ -21,6 +23,14 @@ fn app_config_dir<R: Runtime>(app: &AppHandle<R>) -> Result<PathBuf, String> {
 
 fn window_state_file_path<R: Runtime>(app: &AppHandle<R>) -> Result<PathBuf, String> {
     Ok(app_config_dir(app)?.join(WINDOW_STATE_FILE_NAME))
+}
+
+fn sanitize_scale(scale: f64) -> f64 {
+    if scale.is_finite() && scale > 0.0 {
+        scale
+    } else {
+        1.0
+    }
 }
 
 fn normalize_window_state(state: PersistedWindowState) -> Option<PersistedWindowState> {
@@ -46,36 +56,31 @@ fn load_window_state<R: Runtime>(
     parse_window_state(&raw)
 }
 
-pub fn restore_main_window_size<R: Runtime>(app: &AppHandle<R>) -> Result<(), String> {
-    let Some(window) = app.get_webview_window(MAIN_WINDOW_LABEL) else {
-        return Ok(());
-    };
-
-    let Some(state) = load_window_state(app)? else {
-        return Ok(());
-    };
-
-    window
-        .set_size(PhysicalSize::new(state.width, state.height))
-        .map_err(|error| format!("恢复窗口尺寸失败: {error}"))?;
-
-    let _ = window.center();
-
-    Ok(())
-}
-
-fn state_from_physical_size(size: PhysicalSize<u32>) -> Option<PersistedWindowState> {
+fn state_from_logical_size(size: LogicalSize<u32>) -> Option<PersistedWindowState> {
     normalize_window_state(PersistedWindowState {
         width: size.width,
         height: size.height,
+        logical: true,
     })
 }
 
-fn persist_physical_size<R: Runtime>(
+fn logical_size_to_restore(
+    state: PersistedWindowState,
+    scale_factor: f64,
+) -> Option<LogicalSize<u32>> {
+    let state = normalize_window_state(state)?;
+    if state.logical {
+        return Some(LogicalSize::new(state.width, state.height));
+    }
+
+    Some(PhysicalSize::new(state.width, state.height).to_logical(sanitize_scale(scale_factor)))
+}
+
+fn persist_logical_size<R: Runtime>(
     app: &AppHandle<R>,
-    size: PhysicalSize<u32>,
+    size: LogicalSize<u32>,
 ) -> Result<(), String> {
-    let Some(state) = state_from_physical_size(size) else {
+    let Some(state) = state_from_logical_size(size) else {
         return Ok(());
     };
 
@@ -88,11 +93,45 @@ fn persist_physical_size<R: Runtime>(
         .map_err(|error| format!("写入窗口状态失败: {error}"))
 }
 
+fn persist_physical_size<R: Runtime>(
+    app: &AppHandle<R>,
+    size: PhysicalSize<u32>,
+    scale_factor: f64,
+) -> Result<(), String> {
+    persist_logical_size(app, size.to_logical(sanitize_scale(scale_factor)))
+}
+
+pub fn restore_main_window_size<R: Runtime>(app: &AppHandle<R>) -> Result<(), String> {
+    let Some(window) = app.get_webview_window(MAIN_WINDOW_LABEL) else {
+        return Ok(());
+    };
+
+    let Some(state) = load_window_state(app)? else {
+        return Ok(());
+    };
+
+    let scale = sanitize_scale(window.scale_factor().unwrap_or(1.0));
+    let Some(size) = logical_size_to_restore(state, scale) else {
+        return Ok(());
+    };
+
+    window
+        .set_size(size)
+        .map_err(|error| format!("恢复窗口尺寸失败: {error}"))?;
+
+    let _ = window.center();
+
+    Ok(())
+}
+
 pub fn save_window_size<R: Runtime>(window: &Window<R>) -> Result<(), String> {
     let size = window
         .inner_size()
         .map_err(|error| format!("读取窗口尺寸失败: {error}"))?;
-    persist_physical_size(window.app_handle(), size)
+    let scale = window
+        .scale_factor()
+        .map_err(|error| format!("读取窗口缩放失败: {error}"))?;
+    persist_physical_size(window.app_handle(), size, scale)
 }
 
 pub fn save_main_window_size<R: Runtime>(app: &AppHandle<R>) -> Result<(), String> {
@@ -103,15 +142,19 @@ pub fn save_main_window_size<R: Runtime>(app: &AppHandle<R>) -> Result<(), Strin
     let size = window
         .inner_size()
         .map_err(|error| format!("读取窗口尺寸失败: {error}"))?;
-    persist_physical_size(app, size)
+    let scale = window
+        .scale_factor()
+        .map_err(|error| format!("读取窗口缩放失败: {error}"))?;
+    persist_physical_size(app, size, scale)
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        normalize_window_state, parse_window_state, state_from_physical_size, PersistedWindowState,
+        logical_size_to_restore, normalize_window_state, parse_window_state,
+        state_from_logical_size, PersistedWindowState,
     };
-    use tauri::PhysicalSize;
+    use tauri::LogicalSize;
 
     #[test]
     fn normalize_window_state_rejects_zero_dimensions() {
@@ -119,6 +162,7 @@ mod tests {
             normalize_window_state(PersistedWindowState {
                 width: 0,
                 height: 800,
+                logical: true,
             }),
             None
         );
@@ -126,18 +170,32 @@ mod tests {
             normalize_window_state(PersistedWindowState {
                 width: 1280,
                 height: 0,
+                logical: true,
             }),
             None
         );
     }
 
     #[test]
-    fn parse_window_state_accepts_valid_payload() {
+    fn parse_window_state_accepts_legacy_physical_payload() {
         assert_eq!(
-            parse_window_state(r#"{"width":1440,"height":900}"#).unwrap(),
+            parse_window_state(r#"{"width":3600,"height":2250}"#).unwrap(),
+            Some(PersistedWindowState {
+                width: 3600,
+                height: 2250,
+                logical: false,
+            })
+        );
+    }
+
+    #[test]
+    fn parse_window_state_accepts_logical_payload() {
+        assert_eq!(
+            parse_window_state(r#"{"width":1440,"height":900,"logical":true}"#).unwrap(),
             Some(PersistedWindowState {
                 width: 1440,
                 height: 900,
+                logical: true,
             })
         );
     }
@@ -148,19 +206,65 @@ mod tests {
     }
 
     #[test]
-    fn state_from_physical_size_skips_invalid_dimensions() {
-        assert_eq!(state_from_physical_size(PhysicalSize::new(0, 800)), None);
-        assert_eq!(state_from_physical_size(PhysicalSize::new(1280, 0)), None);
+    fn state_from_logical_size_skips_invalid_dimensions() {
+        assert_eq!(state_from_logical_size(LogicalSize::new(0, 800)), None);
+        assert_eq!(state_from_logical_size(LogicalSize::new(1280, 0)), None);
     }
 
     #[test]
-    fn state_from_physical_size_keeps_valid_dimensions() {
+    fn state_from_logical_size_keeps_valid_dimensions() {
         assert_eq!(
-            state_from_physical_size(PhysicalSize::new(1440, 900)),
+            state_from_logical_size(LogicalSize::new(1440, 900)),
             Some(PersistedWindowState {
                 width: 1440,
                 height: 900,
+                logical: true,
             })
+        );
+    }
+
+    #[test]
+    fn restore_converts_legacy_physical_size() {
+        assert_eq!(
+            logical_size_to_restore(
+                PersistedWindowState {
+                    width: 3600,
+                    height: 2250,
+                    logical: false,
+                },
+                2.0,
+            ),
+            Some(LogicalSize::new(1800, 1125))
+        );
+    }
+
+    #[test]
+    fn restore_keeps_logical_size() {
+        assert_eq!(
+            logical_size_to_restore(
+                PersistedWindowState {
+                    width: 1440,
+                    height: 900,
+                    logical: true,
+                },
+                2.0,
+            ),
+            Some(LogicalSize::new(1440, 900))
+        );
+    }
+
+    #[test]
+    fn restore_rejects_zero_legacy_physical_size() {
+        assert_eq!(
+            logical_size_to_restore(
+                PersistedWindowState {
+                    width: 0,
+                    height: 800,
+                    logical: false,
+                },
+                2.0,
+            ),
+            None
         );
     }
 }

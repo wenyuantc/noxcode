@@ -35,9 +35,6 @@ pub fn run() {
         .plugin(tauri_plugin_process::init())
         .setup(|app| {
             tray::create_tray(app)?;
-            if let Err(error) = window_state::restore_main_window_size(app.handle()) {
-                eprintln!("恢复主窗口尺寸失败: {error}");
-            }
 
             let trust = Arc::new(HostTrustBroker::new(Duration::from_secs(120)));
             let handle = app.handle().clone();
@@ -207,6 +204,12 @@ pub fn run() {
         .expect("error while building tauri application")
         .run(|app, event| match event {
             tauri::RunEvent::Ready => {
+                if let Err(error) = window_state::restore_main_window_size(app) {
+                    eprintln!("恢复主窗口尺寸失败: {error}");
+                }
+                if let Err(error) = tray::show_main_window_handle(app) {
+                    eprintln!("显示主窗口失败: {error}");
+                }
                 git::preflight::show_fatal_dialog_if_needed(app);
             }
             #[cfg(target_os = "macos")]
