@@ -59,7 +59,9 @@ function defaultSourceFor(capability: PermissionCapability): PermissionPatternSo
 
 export function PermissionRulesSection() {
   const { t } = useTranslation(["settings", "common"]);
-  const workspaceId = useWorkspaceStore((state) => state.activeWorkspaceId);
+  const workspaces = useWorkspaceStore((state) => state.workspaces);
+  const activeWorkspaceId = useWorkspaceStore((state) => state.activeWorkspaceId);
+  const [selectedWorkspaceId, setSelectedWorkspaceId] = useState<string | null>(activeWorkspaceId);
   const [view, setView] = useState<NativePermissionRulesView | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [message, setMessage] = useState<string | null>(null);
@@ -76,15 +78,29 @@ export function PermissionRulesSection() {
   const [externalPath, setExternalPath] = useState(false);
   const [pathScope, setPathScope] = useState<PathAccessScope>("exact");
   const [targetKind, setTargetKind] = useState<"local" | "ssh">("local");
+  const [ruleWorkspaceId, setRuleWorkspaceId] = useState<string | null>(selectedWorkspaceId);
+
+  useEffect(() => {
+    void useWorkspaceStore.getState().load();
+  }, []);
+
+  useEffect(() => {
+    const workspaceIds = workspaces.map((item) => item.id);
+    setSelectedWorkspaceId((current) => {
+      if (current && workspaceIds.includes(current)) return current;
+      if (activeWorkspaceId && workspaceIds.includes(activeWorkspaceId)) return activeWorkspaceId;
+      return workspaceIds[0] ?? null;
+    });
+  }, [activeWorkspaceId, workspaces]);
 
   const reload = useCallback(() => {
-    getNativePermissionRules(workspaceId)
+    getNativePermissionRules(selectedWorkspaceId)
       .then((next) => {
         setView(next);
         setError(null);
       })
       .catch((reason: unknown) => setError(String(reason)));
-  }, [workspaceId]);
+  }, [selectedWorkspaceId]);
 
   useEffect(() => {
     reload();
@@ -100,6 +116,7 @@ export function PermissionRulesSection() {
     setExternalPath(false);
     setPathScope("exact");
     setTargetKind(view?.workspace_target?.kind ?? "local");
+    setRuleWorkspaceId(selectedWorkspaceId);
     setError(null);
     setMessage(null);
     setDialogOpen(true);
@@ -108,6 +125,8 @@ export function PermissionRulesSection() {
   const submit = async () => {
     const trimmed = pattern.trim();
     if (!trimmed) return;
+    const targetWsId = scope === "workspace" ? (ruleWorkspaceId ?? selectedWorkspaceId) : null;
+    if (scope === "workspace" && !targetWsId) return;
     setSaving(true);
     setError(null);
     try {
@@ -129,7 +148,10 @@ export function PermissionRulesSection() {
               }
             : null,
       };
-      await addNativePermissionRule(effect, rule, workspaceId);
+      await addNativePermissionRule(effect, rule, targetWsId);
+      if (scope === "workspace" && targetWsId && targetWsId !== selectedWorkspaceId) {
+        setSelectedWorkspaceId(targetWsId);
+      }
       setPattern("");
       setNote("");
       setDialogOpen(false);
@@ -143,7 +165,7 @@ export function PermissionRulesSection() {
   };
 
   const remove = (id: string) => {
-    deleteNativePermissionRule(id, workspaceId)
+    deleteNativePermissionRule(id, selectedWorkspaceId)
       .then(() => {
         setMessage(t("common:deleted", { defaultValue: "已删除" }));
         reload();
@@ -240,8 +262,7 @@ export function PermissionRulesSection() {
     rules: NativePermissionRulesView["global"] | null,
     scopePath?: string,
   ) => {
-    if (!rules) return null;
-    const totalCount = rules.deny.length + rules.allow.length + rules.ask.length;
+    const totalCount = rules ? rules.deny.length + rules.allow.length + rules.ask.length : 0;
 
     return (
       <div className="space-y-3">
@@ -249,13 +270,81 @@ export function PermissionRulesSection() {
           <span className="text-xs font-semibold text-foreground tracking-tight">{title}</span>
           <span className="text-[10px] font-mono text-muted-foreground">{totalCount} 条规则</span>
         </div>
-        {totalCount === 0 ? (
+        {!rules || totalCount === 0 ? (
           <p className="py-2 text-xs text-muted-foreground">{t("settings:permissions.empty")}</p>
         ) : (
           <div className="space-y-2">
             {renderRuleList(rules.deny, "deny")}
             {renderRuleList(rules.allow, "allow")}
             {renderRuleList(rules.ask, "ask")}
+          </div>
+        )}
+        {scopePath ? (
+          <p className="text-[10px] font-mono text-muted-foreground truncate">{scopePath}</p>
+        ) : null}
+      </div>
+    );
+  };
+
+  const renderWorkspaceSection = () => {
+    const totalCount = view?.workspace
+      ? view.workspace.deny.length + view.workspace.allow.length + view.workspace.ask.length
+      : 0;
+    const scopePath =
+      view?.workspace_rules_path ??
+      (view?.workspace_root
+        ? t("settings:permissions.workspacePath", { path: view.workspace_root })
+        : undefined);
+
+    return (
+      <div className="space-y-3">
+        <div className="flex flex-wrap items-center justify-between gap-2 border-b border-border/50 pb-1.5">
+          <div className="flex items-center gap-2.5">
+            <span className="text-xs font-semibold text-foreground tracking-tight">
+              工作区规则 (Workspace)
+            </span>
+            <Select
+              value={selectedWorkspaceId ?? undefined}
+              disabled={workspaces.length === 0}
+              onValueChange={(val) => {
+                if (typeof val === "string") setSelectedWorkspaceId(val);
+              }}
+            >
+              <SelectTrigger
+                className="h-7 w-48 bg-background text-xs"
+                aria-label={t("settings:permissions.selectWorkspace", {
+                  defaultValue: "选择工作区",
+                })}
+              >
+                <SelectValue>
+                  {() =>
+                    workspaces.find((item) => item.id === selectedWorkspaceId)?.name ??
+                    t("settings:permissions.noWorkspaces", { defaultValue: "暂无工作区" })
+                  }
+                </SelectValue>
+              </SelectTrigger>
+              <SelectContent>
+                {workspaces.map((ws) => (
+                  <SelectItem key={ws.id} value={ws.id} className="text-xs">
+                    {ws.name}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </div>
+          <span className="text-[10px] font-mono text-muted-foreground">{totalCount} 条规则</span>
+        </div>
+        {workspaces.length === 0 ? (
+          <p className="py-2 text-xs text-muted-foreground">
+            {t("settings:permissions.noWorkspaces", { defaultValue: "暂无工作区" })}
+          </p>
+        ) : !view?.workspace || totalCount === 0 ? (
+          <p className="py-2 text-xs text-muted-foreground">{t("settings:permissions.empty")}</p>
+        ) : (
+          <div className="space-y-2">
+            {renderRuleList(view.workspace.deny, "deny")}
+            {renderRuleList(view.workspace.allow, "allow")}
+            {renderRuleList(view.workspace.ask, "ask")}
           </div>
         )}
         {scopePath ? (
@@ -300,22 +389,13 @@ export function PermissionRulesSection() {
         }
       >
         <div className="space-y-6">
-          {view
-            ? renderScopeSection(
-                "全局规则 (Global)",
-                view.global,
-                t("settings:permissions.globalPath"),
-              )
-            : null}
+          {renderScopeSection(
+            "全局规则 (Global)",
+            view?.global ?? null,
+            t("settings:permissions.globalPath"),
+          )}
 
-          {view && view.workspace
-            ? renderScopeSection(
-                "工作区规则 (Workspace)",
-                view.workspace,
-                view.workspace_rules_path ??
-                  t("settings:permissions.workspacePath", { path: view.workspace_root ?? "" }),
-              )
-            : null}
+          {renderWorkspaceSection()}
         </div>
       </SettingCard>
 
@@ -414,13 +494,47 @@ export function PermissionRulesSection() {
                     <SelectItem value="global" className="text-xs">
                       {t("settings:permissions.scopeGlobal")}
                     </SelectItem>
-                    <SelectItem value="workspace" className="text-xs" disabled={!workspaceId}>
+                    <SelectItem
+                      value="workspace"
+                      className="text-xs"
+                      disabled={workspaces.length === 0}
+                    >
                       {t("settings:permissions.scopeWorkspace")}
                     </SelectItem>
                   </SelectContent>
                 </Select>
               </div>
             </div>
+
+            {scope === "workspace" ? (
+              <div>
+                <label className="text-xs font-medium text-muted-foreground">
+                  {t("settings:permissions.workspaceLabel", { defaultValue: "目标工作区" })}
+                </label>
+                <Select
+                  value={ruleWorkspaceId ?? undefined}
+                  onValueChange={(val) => {
+                    if (typeof val === "string") setRuleWorkspaceId(val);
+                  }}
+                >
+                  <SelectTrigger className="mt-1 h-8 text-xs bg-background">
+                    <SelectValue>
+                      {() =>
+                        workspaces.find((item) => item.id === ruleWorkspaceId)?.name ??
+                        t("settings:permissions.noWorkspaces", { defaultValue: "暂无工作区" })
+                      }
+                    </SelectValue>
+                  </SelectTrigger>
+                  <SelectContent>
+                    {workspaces.map((item) => (
+                      <SelectItem key={item.id} value={item.id} className="text-xs">
+                        {item.name}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
+            ) : null}
 
             <div>
               <label className="text-xs font-medium text-muted-foreground">

@@ -39,13 +39,13 @@ pub(crate) async fn list_agent_sessions_with(
 ) -> Result<Vec<AgentSessionRecord>, String> {
     let limit = limit.unwrap_or(50).clamp(1, 200);
     let rows = sqlx::query_as::<_, AgentSessionRecord>(LIST_AGENT_SESSIONS_SQL)
-    .bind(workspace_id)
-    .bind(limit)
-    .bind(i32::from(archived.unwrap_or(false)))
-    .bind(offset.unwrap_or(0).max(0))
-    .fetch_all(pool)
-    .await
-    .map_err(|error| format!("读取会话列表失败: {error}"))?;
+        .bind(workspace_id)
+        .bind(limit)
+        .bind(i32::from(archived.unwrap_or(false)))
+        .bind(offset.unwrap_or(0).max(0))
+        .fetch_all(pool)
+        .await
+        .map_err(|error| format!("读取会话列表失败: {error}"))?;
     Ok(rows)
 }
 
@@ -78,11 +78,11 @@ async fn fetch_agent_session_with(
     session_id: &str,
 ) -> Result<AgentSessionRecord, String> {
     sqlx::query_as(FETCH_AGENT_SESSION_SQL)
-    .bind(session_id)
-    .fetch_optional(pool)
-    .await
-    .map_err(|error| format!("读取会话失败: {error}"))?
-    .ok_or_else(|| format!("会话不存在: {session_id}"))
+        .bind(session_id)
+        .fetch_optional(pool)
+        .await
+        .map_err(|error| format!("读取会话失败: {error}"))?
+        .ok_or_else(|| format!("会话不存在: {session_id}"))
 }
 
 pub(crate) async fn rename_agent_session_with(
@@ -884,11 +884,11 @@ mod tests {
         assert_eq!(recent_ids, vec!["evt-3", "evt-4"]);
 
         // 3. Incremental query after evt-2: should return evt-3, evt-4
-        let after = get_agent_session_log_lines_with(&pool, "sess-same-sec", Some("evt-2"), Some(10))
-            .await
-            .expect("fetch after evt-2");
+        let after =
+            get_agent_session_log_lines_with(&pool, "sess-same-sec", Some("evt-2"), Some(10))
+                .await
+                .expect("fetch after evt-2");
         let after_ids: Vec<&str> = after.iter().map(|e| e.id.as_str()).collect();
         assert_eq!(after_ids, vec!["evt-3", "evt-4"]);
     }
 }
-
