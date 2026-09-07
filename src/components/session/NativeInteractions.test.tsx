@@ -3,12 +3,14 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { useSessionStore } from "@/stores/sessionStore";
 import { groupSessionLines, buildTurnBlocks } from "@/lib/sessionLines";
 import { PlanRow, PendingPlanApproval } from "./PlanRow";
+import { PlanAskCard } from "./PlanAskCard";
 import { SubagentRow } from "./SubagentRow";
 import { QueuedInputs } from "./QueuedInputs";
 
 vi.mock("@/lib/backend", () => ({
   getAgentSessionLogLines: vi.fn(),
   resolveNativePlanApproval: vi.fn(),
+  answerNativePlanQuestion: vi.fn(),
   listNativeQueuedInputs: vi.fn(),
   updateNativeQueuedInput: vi.fn(),
   removeNativeQueuedInput: vi.fn(),
@@ -46,10 +48,36 @@ describe("native interaction rendering", () => {
     ])[0];
     const historical = renderToStaticMarkup(<PlanRow item={item} sessionId="s1" />);
     expect(historical).toContain("old plan");
-    expect(historical).not.toContain("<button");
+    expect(historical).not.toContain("planApprovalApprove");
+    expect(historical).not.toContain("planApprovalReject");
     const current = renderToStaticMarkup(<PendingPlanApproval sessionId="s1" />);
     expect(current).toContain("new plan");
     expect(current).toContain("planApprovalApprove");
+    expect(current).toContain("planApprovalReject");
+    expect(current).toContain("planWaitingApproval");
+    expect(current).toContain("planAddFeedback");
+    expect(current).toContain("planCopy");
+  });
+  it("renders PlanAskCard with modern layout and options", () => {
+    useSessionStore.getState().setPlanQuestion({
+      session_record_id: "s1",
+      request_id: "q1",
+      profile_id: "p",
+      workspace_id: "ws",
+      session_kind: "plan",
+      questions: [
+        {
+          prompt: "Choose architecture style",
+          options: ["REST", "GraphQL"],
+        },
+      ],
+    });
+    const html = renderToStaticMarkup(<PlanAskCard sessionId="s1" />);
+    expect(html).toContain("Choose architecture style");
+    expect(html).toContain("REST");
+    expect(html).toContain("GraphQL");
+    expect(html).toContain("planAskSend");
+    expect(html).toContain("planAskCancel");
   });
   it("renders pending messages in order with edit controls outside the transcript", () => {
     useSessionStore.getState().onStarted({

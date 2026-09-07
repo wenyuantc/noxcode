@@ -1,12 +1,27 @@
-import { ClipboardList } from "lucide-react";
-import { useEffect, useState, type ReactNode } from "react";
+import {
+  AlertCircle,
+  Check,
+  ChevronDown,
+  ChevronUp,
+  ClipboardList,
+  Compass,
+  Copy,
+  Loader2,
+  MessageSquarePlus,
+  Play,
+  Undo2,
+} from "lucide-react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 
+import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import { resolveNativePlanApproval } from "@/lib/backend";
 import { resolveSessionRequest } from "@/lib/nativeRequestResolution";
 import type { GroupedSessionItem, PlanLineStatus } from "@/lib/sessionLines";
-import { parsePlanLine } from "@/lib/sessionLines";
+import { parsePlanLine, planTitleFromBody } from "@/lib/sessionLines";
+import { cn } from "@/lib/utils";
 import { useSessionStore } from "@/stores/sessionStore";
 import { AssistantMarkdown } from "./AssistantMarkdown";
 
@@ -24,7 +39,7 @@ export function PlanPillButton({
       type="button"
       disabled={disabled}
       onClick={onClick}
-      className="inline-flex h-9 items-center justify-center rounded-full bg-foreground px-6 text-sm font-medium text-background transition hover:bg-foreground/90 disabled:pointer-events-none disabled:opacity-50"
+      className="inline-flex h-8 items-center justify-center rounded-lg bg-primary px-4 text-xs font-medium text-primary-foreground shadow-xs transition hover:bg-primary/90 disabled:pointer-events-none disabled:opacity-50"
     >
       {children}
     </button>
@@ -53,6 +68,24 @@ function statusLabel(
   }
 }
 
+function cleanPlanBody(body: string, title?: string | null): string {
+  if (!body) return "";
+  const trimmed = body.trim();
+  if (title) {
+    const match = trimmed.match(/^#{1,6}\s+(.+?)(?:\r?\n|$)/);
+    if (match && match[1]?.trim() === title.trim()) {
+      const rest = trimmed.slice(match[0].length).trim();
+      return rest.length > 0 ? rest : trimmed;
+    }
+  }
+  return trimmed;
+}
+
+function isLongContent(text: string): boolean {
+  const lines = text.split("\n").length;
+  return lines > 14 || text.length > 600;
+}
+
 export function PlanRow({ item, sessionId }: { item: GroupedSessionItem; sessionId: string }) {
   const { t } = useTranslation("sessions");
   const parsed = parsePlanLine(item.text);
@@ -62,6 +95,13 @@ export function PlanRow({ item, sessionId }: { item: GroupedSessionItem; session
   const pendingAsk = useSessionStore(
     (state) => Object.values(state.planQuestions[sessionId] ?? {})[0],
   );
+  const [expanded, setExpanded] = useState(false);
+  const [copied, setCopied] = useState(false);
+  const copyTimerRef = useRef<number | undefined>(undefined);
+
+  useEffect(() => {
+    return () => window.clearTimeout(copyTimerRef.current);
+  }, []);
 
   if (!parsed) return null;
 
@@ -69,19 +109,97 @@ export function PlanRow({ item, sessionId }: { item: GroupedSessionItem; session
     if (parsed.status === "waiting_question" && pendingAsk) return null;
     if (parsed.status === "waiting_approval" && pendingApproval) return null;
     return (
-      <p className="flex items-center gap-2 text-sm text-muted-foreground">
-        <ClipboardList className="size-3.5 shrink-0" />
-        <span>{statusLabel(t, parsed.status, parsed.body, parsed.questionSummary)}</span>
-      </p>
+      <div className="flex items-center gap-2 py-0.5 text-xs text-muted-foreground">
+        <span className="flex size-5 shrink-0 items-center justify-center rounded-full bg-cyan-500/10 text-cyan-600 dark:text-cyan-400">
+          <ClipboardList className="size-3" />
+        </span>
+        <span className="font-medium">
+          {statusLabel(t, parsed.status, parsed.body, parsed.questionSummary)}
+        </span>
+      </div>
     );
   }
 
   const title = parsed.title ?? t("planDocument");
+  const cleanBody = cleanPlanBody(parsed.body, title);
+  const isLong = isLongContent(cleanBody || parsed.body);
+
+  const handleCopy = async () => {
+    try {
+      await navigator.clipboard.writeText(parsed.body);
+      setCopied(true);
+      window.clearTimeout(copyTimerRef.current);
+      copyTimerRef.current = window.setTimeout(() => setCopied(false), 2000);
+    } catch {
+      // ignore
+    }
+  };
 
   return (
-    <div className="rounded-lg border bg-muted/30 px-4 py-3">
-      <p className="mb-2 text-sm font-medium">{title}</p>
-      <AssistantMarkdown text={parsed.body} variant="plan" />
+    <div className="overflow-hidden rounded-2xl border border-border/80 bg-card/85 text-card-foreground shadow-xs backdrop-blur-md transition-all dark:border-border/60 dark:bg-card/50">
+      <div className="flex items-center justify-between border-b border-border/50 bg-muted/20 px-4 py-2.5">
+        <div className="flex min-w-0 items-center gap-2.5">
+          <div className="flex size-7 shrink-0 items-center justify-center rounded-lg bg-cyan-500/10 text-cyan-600 dark:text-cyan-400">
+            <Compass className="size-4" strokeWidth={2} />
+          </div>
+          <div className="flex min-w-0 items-center gap-2">
+            <span className="truncate text-sm font-semibold tracking-tight text-foreground">
+              {title}
+            </span>
+            <Badge
+              variant="secondary"
+              className="h-5 shrink-0 px-1.5 text-[11px] font-medium text-muted-foreground"
+            >
+              {t("planHistoricalBadge")}
+            </Badge>
+          </div>
+        </div>
+        <div className="flex shrink-0 items-center gap-1">
+          <button
+            type="button"
+            onClick={handleCopy}
+            className="flex size-7 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+            title={copied ? t("planCopied") : t("planCopy")}
+            aria-label={copied ? t("planCopied") : t("planCopy")}
+          >
+            {copied ? (
+              <Check className="size-3.5 text-emerald-500" />
+            ) : (
+              <Copy className="size-3.5" />
+            )}
+          </button>
+        </div>
+      </div>
+
+      <div className="p-4">
+        <div className={cn(!expanded && isLong && "relative max-h-[360px] overflow-hidden")}>
+          <AssistantMarkdown text={cleanBody || parsed.body} variant="plan" />
+          {!expanded && isLong ? (
+            <div className="pointer-events-none absolute bottom-0 left-0 right-0 flex h-24 items-end justify-center bg-gradient-to-t from-card via-card/85 to-transparent pb-2">
+              <button
+                type="button"
+                onClick={() => setExpanded(true)}
+                className="pointer-events-auto inline-flex items-center gap-1.5 rounded-full border border-border/80 bg-background/95 px-3.5 py-1 text-xs font-medium text-foreground shadow-xs backdrop-blur-sm transition-all hover:bg-muted"
+              >
+                <span>{t("planExpand")}</span>
+                <ChevronDown className="size-3 text-muted-foreground" />
+              </button>
+            </div>
+          ) : null}
+        </div>
+        {expanded && isLong ? (
+          <div className="mt-3 flex justify-center border-t border-border/40 pt-2">
+            <button
+              type="button"
+              onClick={() => setExpanded(false)}
+              className="inline-flex items-center gap-1 text-xs text-muted-foreground transition-colors hover:text-foreground"
+            >
+              <span>{t("planCollapse")}</span>
+              <ChevronUp className="size-3" />
+            </button>
+          </div>
+        ) : null}
+      </div>
     </div>
   );
 }
@@ -92,13 +210,42 @@ export function PendingPlanApproval({ sessionId }: { sessionId: string }) {
     (state) => Object.values(state.planApprovals[sessionId] ?? {})[0],
   );
   const [feedback, setFeedback] = useState("");
+  const [showFeedback, setShowFeedback] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [expanded, setExpanded] = useState(false);
+  const [copied, setCopied] = useState(false);
+  const copyTimerRef = useRef<number | undefined>(undefined);
+  const textareaRef = useRef<HTMLTextAreaElement | null>(null);
+
   useEffect(() => {
     setFeedback("");
+    setShowFeedback(false);
     setError(null);
+    setExpanded(false);
   }, [pendingApproval?.request_id]);
+
+  useEffect(() => {
+    return () => window.clearTimeout(copyTimerRef.current);
+  }, []);
+
   if (!pendingApproval) return null;
+
+  const planText = pendingApproval.plan;
+  const title = planTitleFromBody(planText) ?? t("planDocument");
+  const cleanBody = cleanPlanBody(planText, title);
+  const isLong = isLongContent(cleanBody || planText);
+
+  const handleCopy = async () => {
+    try {
+      await navigator.clipboard.writeText(planText);
+      setCopied(true);
+      window.clearTimeout(copyTimerRef.current);
+      copyTimerRef.current = window.setTimeout(() => setCopied(false), 2000);
+    } catch {
+      // ignore
+    }
+  };
 
   const resolve = async (approved: boolean) => {
     if (busy) return;
@@ -121,43 +268,166 @@ export function PendingPlanApproval({ sessionId }: { sessionId: string }) {
     }
   };
 
+  const handleReject = () => {
+    if (!showFeedback && !feedback.trim()) {
+      setShowFeedback(true);
+      setTimeout(() => textareaRef.current?.focus(), 50);
+      return;
+    }
+    void resolve(false);
+  };
+
+  const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    if ((e.metaKey || e.ctrlKey) && e.key === "Enter") {
+      e.preventDefault();
+      void resolve(true);
+    }
+  };
+
   return (
-    <div className="rounded-xl border bg-muted/30 px-4 py-3">
-      <div className="mb-2 flex items-baseline gap-2">
-        <span className="text-xs font-semibold tracking-wide text-muted-foreground">
-          {t("planLabel")}
-        </span>
-        <span className="text-sm font-medium">{t("planWaitingApproval")}</span>
-      </div>
-      <AssistantMarkdown text={pendingApproval.plan} variant="plan" />
-      <div className="mt-3 space-y-2">
-        {error ? (
-          <p role="alert" className="text-sm text-destructive">
-            {error}
-          </p>
-        ) : null}
-        <Textarea
-          value={feedback}
-          placeholder={t("planApprovalFeedbackPlaceholder")}
-          onChange={(event) => setFeedback(event.target.value)}
-        />
-        <div className="flex flex-col items-center gap-2">
-          <PlanPillButton
-            disabled={busy}
-            onClick={() => {
-              void resolve(true);
-            }}
-          >
-            {t("planApprovalApprove")}
-          </PlanPillButton>
+    <div className="overflow-hidden rounded-2xl border border-border/80 bg-card/85 text-card-foreground shadow-xs backdrop-blur-md transition-all dark:border-border/60 dark:bg-card/50">
+      <div className="h-0.5 w-full bg-gradient-to-r from-cyan-500 via-primary/50 to-cyan-500/20" />
+
+      <div className="flex items-center justify-between border-b border-border/50 bg-muted/20 px-4 py-2.5">
+        <div className="flex min-w-0 items-center gap-2.5">
+          <div className="flex size-7 shrink-0 items-center justify-center rounded-lg bg-cyan-500/10 text-cyan-600 dark:text-cyan-400">
+            <Compass className="size-4" strokeWidth={2} />
+          </div>
+          <div className="flex min-w-0 items-center gap-2">
+            <span className="truncate text-sm font-semibold tracking-tight text-foreground">
+              {title}
+            </span>
+            <Badge
+              variant="outline"
+              className="h-5 shrink-0 gap-1 border-amber-500/40 bg-amber-500/10 px-1.5 text-[11px] font-medium text-amber-600 dark:text-amber-400"
+            >
+              <span className="size-1.5 rounded-full bg-amber-500 animate-pulse" />
+              <span>{t("planWaitingApproval")}</span>
+            </Badge>
+          </div>
+        </div>
+        <div className="flex shrink-0 items-center gap-1">
           <button
             type="button"
-            className="text-sm text-muted-foreground hover:text-foreground"
-            disabled={busy}
-            onClick={() => resolve(false)}
+            onClick={handleCopy}
+            className="flex size-7 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+            title={copied ? t("planCopied") : t("planCopy")}
+            aria-label={copied ? t("planCopied") : t("planCopy")}
           >
-            {t("planApprovalReject")}
+            {copied ? (
+              <Check className="size-3.5 text-emerald-500" />
+            ) : (
+              <Copy className="size-3.5" />
+            )}
           </button>
+        </div>
+      </div>
+
+      <div className="p-4">
+        <div className={cn(!expanded && isLong && "relative max-h-[360px] overflow-hidden")}>
+          <AssistantMarkdown text={cleanBody || planText} variant="plan" />
+          {!expanded && isLong ? (
+            <div className="pointer-events-none absolute bottom-0 left-0 right-0 flex h-24 items-end justify-center bg-gradient-to-t from-card via-card/85 to-transparent pb-2">
+              <button
+                type="button"
+                onClick={() => setExpanded(true)}
+                className="pointer-events-auto inline-flex items-center gap-1.5 rounded-full border border-border/80 bg-background/95 px-3.5 py-1 text-xs font-medium text-foreground shadow-xs backdrop-blur-sm transition-all hover:bg-muted"
+              >
+                <span>{t("planExpand")}</span>
+                <ChevronDown className="size-3 text-muted-foreground" />
+              </button>
+            </div>
+          ) : null}
+        </div>
+        {expanded && isLong ? (
+          <div className="mt-3 flex justify-center border-t border-border/40 pt-2">
+            <button
+              type="button"
+              onClick={() => setExpanded(false)}
+              className="inline-flex items-center gap-1 text-xs text-muted-foreground transition-colors hover:text-foreground"
+            >
+              <span>{t("planCollapse")}</span>
+              <ChevronUp className="size-3" />
+            </button>
+          </div>
+        ) : null}
+
+        {error ? (
+          <div className="mt-3 flex items-center gap-2 rounded-lg border border-destructive/20 bg-destructive/10 px-3 py-2 text-xs text-destructive">
+            <AlertCircle className="size-4 shrink-0" />
+            <span>{error}</span>
+          </div>
+        ) : null}
+
+        {showFeedback ? (
+          <div className="mt-3 space-y-1.5 rounded-xl border border-border/60 bg-muted/20 p-2.5">
+            <div className="flex items-center justify-between px-1 text-xs text-muted-foreground">
+              <span className="font-medium text-foreground/90">{t("planAddFeedback")}</span>
+              <span className="text-[11px] text-muted-foreground/70">
+                ⌘/Ctrl + Enter {t("planApprovalApprove")}
+              </span>
+            </div>
+            <Textarea
+              ref={textareaRef}
+              value={feedback}
+              rows={3}
+              placeholder={t("planApprovalFeedbackPlaceholder")}
+              onChange={(event) => setFeedback(event.target.value)}
+              onKeyDown={handleKeyDown}
+              className="min-h-[70px] resize-y bg-background/70 text-xs"
+            />
+          </div>
+        ) : null}
+
+        <div className="mt-3 flex items-center justify-between gap-2 border-t border-border/50 pt-3">
+          <Button
+            type="button"
+            variant="ghost"
+            size="sm"
+            onClick={() => {
+              const next = !showFeedback;
+              setShowFeedback(next);
+              if (next) {
+                setTimeout(() => textareaRef.current?.focus(), 50);
+              }
+            }}
+            className="h-8 gap-1.5 text-xs text-muted-foreground hover:text-foreground"
+          >
+            <MessageSquarePlus className="size-3.5" />
+            <span>{showFeedback ? t("planHideFeedback") : t("planAddFeedback")}</span>
+            {feedback.trim().length > 0 ? (
+              <span className="size-1.5 rounded-full bg-cyan-500" />
+            ) : null}
+          </Button>
+
+          <div className="flex items-center gap-2">
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              disabled={busy}
+              onClick={handleReject}
+              className="h-8 gap-1.5 text-xs border-border/80 hover:border-destructive/30 hover:bg-destructive/10 hover:text-destructive"
+            >
+              <Undo2 className="size-3.5" />
+              <span>{t("planApprovalReject")}</span>
+            </Button>
+            <Button
+              type="button"
+              variant="default"
+              size="sm"
+              disabled={busy}
+              onClick={() => void resolve(true)}
+              className="h-8 gap-1.5 text-xs font-medium bg-primary text-primary-foreground shadow-xs hover:bg-primary/90"
+            >
+              {busy ? (
+                <Loader2 className="size-3.5 animate-spin" />
+              ) : (
+                <Play className="size-3.5 fill-current" />
+              )}
+              <span>{t("planApprovalApprove")}</span>
+            </Button>
+          </div>
         </div>
       </div>
     </div>

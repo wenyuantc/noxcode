@@ -9,33 +9,62 @@ import { cn } from "@/lib/utils";
 import { useUiStore } from "@/stores/uiStore";
 
 function markdownComponents(variant: "default" | "plan", codeFontSize: number): Components {
-  const headingAccent = variant === "plan" ? "text-cyan-600 dark:text-cyan-400" : "";
+  const isPlan = variant === "plan";
   return {
     h1: ({ children }) => (
-      <h1 className={cn("mb-2 text-base font-semibold", headingAccent)}>{children}</h1>
+      <h1
+        className={cn(
+          "mb-2.5 text-base font-semibold tracking-tight text-foreground",
+          isPlan && "text-cyan-700 dark:text-cyan-300 pb-1 border-b border-border/50",
+        )}
+      >
+        {children}
+      </h1>
     ),
     h2: ({ children }) => (
-      <h2 className={cn("mb-2 text-sm font-semibold", headingAccent)}>{children}</h2>
+      <h2
+        className={cn(
+          "mb-2 text-sm font-semibold tracking-tight text-foreground",
+          isPlan && "mt-3 text-cyan-700 dark:text-cyan-300 flex items-center gap-1.5",
+        )}
+      >
+        {children}
+      </h2>
     ),
     h3: ({ children }) => (
-      <h3 className={cn("mb-1 text-sm font-medium", headingAccent)}>{children}</h3>
+      <h3
+        className={cn(
+          "mb-1 text-sm font-medium",
+          isPlan
+            ? "mt-2.5 text-xs font-semibold uppercase tracking-wider text-muted-foreground"
+            : "",
+        )}
+      >
+        {children}
+      </h3>
     ),
-    p: ({ children }) => <p className="mb-2 last:mb-0 leading-6">{children}</p>,
+    p: ({ children }) => (
+      <p className={cn("mb-2 leading-6 last:mb-0", isPlan && "text-foreground/90")}>{children}</p>
+    ),
     ul: ({ className, children }) => {
       const task = className?.includes("contains-task-list");
       return (
-        <ul className={cn("mb-2 space-y-1 last:mb-0", task ? "list-none pl-0" : "list-disc pl-5")}>
+        <ul
+          className={cn("mb-2.5 space-y-1.5 last:mb-0", task ? "list-none pl-0" : "list-disc pl-5")}
+        >
           {children}
         </ul>
       );
     },
     ol: ({ children }) => (
-      <ol className="mb-2 list-decimal space-y-1 pl-5 last:mb-0">{children}</ol>
+      <ol className="mb-2.5 list-decimal space-y-1.5 pl-5 last:mb-0">{children}</ol>
     ),
     li: ({ className, children }) => {
       const task = className?.includes("task-list-item");
       return (
-        <li className={cn("leading-6", task && "flex list-none items-start gap-2")}>{children}</li>
+        <li className={cn("leading-6", task && "flex list-none items-start gap-2.5")}>
+          {children}
+        </li>
       );
     },
     input: ({ type, checked }) => {
@@ -46,12 +75,19 @@ function markdownComponents(variant: "default" | "plan", codeFontSize: number): 
           checked={Boolean(checked)}
           disabled
           readOnly
-          className="mt-1.5 size-3.5 shrink-0 accent-cyan-600"
+          className="mt-1.5 size-3.5 shrink-0 rounded border-border accent-cyan-600 dark:accent-cyan-500"
         />
       );
     },
     blockquote: ({ children }) => (
-      <blockquote className="mb-2 border-l-2 pl-3 text-muted-foreground">{children}</blockquote>
+      <blockquote
+        className={cn(
+          "mb-2.5 border-l-2 pl-3 text-muted-foreground",
+          isPlan && "border-cyan-500/50 bg-cyan-500/5 py-1.5 px-3 rounded-r-md text-xs",
+        )}
+      >
+        {children}
+      </blockquote>
     ),
     a: ({ href, children }) => (
       <a href={href} className="underline underline-offset-2" target="_blank" rel="noreferrer">
