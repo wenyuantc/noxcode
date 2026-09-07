@@ -71,10 +71,21 @@
   "toolImageAlt": "工具返回的图片 {{name}}",
   "permissionTitle": "需要确认高风险操作",
   "permissionRuleTitle": "权限规则要求确认",
-  "permissionAllowOnce": "允许一次",
+  "permissionAllowOnce": "本次允许",
+  "permissionAlways": "始终允许",
+  "permissionFileTitle": "文件访问授权",
+  "permissionLocalTarget": "本机",
+  "permissionIncludeDirectory": "允许该目录及子目录",
+  "permissionSaveScope": "白名单作用域",
+  "permissionScopeWorkspace": "当前工作区",
+  "permissionScopeGlobal": "全局",
+  "permissionOperation": {
+    "read": "读取", "search": "搜索", "write": "写入", "edit": "修改",
+    "create": "创建", "delete": "删除", "move_source": "移动源文件", "move_destination": "移动目标"
+  },
   "permissionAllowSession": "本会话允许",
   "permissionAllowServer": "允许该服务器",
-  "permissionAllowAlways": "总是允许 {{pattern}}（保存规则）",
+  "permissionAllowAlways": "始终允许 {{pattern}}（保存规则）",
   "permissionDeny": "拒绝",
   "planQuestionTitle": "计划模式提问",
   "planSkip": "跳过",
@@ -123,7 +134,7 @@
     },
     "yolo": {
       "title": "完全访问",
-      "description": "减少确认次数。"
+      "description": "允许工作区外访问；拒绝规则与确认规则仍生效。"
     }
   },
   "effortLevels": {

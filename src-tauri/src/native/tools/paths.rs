@@ -19,6 +19,16 @@ pub fn normalize_logical_path(path: &Path) -> PathBuf {
 }
 
 pub fn resolve_under_workspace(root: &Path, input: &str) -> Result<PathBuf, String> {
+    let resolved = resolve_local_path(root, input)?;
+    let physical_root = resolve_local_path(root, ".")?;
+    if !is_under_root(&physical_root, &resolved) {
+        return Err(format!("路径超出工作区: {}", input.trim()));
+    }
+    Ok(resolved)
+}
+
+/// Resolve the physical target independently of the authorization boundary.
+pub fn resolve_local_path(root: &Path, input: &str) -> Result<PathBuf, String> {
     let trimmed = input.trim();
     if trimmed.is_empty() {
         return Err("路径不能为空".to_string());
@@ -36,12 +46,7 @@ pub fn resolve_under_workspace(root: &Path, input: &str) -> Result<PathBuf, Stri
         root.join(trimmed)
     };
     // 不先折叠 `..`：符号链接后的父目录必须遵循文件系统语义。
-    let physical_root = canonicalize_allow_missing(&root)?;
-    let resolved = canonicalize_allow_missing(&candidate)?;
-    if !is_under_root(&physical_root, &resolved) {
-        return Err(format!("路径超出工作区: {trimmed}"));
-    }
-    Ok(resolved)
+    canonicalize_allow_missing(&candidate)
 }
 
 fn canonicalize_allow_missing(path: &Path) -> Result<PathBuf, String> {
@@ -69,6 +74,15 @@ fn canonicalize_allow_missing(path: &Path) -> Result<PathBuf, String> {
 }
 
 pub fn resolve_under_workspace_posix(root: &str, input: &str) -> Result<String, String> {
+    let resolved = resolve_posix_path(root, input)?;
+    let root_normalized = resolve_posix_path(root, ".")?;
+    if !path_is_within(&root_normalized, &resolved) {
+        return Err(format!("路径超出工作区: {}", input.trim()));
+    }
+    Ok(resolved)
+}
+
+pub fn resolve_posix_path(root: &str, input: &str) -> Result<String, String> {
     let root = trim_slash(root);
     let trimmed = input.trim();
     if trimmed.is_empty() {
@@ -79,13 +93,17 @@ pub fn resolve_under_workspace_posix(root: &str, input: &str) -> Result<String, 
     } else {
         format!("{root}/{trimmed}")
     };
-    let resolved = normalize_posix(&candidate);
-    let root_normalized = normalize_posix(&root);
-    let prefix = format!("{}/", root_normalized.trim_end_matches('/'));
-    if resolved != root_normalized && !resolved.starts_with(&prefix) {
-        return Err(format!("路径超出工作区: {trimmed}"));
+    Ok(normalize_posix(&candidate))
+}
+
+pub fn path_is_within(root: &str, candidate: &str) -> bool {
+    if root.as_bytes().get(1) == Some(&b':') || root.starts_with("\\\\") {
+        let root = root.replace('\\', "/");
+        let candidate = candidate.replace('\\', "/");
+        return candidate == root
+            || candidate.starts_with(&format!("{}/", root.trim_end_matches('/')));
     }
-    Ok(resolved)
+    candidate == root || candidate.starts_with(&format!("{}/", root.trim_end_matches('/')))
 }
 
 fn is_under_root(root: &Path, candidate: &Path) -> bool {

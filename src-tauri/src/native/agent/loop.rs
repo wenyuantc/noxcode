@@ -4004,6 +4004,7 @@ mod tests {
             RuleEffect::Deny,
             PermissionRule {
                 id: "deny-agent".to_string(),
+                external_path: None,
                 capability: PermissionCapability::Subagent,
                 pattern: "*".to_string(),
                 source: PatternSource::ToolName,

@@ -8,6 +8,10 @@ use serde_json::Value;
 
 use super::cancel::CancelFlag;
 use super::contract::{resolve_builtin_contract, ToolContract};
+use super::file_access::{
+    collect_file_access, external_rule_matches, is_file_tool, AuthorizedPath, FileAccessPrompt,
+    PermissionTarget,
+};
 use super::hooks::{
     run_permission_request_hooks, run_post_tool_failure_hooks, run_post_tool_hooks,
     run_pre_tool_hooks, HookAgentHandler, HookDecision, HookRuntime,
@@ -82,6 +86,7 @@ pub struct PermissionPrompt {
     pub mcp_server_id: Option<String>,
     /// 「总是允许」时建议保存的规则。
     pub suggested_rule: Option<PermissionRuleSuggestion>,
+    pub file_access: Option<FileAccessPrompt>,
 }
 
 pub type PermissionRequester =
@@ -246,7 +251,7 @@ impl ToolCtx {
     }
 
     /// 技能只读根按当前列表派生，不写回工作区，避免子 Agent 继承已筛除技能的权限。
-    fn workspace_for_read(&self) -> LocalWorkspace {
+    pub(super) fn workspace_for_read(&self) -> LocalWorkspace {
         let mut workspace = self.workspace.clone();
         if self.ssh.is_none() {
             workspace.extra_read_roots.extend(
@@ -257,6 +262,36 @@ impl ToolCtx {
             );
         }
         workspace
+    }
+
+    pub fn permission_target(&self) -> PermissionTarget {
+        match &self.ssh {
+            Some(ssh) => PermissionTarget::Ssh {
+                config_id: ssh.config.id.clone(),
+                host: ssh.config.host.clone(),
+                port: ssh.config.port,
+                username: ssh.config.username.clone(),
+            },
+            None => PermissionTarget::Local,
+        }
+    }
+
+    fn with_file_access(&self, access: &FileAccessPrompt) -> Self {
+        let mut execution = self.clone();
+        let grants: Vec<_> = access
+            .paths
+            .iter()
+            .map(|path| AuthorizedPath {
+                path: path.path.clone(),
+                scope: path.scope,
+                capability: path.capability,
+            })
+            .collect();
+        execution.workspace.authorized_paths = grants.clone();
+        if let Some(ssh) = &mut execution.ssh {
+            ssh.authorized_paths = grants;
+        }
+        execution
     }
 
     pub fn mark_read(&self, key: impl Into<String>, fingerprint: Option<FileFingerprint>) {
@@ -290,6 +325,10 @@ impl ToolCtx {
     /// 与待办清单是独立的。
     pub fn fork_for_child(&self) -> Self {
         let mut child = self.clone();
+        child.workspace.authorized_paths.clear();
+        if let Some(ssh) = &mut child.ssh {
+            ssh.authorized_paths.clear();
+        }
         child.read_files = Arc::new(Mutex::new(HashMap::new()));
         child.todos = Arc::new(Mutex::new(Vec::new()));
         child.mcp = SharedMcp::empty();
@@ -363,9 +402,13 @@ pub async fn execute_tool(ctx: &ToolCtx, name: &str, arguments: &str) -> Result<
 
 pub async fn execute_tool_call(ctx: &ToolCtx, call: &ToolCall) -> Result<ToolOutput, String> {
     let prepared = preflight_tool(ctx, call).await?;
-    let result =
-        run_with_contract_timeout(ctx, &prepared.contract, &prepared.name, &prepared.arguments)
-            .await;
+    let result = run_with_contract_timeout(
+        prepared.execution_ctx.as_ref().unwrap_or(ctx),
+        &prepared.contract,
+        &prepared.name,
+        &prepared.arguments,
+    )
+    .await;
     finalize_tool(ctx, prepared, result).await
 }
 
@@ -374,6 +417,7 @@ pub(crate) struct PreparedTool {
     pub arguments: String,
     contract: ToolContract,
     additional_context: Vec<String>,
+    execution_ctx: Option<ToolCtx>,
 }
 
 /// 特殊调度工具（如 Agent）与普通工具共用执行前后的安全边界。
@@ -390,7 +434,12 @@ pub(crate) async fn preflight_tool(ctx: &ToolCtx, call: &ToolCall) -> Result<Pre
     let pre = run_pre_tool_hooks(&ctx.hook_runtime(), name, arguments).await?;
     // 钩子可以改写参数（例如把危险命令替换成安全版本）。
     let arguments: &str = pre.updated_arguments.as_deref().unwrap_or(arguments);
-    enforce_permissions(ctx, &contract, name, arguments).await?;
+    let execution_ctx = if is_file_tool(name) {
+        Some(prepare_file_access(ctx, &contract, name, arguments).await?)
+    } else {
+        enforce_permissions(ctx, &contract, name, arguments).await?;
+        None
+    };
     if ctx.cancel.is_cancelled() {
         return Err("已取消".to_string());
     }
@@ -402,6 +451,7 @@ pub(crate) async fn preflight_tool(ctx: &ToolCtx, call: &ToolCall) -> Result<Pre
         arguments: arguments.to_string(),
         contract,
         additional_context: pre.additional_context,
+        execution_ctx,
     })
 }
 
@@ -844,6 +894,107 @@ async fn call_exit_plan_mode(ctx: &ToolCtx, arguments: &str) -> Result<String, S
     }
 }
 
+async fn prepare_file_access(
+    ctx: &ToolCtx,
+    contract: &ToolContract,
+    name: &str,
+    arguments: &str,
+) -> Result<ToolCtx, String> {
+    loop {
+        if ctx.cancel.is_cancelled() {
+            return Err("已取消".to_string());
+        }
+        let access = collect_file_access(ctx, name, arguments).await?;
+        let rules = ctx.permission_rules_snapshot();
+        let decisions = rules.evaluate_file_access(
+            contract,
+            name,
+            arguments,
+            &ctx.rules_workspace_root(),
+            &access,
+        );
+        reject_file_deny(&decisions)?;
+        let forced = decisions.iter().find_map(|decision| match decision {
+            RuleDecision::Ask(rule) => Some(rule),
+            _ => None,
+        });
+        let all_allowed = decisions
+            .iter()
+            .all(|decision| matches!(decision, RuleDecision::Allow(_)));
+        let missing_access = access.paths.iter().any(|path| {
+            path.outside_workspace
+                && !rules
+                    .allow
+                    .iter()
+                    .any(|rule| external_rule_matches(rule, &access.target, path))
+        });
+        let execution = ctx.with_file_access(&access);
+        let risk = classify_native_tool_risk(
+            name,
+            arguments,
+            if name == "Write" {
+                write_target_exists(&execution, arguments).await
+            } else {
+                None
+            },
+            false,
+        );
+        let approval = if let Some(rule) = forced {
+            Some((
+                NativeToolRiskKind::Rule,
+                format!(
+                    "规则 `{}` 要求确认：{}",
+                    rule.pattern,
+                    call_brief(name, arguments)
+                ),
+            ))
+        } else if missing_access && !ctx.allow_all_high_risk.load(Ordering::SeqCst) {
+            let summary = match risk {
+                NativeToolRisk::High { summary, .. } => format!("工作区外访问：{summary}"),
+                NativeToolRisk::Low => format!("工作区外访问：{}", call_brief(name, arguments)),
+            };
+            Some((NativeToolRiskKind::ExternalPath, summary))
+        } else if !all_allowed {
+            match risk {
+                NativeToolRisk::High { kind, summary } => Some((kind, summary)),
+                NativeToolRisk::Low => None,
+            }
+        } else {
+            None
+        };
+        if let Some((kind, summary)) = approval {
+            request_permission(ctx, name, arguments, kind, summary, Some(access.clone())).await?;
+            // Resolve again after a potentially long user interaction, before any file I/O.
+            let current = collect_file_access(ctx, name, arguments).await?;
+            if current != access {
+                continue;
+            }
+            reject_file_deny(&ctx.permission_rules_snapshot().evaluate_file_access(
+                contract,
+                name,
+                arguments,
+                &ctx.rules_workspace_root(),
+                &current,
+            ))?;
+        }
+        return Ok(execution);
+    }
+}
+
+fn reject_file_deny(decisions: &[RuleDecision]) -> Result<(), String> {
+    if let Some(rule) = decisions.iter().find_map(|decision| match decision {
+        RuleDecision::Deny(rule) => Some(rule),
+        _ => None,
+    }) {
+        return Err(format!(
+            "权限规则拒绝：{} 命中 deny 规则 `{}`",
+            rule.capability.as_str(),
+            rule.pattern
+        ));
+    }
+    Ok(())
+}
+
 /// 规则层 → 风险分类 → 模式默认。
 async fn enforce_permissions(
     ctx: &ToolCtx,
@@ -869,7 +1020,6 @@ async fn enforce_permissions(
         RuleDecision::Ask(rule) => {
             return request_permission(
                 ctx,
-                contract,
                 name,
                 arguments,
                 NativeToolRiskKind::Rule,
@@ -878,6 +1028,7 @@ async fn enforce_permissions(
                     rule.pattern,
                     call_brief(name, arguments)
                 ),
+                None,
             )
             .await;
         }
@@ -894,11 +1045,11 @@ async fn enforce_permissions(
     {
         return request_permission(
             ctx,
-            contract,
             name,
             arguments,
             NativeToolRiskKind::Automation,
             format!("自动化变更：{}", call_brief(name, arguments)),
+            None,
         )
         .await;
     }
@@ -914,7 +1065,7 @@ async fn enforce_permissions(
             {
                 return Ok(());
             }
-            request_permission(ctx, contract, name, arguments, kind, summary).await
+            request_permission(ctx, name, arguments, kind, summary, None).await
         }
     }
 }
@@ -956,11 +1107,11 @@ async fn write_target_exists(ctx: &ToolCtx, arguments: &str) -> Option<bool> {
 
 async fn request_permission(
     ctx: &ToolCtx,
-    contract: &ToolContract,
     name: &str,
     arguments: &str,
     kind: NativeToolRiskKind,
     summary: String,
+    file_access: Option<FileAccessPrompt>,
 ) -> Result<(), String> {
     let mcp_server_id = if kind == NativeToolRiskKind::Mcp {
         ctx.mcp.server_id_for_tool(name).await
@@ -983,7 +1134,8 @@ async fn request_permission(
         run_permission_request_hooks(&ctx.hook_runtime(), name, arguments, kind, &summary).await
     {
         match hook_decision.decision {
-            HookDecision::Allow => return Ok(()),
+            HookDecision::Allow if kind != NativeToolRiskKind::ExternalPath => return Ok(()),
+            HookDecision::Allow => {}
             HookDecision::Deny => {
                 return Err(match hook_decision.reason {
                     Some(reason) => format!("钩子 {} 拒绝：{reason}", hook_decision.hook_id),
@@ -993,7 +1145,13 @@ async fn request_permission(
             HookDecision::Ask => {}
         }
     }
-    let suggested_rule = suggest_rule(contract, name, arguments, Some(&ctx.rules_workspace_root()));
+    let contract = ctx.contract_for(name).await;
+    let suggested_rule = suggest_rule(
+        &contract,
+        name,
+        arguments,
+        Some(&ctx.rules_workspace_root()),
+    );
     if kind == NativeToolRiskKind::Mcp {
         if let Some(server_id) = mcp_server_id.as_deref() {
             if ctx
@@ -1007,6 +1165,9 @@ async fn request_permission(
         }
     }
     let Some(requester) = ctx.request_permission.clone() else {
+        if file_access.is_some() {
+            return Err("当前没有可用的权限确认通道，操作未执行".to_string());
+        }
         // Setting off, or tests that skip the UI channel.
         return Ok(());
     };
@@ -1023,6 +1184,7 @@ async fn request_permission(
         remote: ctx.ssh.is_some(),
         mcp_server_id,
         suggested_rule: suggested_rule.clone(),
+        file_access: file_access.clone(),
     };
     let (tx, rx) = oneshot::channel();
     requester(prompt, tx);
@@ -1067,6 +1229,11 @@ async fn request_permission(
         PermissionWait::Decision(decision) => decision,
     };
     match decision {
+        NativePermissionDecision::AllowSession | NativePermissionDecision::AllowServer
+            if file_access.is_some() =>
+        {
+            Err("文件访问请使用本次允许或始终允许".to_string())
+        }
         NativePermissionDecision::AllowSession if kind == NativeToolRiskKind::Mcp => {
             allow_mcp_server(ctx, name).await;
             Ok(())
@@ -1080,6 +1247,9 @@ async fn request_permission(
             Ok(())
         }
         NativePermissionDecision::AllowAlways => {
+            if file_access.is_some() {
+                return Ok(());
+            }
             // 持久化由会话层完成；这里先把规则塞进内存，本会话内立刻生效。
             if let Some(suggestion) = suggested_rule {
                 if let Ok(mut rules) = ctx.permission_rules.write() {
@@ -1092,6 +1262,7 @@ async fn request_permission(
                             source: suggestion.source,
                             scope: super::permission::RuleScope::Workspace,
                             note: String::new(),
+                            external_path: None,
                         },
                     );
                 }
@@ -1150,8 +1321,22 @@ async fn call_apply_patch(ctx: &ToolCtx, arguments: &str) -> Result<String, Stri
         cache.insert(path, content);
     }
     let mutations = plan_mutations(&actions, |path| Ok(cache.get(path).cloned().flatten()))?;
+    for mutation in &mutations {
+        let path = match mutation {
+            FileMutation::Write { path, .. } | FileMutation::Delete { path } => path,
+        };
+        if let Some(ssh) = &ctx.ssh {
+            ssh.resolve_for_write(path)?;
+            ssh.validate_path(path).await?;
+        } else {
+            ctx.workspace.resolve_for_write(path)?;
+        }
+    }
     let mut notes = Vec::new();
     for mutation in mutations {
+        if ctx.cancel.is_cancelled() {
+            return Err("已取消".to_string());
+        }
         match mutation {
             FileMutation::Write { path, content } => {
                 if let Some(ssh) = ctx.ssh.as_ref() {
@@ -1161,7 +1346,7 @@ async fn call_apply_patch(ctx: &ToolCtx, arguments: &str) -> Result<String, Stri
                         Some(FileFingerprint::of_bytes(content.as_bytes())),
                     );
                 } else {
-                    let resolved = resolve_under_workspace(&ctx.workspace.root, &path)?;
+                    let resolved = ctx.workspace.resolve_for_write(&path)?;
                     ctx.workspace.write_file(&path, &content)?;
                     ctx.mark_read(
                         resolved.to_string_lossy().into_owned(),
@@ -1175,7 +1360,7 @@ async fn call_apply_patch(ctx: &ToolCtx, arguments: &str) -> Result<String, Stri
                     ssh.delete(&path).await?;
                     ctx.mark_read(ssh.resolve(&path)?, None);
                 } else {
-                    let resolved = resolve_under_workspace(&ctx.workspace.root, &path)?;
+                    let resolved = ctx.workspace.resolve_for_write(&path)?;
                     ctx.workspace.delete_file(&path)?;
                     ctx.mark_read(resolved.to_string_lossy().into_owned(), None);
                 }
@@ -1192,13 +1377,18 @@ async fn call_apply_patch(ctx: &ToolCtx, arguments: &str) -> Result<String, Stri
 
 async fn load_patch_file(ctx: &ToolCtx, path: &str) -> Result<Option<String>, String> {
     if let Some(ssh) = ctx.ssh.as_ref() {
-        return match ssh.read(path).await {
-            Ok(text) if text.trim() == "(no output)" => Ok(Some(String::new())),
-            Ok(text) => Ok(Some(text)),
-            Err(_) => Ok(None),
-        };
+        if !ssh.exists(path).await? {
+            return Ok(None);
+        }
+        return ssh.read(path).await.map(|text| {
+            Some(if text.trim() == "(no output)" {
+                String::new()
+            } else {
+                text
+            })
+        });
     }
-    let resolved = match resolve_under_workspace(&ctx.workspace.root, path) {
+    let resolved = match ctx.workspace.resolve_for_write(path) {
         Ok(path) => path,
         Err(error) => return Err(error),
     };
@@ -1413,14 +1603,22 @@ fn edit_summary(path: &str, strategy: &str, replacements: usize) -> String {
 async fn call_glob(ctx: &ToolCtx, arguments: &str) -> Result<String, String> {
     let args = parse_args(arguments)?;
     let pattern = string_arg(&args, "pattern")?;
-    let path = args.get("path").and_then(Value::as_str);
+    let path = args
+        .get("path")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|path| !path.is_empty());
     if let Some(ssh) = ctx.ssh.as_ref() {
-        let listing = ssh.glob().await?;
+        let listing = ssh.glob(path).await?;
+        let search_root = path.map(|path| ssh.resolve(path)).transpose()?;
         let hits: Vec<_> = listing
             .lines()
             .filter(|line| super::glob::glob_match(&pattern, line.trim()))
             .take(100)
-            .map(ToOwned::to_owned)
+            .map(|line| match &search_root {
+                Some(root) => format!("{}/{}", root.trim_end_matches('/'), line.trim()),
+                None => line.to_string(),
+            })
             .collect();
         return Ok(if hits.is_empty() {
             "No files found".to_string()
@@ -1434,7 +1632,11 @@ async fn call_glob(ctx: &ToolCtx, arguments: &str) -> Result<String, String> {
 async fn call_grep(ctx: &ToolCtx, arguments: &str) -> Result<String, String> {
     let args = parse_args(arguments)?;
     let pattern = string_arg(&args, "pattern")?;
-    let path = args.get("path").and_then(Value::as_str);
+    let path = args
+        .get("path")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|path| !path.is_empty());
     let glob = args.get("glob").and_then(Value::as_str);
     let head_limit = args.get("head_limit").and_then(Value::as_i64);
     if let Some(ssh) = ctx.ssh.as_ref() {
@@ -1566,7 +1768,9 @@ mod tests {
                 .await
                 .unwrap_err();
             assert!(
-                error.contains("超出工作区") || error.contains("无法解析符号链接"),
+                error.contains("确认通道")
+                    || error.contains("不允许")
+                    || error.contains("无法解析符号链接"),
                 "{tool}: {error}"
             );
         }
@@ -2027,6 +2231,7 @@ mod tests {
             fs::read_to_string(memory.join("notes.md")).unwrap(),
             "updated memory"
         );
+        child.allow_all_high_risk.store(false, Ordering::SeqCst);
         assert!(execute_tool(
             &child,
             "Write",
@@ -2035,11 +2240,11 @@ mod tests {
         )
         .await
         .unwrap_err()
-        .contains("超出工作区"));
+        .contains("确认通道"));
     }
 
     #[tokio::test]
-    async fn skill_read_access_does_not_allow_yolo_writes_or_neighboring_paths() {
+    async fn skill_read_access_does_not_allow_auto_edit_writes_or_neighboring_paths() {
         let root = tempfile::tempdir().unwrap();
         let outside = tempfile::tempdir().unwrap();
         let dir = outside.path().join("demo");
@@ -2050,7 +2255,8 @@ mod tests {
             "other",
             SkillSource::Global,
         );
-        ctx.allow_all_high_risk.store(true, Ordering::SeqCst);
+        ctx.auto_approve_overwrite = true;
+        ctx.request_permission = Some(deny_requester());
         let file = dir.join("notes.md");
         execute_tool(
             &ctx,
@@ -2088,7 +2294,7 @@ mod tests {
             let error = execute_tool(&ctx, tool, &args.to_string())
                 .await
                 .unwrap_err();
-            assert!(error.contains("超出工作区"), "{tool}: {error}");
+            assert!(error.contains("不允许"), "{tool}: {error}");
         }
         assert_eq!(
             fs::read_to_string(&file).unwrap(),
@@ -2128,6 +2334,7 @@ mod tests {
                 effect,
                 PermissionRule {
                     id: "skill-read".to_string(),
+                    external_path: None,
                     capability: PermissionCapability::Read,
                     pattern: "**".to_string(),
                     source: PatternSource::Path,
@@ -2430,6 +2637,7 @@ mod tests {
             .store(true, std::sync::atomic::Ordering::SeqCst);
         let rule = |capability, pattern: &str, source| PermissionRule {
             id: pattern.to_string(),
+            external_path: None,
             capability,
             pattern: pattern.to_string(),
             source,

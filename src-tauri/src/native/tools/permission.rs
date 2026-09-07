@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use super::contract::{PatternSource, PermissionCapability, ToolContract};
+use super::file_access::{external_rule_matches, ExternalPathRule, FileAccessPrompt};
 use super::glob::glob_match;
 use super::patch::{extract_patch_text, parse_patch, patch_counts};
 
@@ -20,6 +21,7 @@ pub enum NativeToolRiskKind {
     Rule,
     /// 创建 / 删除定时自动化。
     Automation,
+    ExternalPath,
 }
 
 impl NativeToolRiskKind {
@@ -33,6 +35,7 @@ impl NativeToolRiskKind {
             Self::Opaque => "不透明命令",
             Self::Rule => "权限规则",
             Self::Automation => "自动化",
+            Self::ExternalPath => "工作区外访问",
         }
     }
 }
@@ -194,6 +197,7 @@ fn risk_rank(kind: NativeToolRiskKind) -> u8 {
     match kind {
         NativeToolRiskKind::Rule => 0,
         NativeToolRiskKind::Automation => 1,
+        NativeToolRiskKind::ExternalPath => 1,
         NativeToolRiskKind::Overwrite => 1,
         NativeToolRiskKind::Mcp => 2,
         NativeToolRiskKind::Opaque => 3,
@@ -605,6 +609,8 @@ pub struct PermissionRule {
     pub scope: RuleScope,
     #[serde(default)]
     pub note: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub external_path: Option<ExternalPathRule>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -662,6 +668,8 @@ impl PermissionRules {
             !(existing.capability == rule.capability
                 && existing.pattern == rule.pattern
                 && existing.source == rule.source)
+                || existing.scope != rule.scope
+                || existing.external_path != rule.external_path
         });
         list.push(rule);
     }
@@ -712,6 +720,50 @@ impl PermissionRules {
         }
         RuleDecision::NoMatch
     }
+
+    pub fn evaluate_file_access(
+        &self,
+        contract: &ToolContract,
+        name: &str,
+        arguments: &str,
+        root: &Path,
+        access: &FileAccessPrompt,
+    ) -> Vec<RuleDecision> {
+        let physical_root = if access.target == super::file_access::PermissionTarget::Local {
+            super::paths::resolve_local_path(root, ".").unwrap_or_else(|_| root.to_path_buf())
+        } else {
+            root.to_path_buf()
+        };
+        access
+            .paths
+            .iter()
+            .map(|path| {
+                let mut candidates = RuleCandidates::from_call(name, arguments, Some(root));
+                candidates.paths = vec![
+                    path.requested_path.clone(),
+                    relative_display_path(&path.requested_path, Some(root)),
+                    relative_display_path(&path.path, Some(&physical_root)),
+                    path.path.clone(),
+                ];
+                let matches = |rule: &&PermissionRule| {
+                    if rule.external_path.is_some() {
+                        external_rule_matches(rule, &access.target, path)
+                    } else {
+                        rule_matches(rule, contract, &candidates)
+                    }
+                };
+                if let Some(rule) = self.deny.iter().find(matches) {
+                    RuleDecision::Deny(rule.clone())
+                } else if let Some(rule) = self.allow.iter().find(matches) {
+                    RuleDecision::Allow(rule.clone())
+                } else if let Some(rule) = self.ask.iter().find(matches) {
+                    RuleDecision::Ask(rule.clone())
+                } else {
+                    RuleDecision::NoMatch
+                }
+            })
+            .collect()
+    }
 }
 
 /// 从一次调用里抽出的可匹配字段。
@@ -746,9 +798,14 @@ impl RuleCandidates {
                     for action in actions {
                         match action {
                             super::patch::PatchAction::Add { path, .. }
-                            | super::patch::PatchAction::Delete { path }
-                            | super::patch::PatchAction::Update { path, .. } => {
+                            | super::patch::PatchAction::Delete { path } => {
                                 paths.push(relative_display_path(&path, workspace_root));
+                            }
+                            super::patch::PatchAction::Update { path, move_to, .. } => {
+                                paths.push(relative_display_path(&path, workspace_root));
+                                if let Some(dest) = move_to {
+                                    paths.push(relative_display_path(&dest, workspace_root));
+                                }
                             }
                         }
                     }
@@ -772,10 +829,16 @@ pub fn relative_display_path(path: &str, workspace_root: Option<&Path>) -> Strin
     };
     let root_text = root.to_string_lossy().replace('\\', "/");
     let root_text = root_text.trim_end_matches('/');
-    if let Some(rest) = normalized.strip_prefix(root_text) {
-        return rest.trim_start_matches('/').to_string();
+    if normalized == root_text {
+        return ".".to_string();
     }
-    normalized.trim_start_matches("./").to_string()
+    if let Some(rest) = normalized.strip_prefix(&format!("{root_text}/")) {
+        return rest.to_string();
+    }
+    normalized
+        .strip_prefix("./")
+        .unwrap_or(&normalized)
+        .to_string()
 }
 
 fn rule_matches(
@@ -783,7 +846,7 @@ fn rule_matches(
     contract: &ToolContract,
     candidates: &RuleCandidates,
 ) -> bool {
-    if rule.capability != contract.permission {
+    if rule.external_path.is_some() || rule.capability != contract.permission {
         return false;
     }
     let pattern = rule.pattern.trim();
@@ -885,6 +948,7 @@ mod tests {
     ) -> PermissionRule {
         PermissionRule {
             id: format!("{pattern}-{}", pattern.len()),
+            external_path: None,
             capability,
             pattern: pattern.to_string(),
             source,

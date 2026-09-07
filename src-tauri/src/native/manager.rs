@@ -10,8 +10,10 @@ use tokio::task::JoinHandle;
 use crate::native::model::types::NativeImage;
 use crate::native::permission_rules::SharedPermissionRules;
 use crate::native::tools::dispatch::PlanApprovalAnswer;
+use crate::native::tools::file_access::FileAccessSelection;
 use crate::native::tools::permission::{
-    NativePermissionDecision, NativeToolRiskKind, PermissionRuleSuggestion,
+    NativePermissionDecision, NativeToolRiskKind, PermissionRule, PermissionRuleSuggestion,
+    RuleEffect, RuleScope,
 };
 use crate::native::tools::question::{PlanQuestion, PlanQuestionAnswer};
 use crate::native::tools::CancelFlag;
@@ -86,6 +88,7 @@ pub struct PermissionRequest {
     pub remote: bool,
     pub mcp_server_id: Option<String>,
     pub suggested_rule: Option<PermissionRuleSuggestion>,
+    pub file_access: Option<crate::native::tools::file_access::FileAccessPrompt>,
 }
 
 pub struct PendingPermission {
@@ -135,7 +138,7 @@ pub struct NativeLiveSession {
     pub pending_compactions: Arc<AtomicUsize>,
     /// 与 `ToolCtx` 共享的规则；「总是允许」写入后即时生效。
     pub permission_rules: SharedPermissionRules,
-    /// 本地工作区目录（工作区规则文件的落点）；SSH 工作区为 `None`。
+    /// 权限规则存储根；SSH 使用本机按工作区隔离的目录。
     pub workspace_root: Option<std::path::PathBuf>,
     pub pending_permission: VecDeque<PendingPermission>,
     pub pending_question: VecDeque<PendingPlanQuestion>,
@@ -203,6 +206,82 @@ impl NativeAgentManager {
 
     pub fn get_session_mut(&mut self, session_record_id: &str) -> Option<&mut NativeLiveSession> {
         self.sessions.get_mut(session_record_id)
+    }
+
+    pub fn refresh_permission_rules(&self, config_dir: &std::path::Path) {
+        for session in self.sessions.values() {
+            let effective = crate::native::permission_rules::load_effective_rules(
+                config_dir,
+                session.workspace_root.as_deref(),
+            );
+            if let Ok(mut rules) = session.permission_rules.write() {
+                *rules = effective;
+            }
+        }
+    }
+
+    pub fn save_permission_rules(
+        &self,
+        config_dir: &std::path::Path,
+        session_id: &str,
+        request_id: &str,
+        selections: Option<&[FileAccessSelection]>,
+        scope: Option<RuleScope>,
+    ) -> Result<(), String> {
+        let session = self
+            .get_session(session_id)
+            .ok_or_else(|| "没有运行中的内置 Agent 会话".to_string())?;
+        let pending = session
+            .pending_permission
+            .front()
+            .filter(|pending| {
+                pending.request.request_id == request_id
+                    && !pending.reply.is_closed()
+                    && !session.cancel.is_cancelled()
+            })
+            .ok_or_else(|| "权限确认请求已过期".to_string())?;
+        let root = session.workspace_root.as_deref();
+        let scope = scope.unwrap_or(if root.is_some() {
+            RuleScope::Workspace
+        } else {
+            RuleScope::Global
+        });
+        let rules = if let Some(access) = &pending.request.file_access {
+            let rules = access.rules_for_selection(
+                selections.ok_or_else(|| "请选择白名单范围".to_string())?,
+                scope,
+            )?;
+            if access.target == crate::native::tools::file_access::PermissionTarget::Local {
+                for rule in &rules {
+                    let current = crate::native::tools::paths::resolve_local_path(
+                        std::path::Path::new("/"),
+                        &rule.pattern,
+                    )?;
+                    if current.to_string_lossy() != rule.pattern {
+                        return Err("授权目标已经改变，请重新确认".to_string());
+                    }
+                }
+            }
+            rules
+        } else {
+            let suggestion = pending
+                .request
+                .suggested_rule
+                .as_ref()
+                .ok_or_else(|| "该请求不支持始终允许".to_string())?;
+            vec![PermissionRule {
+                id: String::new(),
+                capability: suggestion.capability,
+                pattern: suggestion.pattern.clone(),
+                source: suggestion.source,
+                scope,
+                note: "由权限确认对话框保存".to_string(),
+                external_path: None,
+            }]
+        };
+        crate::native::permission_rules::add_rules(config_dir, root, RuleEffect::Allow, rules)?;
+        self.refresh_permission_rules(config_dir);
+        Ok(())
     }
 
     pub fn begin_finish(
@@ -310,6 +389,15 @@ impl NativeAgentManager {
         if pending.request.request_id != request_id {
             session.pending_permission.push_front(pending);
             return Err("权限确认请求已过期".to_string());
+        }
+        if pending.request.file_access.is_some()
+            && matches!(
+                decision,
+                NativePermissionDecision::AllowSession | NativePermissionDecision::AllowServer
+            )
+        {
+            session.pending_permission.push_front(pending);
+            return Err("文件访问请使用本次允许或始终允许".to_string());
         }
         if decision == NativePermissionDecision::AllowSession
             && pending.request.kind != NativeToolRiskKind::Mcp
@@ -680,6 +768,7 @@ mod tests {
                     remote: false,
                     mcp_server_id: None,
                     suggested_rule: None,
+                    file_access: None,
                 },
                 reply,
             },
@@ -719,6 +808,132 @@ mod tests {
             second_rx.try_recv().expect("second decision"),
             NativePermissionDecision::Deny
         );
+    }
+
+    #[tokio::test]
+    async fn always_allow_saves_before_resolution_and_refreshes_other_sessions() {
+        use crate::native::tools::contract::PermissionCapability;
+        use crate::native::tools::file_access::{
+            FileAccessPath, FileAccessPrompt, PathAccessScope, PermissionTarget,
+        };
+        let config = tempfile::tempdir().unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let path = std::fs::canonicalize(outside.path())
+            .unwrap()
+            .join("file.txt")
+            .to_string_lossy()
+            .into_owned();
+        let mut manager = NativeAgentManager::new();
+        for id in ["one", "two"] {
+            let mut session = live_session(id);
+            session.workspace_root = Some(workspace.path().to_path_buf());
+            manager.add_session(session);
+        }
+        let (mut pending, mut reply) = pending("request", "Read");
+        pending.request.file_access = Some(FileAccessPrompt {
+            target: PermissionTarget::Local,
+            paths: vec![FileAccessPath {
+                path: path.clone(),
+                requested_path: path.clone(),
+                capability: PermissionCapability::Read,
+                scope: PathAccessScope::Exact,
+                operation: "read".into(),
+                outside_workspace: true,
+            }],
+        });
+        manager.enqueue_permission("one", pending).unwrap();
+        let selections = vec![FileAccessSelection {
+            path,
+            directory: false,
+        }];
+        assert!(manager
+            .save_permission_rules(config.path(), "one", "stale", Some(&selections), None)
+            .is_err());
+        assert!(manager
+            .save_permission_rules(config.path(), "one", "request", Some(&[]), None)
+            .is_err());
+        let blocked = workspace.path().join(".noxcode");
+        std::fs::write(&blocked, "not a directory").unwrap();
+        assert!(manager
+            .save_permission_rules(config.path(), "one", "request", Some(&selections), None)
+            .is_err());
+        assert!(matches!(
+            reply.try_recv(),
+            Err(oneshot::error::TryRecvError::Empty)
+        ));
+        assert_eq!(
+            manager.get_session("one").unwrap().pending_permission.len(),
+            1
+        );
+        assert!(manager
+            .get_session("two")
+            .unwrap()
+            .permission_rules
+            .read()
+            .unwrap()
+            .is_empty());
+        std::fs::remove_file(&blocked).unwrap();
+        manager
+            .save_permission_rules(config.path(), "one", "request", Some(&selections), None)
+            .unwrap();
+        assert_eq!(
+            manager
+                .get_session("two")
+                .unwrap()
+                .permission_rules
+                .read()
+                .unwrap()
+                .allow
+                .len(),
+            1
+        );
+        manager
+            .resolve_permission("one", "request", NativePermissionDecision::AllowAlways)
+            .unwrap();
+        assert_eq!(reply.await.unwrap(), NativePermissionDecision::AllowAlways);
+        assert!(!manager
+            .get_session("one")
+            .unwrap()
+            .allow_all_high_risk
+            .load(Ordering::SeqCst));
+        let rules = crate::native::permission_rules::load_effective_rules(
+            config.path(),
+            Some(workspace.path()),
+        );
+        crate::native::permission_rules::delete_rule(
+            config.path(),
+            Some(workspace.path()),
+            &rules.allow[0].id,
+        )
+        .unwrap();
+        manager.refresh_permission_rules(config.path());
+        assert!(manager
+            .get_session("two")
+            .unwrap()
+            .permission_rules
+            .read()
+            .unwrap()
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn closed_permission_request_cannot_save_an_allow_rule() {
+        let config = tempfile::tempdir().unwrap();
+        let mut manager = NativeAgentManager::new();
+        manager.add_session(live_session("one"));
+        let (mut pending, reply) = pending("closed", "Bash");
+        pending.request.suggested_rule = Some(PermissionRuleSuggestion {
+            capability: crate::native::tools::contract::PermissionCapability::Bash,
+            pattern: "echo*".into(),
+            source: crate::native::tools::contract::PatternSource::Command,
+        });
+        drop(reply);
+        manager.enqueue_permission("one", pending).unwrap();
+        assert!(manager
+            .save_permission_rules(config.path(), "one", "closed", None, None)
+            .is_err());
+        assert!(!crate::native::permission_rules::global_rules_path(config.path()).exists());
     }
 
     #[tokio::test]

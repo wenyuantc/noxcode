@@ -10,25 +10,50 @@ use crate::app::ssh::shell::shell_escape_single_quoted;
 use crate::db::models::SshConfigRecord;
 
 use super::cancel::CancelFlag;
+use super::file_access::AuthorizedPath;
 use super::local::{
     bash_timeout, BoundedOutput, CommandStatus, BASH_DEFAULT_TIMEOUT, BASH_OUTPUT_HARD_LIMIT,
 };
-use super::paths::resolve_under_workspace_posix;
+use super::paths::{resolve_posix_path, resolve_under_workspace_posix};
 
 #[derive(Clone)]
 pub struct SshToolRuntime {
     pub app: AppHandle,
     pub config: SshConfigRecord,
     pub root: String,
+    pub authorized_paths: Vec<AuthorizedPath>,
 }
 
 impl SshToolRuntime {
     pub fn resolve(&self, path: &str) -> Result<String, String> {
-        resolve_under_workspace_posix(&self.root, path)
+        self.resolve_access(path, false)
+    }
+
+    pub fn resolve_for_write(&self, path: &str) -> Result<String, String> {
+        self.resolve_access(path, true)
+    }
+
+    fn resolve_access(&self, path: &str, write: bool) -> Result<String, String> {
+        resolve_ssh_access(&self.root, &self.authorized_paths, path, write)
+    }
+
+    pub async fn validate_path(&self, path: &str) -> Result<bool, String> {
+        let resolved = resolve_posix_path(&self.root, path)?;
+        let command = format!(
+            "{}test -d {}",
+            ssh_path_guard("/", &resolved)?,
+            shell_escape_single_quoted(&resolved)
+        );
+        let output = execute_ssh_command(&self.app, &self.config, &command, true).await?;
+        match output.exit_code {
+            Some(0) => Ok(true),
+            Some(1) => Ok(false),
+            _ => Err(format!("检查远程路径失败: {}", output.stderr_lossy())),
+        }
     }
 
     pub async fn exists(&self, path: &str) -> Result<bool, String> {
-        let command = ssh_exists_command(&self.root, path)?;
+        let command = ssh_exists_command("/", &self.resolve(path)?)?;
         let output = execute_ssh_command(&self.app, &self.config, &command, true).await?;
         match output.exit_code {
             Some(0) => Ok(true),
@@ -38,7 +63,7 @@ impl SshToolRuntime {
     }
 
     pub async fn read(&self, path: &str) -> Result<String, String> {
-        let command = ssh_read_command(&self.root, path)?;
+        let command = ssh_read_command("/", &self.resolve(path)?)?;
         let output = execute_ssh_command(&self.app, &self.config, &command, true).await?;
         if output.success() {
             Ok(output.stdout_lossy())
@@ -57,10 +82,11 @@ impl SshToolRuntime {
         content: &str,
         create_only: bool,
     ) -> Result<String, String> {
+        let resolved = self.resolve_access(path, true)?;
         let command = if create_only {
-            ssh_write_command_checked(&self.root, path, true)?
+            ssh_write_command_checked("/", &resolved, true)?
         } else {
-            ssh_write_command(&self.root, path)?
+            ssh_write_command("/", &resolved)?
         };
         let output = execute_ssh_command_with_input(
             &self.app,
@@ -76,13 +102,14 @@ impl SshToolRuntime {
         Ok(format!("Wrote {} bytes to {path}", content.len()))
     }
 
-    pub async fn glob(&self) -> Result<String, String> {
-        let command = ssh_glob_command(&self.root)?;
+    pub async fn glob(&self, path: Option<&str>) -> Result<String, String> {
+        let command = ssh_glob_access_command(&self.root, &self.authorized_paths, path)?;
         stdout_or_err(execute_ssh_command(&self.app, &self.config, &command, true).await?)
     }
 
     pub async fn grep(&self, pattern: &str, path: Option<&str>) -> Result<String, String> {
-        let command = ssh_grep_command(&self.root, pattern, path)?;
+        let resolved = self.resolve(path.unwrap_or("."))?;
+        let command = ssh_grep_command("/", pattern, Some(&resolved))?;
         stdout_or_err(execute_ssh_command(&self.app, &self.config, &command, true).await?)
     }
 
@@ -139,10 +166,37 @@ impl SshToolRuntime {
     }
 
     pub async fn delete(&self, path: &str) -> Result<String, String> {
-        let command = ssh_delete_command(&self.root, path)?;
+        let command = ssh_delete_command("/", &self.resolve_access(path, true)?)?;
         stdout_or_err(execute_ssh_command(&self.app, &self.config, &command, true).await?)?;
         Ok(format!("Deleted {path}"))
     }
+}
+
+fn resolve_ssh_access(
+    root: &str,
+    grants: &[AuthorizedPath],
+    path: &str,
+    write: bool,
+) -> Result<String, String> {
+    let resolved = resolve_posix_path(root, path)?;
+    if grants.iter().any(|grant| grant.permits(&resolved, write)) {
+        Ok(resolved)
+    } else {
+        resolve_under_workspace_posix(root, path)
+    }
+}
+
+fn ssh_glob_access_command(
+    root: &str,
+    grants: &[AuthorizedPath],
+    path: Option<&str>,
+) -> Result<String, String> {
+    let resolved = resolve_ssh_access(root, grants, path.unwrap_or("."), false)?;
+    Ok(format!(
+        "{}{}",
+        ssh_path_guard("/", &resolved)?,
+        ssh_glob_command(&resolved)?
+    ))
 }
 
 async fn collect_bash_output(
@@ -287,13 +341,13 @@ pub fn ssh_grep_command(root: &str, pattern: &str, path: Option<&str>) -> Result
         None => resolve_under_workspace_posix(root, ".")?,
     };
     Ok(format!(
-        "{}cd {} && (rg -n --no-heading -e {} -- {} 2>/dev/null || grep -r -n -e {} -- {})",
+        "{}cd {} && (if command -v rg >/dev/null 2>&1; then rg -n --no-heading -e {} -- {}; else find {} -type f -exec grep -n -H -e {} -- {{}} +; fi)",
         ssh_path_guard(root, &target)?,
         shell_escape_single_quoted(root),
         shell_escape_single_quoted(pattern),
         shell_escape_single_quoted(&target),
-        shell_escape_single_quoted(pattern),
-        shell_escape_single_quoted(&target)
+        shell_escape_single_quoted(&target),
+        shell_escape_single_quoted(pattern)
     ))
 }
 
@@ -321,6 +375,51 @@ pub fn ssh_bash_command(root: &str, command: &str) -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn approved_ssh_glob_uses_requested_directory_and_grants_do_not_leak() {
+        use super::super::contract::PermissionCapability;
+        use super::super::file_access::PathAccessScope;
+        let root = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("inside.txt"), "inside").unwrap();
+        std::fs::write(outside.path().join("outside.txt"), "outside").unwrap();
+        let root = std::fs::canonicalize(root.path())
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        let external = std::fs::canonicalize(outside.path())
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        let grants = vec![AuthorizedPath {
+            path: external.clone(),
+            scope: PathAccessScope::Subtree,
+            capability: PermissionCapability::Read,
+        }];
+        assert!(ssh_glob_access_command(&root, &[], Some(&external)).is_err());
+        assert!(
+            resolve_ssh_access(&root, &grants, &format!("{external}/outside.txt"), true).is_err()
+        );
+        let command = ssh_glob_access_command(&root, &grants, Some(&external)).unwrap();
+        let output = crate::process_spawn::tokio_command("sh")
+            .args(["-c", &command])
+            .output()
+            .await
+            .unwrap();
+        assert!(output.status.success());
+        let listing = String::from_utf8_lossy(&output.stdout);
+        assert!(listing.contains("outside.txt"));
+        assert!(!listing.contains("inside.txt"));
+        let default = ssh_glob_access_command(&root, &grants, None).unwrap();
+        let output = crate::process_spawn::tokio_command("sh")
+            .args(["-c", &default])
+            .output()
+            .await
+            .unwrap();
+        assert!(String::from_utf8_lossy(&output.stdout).contains("inside.txt"));
+        assert!(!String::from_utf8_lossy(&output.stdout).contains("outside.txt"));
+    }
 
     #[tokio::test]
     async fn remote_write_commands_create_new_files_without_clobbering_existing_files() {

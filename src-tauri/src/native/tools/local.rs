@@ -14,8 +14,9 @@ use crate::native::model::types::NativeImage;
 use crate::process_spawn::tokio_command;
 
 use super::cancel::CancelFlag;
+use super::file_access::AuthorizedPath;
 use super::glob::glob_match;
-use super::paths::resolve_under_workspace;
+use super::paths::{resolve_local_path, resolve_under_workspace};
 use super::shell_snapshot::{COMMAND_ENV, SNAPSHOT_ENV};
 
 const READ_DEFAULT_LIMIT: usize = 2000;
@@ -94,6 +95,7 @@ pub struct LocalWorkspace {
     pub extra_read_roots: Vec<PathBuf>,
     /// 工作区之外允许 Write / Edit 的目录（记忆目录）。
     pub extra_write_roots: Vec<PathBuf>,
+    pub authorized_paths: Vec<AuthorizedPath>,
 }
 
 impl LocalWorkspace {
@@ -105,6 +107,7 @@ impl LocalWorkspace {
             bash_default_timeout: BASH_DEFAULT_TIMEOUT,
             extra_read_roots: Vec::new(),
             extra_write_roots: Vec::new(),
+            authorized_paths: Vec::new(),
         }
     }
 
@@ -114,6 +117,9 @@ impl LocalWorkspace {
 
     /// 只读解析：工作区优先，其次是 `extra_read_roots` 与 `extra_write_roots`。
     pub fn resolve_for_read(&self, input: &str) -> Result<PathBuf, String> {
+        if let Some(path) = self.resolve_authorized(input, false)? {
+            return Ok(path);
+        }
         match resolve_under_workspace(&self.root, input) {
             Ok(path) => Ok(path),
             Err(error) => {
@@ -133,6 +139,9 @@ impl LocalWorkspace {
 
     /// 可写解析：工作区优先，其次是 `extra_write_roots`（记忆目录）。
     pub fn resolve_for_write(&self, input: &str) -> Result<PathBuf, String> {
+        if let Some(path) = self.resolve_authorized(input, true)? {
+            return Ok(path);
+        }
         match resolve_under_workspace(&self.root, input) {
             Ok(path) => Ok(path),
             Err(error) => {
@@ -144,6 +153,18 @@ impl LocalWorkspace {
                 Err(error)
             }
         }
+    }
+
+    fn resolve_authorized(&self, input: &str, write: bool) -> Result<Option<PathBuf>, String> {
+        if self.authorized_paths.is_empty() {
+            return Ok(None);
+        }
+        let path = resolve_local_path(&self.root, input)?;
+        Ok(self
+            .authorized_paths
+            .iter()
+            .any(|grant| grant.permits(&path.to_string_lossy(), write))
+            .then_some(path))
     }
 
     pub fn read_file(
@@ -199,7 +220,7 @@ impl LocalWorkspace {
     }
 
     pub fn delete_file(&self, path: &str) -> Result<String, String> {
-        let resolved = self.resolve(path)?;
+        let resolved = self.resolve_for_write(path)?;
         let metadata = fs::metadata(&resolved).map_err(|_| missing_file_error(&resolved, path))?;
         if metadata.is_dir() {
             return Err(format!("路径是目录: {path}"));

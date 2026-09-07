@@ -35,9 +35,12 @@ P4 把进程内编程 Agent 接到渠道 + 工作区外壳。数据流仍是 `Re
 
 ## 权限规则
 
-规则层在风险分类之前裁决：`deny → allow → ask → 未命中`（对齐 ZCode 的 `denyPriority: beforeAsk`）。每条规则 `{ capability, pattern, source, scope, note }`：`capability` 是契约里的能力（bash / edit / read / mcp / web_fetch / …），`source` 决定从调用里取哪个字段匹配（`command` 前缀通配如 `git push*`；`path` / `tool_name` / `input` 用 glob），`scope` 决定落盘位置：全局 `$APPCONFIG/native-permissions.json`，工作区 `.noxcode/permissions.json`（只对本地工作区生效，工作区规则排在全局之前）。
+规则层在风险分类之前裁决：`deny → allow → ask → 未命中`（对齐 ZCode 的 `denyPriority: beforeAsk`）。每条规则 `{ capability, pattern, source, scope, note, external_path? }`：`capability` 是契约里的能力，`source` 决定匹配字段。普通命令支持前缀通配，路径 / 工具名 / 输入支持 glob。全局规则存 `$APPCONFIG/native-permissions.json`，本地工作区存 `.noxcode/permissions.json`；SSH 工作区存本机 `$APPCONFIG/ssh-workspaces/<工作区 ID 的 UTF-8 十六进制>/.noxcode/permissions.json`。同效果下工作区规则优先。
 
-- 确认对话框多出「总是允许 `<pattern>`（保存规则）」：后端按 `suggested_rule`（Bash 取前两个词做前缀、文件工具取相对路径、其余取工具名）写一条工作区 allow 规则并即时生效。
+- 文件访问弹窗提供「本次允许」「始终允许」「拒绝」，展示主机、操作和所有目标路径。「始终允许」默认保存当前文件，目录搜索保存搜索目录及子目录，也可改选文件所在目录；默认当前工作区，可显式选全局。保存失败保留请求，多目标规则原子保存后才执行。
+- 本地 / SSH 的 Read、Glob、Grep、Write、Edit、ApplyPatch 均支持工作区外授权。yolo 直接允许外部访问，其他模式遇到未授权路径先确认。补丁源、删除与移动目标统一检查，全部授权后才开始修改；单次授权不进入共享上下文。SSH Glob 使用指定搜索目录，显式指定目录时返回绝对路径。
+- `external_path = { target, scope: exact | subtree }` 使用真实绝对路径及路径组件匹配，能力为 `read` 或 `edit`，两者分开。`target` 为 `{ kind: local }` 或 `{ kind: ssh, config_id, host, port, username }`，防止授权跨连接混用。旧规则没有此字段时不自动扩展文件边界。
+- 普通工具的「始终允许」沿用 `suggested_rule`，Bash 使用命令前缀、其余工具使用工具名。设置页增删规则后同步运行中会话；文件授权仍保留只读模式、内容指纹、取消和路径验证。
 - `ask` 规则命中时即便在 `yolo` 也会弹确认（`kind = rule`）。
 - 子 Agent 档案可带 `permission_mode`（不共享父会话的放行开关）与 `disallowed_tools`。
 - 命令：`get/update/add/delete_native_permission_rules`；设置页「权限规则」可增删规则。
@@ -76,7 +79,7 @@ P4 把进程内编程 Agent 接到渠道 + 工作区外壳。数据流仍是 `Re
 - `Bash`：会话开始时导出一次 login shell 快照（函数 / 别名 / shell 选项 / PATH）到 `$APPCONFIG/shell-snapshots/`，之后每次只 `source` 快照再 `eval` 命令；导出失败或关闭 `shell_snapshot_enabled` 时回退 `bash -lc`。`Grep` 在 `rg_sidecar_enabled` 且找到打包的 `tools/rg` 或 PATH 上的 `rg` 时用 ripgrep，否则用 Rust 正则遍历。
 - 未验证 Shell 命令默认需要授权；重定向覆盖、`cp/mv`、所有 `git restore` 均进入风险判断。本地 Bash 同时排空两路输出并限内存，超时或取消时终止独立进程组；SSH Bash 透传 deadline / cancel 并发送终止信号、关闭通道。超出硬上限的输出仅保留尾部，不能从 artifact 恢复被丢弃前缀。
 - 本地文件工具按真实路径及最近存在父目录检查边界，额外读写根保持各自权限，递归搜索不跟随符号链接；SSH 文件工具拒绝符号链接路径。SSH Write 支持防覆盖创建新文件，覆盖旧文件仍要求 Read 与内容指纹匹配。这些边界不等同于操作系统级 Shell 沙箱。
-- 本地会话的 `Read / Glob / Grep` 允许使用绝对路径只读访问当前有效技能目录及其附属文件，覆盖全局、插件及仓库根技能；权限按当前工具上下文的技能列表派生，遵守启停、重名覆盖和子 Agent 的技能筛选，不授权技能父目录。相对路径仍以工作区为基准，未指定路径的搜索只扫描工作区。链接导入的技能按真实目录检查边界，技能内部链接不得逃逸。此扩展不增加写权限，也不绕过 deny/ask 规则或改变 yolo、SSH 的权限边界。
+- 本地会话的 `Read / Glob / Grep` 默认允许只读访问当前有效技能目录及其附属文件，遵守启停、重名覆盖和子 Agent 的技能筛选。技能父目录及写入需额外授权，yolo 按完全访问处理。相对路径以工作区为基准，未指定路径的搜索只扫描工作区。链接按真实目录检查，递归搜索不跟随链接逃逸；直接访问外部链接目标仍须经过外部路径授权。
 - `WebFetch` 有 15 分钟 / 50 MB 的内存缓存。
 
 ## 钩子

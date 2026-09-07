@@ -14,7 +14,9 @@ import type {
   PermissionRule,
   PermissionRuleEffect,
   PermissionRuleScope,
+  PathAccessScope,
 } from "@/lib/types";
+import { permissionTargetLabel } from "@/lib/nativeFileAccess";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -71,6 +73,9 @@ export function PermissionRulesSection() {
   const [scope, setScope] = useState<PermissionRuleScope>("global");
   const [pattern, setPattern] = useState("");
   const [note, setNote] = useState("");
+  const [externalPath, setExternalPath] = useState(false);
+  const [pathScope, setPathScope] = useState<PathAccessScope>("exact");
+  const [targetKind, setTargetKind] = useState<"local" | "ssh">("local");
 
   const reload = useCallback(() => {
     getNativePermissionRules(workspaceId)
@@ -92,6 +97,9 @@ export function PermissionRulesSection() {
     setScope("global");
     setPattern("");
     setNote("");
+    setExternalPath(false);
+    setPathScope("exact");
+    setTargetKind(view?.workspace_target?.kind ?? "local");
     setError(null);
     setMessage(null);
     setDialogOpen(true);
@@ -110,6 +118,16 @@ export function PermissionRulesSection() {
         source,
         scope,
         note: note.trim(),
+        external_path:
+          externalPath && (capability === "read" || capability === "edit") && source === "path"
+            ? {
+                target:
+                  targetKind === "ssh" && view?.workspace_target?.kind === "ssh"
+                    ? view.workspace_target
+                    : { kind: "local" },
+                scope: pathScope,
+              }
+            : null,
       };
       await addNativePermissionRule(effect, rule, workspaceId);
       setPattern("");
@@ -173,6 +191,14 @@ export function PermissionRulesSection() {
               <code className="min-w-0 truncate rounded-md bg-muted/60 px-2 py-0.5 font-mono text-xs text-foreground font-semibold">
                 {rule.pattern}
               </code>
+              {rule.external_path ? (
+                <span className="text-xs break-words [overflow-wrap:anywhere]">
+                  {t("settings:permissions.externalPath")} ·{" "}
+                  {permissionTargetLabel(rule.external_path.target) ||
+                    t("settings:permissions.targetLocal")}{" "}
+                  · {t(`settings:permissions.pathScope.${rule.external_path.scope}`)}
+                </span>
+              ) : null}
               <span className="text-[10px] text-muted-foreground font-mono">
                 ({t(`settings:permissions.source.${rule.source}`)})
               </span>
@@ -274,7 +300,8 @@ export function PermissionRulesSection() {
             ? renderScopeSection(
                 "工作区规则 (Workspace)",
                 view.workspace,
-                t("settings:permissions.workspacePath", { path: view.workspace_root ?? "" }),
+                view.workspace_rules_path ??
+                  t("settings:permissions.workspacePath", { path: view.workspace_root ?? "" }),
               )
             : null}
         </div>
@@ -282,7 +309,7 @@ export function PermissionRulesSection() {
 
       {/* 添加规则 Dialog */}
       <Dialog open={dialogOpen} onOpenChange={setDialogOpen}>
-        <DialogContent className="sm:max-w-md rounded-2xl p-0 overflow-hidden">
+        <DialogContent className="sm:max-w-md max-h-[85dvh] rounded-lg p-0 overflow-y-auto">
           <DialogHeader className="border-b border-border/50 px-6 py-4">
             <DialogTitle className="text-base font-semibold tracking-tight">
               {t("settings:permissions.addTitle")}
@@ -389,11 +416,60 @@ export function PermissionRulesSection() {
               </label>
               <Input
                 className="mt-1 h-8 font-mono text-xs"
-                placeholder={capability === "bash" ? "git *" : "*.env*"}
+                placeholder={
+                  externalPath ? "/absolute/path" : capability === "bash" ? "git *" : "*.env*"
+                }
                 value={pattern}
                 onChange={(e) => setPattern(e.target.value)}
               />
             </div>
+
+            {(capability === "read" || capability === "edit") && source === "path" ? (
+              <div className="space-y-3">
+                <label className="flex items-center gap-2 text-xs">
+                  <input
+                    type="checkbox"
+                    checked={externalPath}
+                    onChange={(event) => setExternalPath(event.target.checked)}
+                  />
+                  {t("settings:permissions.externalPath")}
+                </label>
+                {externalPath ? (
+                  <div className="grid grid-cols-2 gap-3">
+                    <label className="space-y-1 text-xs">
+                      <span>{t("settings:permissions.targetLabel")}</span>
+                      <select
+                        aria-label={t("settings:permissions.targetLabel")}
+                        value={targetKind}
+                        onChange={(event) => setTargetKind(event.target.value as "local" | "ssh")}
+                        className="w-full min-w-0 rounded-md border border-input bg-background p-2"
+                      >
+                        <option value="local">{t("settings:permissions.targetLocal")}</option>
+                        {view?.workspace_target?.kind === "ssh" ? (
+                          <option value="ssh">
+                            {permissionTargetLabel(view.workspace_target)}
+                          </option>
+                        ) : null}
+                      </select>
+                    </label>
+                    <label className="space-y-1 text-xs">
+                      <span>{t("settings:permissions.pathScopeLabel")}</span>
+                      <select
+                        aria-label={t("settings:permissions.pathScopeLabel")}
+                        value={pathScope}
+                        onChange={(event) => setPathScope(event.target.value as PathAccessScope)}
+                        className="w-full min-w-0 rounded-md border border-input bg-background p-2"
+                      >
+                        <option value="exact">{t("settings:permissions.pathScope.exact")}</option>
+                        <option value="subtree">
+                          {t("settings:permissions.pathScope.subtree")}
+                        </option>
+                      </select>
+                    </label>
+                  </div>
+                ) : null}
+              </div>
+            ) : null}
 
             <div>
               <label className="text-xs font-medium text-muted-foreground">

@@ -695,6 +695,11 @@
     "profilesHint": "Markdown profiles are also loaded from <workspace>/.noxcode/agents, .claude/agents and $APPCONFIG/agents: frontmatter name / description / tools / disallowedTools / permissionMode / maxTurns / skills, body = system prompt. They are read-only here."
   },
   "permissions": {
+    "externalPath": "Access outside the workspace",
+    "targetLabel": "Execution target",
+    "targetLocal": "This device",
+    "pathScopeLabel": "Path scope",
+    "pathScope": { "exact": "This target only", "subtree": "Directory and descendants" },
     "hint": "Rules take precedence over the permission mode: deny before allow, allow before ask; calls that match nothing fall back to mode and risk classification. Global rules live in native-permissions.json, workspace rules in .noxcode/permissions.json.",
     "addTitle": "Add a rule",
     "addHint": "Command patterns support prefix wildcards (git push*); paths and tool names support globs (src/**, mcp_fs_*).",

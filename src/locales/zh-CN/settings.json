@@ -695,6 +695,11 @@
     "profilesHint": "也会读取 <工作区>/.noxcode/agents、.claude/agents 与 $APPCONFIG/agents 下的 .md 档案：frontmatter 里 name / description / tools / disallowedTools / permissionMode / maxTurns / skills，正文即系统提示；这里只展示不可编辑。"
   },
   "permissions": {
+    "externalPath": "工作区外路径授权",
+    "targetLabel": "执行目标",
+    "targetLocal": "本机",
+    "pathScopeLabel": "路径范围",
+    "pathScope": { "exact": "仅此目标", "subtree": "目录及子目录" },
     "hint": "规则优先于权限模式：deny 先于 allow，allow 先于 ask；未命中的调用再按模式与风险判定。全局规则存 native-permissions.json，工作区规则存 .noxcode/permissions.json。",
     "addTitle": "新增规则",
     "addHint": "命令模式支持前缀通配（如 git push*），路径与工具名支持 glob（如 src/**、mcp_fs_*）。",

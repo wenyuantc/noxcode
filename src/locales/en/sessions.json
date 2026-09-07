@@ -72,6 +72,17 @@
   "permissionTitle": "High-risk action needs confirmation",
   "permissionRuleTitle": "A permission rule requires confirmation",
   "permissionAllowOnce": "Allow once",
+  "permissionAlways": "Always allow",
+  "permissionFileTitle": "File access approval",
+  "permissionLocalTarget": "This device",
+  "permissionIncludeDirectory": "Allow this directory and its descendants",
+  "permissionSaveScope": "Allowlist scope",
+  "permissionScopeWorkspace": "Current workspace",
+  "permissionScopeGlobal": "Global",
+  "permissionOperation": {
+    "read": "Read", "search": "Search", "write": "Write", "edit": "Edit",
+    "create": "Create", "delete": "Delete", "move_source": "Move source", "move_destination": "Move destination"
+  },
   "permissionAllowSession": "Allow this session",
   "permissionAllowServer": "Allow this server",
   "permissionAllowAlways": "Always allow {{pattern}} (save rule)",
@@ -123,7 +134,7 @@
     },
     "yolo": {
       "title": "Full access",
-      "description": "Reduce confirmation frequency."
+      "description": "Includes access outside the workspace; deny and ask rules still apply."
     }
   },
   "effortLevels": {

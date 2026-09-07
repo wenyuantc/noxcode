@@ -208,6 +208,7 @@ struct NativePermissionRequestEvent {
     remote: bool,
     mcp_server_id: Option<String>,
     suggested_rule: Option<PermissionRuleSuggestion>,
+    file_access: Option<crate::native::tools::file_access::FileAccessPrompt>,
 }
 
 fn session_kind(plan_mode: bool) -> String {
@@ -234,6 +235,7 @@ fn permission_event(
         remote: request.remote,
         mcp_server_id: request.mcp_server_id.clone(),
         suggested_rule: request.suggested_rule.clone(),
+        file_access: request.file_access.clone(),
     }
 }
 
@@ -541,6 +543,7 @@ async fn approve_workspace_hooks(
             remote: false,
             mcp_server_id: None,
             suggested_rule: None,
+            file_access: None,
         },
         tx,
     );
@@ -1766,6 +1769,7 @@ async fn start_native_session_locked(
             app: app.clone(),
             config,
             root: run_cwd.clone(),
+            authorized_paths: Vec::new(),
         })
     } else {
         None
@@ -1816,14 +1820,20 @@ async fn start_native_session_locked(
     let allow_all_high_risk = Arc::new(AtomicBool::new(
         crate::native::settings::permission_mode_is_yolo(&permission_mode),
     ));
-    let local_workspace_root = (execution_context.execution_target
-        == crate::app::shared::EXECUTION_TARGET_LOCAL)
-        .then(|| PathBuf::from(&run_cwd));
+    let permission_storage_root =
+        if execution_context.execution_target == crate::app::shared::EXECUTION_TARGET_LOCAL {
+            Some(PathBuf::from(&run_cwd))
+        } else {
+            app.path()
+                .app_config_dir()
+                .ok()
+                .map(|dir| crate::native::permission_rules::ssh_rules_root(&dir, &workspace_id))
+        };
     let permission_rules =
         crate::native::permission_rules::shared_rules(match app.path().app_config_dir() {
             Ok(dir) => crate::native::permission_rules::load_effective_rules(
                 &dir,
-                local_workspace_root.as_deref(),
+                permission_storage_root.as_deref(),
             ),
             Err(_) => Default::default(),
         });
@@ -1888,7 +1898,7 @@ async fn start_native_session_locked(
         working,
         pending_compactions: Arc::default(),
         permission_rules,
-        workspace_root: local_workspace_root,
+        workspace_root: permission_storage_root,
         pending_permission: std::collections::VecDeque::new(),
         pending_question: std::collections::VecDeque::new(),
         pending_plan_approval: std::collections::VecDeque::new(),
@@ -2020,7 +2030,7 @@ async fn run_native_loop(
     if announce_startup {
         let notice = match permission_mode.as_str() {
             crate::native::settings::PERMISSION_MODE_YOLO => Some(
-                "[PERMISSION] 完全访问（yolo）：高风险工具直接执行，只有 ask 规则仍会确认",
+                "[PERMISSION] 完全访问（yolo）：包含工作区外文件访问；deny 规则仍拒绝，ask 规则仍需确认",
             ),
             crate::native::settings::PERMISSION_MODE_BUILD => Some(
                 "[PERMISSION] 自动构建（build）：覆盖文件、不透明命令与只读 MCP 直接执行，删除 / 推送 / 强制 Git / 写入型 MCP 仍需确认",
@@ -2086,6 +2096,7 @@ async fn run_native_loop(
                     remote: prompt.remote,
                     mcp_server_id: prompt.mcp_server_id.clone(),
                     suggested_rule: prompt.suggested_rule.clone(),
+                    file_access: prompt.file_access.clone(),
                 };
                 let should_emit = {
                     let mut manager = manager_state.lock().await;
@@ -2951,58 +2962,26 @@ pub async fn resolve_native_tool_permission(
     session_record_id: String,
     request_id: String,
     decision: NativePermissionDecision,
+    file_access: Option<Vec<crate::native::tools::file_access::FileAccessSelection>>,
+    scope: Option<crate::native::tools::permission::RuleScope>,
 ) -> Result<(), String> {
-    // 「总是允许」：先落盘规则（工作区优先，SSH 工作区落全局），再放行。
+    let mut manager = state.lock().await;
+    // Keep the request queued until all selected rules have been saved atomically.
     if decision == NativePermissionDecision::AllowAlways {
-        let (suggestion, rules, root) = {
-            let manager = state.lock().await;
-            let session = manager
-                .get_session(&session_record_id)
-                .ok_or_else(|| "没有运行中的内置 Agent 会话".to_string())?;
-            let suggestion = session
-                .pending_permission
-                .front()
-                .filter(|pending| pending.request.request_id == request_id)
-                .and_then(|pending| pending.request.suggested_rule.clone());
-            (
-                suggestion,
-                session.permission_rules.clone(),
-                session.workspace_root.clone(),
-            )
-        };
-        if let Some(suggestion) = suggestion {
-            let config_dir = app
-                .path()
-                .app_config_dir()
-                .map_err(|error| format!("无法读取应用配置目录: {error}"))?;
-            let scope = if root.is_some() {
-                crate::native::tools::permission::RuleScope::Workspace
-            } else {
-                crate::native::tools::permission::RuleScope::Global
-            };
-            let rule = crate::native::tools::permission::PermissionRule {
-                id: String::new(),
-                capability: suggestion.capability,
-                pattern: suggestion.pattern,
-                source: suggestion.source,
-                scope,
-                note: "由权限确认对话框保存".to_string(),
-            };
-            let saved = crate::native::permission_rules::add_rule(
-                &config_dir,
-                root.as_deref(),
-                crate::native::tools::permission::RuleEffect::Allow,
-                rule,
-            )?;
-            if let Ok(mut live) = rules.write() {
-                live.push(crate::native::tools::permission::RuleEffect::Allow, saved);
-            }
-        }
+        let config_dir = app
+            .path()
+            .app_config_dir()
+            .map_err(|error| format!("无法读取应用配置目录: {error}"))?;
+        manager.save_permission_rules(
+            &config_dir,
+            &session_record_id,
+            &request_id,
+            file_access.as_deref(),
+            scope,
+        )?;
     }
-    let next = state
-        .lock()
-        .await
-        .resolve_permission(&session_record_id, &request_id, decision)?;
+    let next = manager.resolve_permission(&session_record_id, &request_id, decision)?;
+    drop(manager);
     emit_request_resolved(&app, &session_record_id, &request_id, "permission");
     if let Some(request) = next {
         let _ = app.emit(
@@ -3719,6 +3698,7 @@ mod tests {
             tool_name: "Bash".to_string(),
             kind: NativeToolRiskKind::Opaque,
             summary: "rm -rf /tmp/x".to_string(),
+            file_access: None,
             remote: false,
             mcp_server_id: None,
             suggested_rule: Some(PermissionRuleSuggestion {

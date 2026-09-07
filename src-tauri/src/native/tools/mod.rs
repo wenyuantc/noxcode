@@ -5,6 +5,9 @@ pub mod cancel;
 pub mod catalog;
 pub mod contract;
 pub mod dispatch;
+pub mod file_access;
+#[cfg(test)]
+mod file_access_tests;
 pub mod glob;
 pub mod hooks;
 pub mod local;

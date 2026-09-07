@@ -13,6 +13,7 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 tauri-build = { version = "2.6.3", features = [] }
 
 [dependencies]
+tempfile = "3"
 tauri = { version = "2.11.5", features = ["protocol-asset", "tray-icon"] }
 tauri-plugin-opener = "2.5.5"
 tauri-plugin-sql = { version = "2.4.1", features = ["sqlite"] }
@@ -45,4 +46,3 @@ ssh2-config = "0.8"
 
 [dev-dependencies]
 rand = "0.10"
-tempfile = "3"

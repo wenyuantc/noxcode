@@ -655,7 +655,15 @@ export interface NativeTextDelta {
 }
 
 export type NativeToolRiskKind =
-  "overwrite" | "delete" | "push" | "force_git" | "mcp" | "opaque" | "rule";
+  | "overwrite"
+  | "delete"
+  | "push"
+  | "force_git"
+  | "mcp"
+  | "opaque"
+  | "rule"
+  | "automation"
+  | "external_path";
 
 export type NativePermissionDecision =
   "allow_session" | "allow_once" | "allow_server" | "allow_always" | "deny";
@@ -699,6 +707,33 @@ export interface PermissionRule {
   source: PermissionPatternSource;
   scope: PermissionRuleScope;
   note: string;
+  external_path?: { target: PermissionTarget; scope: PathAccessScope } | null;
+}
+
+export type PermissionTarget =
+  | { kind: "local" }
+  | {
+      kind: "ssh";
+      config_id: string;
+      host: string;
+      port: number;
+      username: string;
+    };
+export type PathAccessScope = "exact" | "subtree";
+export interface FileAccessPrompt {
+  target: PermissionTarget;
+  paths: {
+    path: string;
+    requested_path: string;
+    capability: "read" | "edit";
+    scope: PathAccessScope;
+    operation: string;
+    outside_workspace: boolean;
+  }[];
+}
+export interface FileAccessSelection {
+  path: string;
+  directory: boolean;
 }
 
 export interface PermissionRules {
@@ -711,6 +746,8 @@ export interface NativePermissionRulesView {
   global: PermissionRules;
   workspace: PermissionRules | null;
   workspace_root: string | null;
+  workspace_rules_path?: string | null;
+  workspace_target?: PermissionTarget | null;
 }
 
 export interface NativePermissionRequest {
@@ -725,6 +762,7 @@ export interface NativePermissionRequest {
   remote: boolean;
   mcp_server_id: string | null;
   suggested_rule?: PermissionRuleSuggestion | null;
+  file_access?: FileAccessPrompt | null;
 }
 
 export interface NativePlanApprovalRequest {

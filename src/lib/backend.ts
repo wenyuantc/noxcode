@@ -540,8 +540,16 @@ export function resolveNativeToolPermission(
   sessionRecordId: string,
   requestId: string,
   decision: NativePermissionDecision,
+  fileAccess?: import("./types").FileAccessSelection[],
+  scope?: PermissionRuleScope,
 ): Promise<void> {
-  return invoke("resolve_native_tool_permission", { sessionRecordId, requestId, decision });
+  return invoke("resolve_native_tool_permission", {
+    sessionRecordId,
+    requestId,
+    decision,
+    fileAccess: fileAccess ?? null,
+    scope: scope ?? null,
+  });
 }
 
 export function answerNativePlanQuestion(
