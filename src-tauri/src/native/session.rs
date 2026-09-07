@@ -1884,7 +1884,7 @@ async fn start_native_session_locked(
         input_queue,
         join,
         allow_all_high_risk,
-        allow_session_commands: Arc::new(AtomicBool::new(false)),
+        allow_session_commands: Arc::default(),
         working,
         pending_compactions: Arc::default(),
         permission_rules,
@@ -1978,6 +1978,7 @@ async fn run_native_loop(
     {
         session.background = Some(runner.background.clone());
         runner.ctx.plan_mode = session.plan_mode.clone();
+        runner.ctx.allow_session_commands = session.allow_session_commands.clone();
     }
     runner.steer_rx = Some(followup_rx.clone());
     if plan_mode {
@@ -2114,14 +2115,15 @@ async fn run_native_loop(
                     ),
                 )
                 .await;
-                if should_emit
-                    && manager_state
-                        .lock()
-                        .await
+                if should_emit {
+                    let manager = manager_state.lock().await;
+                    if manager
                         .get_session(&session_record_id)
                         .and_then(|session| session.pending_permission.front())
-                        .is_some_and(|pending| pending.request.request_id == request.request_id)
-                {
+                        .is_none_or(|pending| pending.request.request_id != request.request_id)
+                    {
+                        return;
+                    }
                     let _ = app.emit(
                         "native-permission-request",
                         permission_event(&session_record_id, &request),
@@ -2949,9 +2951,18 @@ pub async fn resolve_native_tool_permission(
             scope,
         )?;
     }
-    let next = manager.resolve_permission(&session_record_id, &request_id, decision)?;
+    let (resolved, next) = if decision == NativePermissionDecision::AllowSessionCommands {
+        manager.resolve_session_commands(&session_record_id, &request_id)?
+    } else {
+        (
+            vec![request_id.clone()],
+            manager.resolve_permission(&session_record_id, &request_id, decision)?,
+        )
+    };
     drop(manager);
-    emit_request_resolved(&app, &session_record_id, &request_id, "permission");
+    for request_id in resolved {
+        emit_request_resolved(&app, &session_record_id, &request_id, "permission");
+    }
     if let Some(request) = next {
         let _ = app.emit(
             "native-permission-request",
@@ -3613,6 +3624,7 @@ mod tests {
             },
             runtime: None,
             plan_mode: std::sync::Arc::default(),
+            allow_session_commands: std::sync::Arc::default(),
             background: None,
             closing: false,
             cancel,
@@ -3620,7 +3632,6 @@ mod tests {
             input_queue: Arc::new(NativeInputQueue::new("sess-1")),
             join,
             allow_all_high_risk: Arc::new(AtomicBool::new(false)),
-            allow_session_commands: Arc::new(AtomicBool::new(false)),
             working: Arc::new(AtomicBool::new(false)),
             pending_compactions: Arc::default(),
             permission_rules: crate::native::permission_rules::shared_rules(Default::default()),
@@ -3963,6 +3974,7 @@ mod tests {
             },
             runtime: None,
             plan_mode: std::sync::Arc::default(),
+            allow_session_commands: std::sync::Arc::default(),
             background: None,
             closing: false,
             cancel: CancelFlag::new(),
@@ -3970,7 +3982,6 @@ mod tests {
             input_queue: Arc::new(NativeInputQueue::new("sess-1")),
             join: tokio::spawn(async {}),
             allow_all_high_risk: Arc::new(AtomicBool::new(false)),
-            allow_session_commands: Arc::new(AtomicBool::new(false)),
             working: Arc::new(AtomicBool::new(false)),
             pending_compactions: Arc::default(),
             pending_permission: VecDeque::new(),
@@ -4038,6 +4049,7 @@ mod tests {
             },
             runtime: None,
             plan_mode: std::sync::Arc::default(),
+            allow_session_commands: std::sync::Arc::default(),
             background: None,
             closing: false,
             cancel: CancelFlag::new(),
@@ -4045,7 +4057,6 @@ mod tests {
             input_queue: Arc::new(NativeInputQueue::new("sess-1")),
             join: tokio::spawn(async {}),
             allow_all_high_risk: Arc::new(AtomicBool::new(false)),
-            allow_session_commands: Arc::new(AtomicBool::new(false)),
             working: Arc::new(AtomicBool::new(false)),
             pending_compactions: Arc::default(),
             pending_permission: VecDeque::new(),

@@ -136,6 +136,7 @@ pub struct NativeLiveSession {
     pub input_queue: Arc<crate::native::input_queue::NativeInputQueue>,
     pub join: JoinHandle<()>,
     pub allow_all_high_risk: Arc<AtomicBool>,
+    pub allow_session_commands: Arc<AtomicBool>,
     pub working: Arc<AtomicBool>,
     pub pending_compactions: Arc<AtomicUsize>,
     /// 与 `ToolCtx` 共享的规则；「总是允许」写入后即时生效。
@@ -411,6 +412,17 @@ impl NativeAgentManager {
             .sessions
             .get_mut(session_record_id)
             .ok_or_else(|| "没有运行中的内置 Agent 会话".to_string())?;
+        if session.allow_session_commands.load(Ordering::SeqCst)
+            && pending.request.tool_name == "Bash"
+            && pending.request.file_access.is_none()
+            && !pending.request.allow_once_only
+        {
+            if session.cancel.is_cancelled() || session.closing || pending.reply.is_closed() {
+                return Err("权限确认请求已失效".to_string());
+            }
+            let _ = pending.reply.send(NativePermissionDecision::AllowOnce);
+            return Ok(false);
+        }
         let should_emit = session.pending_permission.is_empty();
         session.pending_permission.push_back(pending);
         Ok(should_emit)
@@ -433,6 +445,16 @@ impl NativeAgentManager {
         if pending.request.request_id != request_id {
             session.pending_permission.push_front(pending);
             return Err("权限确认请求已过期".to_string());
+        }
+        if decision == NativePermissionDecision::AllowSessionCommands
+            && (pending.request.tool_name != "Bash"
+                || pending.request.file_access.is_some()
+                || session.cancel.is_cancelled()
+                || session.closing
+                || pending.reply.is_closed())
+        {
+            session.pending_permission.push_front(pending);
+            return Err("当前请求不能授权本会话的所有命令".to_string());
         }
         if pending.request.allow_once_only
             && !matches!(
@@ -482,10 +504,48 @@ impl NativeAgentManager {
             .reply
             .send(decision)
             .map_err(|_| "权限确认通道已关闭".to_string())?;
+        if decision == NativePermissionDecision::AllowSessionCommands {
+            session.allow_session_commands.store(true, Ordering::SeqCst);
+        }
         Ok(session
             .pending_permission
             .front()
             .map(|item| item.request.clone()))
+    }
+
+    pub fn resolve_session_commands(
+        &mut self,
+        session_id: &str,
+        request_id: &str,
+    ) -> Result<(Vec<String>, Option<PermissionRequest>), String> {
+        self.resolve_permission(
+            session_id,
+            request_id,
+            NativePermissionDecision::AllowSessionCommands,
+        )?;
+        let session = self
+            .sessions
+            .get_mut(session_id)
+            .ok_or_else(|| "会话已结束".to_string())?;
+        let mut resolved = vec![request_id.to_string()];
+        let mut retained = VecDeque::new();
+        while let Some(pending) = session.pending_permission.pop_front() {
+            if pending.request.tool_name == "Bash"
+                && pending.request.file_access.is_none()
+                && !pending.request.allow_once_only
+            {
+                resolved.push(pending.request.request_id);
+                let _ = pending.reply.send(NativePermissionDecision::AllowOnce);
+            } else {
+                retained.push_back(pending);
+            }
+        }
+        session.pending_permission = retained;
+        let next = session
+            .pending_permission
+            .front()
+            .map(|pending| pending.request.clone());
+        Ok((resolved, next))
     }
 
     pub fn expire_permission(
@@ -713,6 +773,101 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn session_command_approval_resolves_queued_commands_and_isolates_other_sessions() {
+        let mut manager = NativeAgentManager::new();
+        manager.add_session(live_session("current"));
+        manager.add_session(live_session("other"));
+        let (first, first_rx) = pending("first", "Bash");
+        let (file, mut file_rx) = pending("file", "Write");
+        let (second, second_rx) = pending("second", "Bash");
+        let (other, mut other_rx) = pending("other", "Bash");
+        manager.enqueue_permission("current", first).unwrap();
+        manager.enqueue_permission("current", file).unwrap();
+        manager.enqueue_permission("current", second).unwrap();
+        manager.enqueue_permission("other", other).unwrap();
+        assert!(manager
+            .resolve_session_commands("current", "stale")
+            .is_err());
+        assert!(!manager
+            .get_session("current")
+            .unwrap()
+            .allow_session_commands
+            .load(Ordering::SeqCst));
+        let (resolved, next) = manager
+            .resolve_session_commands("current", "first")
+            .unwrap();
+        assert_eq!(resolved, ["first", "second"]);
+        assert_eq!(next.unwrap().request_id, "file");
+        assert_eq!(
+            first_rx.await.unwrap(),
+            NativePermissionDecision::AllowSessionCommands
+        );
+        assert_eq!(
+            second_rx.await.unwrap(),
+            NativePermissionDecision::AllowOnce
+        );
+        assert!(file_rx.try_recv().is_err() && other_rx.try_recv().is_err());
+        assert!(!manager
+            .get_session("other")
+            .unwrap()
+            .allow_session_commands
+            .load(Ordering::SeqCst));
+        assert!(!manager
+            .get_session("current")
+            .unwrap()
+            .allow_all_high_risk
+            .load(Ordering::SeqCst));
+        let (late, late_rx) = pending("late", "Bash");
+        assert!(!manager.enqueue_permission("current", late).unwrap());
+        assert_eq!(late_rx.await.unwrap(), NativePermissionDecision::AllowOnce);
+        assert_eq!(
+            manager
+                .get_session("current")
+                .unwrap()
+                .pending_permission
+                .len(),
+            1
+        );
+        manager.remove_session("current");
+        manager.add_session(live_session("current"));
+        assert!(!manager
+            .get_session("current")
+            .unwrap()
+            .allow_session_commands
+            .load(Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn session_command_grants_reject_wrong_tool_closed_and_cancelled_requests() {
+        for scenario in ["Write", "closed", "cancelled"] {
+            let mut manager = NativeAgentManager::new();
+            manager.add_session(live_session("current"));
+            let (pending, reply) = pending(
+                "request",
+                if scenario == "Write" { "Write" } else { "Bash" },
+            );
+            manager.enqueue_permission("current", pending).unwrap();
+            let _reply = if scenario == "closed" {
+                drop(reply);
+                None
+            } else {
+                Some(reply)
+            };
+            if scenario == "cancelled" {
+                manager.get_session("current").unwrap().cancel.cancel();
+            }
+            assert!(manager
+                .resolve_session_commands("current", "request")
+                .is_err());
+            assert!(!manager
+                .get_session("current")
+                .unwrap()
+                .allow_session_commands
+                .load(Ordering::SeqCst));
+        }
+    }
+
+    #[tokio::test]
     async fn plan_command_always_allow_persists_before_execution_and_can_be_revoked() {
         use crate::native::tools::dispatch::{execute_tool, ToolCtx};
         use crate::native::tools::local::LocalWorkspace;
@@ -862,6 +1017,7 @@ mod tests {
             },
             runtime: None,
             plan_mode: std::sync::Arc::default(),
+            allow_session_commands: std::sync::Arc::default(),
             background: None,
             closing: false,
             cancel: CancelFlag::new(),
@@ -903,6 +1059,7 @@ mod tests {
             },
             runtime: None,
             plan_mode: std::sync::Arc::default(),
+            allow_session_commands: std::sync::Arc::default(),
             background: None,
             closing: false,
             cancel: CancelFlag::new(),
@@ -1344,6 +1501,7 @@ mod tests {
             },
             runtime: None,
             plan_mode: std::sync::Arc::default(),
+            allow_session_commands: std::sync::Arc::default(),
             background: None,
             closing: false,
             cancel: CancelFlag::new(),

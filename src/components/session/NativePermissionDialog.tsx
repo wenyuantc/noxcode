@@ -331,6 +331,7 @@ export function NativePermissionDialog() {
             </Button>
             {access ||
             pending?.allow_once_only ||
+            pending?.tool_name === "Bash" ||
             suggestion?.plan_bash ||
             pending?.tool_name === "WorkspaceHooks" ? null : pending?.kind === "mcp" ? (
               <Button onClick={() => resolve("allow_server")}>{t("permissionAllowServer")}</Button>
@@ -350,6 +351,14 @@ export function NativePermissionDialog() {
                 {access || suggestion?.plan_bash
                   ? t("permissionAlways")
                   : t("permissionAllowAlways", { pattern: suggestion?.pattern })}
+              </Button>
+            ) : null}
+            {pending?.tool_name === "Bash" && !access && !pending.allow_once_only ? (
+              <Button
+                className="h-auto min-h-8 whitespace-normal break-words [overflow-wrap:anywhere]"
+                onClick={() => resolve("allow_session_commands")}
+              >
+                {t("permissionAllowSessionCommands")}
               </Button>
             ) : null}
             <Button variant="ghost" onClick={() => resolve("deny")}>

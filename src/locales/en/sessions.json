@@ -90,6 +90,7 @@
     "create": "Create", "delete": "Delete", "move_source": "Move source", "move_destination": "Move destination"
   },
   "permissionAllowSession": "Allow this session",
+  "permissionAllowSessionCommands": "Allow all commands in this session",
   "permissionAllowServer": "Allow this server",
   "permissionAllowAlways": "Always allow {{pattern}} (save rule)",
   "permissionDeny": "Deny",

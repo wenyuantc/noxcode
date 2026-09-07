@@ -672,7 +672,12 @@ export type NativeToolRiskKind =
   | "external_path";
 
 export type NativePermissionDecision =
-  "allow_session" | "allow_once" | "allow_server" | "allow_always" | "deny";
+  | "allow_session"
+  | "allow_session_commands"
+  | "allow_once"
+  | "allow_server"
+  | "allow_always"
+  | "deny";
 
 export type PermissionCapability =
   | "read"

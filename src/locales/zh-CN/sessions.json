@@ -90,6 +90,7 @@
     "create": "创建", "delete": "删除", "move_source": "移动源文件", "move_destination": "移动目标"
   },
   "permissionAllowSession": "本会话允许",
+  "permissionAllowSessionCommands": "当前会话允许所有命令",
   "permissionAllowServer": "允许该服务器",
   "permissionAllowAlways": "始终允许 {{pattern}}（保存规则）",
   "permissionDeny": "拒绝",

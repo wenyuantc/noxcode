@@ -4,6 +4,9 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { NativePermissionDialog } from "./NativePermissionDialog";
 import { useSessionStore } from "@/stores/sessionStore";
 import { useWorkspaceStore } from "@/stores/workspaceStore";
+import { resolveNativeToolPermission } from "@/lib/backend";
+
+const buttonActions = vi.hoisted(() => new Map<string, () => unknown>());
 
 vi.mock("@/lib/backend", () => ({ resolveNativeToolPermission: vi.fn() }));
 vi.mock("react-i18next", () => ({ useTranslation: () => ({ t: (key: string) => key }) }));
@@ -19,7 +22,10 @@ vi.mock("@/components/ui/dialog", () => {
   };
 });
 vi.mock("@/components/ui/button", () => ({
-  Button: ({ children }: { children: ReactNode }) => <button>{children}</button>,
+  Button: ({ children, onClick }: { children: ReactNode; onClick?: () => unknown }) => {
+    if (onClick) buttonActions.set(String(children), onClick);
+    return <button>{children}</button>;
+  },
 }));
 vi.mock("@/stores/sessionStore", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/stores/sessionStore")>();
@@ -44,11 +50,26 @@ vi.mock("@/stores/workspaceStore", async (importOriginal) => {
 
 describe("plan Bash permission controls", () => {
   beforeEach(() => {
-    useSessionStore.setState({ permissions: {}, selectedSessionId: "plan" });
+    buttonActions.clear();
+    vi.mocked(resolveNativeToolPermission).mockReset().mockResolvedValue(undefined);
+    useSessionStore.setState({
+      permissions: {},
+      selectedSessionId: "plan",
+      configurationBySession: {},
+      planModeBySession: {},
+    });
     useWorkspaceStore.setState({ sessions: [] });
   });
 
-  it("offers always allow for a plan command without offering session access", () => {
+  it("grants all session commands without exiting plan mode or changing permission mode", async () => {
+    const runtime = {
+      ai_channel_id: "channel",
+      model: "model",
+      reasoning_effort: null,
+      permission_mode: "default",
+      plan_mode: true,
+    };
+    useSessionStore.getState().setConfiguration("plan", runtime);
     useSessionStore.getState().setPermission({
       session_record_id: "plan",
       request_id: "request",
@@ -73,9 +94,22 @@ describe("plan Bash permission controls", () => {
     expect(html).toContain("permissionAllowOnce");
     expect(html).toContain("permissionAlways");
     expect(html).toContain("permissionDeny");
-    expect(html).not.toContain("permissionAllowSession");
+    expect(html).toContain("permissionAllowSessionCommands");
+    expect(html).not.toContain(">permissionAllowSession<");
     expect(html).not.toContain("permissionAllowServer");
     expect(html).toContain("/workspace");
+    await buttonActions.get("permissionAllowSessionCommands")!();
+    expect(resolveNativeToolPermission).toHaveBeenCalledWith(
+      "plan",
+      "request",
+      "allow_session_commands",
+      undefined,
+      undefined,
+    );
+    const state = useSessionStore.getState();
+    expect(state.permissions.plan.request).toBeUndefined();
+    expect(state.planModeBySession.plan).toBe(true);
+    expect(state.configurationBySession.plan).toEqual(runtime);
   });
 
   it.each([true, false])(
@@ -99,9 +133,30 @@ describe("plan Bash permission controls", () => {
       expect(html).toContain("permissionAllowOnce");
       expect(html).toContain("permissionDeny");
       expect(html.includes("permissionAllowAlways")).toBe(!allowOnceOnly);
-      expect(html.includes("permissionAllowSession")).toBe(!allowOnceOnly);
+      expect(html.includes("permissionAllowSessionCommands")).toBe(!allowOnceOnly);
+      expect(html).not.toContain(">permissionAllowSession<");
     },
   );
+
+  it("keeps the request available when session command approval fails", async () => {
+    useSessionStore.getState().setPermission({
+      session_record_id: "plan",
+      request_id: "retry",
+      profile_id: "",
+      workspace_id: "workspace",
+      session_kind: "plan",
+      tool_name: "Bash",
+      kind: "opaque",
+      summary: "touch file",
+      remote: false,
+      mcp_server_id: null,
+    });
+    vi.mocked(resolveNativeToolPermission).mockRejectedValueOnce(new Error("expired"));
+    renderToStaticMarkup(<NativePermissionDialog />);
+    await buttonActions.get("permissionAllowSessionCommands")!();
+    expect(useSessionStore.getState().permissions.plan.retry).toBeDefined();
+    expect(useSessionStore.getState().configurationBySession.plan).toBeUndefined();
+  });
 
   it("renders risk callout and command block for opaque long bash command", () => {
     const longCmd =

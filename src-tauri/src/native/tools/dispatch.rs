@@ -121,6 +121,7 @@ pub struct ToolCtx {
     pub todos: Arc<Mutex<Vec<TodoItem>>>,
     pub mcp: SharedMcp,
     pub allow_all_high_risk: Arc<std::sync::atomic::AtomicBool>,
+    pub allow_session_commands: Arc<AtomicBool>,
     pub auto_approve_overwrite: bool,
     pub allowed_mcp_servers: Arc<Mutex<HashSet<String>>>,
     pub request_permission: Option<PermissionRequester>,
@@ -169,6 +170,7 @@ impl ToolCtx {
             todos: Arc::new(Mutex::new(Vec::new())),
             mcp: SharedMcp::empty(),
             allow_all_high_risk: Arc::new(AtomicBool::new(false)),
+            allow_session_commands: Arc::new(AtomicBool::new(false)),
             auto_approve_overwrite: false,
             allowed_mcp_servers: Arc::new(Mutex::new(HashSet::new())),
             request_permission: None,
@@ -834,7 +836,7 @@ fn call_enter_plan_mode(ctx: &ToolCtx) -> Result<String, String> {
     }
     ctx.set_read_only(true);
     ctx.set_plan_mode(true);
-    Ok("已进入计划模式：使用只读工具摸底；写入或高风险 Bash 命令须用户授权，可选择本次允许或始终允许，授权后仍保持计划模式。计划写好后调用 ExitPlanMode 提交，等用户批准再实施。".to_string())
+    Ok("已进入计划模式：使用只读工具摸底；写入或高风险 Bash 命令须用户授权，可选择本次允许、始终允许或当前会话允许所有命令，授权后仍保持计划模式。计划写好后调用 ExitPlanMode 提交，等用户批准再实施。".to_string())
 }
 
 async fn call_exit_plan_mode(ctx: &ToolCtx, arguments: &str) -> Result<String, String> {
@@ -1040,6 +1042,7 @@ async fn enforce_permissions(
                 rule.pattern
             ));
         }
+        _ if name == "Bash" && ctx.allow_session_commands.load(Ordering::SeqCst) => return Ok(()),
         RuleDecision::Allow(_) => return Ok(()),
         RuleDecision::Ask(rule) => {
             return request_permission(
@@ -1149,6 +1152,9 @@ async fn request_permission(
     summary: String,
     file_access: Option<FileAccessPrompt>,
 ) -> Result<(), String> {
+    if name == "Bash" && ctx.allow_session_commands.load(Ordering::SeqCst) {
+        return Ok(());
+    }
     let mcp_server_id = if kind == NativeToolRiskKind::Mcp {
         ctx.mcp.server_id_for_tool(name).await
     } else {
@@ -1290,12 +1296,20 @@ async fn request_permission(
             decision,
             NativePermissionDecision::AllowOnce
                 | NativePermissionDecision::AllowAlways
+                | NativePermissionDecision::AllowSessionCommands
                 | NativePermissionDecision::Deny
         )
     {
         return Err("计划模式下的 Bash 命令不支持会话或服务器整体放行".to_string());
     }
     match decision {
+        NativePermissionDecision::AllowSessionCommands => {
+            if name != "Bash" || file_access.is_some() {
+                return Err("会话命令授权仅适用于 Bash".to_string());
+            }
+            ctx.allow_session_commands.store(true, Ordering::SeqCst);
+            Ok(())
+        }
         NativePermissionDecision::AllowSession | NativePermissionDecision::AllowServer
             if file_access.is_some() =>
         {
@@ -2652,6 +2666,119 @@ mod tests {
                     .is_err());
             }
         }
+    }
+
+    #[tokio::test]
+    async fn session_command_approval_skips_later_bash_prompts_without_changing_mode() {
+        use super::super::contract::{PatternSource, PermissionCapability};
+        use super::super::permission::{PermissionRule, RuleEffect, RuleScope};
+        for plan_mode in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            let mut ctx = ctx_for(root.path());
+            ctx.set_plan_mode(plan_mode);
+            let calls = Arc::new(Mutex::new(0));
+            let calls_sink = calls.clone();
+            ctx.request_permission = Some(Arc::new(move |_, reply| {
+                *calls_sink.lock().unwrap() += 1;
+                reply
+                    .send(NativePermissionDecision::AllowSessionCommands)
+                    .unwrap();
+            }));
+            execute_tool(&ctx, "Bash", r#"{"command":"printf first > output.txt"}"#)
+                .await
+                .unwrap();
+            assert!(ctx.allow_session_commands.load(Ordering::SeqCst));
+            assert!(!ctx.allow_all_high_risk.load(Ordering::SeqCst));
+            assert_eq!(ctx.is_plan_mode(), plan_mode);
+            assert!(ctx.permission_rules_snapshot().is_empty());
+            ctx.permission_rules.write().unwrap().push(
+                RuleEffect::Ask,
+                PermissionRule {
+                    id: "ask-bash".into(),
+                    capability: PermissionCapability::Bash,
+                    pattern: "printf*".into(),
+                    source: PatternSource::Command,
+                    scope: RuleScope::Workspace,
+                    note: String::new(),
+                    external_path: None,
+                    plan_bash: None,
+                },
+            );
+            let twin = ctx.clone();
+            execute_tool(&twin, "Bash", r#"{"command":"printf second > output.txt"}"#)
+                .await
+                .unwrap();
+            execute_tool(&ctx, "Bash", r#"{"command":"touch another.txt"}"#)
+                .await
+                .unwrap();
+            assert_eq!(*calls.lock().unwrap(), 1);
+            assert_eq!(
+                fs::read_to_string(root.path().join("output.txt")).unwrap(),
+                "second"
+            );
+            ctx.permission_rules.write().unwrap().push(
+                RuleEffect::Deny,
+                PermissionRule {
+                    id: "deny-rm".into(),
+                    capability: PermissionCapability::Bash,
+                    pattern: "rm*".into(),
+                    source: PatternSource::Command,
+                    scope: RuleScope::Workspace,
+                    note: String::new(),
+                    external_path: None,
+                    plan_bash: None,
+                },
+            );
+            assert!(execute_tool(&ctx, "Bash", r#"{"command":"rm output.txt"}"#)
+                .await
+                .unwrap_err()
+                .contains("deny"));
+            assert!(root.path().join("output.txt").exists());
+            ctx.request_permission = Some(deny_requester());
+            execute_tool(&ctx, "Read", r#"{"file_path":"output.txt"}"#)
+                .await
+                .unwrap();
+            assert!(execute_tool(
+                &ctx,
+                "Write",
+                r#"{"file_path":"output.txt","content":"unexpected"}"#
+            )
+            .await
+            .is_err());
+            assert_eq!(ctx.is_plan_mode(), plan_mode);
+            let mut fresh = ctx_for(root.path());
+            fresh.set_plan_mode(plan_mode);
+            fresh.request_permission = Some(deny_requester());
+            assert!(!fresh.allow_session_commands.load(Ordering::SeqCst));
+            assert!(
+                execute_tool(&fresh, "Bash", r#"{"command":"touch fresh.txt"}"#)
+                    .await
+                    .is_err()
+            );
+            assert!(!root.path().join("fresh.txt").exists());
+        }
+    }
+
+    #[tokio::test]
+    async fn cancelled_session_command_approval_does_not_grant_or_execute() {
+        let root = tempfile::tempdir().unwrap();
+        let mut ctx = ctx_for(root.path());
+        ctx.set_plan_mode(true);
+        let cancel = ctx.cancel.clone();
+        ctx.request_permission = Some(Arc::new(move |_, reply| {
+            reply
+                .send(NativePermissionDecision::AllowSessionCommands)
+                .unwrap();
+            cancel.cancel();
+        }));
+        assert!(
+            execute_tool(&ctx, "Bash", r#"{"command":"touch cancelled.txt"}"#)
+                .await
+                .is_err()
+        );
+        assert!(!ctx.allow_session_commands.load(Ordering::SeqCst));
+        assert!(ctx.is_plan_mode());
+        assert!(!root.path().join("cancelled.txt").exists());
     }
 
     #[tokio::test]

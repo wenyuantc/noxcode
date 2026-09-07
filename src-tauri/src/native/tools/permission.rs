@@ -55,6 +55,8 @@ pub enum NativeToolRisk {
 #[serde(rename_all = "snake_case")]
 pub enum NativePermissionDecision {
     AllowSession,
+    /// 当前运行会话内的 Bash 命令免确认，不改变权限模式或持久化规则。
+    AllowSessionCommands,
     AllowOnce,
     AllowServer,
     /// 允许并保存一条工作区 allow 规则（由 `suggested_rule` 推导）。
