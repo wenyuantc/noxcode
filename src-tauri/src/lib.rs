@@ -213,6 +213,11 @@ pub fn run() {
             tauri::RunEvent::Reopen { .. } => {
                 let _ = tray::show_main_window_handle(app);
             }
+            tauri::RunEvent::ExitRequested { .. } => {
+                if let Err(error) = window_state::save_main_window_size(app) {
+                    eprintln!("保存窗口尺寸失败: {error}");
+                }
+            }
             tauri::RunEvent::Exit => {
                 if let Some(manager) = app.try_state::<Arc<Mutex<NativeAgentManager>>>() {
                     tauri::async_runtime::block_on(async {

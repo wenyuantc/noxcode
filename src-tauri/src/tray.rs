@@ -49,6 +49,9 @@ pub fn create_tray<R: Runtime>(app: &App<R>) -> Result<(), Box<dyn std::error::E
                 let _ = show_main_window_handle(app);
             }
             "quit" => {
+                if let Err(error) = crate::window_state::save_main_window_size(app) {
+                    eprintln!("保存窗口尺寸失败: {error}");
+                }
                 app.exit(0);
             }
             _ => {}

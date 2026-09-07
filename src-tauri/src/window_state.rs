@@ -64,18 +64,21 @@ pub fn restore_main_window_size<R: Runtime>(app: &AppHandle<R>) -> Result<(), St
     Ok(())
 }
 
-pub fn save_window_size<R: Runtime>(window: &Window<R>) -> Result<(), String> {
-    let size = window
-        .inner_size()
-        .map_err(|error| format!("读取窗口尺寸失败: {error}"))?;
-    let Some(state) = normalize_window_state(PersistedWindowState {
+fn state_from_physical_size(size: PhysicalSize<u32>) -> Option<PersistedWindowState> {
+    normalize_window_state(PersistedWindowState {
         width: size.width,
         height: size.height,
-    }) else {
+    })
+}
+
+fn persist_physical_size<R: Runtime>(
+    app: &AppHandle<R>,
+    size: PhysicalSize<u32>,
+) -> Result<(), String> {
+    let Some(state) = state_from_physical_size(size) else {
         return Ok(());
     };
 
-    let app = window.app_handle();
     let config_dir = app_config_dir(app)?;
     fs::create_dir_all(&config_dir).map_err(|error| format!("创建应用配置目录失败: {error}"))?;
 
@@ -85,9 +88,30 @@ pub fn save_window_size<R: Runtime>(window: &Window<R>) -> Result<(), String> {
         .map_err(|error| format!("写入窗口状态失败: {error}"))
 }
 
+pub fn save_window_size<R: Runtime>(window: &Window<R>) -> Result<(), String> {
+    let size = window
+        .inner_size()
+        .map_err(|error| format!("读取窗口尺寸失败: {error}"))?;
+    persist_physical_size(window.app_handle(), size)
+}
+
+pub fn save_main_window_size<R: Runtime>(app: &AppHandle<R>) -> Result<(), String> {
+    let Some(window) = app.get_webview_window(MAIN_WINDOW_LABEL) else {
+        return Ok(());
+    };
+
+    let size = window
+        .inner_size()
+        .map_err(|error| format!("读取窗口尺寸失败: {error}"))?;
+    persist_physical_size(app, size)
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{normalize_window_state, parse_window_state, PersistedWindowState};
+    use super::{
+        normalize_window_state, parse_window_state, state_from_physical_size, PersistedWindowState,
+    };
+    use tauri::PhysicalSize;
 
     #[test]
     fn normalize_window_state_rejects_zero_dimensions() {
@@ -121,5 +145,22 @@ mod tests {
     #[test]
     fn parse_window_state_rejects_invalid_payload() {
         assert!(parse_window_state("not-json").is_err());
+    }
+
+    #[test]
+    fn state_from_physical_size_skips_invalid_dimensions() {
+        assert_eq!(state_from_physical_size(PhysicalSize::new(0, 800)), None);
+        assert_eq!(state_from_physical_size(PhysicalSize::new(1280, 0)), None);
+    }
+
+    #[test]
+    fn state_from_physical_size_keeps_valid_dimensions() {
+        assert_eq!(
+            state_from_physical_size(PhysicalSize::new(1440, 900)),
+            Some(PersistedWindowState {
+                width: 1440,
+                height: 900,
+            })
+        );
     }
 }

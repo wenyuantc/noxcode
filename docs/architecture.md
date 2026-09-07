@@ -69,7 +69,7 @@ flowchart LR
 3. `setup` 创建托盘、从 `$APPCONFIG/window-state.json` 恢复主窗口尺寸。
 4. debug 下异步打印迁移状态。
 5. `RunEvent::Ready` 时若预检失败，弹中文错误对话框后 `exit(1)`。预检必须等事件循环就绪再弹窗，不能在 `setup` 里阻塞主线程。
-6. 关闭主窗口写入窗口尺寸并隐藏到托盘。macOS `RunEvent::Reopen`（点 Dock）恢复主窗口。`RunEvent::Exit` 取消 Agent 并关闭 SshPool。
+6. 关闭主窗口、托盘退出、`Cmd+Q` 都会写入窗口尺寸；关闭主窗口后隐藏到托盘。macOS `RunEvent::Reopen`（点 Dock）恢复主窗口。`RunEvent::Exit` 取消 Agent 并关闭 SshPool。
 
 全仓库只允许 [`src-tauri/src/git/runner.rs`](../src-tauri/src/git/runner.rs) spawn `git`。Windows 子进程走 [`process_spawn.rs`](../src-tauri/src/process_spawn.rs)（隐藏 CMD 窗口）。
 

@@ -56,7 +56,7 @@ gh secret set TAURI_SIGNING_PRIVATE_KEY < ~/.tauri/noxcode-updater.key
 
 ## 托盘与窗口
 
-关闭主窗口会写入 `$APPCONFIG/window-state.json` 并隐藏到托盘，不退出进程。托盘左键或菜单「显示窗口」恢复；「退出」走 `app.exit(0)`，`RunEvent::Exit` 里关闭 SshPool 并取消 Agent。macOS 点 Dock 图标触发 `RunEvent::Reopen`，同样恢复主窗口。
+关闭主窗口、托盘「退出」、`Cmd+Q` 都会写入 `$APPCONFIG/window-state.json`。关闭主窗口后隐藏到托盘，不退出进程。托盘左键或菜单「显示窗口」恢复；「退出」走 `app.exit(0)`，`RunEvent::Exit` 里关闭 SshPool 并取消 Agent。macOS 点 Dock 图标触发 `RunEvent::Reopen`，同样恢复主窗口。
 
 命令：`show_main_window`。
 
