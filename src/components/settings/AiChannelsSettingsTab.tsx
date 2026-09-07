@@ -11,7 +11,6 @@ import {
   RefreshCw,
   Sparkles,
   Trash2,
-  Zap,
 } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
@@ -39,6 +38,7 @@ import type {
   ResponsesContinuation,
 } from "@/lib/types";
 import { ChannelModelsEditor } from "@/components/settings/ChannelModelsEditor";
+import { ChannelTestButton } from "@/components/settings/ChannelTestButton";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -306,19 +306,25 @@ export function AiChannelsSettingsTab() {
     }
   };
 
-  const handleTest = async () => {
+  const handleTest = async (modelId?: string | null) => {
     setSaving("test");
     setError(null);
     setMessage(null);
+    const targetModel =
+      modelId?.trim() ||
+      form.liteModel.trim() ||
+      form.models.find((item) => item.id.trim())?.id ||
+      null;
     try {
       const result = await testAiChannel({
         ...channelRequestPayload(),
-        model: form.models.find((item) => item.id.trim())?.id ?? null,
+        model: targetModel,
       });
+      const prefix = targetModel ? `[${targetModel}] ` : "";
       if (result.ok) {
-        setMessage(result.message);
+        setMessage(`${prefix}${result.message}`);
       } else {
-        setError(result.message);
+        setError(`${prefix}${result.message}`);
       }
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
@@ -327,10 +333,15 @@ export function AiChannelsSettingsTab() {
     }
   };
 
-  const handleQuickTest = async (channel: AiChannel) => {
+  const handleQuickTest = async (channel: AiChannel, modelId?: string | null) => {
     setTestingId(channel.id);
     setError(null);
     setMessage(null);
+    const targetModel =
+      modelId?.trim() ||
+      channel.lite_model?.trim() ||
+      channel.models.find((item) => item.id.trim())?.id ||
+      null;
     try {
       const result = await testAiChannel({
         id: channel.id,
@@ -338,12 +349,13 @@ export function AiChannelsSettingsTab() {
         base_url: channel.base_url,
         api_key: channel.api_key?.trim() || null,
         extra_headers_json: channel.extra_headers_json?.trim() || null,
-        model: channel.models.find((item) => item.id.trim())?.id ?? null,
+        model: targetModel,
       });
+      const header = targetModel ? `[${channel.name} / ${targetModel}]` : `[${channel.name}]`;
       if (result.ok) {
-        setMessage(`[${channel.name}] 测通成功: ${result.message}`);
+        setMessage(`${header} 测通成功: ${result.message}`);
       } else {
-        setError(`[${channel.name}] 测通失败: ${result.message}`);
+        setError(`${header} 测通失败: ${result.message}`);
       }
     } catch (err) {
       setError(`[${channel.name}] 测通异常: ${String(err)}`);
@@ -468,21 +480,12 @@ export function AiChannelsSettingsTab() {
 
                   {/* 快捷操作 */}
                   <div className="flex items-center gap-1.5 shrink-0 self-end sm:self-center">
-                    <Button
-                      type="button"
-                      variant="outline"
-                      size="sm"
-                      disabled={isTesting}
-                      onClick={() => void handleQuickTest(channel)}
-                      className="h-7 text-xs gap-1"
-                    >
-                      {isTesting ? (
-                        <Loader2 className="size-3 animate-spin" />
-                      ) : (
-                        <Zap className="size-3" />
-                      )}
-                      {t("channels.actions.test")}
-                    </Button>
+                    <ChannelTestButton
+                      models={channel.models}
+                      defaultModelId={channel.lite_model}
+                      isTesting={isTesting}
+                      onTest={(modelId) => void handleQuickTest(channel, modelId)}
+                    />
                     <Button
                       type="button"
                       variant="outline"
@@ -750,21 +753,13 @@ export function AiChannelsSettingsTab() {
                   )}
                   {t("channels.actions.fetchModels")}
                 </Button>
-                <Button
-                  type="button"
-                  variant="outline"
-                  size="sm"
-                  className="h-7 text-xs gap-1"
-                  onClick={() => void handleTest()}
+                <ChannelTestButton
+                  models={form.models}
+                  defaultModelId={form.liteModel}
                   disabled={formLocked}
-                >
-                  {saving === "test" ? (
-                    <Loader2 className="size-3 animate-spin" />
-                  ) : (
-                    <Zap className="size-3" />
-                  )}
-                  {t("channels.actions.test")}
-                </Button>
+                  isTesting={saving === "test"}
+                  onTest={(modelId) => void handleTest(modelId)}
+                />
               </div>
             </div>
           </div>

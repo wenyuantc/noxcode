@@ -76,6 +76,8 @@
       "save": "保存",
       "cancel": "取消",
       "test": "测通",
+      "testModel": "选择模型测通",
+      "defaultModel": "默认",
       "fetchModels": "获取模型",
       "addModel": "添加模型",
       "fillFromCatalog": "从本地元数据填充",

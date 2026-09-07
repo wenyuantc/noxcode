@@ -76,6 +76,8 @@
       "save": "Save",
       "cancel": "Cancel",
       "test": "Test",
+      "testModel": "Select model to test",
+      "defaultModel": "Default",
       "fetchModels": "Fetch models",
       "addModel": "Add model",
       "fillFromCatalog": "Fill from local metadata",
