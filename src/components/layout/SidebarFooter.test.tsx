@@ -29,8 +29,24 @@ describe("SidebarUpdateButton", () => {
     expect(html).toContain("更新到 0.3.0");
   });
 
-  it("shows 下载中 while the package is downloading", () => {
+  it("shows 下载中 while the package is downloading without known percent", () => {
     expect(renderButton("downloading")).toContain("下载中");
+  });
+
+  it("shows download percentage while downloading when percent is known", () => {
+    const html = renderToString(
+      <I18nextProvider i18n={i18n}>
+        <SidebarUpdateButton
+          status="downloading"
+          version="0.3.0"
+          progress={{ downloaded: 17, total: 100, percent: 17 }}
+          onDownload={() => undefined}
+          onRelaunch={() => undefined}
+        />
+      </I18nextProvider>,
+    );
+    expect(html).toContain("17%");
+    expect(html).toContain("bg-blue-600");
   });
 
   it("shows 重启更新 after the package is installed", () => {

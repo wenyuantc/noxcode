@@ -11,6 +11,7 @@ import {
   relaunchApp,
 } from "@/lib/appUpdate";
 
+export type { AppUpdateProgress, AppUpdateInfo, UpdaterErrorCode };
 export type AppUpdateStatus = "idle" | "available" | "downloading" | "ready";
 
 export type SidebarUpdateLabelKey = "update" | "downloading" | "restartUpdate";
