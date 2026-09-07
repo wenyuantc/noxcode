@@ -355,7 +355,7 @@ export function NativePermissionDialog() {
             ) : null}
             {pending?.tool_name === "Bash" && !access && !pending.allow_once_only ? (
               <Button
-                className="h-auto min-h-8 whitespace-normal break-words [overflow-wrap:anywhere]"
+                className="h-auto min-h-8 whitespace-normal break-words bg-red-600 text-white hover:bg-red-700 focus-visible:border-red-500 focus-visible:ring-red-500/30 [overflow-wrap:anywhere]"
                 onClick={() => resolve("allow_session_commands")}
               >
                 {t("permissionAllowSessionCommands")}
