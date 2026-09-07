@@ -6,18 +6,25 @@ import type { GroupedSessionItem } from "@/lib/sessionLines";
 import {
   lookupPathText,
   parseReadResultLines,
+  parseSqliteResult,
   sessionLineBody,
   toolTitle,
 } from "@/lib/sessionLines";
 import { cn } from "@/lib/utils";
+import { SqliteResultTable } from "./SqliteResultTable";
 
 export function LookupResultCard({ item }: { item: GroupedSessionItem }) {
   const { t } = useTranslation("sessions");
   const body = sessionLineBody(item.text);
   const isRead = body.startsWith("[读取]");
+  const isSqlite =
+    body.startsWith("[工具] SQLiteQuery") ||
+    item.toolName?.includes("SQLiteQuery") ||
+    item.tool?.name === "SQLiteQuery";
   const failed = item.ok === false;
   const title = item.toolName ?? (isRead ? `[读取] ${lookupPathText(item)}` : toolTitle(item.text));
   const lines = item.result && isRead ? parseReadResultLines(item.result) : null;
+  const sqliteData = item.result && isSqlite ? parseSqliteResult(item.result) : null;
   const language = languageFromPath(lookupPathText(item));
 
   return (
@@ -49,6 +56,8 @@ export function LookupResultCard({ item }: { item: GroupedSessionItem }) {
           language={language}
           lineNumbers={lines.map((row) => row.line)}
         />
+      ) : sqliteData ? (
+        <SqliteResultTable data={sqliteData} rawResult={item.result!} />
       ) : item.result ? (
         <CodeBlock className="mt-1 max-h-80" code={item.result} language={language} />
       ) : (

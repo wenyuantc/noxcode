@@ -226,6 +226,7 @@ export interface ToolSummary {
   files: number;
   lists: number;
   searches: number;
+  queries: number;
 }
 
 export type TodoStatus = "pending" | "in_progress" | "completed";
@@ -846,16 +847,46 @@ export function isFileChangeTool(item: GroupedSessionItem): boolean {
 }
 
 export function summarizeTools(items: GroupedSessionItem[]): ToolSummary {
-  const summary: ToolSummary = { files: 0, lists: 0, searches: 0 };
+  const summary: ToolSummary = { files: 0, lists: 0, searches: 0, queries: 0 };
   for (const item of items) {
     const body = sessionLineBody(item.text);
     if (body.startsWith("[读取]") || body.startsWith("[工具] WebFetch")) summary.files += 1;
     else if (body.startsWith("[工具] Glob")) summary.lists += 1;
+    else if (body.startsWith("[工具] SQLiteQuery")) summary.queries += 1;
     else if (body.startsWith("[工具] Grep") || body.startsWith("[工具] WebSearch")) {
       summary.searches += 1;
     }
   }
   return summary;
+}
+
+export interface ParsedSqliteResult {
+  columns: string[];
+  rows: unknown[][];
+  rowCount: number;
+  truncated: boolean;
+}
+
+export function parseSqliteResult(result: string): ParsedSqliteResult | null {
+  try {
+    const parsed = JSON.parse(result);
+    if (
+      parsed &&
+      typeof parsed === "object" &&
+      Array.isArray(parsed.columns) &&
+      Array.isArray(parsed.rows)
+    ) {
+      return {
+        columns: parsed.columns.map(String),
+        rows: parsed.rows,
+        rowCount: typeof parsed.row_count === "number" ? parsed.row_count : parsed.rows.length,
+        truncated: Boolean(parsed.truncated),
+      };
+    }
+    return null;
+  } catch {
+    return null;
+  }
 }
 
 export function parseTodoList(text: string): ParsedTodoList | null {
@@ -962,6 +993,30 @@ function pairToolResult(
   return false;
 }
 
+function pairOrphanToolResult(
+  grouped: GroupedSessionItem[],
+  toolItem: GroupedSessionItem,
+): boolean {
+  const callId = toolItem.tool?.call_id;
+  if (!callId) return false;
+  const orphanIndex = grouped.findIndex(
+    (item) => item.kind === "tool_result" && item.tool?.call_id === callId,
+  );
+  if (orphanIndex >= 0) {
+    const orphan = grouped[orphanIndex]!;
+    const result = sessionLineBody(orphan.text).replace(/^\[工具结果\]\s*/, "");
+    toolItem.result = result;
+    if (orphan.tool) {
+      toolItem.ok = orphan.tool.ok ?? toolItem.ok;
+      toolItem.tool = toolItem.tool ? { ...toolItem.tool, ...orphan.tool } : orphan.tool;
+    }
+    if (orphan.images?.length) toolItem.images = orphan.images;
+    grouped.splice(orphanIndex, 1);
+    return true;
+  }
+  return false;
+}
+
 export function groupSessionLines(lines: RawSessionLine[]): GroupedSessionItem[] {
   const grouped: GroupedSessionItem[] = [];
   for (const raw of lines) {
@@ -973,7 +1028,7 @@ export function groupSessionLines(lines: RawSessionLine[]): GroupedSessionItem[]
       const result = sessionLineBody(line.text).replace(/^\[工具结果\]\s*/, "");
       if (pairToolResult(grouped, line, result)) continue;
     }
-    grouped.push({
+    const item: GroupedSessionItem = {
       id: line.id,
       kind,
       text: kind === "user" ? stripUserPrefix(line.text) : line.text,
@@ -983,7 +1038,11 @@ export function groupSessionLines(lines: RawSessionLine[]): GroupedSessionItem[]
       tool: line.tool,
       images: line.images,
       subagentTag: tag ?? undefined,
-    });
+    };
+    if (kind === "tool") {
+      pairOrphanToolResult(grouped, item);
+    }
+    grouped.push(item);
   }
   return attachOrphanAgentCalls(grouped);
 }

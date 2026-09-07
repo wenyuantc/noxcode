@@ -164,10 +164,12 @@ pub(crate) async fn get_agent_session_log_lines_with(
     {
         sqlx::query_as::<_, AgentSessionEvent>(
             r#"
-            SELECT * FROM agent_session_events
+            SELECT id, session_id, event_type, message, created_at FROM agent_session_events
             WHERE session_id = $1
-              AND created_at > COALESCE((SELECT created_at FROM agent_session_events WHERE id = $2), '')
-            ORDER BY created_at ASC
+              AND (created_at, rowid) > (
+                  SELECT created_at, rowid FROM agent_session_events WHERE id = $2
+              )
+            ORDER BY created_at ASC, rowid ASC
             LIMIT $3
             "#,
         )
@@ -179,13 +181,13 @@ pub(crate) async fn get_agent_session_log_lines_with(
     } else {
         sqlx::query_as::<_, AgentSessionEvent>(
             r#"
-            SELECT * FROM (
-                SELECT * FROM agent_session_events
+            SELECT id, session_id, event_type, message, created_at FROM (
+                SELECT rowid, * FROM agent_session_events
                 WHERE session_id = $1
-                ORDER BY created_at DESC
+                ORDER BY created_at DESC, rowid DESC
                 LIMIT $2
             ) AS recent
-            ORDER BY created_at ASC
+            ORDER BY created_at ASC, rowid ASC
             "#,
         )
         .bind(session_id)
@@ -845,4 +847,48 @@ mod tests {
             vec![("evt-2", Some("middle")), ("evt-3", Some("newest"))]
         );
     }
+
+    #[tokio::test]
+    async fn log_lines_maintain_insertion_order_when_timestamps_identical() {
+        let pool = setup_migrated_pool().await;
+        seed_session(&pool, "sess-same-sec").await;
+        // Insert 4 events in the exact same second
+        for (id, message) in [
+            ("evt-1", "tool_start_1"),
+            ("evt-2", "tool_start_2"),
+            ("evt-3", "tool_result_1"),
+            ("evt-4", "tool_result_2"),
+        ] {
+            sqlx::query(
+                "INSERT INTO agent_session_events (id, session_id, event_type, message, created_at) VALUES ($1, 'sess-same-sec', 'stdout', $2, '2026-01-01 12:00:00')",
+            )
+            .bind(id)
+            .bind(message)
+            .execute(&pool)
+            .await
+            .expect("event");
+        }
+
+        // 1. Initial query: should return all 4 in exact insertion order
+        let rows = get_agent_session_log_lines_with(&pool, "sess-same-sec", None, Some(10))
+            .await
+            .expect("fetch all");
+        let ids: Vec<&str> = rows.iter().map(|e| e.id.as_str()).collect();
+        assert_eq!(ids, vec!["evt-1", "evt-2", "evt-3", "evt-4"]);
+
+        // 2. Fetch latest 2: should be evt-3, evt-4 in ASC order
+        let recent = get_agent_session_log_lines_with(&pool, "sess-same-sec", None, Some(2))
+            .await
+            .expect("fetch latest 2");
+        let recent_ids: Vec<&str> = recent.iter().map(|e| e.id.as_str()).collect();
+        assert_eq!(recent_ids, vec!["evt-3", "evt-4"]);
+
+        // 3. Incremental query after evt-2: should return evt-3, evt-4
+        let after = get_agent_session_log_lines_with(&pool, "sess-same-sec", Some("evt-2"), Some(10))
+            .await
+            .expect("fetch after evt-2");
+        let after_ids: Vec<&str> = after.iter().map(|e| e.id.as_str()).collect();
+        assert_eq!(after_ids, vec!["evt-3", "evt-4"]);
+    }
 }
+

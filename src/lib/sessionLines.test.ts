@@ -376,8 +376,28 @@ describe("sessionLines", () => {
       line("6", "[待办]\n- [pending] x (low)"),
       line("7", "[工具] WebFetch https://example.com"),
       line("8", "[工具] WebSearch rust tokio"),
+      line("9", "[工具] SQLiteQuery app.db"),
     ]);
-    expect(summarizeTools(items)).toEqual({ files: 2, lists: 1, searches: 2 });
+    expect(summarizeTools(items)).toEqual({ files: 2, lists: 1, searches: 2, queries: 1 });
+  });
+
+  it("pairs orphan tool result when tool call arrives out of order", () => {
+    const envelopeResult = JSON.stringify({
+      nox: 1,
+      line: '[工具结果]\n{"columns":["id"],"rows":[[1]],"row_count":1,"truncated":false}',
+      tool: { call_id: "call_sqlite_1", name: "SQLiteQuery", phase: "result", ok: true },
+    });
+    const envelopeStart = JSON.stringify({
+      nox: 1,
+      line: "[工具] SQLiteQuery app.db",
+      tool: { call_id: "call_sqlite_1", name: "SQLiteQuery", phase: "start" },
+    });
+    // result arrives BEFORE start:
+    const grouped = groupSessionLines([line("1", envelopeResult), line("2", envelopeStart)]);
+    expect(grouped.length).toBe(1);
+    expect(grouped[0]?.kind).toBe("tool");
+    expect(grouped[0]?.result).toContain('"columns":["id"]');
+    expect(grouped[0]?.ok).toBe(true);
   });
 
   it("splits read / command / read into separate segments", () => {
@@ -1010,5 +1030,3 @@ describe("sessionLines", () => {
     expect(aggregateUsages([null, undefined])).toBeNull();
   });
 });
-
-

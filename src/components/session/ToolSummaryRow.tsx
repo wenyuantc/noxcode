@@ -18,6 +18,7 @@ export function ToolSummaryRow({
   const [open, setOpen] = useState(false);
   const summary = summarizeTools(items);
   const parts = [
+    summary.queries ? t("lookupQuery", { count: summary.queries }) : null,
     summary.lists ? t("lookupList", { count: summary.lists }) : null,
     summary.searches ? t("lookupSearch", { count: summary.searches }) : null,
     summary.files ? t("lookupFile", { count: summary.files }) : null,

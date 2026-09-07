@@ -1,0 +1,21 @@
+{
+  "version": 1,
+  "allow": [
+    {
+      "id": "c60c77eb-90a1-4360-a963-d413fc4a01b3",
+      "capability": "bash",
+      "pattern": "ls -la \"$HOME/Library/Application Support/com.wenyuan.noxcode/\" 2>/dev/null | head -30",
+      "source": "command",
+      "scope": "workspace",
+      "note": "由权限确认对话框保存",
+      "plan_bash": {
+        "target": {
+          "kind": "local"
+        },
+        "workspace_root": "/Users/wenyuantc/IdeaProjects/my/noxcode"
+      }
+    }
+  ],
+  "deny": [],
+  "ask": []
+}
