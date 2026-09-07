@@ -10,7 +10,9 @@ import {
   formatSessionDuration,
   groupSessionLines,
   hydrateSessionLine,
+  isCommandTool,
   isHiddenSessionCeremonyLine,
+  type RawSessionLine,
   latestTodos,
   isBackgroundNoticeLine,
   parseBackgroundNotice,
@@ -1076,5 +1078,55 @@ describe("sessionLines", () => {
     const blocks = buildTurnBlocks(grouped);
     expect(blocks[0]?.segments[0]?.kind).toBe("background_notice");
     expect(blocks[0]?.segments[0]?.items[0]?.text).toBe(rawNotice);
+  });
+
+  it("keeps truncated preceding tool history separate from subsequent user turn", () => {
+    // 模拟会话在工具结果处截断，后接用户新输入
+    const rawLines: RawSessionLine[] = [
+      {
+        id: "evt-result",
+        sessionId: "sess-1",
+        text: JSON.stringify({
+          line: "[工具结果]\nrunning 36 tests\ntest foo ... ok",
+          nox: 1,
+          tool: {
+            name: "Bash",
+            title: "命令 cargo test",
+            args_summary: "cargo test --lib",
+            call_id: "call-1",
+            ok: true,
+          },
+        }),
+        createdAt: "2026-09-07T13:25:21Z",
+      },
+      {
+        id: "evt-user",
+        sessionId: "sess-1",
+        text: "[USER_INPUT] 请尽快返回明确问题",
+        createdAt: "2026-09-07T13:36:57Z",
+      },
+      {
+        id: "evt-assistant",
+        sessionId: "sess-1",
+        text: "已定位问题",
+        createdAt: "2026-09-07T13:37:00Z",
+      },
+    ];
+
+    const grouped = groupSessionLines(rawLines);
+    // 孤立的带 Bash 元数据的工具结果应转换为 tool 且识别为 terminal
+    expect(grouped[0]?.kind).toBe("tool");
+    expect(isCommandTool(grouped[0]!)).toBe(true);
+    expect(commandText(grouped[0]!)).toBe("cargo test --lib");
+    expect(grouped[0]?.result).toBe("running 36 tests\ntest foo ... ok");
+
+    const blocks = buildTurnBlocks(grouped);
+    // 截断的历史必须作为独立的前置 block，不能与后续 user block 颠倒混淆
+    expect(blocks).toHaveLength(2);
+    expect(blocks[0]?.user).toBeUndefined();
+    expect(blocks[0]?.segments.map((s) => s.kind)).toEqual(["terminal"]);
+
+    expect(blocks[1]?.user?.text).toBe("请尽快返回明确问题");
+    expect(blocks[1]?.segments.map((s) => s.kind)).toEqual(["assistant"]);
   });
 });

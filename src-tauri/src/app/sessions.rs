@@ -157,11 +157,11 @@ pub(crate) async fn get_agent_session_log_lines_with(
     after_event_id: Option<&str>,
     limit: Option<i64>,
 ) -> Result<Vec<AgentSessionEvent>, String> {
-    let limit = limit.unwrap_or(200).clamp(1, 1000);
     let rows = if let Some(after) = after_event_id
         .map(str::trim)
         .filter(|item| !item.is_empty())
     {
+        let limit = limit.unwrap_or(10_000).clamp(1, 50_000);
         sqlx::query_as::<_, AgentSessionEvent>(
             r#"
             SELECT id, session_id, event_type, message, created_at FROM agent_session_events
@@ -178,7 +178,8 @@ pub(crate) async fn get_agent_session_log_lines_with(
         .bind(limit)
         .fetch_all(pool)
         .await
-    } else {
+    } else if let Some(limit_val) = limit {
+        let limit = limit_val.clamp(1, 50_000);
         sqlx::query_as::<_, AgentSessionEvent>(
             r#"
             SELECT id, session_id, event_type, message, created_at FROM (
@@ -192,6 +193,18 @@ pub(crate) async fn get_agent_session_log_lines_with(
         )
         .bind(session_id)
         .bind(limit)
+        .fetch_all(pool)
+        .await
+    } else {
+        sqlx::query_as::<_, AgentSessionEvent>(
+            r#"
+            SELECT id, session_id, event_type, message, created_at FROM agent_session_events
+            WHERE session_id = $1
+            ORDER BY created_at ASC, rowid ASC
+            LIMIT 10000
+            "#,
+        )
+        .bind(session_id)
         .fetch_all(pool)
         .await
     };
@@ -875,6 +888,13 @@ mod tests {
             .expect("fetch all");
         let ids: Vec<&str> = rows.iter().map(|e| e.id.as_str()).collect();
         assert_eq!(ids, vec!["evt-1", "evt-2", "evt-3", "evt-4"]);
+
+        // 1.1 Query without limit: should also return all 4 in ASC order
+        let all_rows = get_agent_session_log_lines_with(&pool, "sess-same-sec", None, None)
+            .await
+            .expect("fetch without limit");
+        let all_ids: Vec<&str> = all_rows.iter().map(|e| e.id.as_str()).collect();
+        assert_eq!(all_ids, vec!["evt-1", "evt-2", "evt-3", "evt-4"]);
 
         // 2. Fetch latest 2: should be evt-3, evt-4 in ASC order
         let recent = get_agent_session_log_lines_with(&pool, "sess-same-sec", None, Some(2))

@@ -137,7 +137,10 @@ function renderSegment(
             return (
               <p
                 key={item.id}
-                className={cn("text-xs", lineToneClass(item.kind, item.text, item.ok))}
+                className={cn(
+                  "text-xs whitespace-pre-wrap font-mono break-words",
+                  lineToneClass(item.kind, item.text, item.ok),
+                )}
               >
                 {item.text}
               </p>

@@ -631,11 +631,19 @@ export function stripUserPrefix(text: string): string {
 }
 
 export function commandText(item: GroupedSessionItem): string {
-  return (
-    sessionLineBody(item.text)
-      .replace(/^\[命令\]\s*/, "")
-      .split("\n")[0] ?? ""
-  );
+  const body = sessionLineBody(item.text);
+  if (body.startsWith("[命令]")) {
+    return body.replace(/^\[命令\]\s*/, "").split("\n")[0] ?? "";
+  }
+  if (item.tool?.name === "Bash" || item.tool?.name === "shell") {
+    return (
+      (item.tool.args_summary ?? item.tool.title ?? item.text)
+        .replace(/^\[(?:命令|工具|工具结果)\]\s*/, "")
+        .replace(/^命令\s*/, "")
+        .split("\n")[0] ?? ""
+    );
+  }
+  return "";
 }
 
 export function filePathText(item: GroupedSessionItem): string {
@@ -881,7 +889,9 @@ export function thinkingText(items: GroupedSessionItem[]): string {
 }
 
 export function isCommandTool(item: GroupedSessionItem): boolean {
-  return item.kind === "tool" && sessionLineBody(item.text).startsWith("[命令]");
+  if (item.kind !== "tool") return false;
+  const body = sessionLineBody(item.text);
+  return body.startsWith("[命令]") || item.tool?.name === "Bash" || item.tool?.name === "shell";
 }
 
 export function isLookupTool(item: GroupedSessionItem): boolean {
@@ -1073,6 +1083,30 @@ function pairOrphanToolResult(
   return false;
 }
 
+function normalizeOrphanToolResults(items: GroupedSessionItem[]): GroupedSessionItem[] {
+  return items.map((item) => {
+    if (item.kind !== "tool_result" || !item.tool) return item;
+    const result = item.result ?? sessionLineBody(item.text).replace(/^\[工具结果\]\s*/, "");
+    const title = item.tool.title ?? item.tool.name ?? toolTitle(item.text);
+    const text =
+      item.tool.name === "Bash" || item.tool.name === "shell"
+        ? item.tool.args_summary
+          ? `[命令] ${item.tool.args_summary}`
+          : `[命令] ${title}`
+        : item.tool.title
+          ? `[工具] ${item.tool.title}`
+          : item.text;
+    return {
+      ...item,
+      kind: "tool",
+      text,
+      toolName: item.toolName ?? title,
+      result,
+      ok: item.ok ?? item.tool.ok ?? true,
+    };
+  });
+}
+
 export function groupSessionLines(lines: RawSessionLine[]): GroupedSessionItem[] {
   const grouped: GroupedSessionItem[] = [];
   for (const raw of lines) {
@@ -1100,7 +1134,8 @@ export function groupSessionLines(lines: RawSessionLine[]): GroupedSessionItem[]
     }
     grouped.push(item);
   }
-  return attachOrphanAgentCalls(grouped);
+  const attached = attachOrphanAgentCalls(grouped);
+  return normalizeOrphanToolResults(attached);
 }
 
 function segmentKey(item: GroupedSessionItem): TurnSegmentKind | "skip" | "file_change" {
@@ -1117,7 +1152,7 @@ function segmentKey(item: GroupedSessionItem): TurnSegmentKind | "skip" | "file_
   if (isCommandTool(item)) return "terminal";
   if (parseTodoList(body)) return "todo";
   if (isFileChangeTool(item)) return "file_change";
-  if (item.kind === "tool") return "tools";
+  if (item.kind === "tool" || item.kind === "tool_result") return "tools";
   if (item.kind === "assistant") return "assistant";
   return "system";
 }
@@ -1225,6 +1260,19 @@ export function isSessionStartLine(text: string): boolean {
   return line.startsWith("[MCP] 未启用服务器") || line.startsWith("[MCP] 将连接 ");
 }
 
+export function isLeadingStatusItem(item: GroupedSessionItem): boolean {
+  if (item.kind === "system") {
+    const body = sessionLineBody(item.text);
+    return (
+      isSessionStartLine(item.text) ||
+      body.startsWith("[PERMISSION]") ||
+      body.startsWith("[MCP]") ||
+      body.startsWith("[内置 Agent]")
+    );
+  }
+  return false;
+}
+
 export function buildTurnBlocks(items: GroupedSessionItem[]): SessionTurnBlock[] {
   const blocks: SessionTurnBlock[] = [];
   let current: SessionTurnBlock | null = null;
@@ -1258,14 +1306,15 @@ export function buildTurnBlocks(items: GroupedSessionItem[]): SessionTurnBlock[]
   };
 
   for (const item of items) {
-    const startUserTurn = item.kind === "user" && Boolean(current?.user);
+    const hasMeaningfulHistory = currentItems.some((it) => !isLeadingStatusItem(it));
+    const startUserTurn = item.kind === "user" && (Boolean(current?.user) || hasMeaningfulHistory);
     const startResumeTurn = Boolean(current?.user && isSessionStartLine(item.text));
     if (startUserTurn || startResumeTurn || !current) {
       if (current) finish(current, currentItems);
       current = startBlock(item);
       currentItems = [];
     }
-    if (item.kind === "user" && currentItems.length > 0) {
+    if (item.kind === "user" && currentItems.length > 0 && !current.user) {
       current.user = item;
       current.id = item.id;
       current.startedAt = item.createdAt;
