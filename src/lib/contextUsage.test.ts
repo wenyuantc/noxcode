@@ -16,6 +16,7 @@ function channel(id: string, modelId: string, contextTokens: number | null): AiC
     protocol: "openai",
     base_url: "https://example.test",
     extra_headers_json: null,
+    responses_continuation: "auto",
     models: [
       {
         id: modelId,

@@ -13,7 +13,7 @@ use crate::app::shared::{new_id, sqlite_pool};
 use crate::native::api_logs::sqlite_call_log_sink;
 use crate::native::channels::{fetch_channel_record, require_channel_api_key};
 use crate::native::model::call_log::{CallLogContext, CALL_KIND_SUBAGENT};
-use crate::native::model::{ModelClient, ModelClientConfig};
+use crate::native::model::{ModelClient, ModelClientConfig, ResponsesContinuationMode};
 use crate::native::model_catalog::{apply_catalog_defaults, fill_from_catalog};
 use crate::native::protocol::record_to_channel;
 
@@ -764,6 +764,9 @@ pub async fn resolve_child_model<R: Runtime>(
         retry: crate::native::settings::effective_model_retry_config(app),
         timeout: Duration::from_secs(if thinking_enabled { 300 } else { 120 }),
         network: load_network_settings(app)?,
+        responses_continuation: ResponsesContinuationMode::from_stored(
+            &channel.responses_continuation,
+        ),
     })?
     .with_call_log(
         CallLogContext {

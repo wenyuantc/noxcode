@@ -10,7 +10,7 @@ React (UI) → Tauri IPC commands → Rust service layer → SQLite
 
 | 路径 | 职责 |
 | --- | --- |
-| [`src-tauri/src/db/migrations.rs`](../src-tauri/src/db/migrations.rs) | 迁移清单（version 1 baseline + version 2 去掉档案 + version 3 `agent_sessions.title` + version 4 `agent_sessions.pinned` + version 5 `agent_sessions.context_usage_json` + version 6 `ssh_configs.algorithms_json` + version 7 `activity_logs` + version 8 `native_tool_artifacts` / call log `operation`、`model_role` / `ai_channels.lite_model` + version 9 `native_automations`、`native_goals` + version 10 `agent_sessions.archived`） |
+| [`src-tauri/src/db/migrations.rs`](../src-tauri/src/db/migrations.rs) | 迁移清单（version 1 baseline + version 2 去掉档案 + version 3 `agent_sessions.title` + version 4 `agent_sessions.pinned` + version 5 `agent_sessions.context_usage_json` + version 6 `ssh_configs.algorithms_json` + version 7 `activity_logs` + version 8 `native_tool_artifacts` / call log `operation`、`model_role` / `ai_channels.lite_model` + version 9 `native_automations`、`native_goals` + version 10 `agent_sessions.archived` + version 11 `ai_channels.responses_continuation`） |
 | [`src-tauri/src/db/models.rs`](../src-tauri/src/db/models.rs) | 行模型与 IPC DTO |
 | [`src-tauri/src/app/shared.rs`](../src-tauri/src/app/shared.rs) | `sqlite_pool` / `database_path` / `now_sqlite` / `new_id` |
 | [`src-tauri/src/app/database.rs`](../src-tauri/src/app/database.rs) | 健康检查、备份、恢复 |
@@ -32,9 +32,9 @@ React (UI) → Tauri IPC commands → Rust service layer → SQLite
 
 ## 迁移
 
-`tauri-plugin-sql` 在启动时按 `get_all_migrations()` 升级。版本号必须连续 `1..N`，由 `migration_versions_are_contiguous` 强制。当前最新版本是 **10**：version 6 只为 `ssh_configs` 增加 `algorithms_json`，不增加表；version 7 新增 `activity_logs`；version 8 新增 `native_tool_artifacts`，并给 `native_api_call_logs` 加 `operation`（默认 `agent_step`）与 `model_role`（默认 `main`）、给 `ai_channels` 加 `lite_model`；version 9 新增 `native_automations`（Cron 自动化）与 `native_goals`（会话目标）；version 10 增加 `agent_sessions.archived`（默认 `0`）及列表索引，业务表仍为 12 张。
+`tauri-plugin-sql` 在启动时按 `get_all_migrations()` 升级。版本号必须连续 `1..N`，由 `migration_versions_are_contiguous` 强制。当前最新版本是 **11**：version 6 只为 `ssh_configs` 增加 `algorithms_json`，不增加表；version 7 新增 `activity_logs`；version 8 新增 `native_tool_artifacts`，并给 `native_api_call_logs` 加 `operation`（默认 `agent_step`）与 `model_role`（默认 `main`）、给 `ai_channels` 加 `lite_model`；version 9 新增 `native_automations`（Cron 自动化）与 `native_goals`（会话目标）；version 10 增加 `agent_sessions.archived`（默认 `0`）及列表索引；version 11 给 `ai_channels` 增加 `responses_continuation`（默认 `auto`），业务表仍为 12 张。
 
-后续只能追加 `version: 11`……，禁止改已发布的 SQL，禁止插队。
+后续只能追加 `version: 12`……，禁止改已发布的 SQL，禁止插队。
 
 应用的 `_sqlx_migrations` 表记录已应用版本。debug 启动会打印：
 
@@ -95,6 +95,8 @@ SSH 连接配置。密码与密钥口令只存 keyring 引用（`password_ref` /
 | `extra_headers_json` | 额外请求头 |
 | `models_json` | 模型列表 JSON，默认 `[]` |
 | `enabled` | `1` / `0` |
+| `lite_model` | 轻量模型，必须在该渠道模型列表内 |
+| `responses_continuation` | Codex Responses 续写：`auto`（官方主机启用 `previous_response_id`，中转默认全量）/ `enabled` / `disabled`。version 11 新增，默认 `auto` |
 
 ### `workspaces`
 

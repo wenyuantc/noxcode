@@ -31,7 +31,13 @@ import {
   materializeThinkingLevels,
 } from "@/lib/modelCatalog";
 import { formatDate } from "@/lib/utils";
-import type { AiChannel, AiChannelModel, AiChannelProtocol, ModelCatalogEntry } from "@/lib/types";
+import type {
+  AiChannel,
+  AiChannelModel,
+  AiChannelProtocol,
+  ModelCatalogEntry,
+  ResponsesContinuation,
+} from "@/lib/types";
 import { ChannelModelsEditor } from "@/components/settings/ChannelModelsEditor";
 import { Button } from "@/components/ui/button";
 import {
@@ -63,6 +69,7 @@ interface ChannelFormState {
   models: AiChannelModel[];
   extraHeaders: string;
   liteModel: string;
+  responsesContinuation: ResponsesContinuation;
   enabled: boolean;
 }
 
@@ -74,6 +81,7 @@ const EMPTY_FORM: ChannelFormState = {
   models: [],
   extraHeaders: "",
   liteModel: "",
+  responsesContinuation: "auto",
   enabled: true,
 };
 
@@ -86,6 +94,7 @@ function channelToForm(channel: AiChannel): ChannelFormState {
     models: channel.models.length > 0 ? channel.models : [],
     extraHeaders: channel.extra_headers_json ?? "",
     liteModel: channel.lite_model ?? "",
+    responsesContinuation: channel.responses_continuation ?? "auto",
     enabled: channel.enabled,
   };
 }
@@ -205,6 +214,7 @@ export function AiChannelsSettingsTab() {
           models: materializedModels,
           extra_headers_json: form.extraHeaders.trim() || null,
           lite_model: form.liteModel.trim() || null,
+          responses_continuation: form.responsesContinuation,
           enabled: form.enabled,
         });
         setChannels((current) =>
@@ -222,6 +232,7 @@ export function AiChannelsSettingsTab() {
           models: materializedModels,
           extra_headers_json: form.extraHeaders.trim() || null,
           lite_model: form.liteModel.trim() || null,
+          responses_continuation: form.responsesContinuation,
           enabled: form.enabled,
         });
         setChannels((current) => [created, ...current]);
@@ -554,6 +565,41 @@ export function AiChannelsSettingsTab() {
                   </Select>
                 </div>
               </div>
+
+              {form.protocol === "codex" ? (
+                <div>
+                  <label className="text-xs font-medium text-muted-foreground">
+                    {t("channels.fields.responsesContinuation")}
+                  </label>
+                  <Select
+                    value={form.responsesContinuation}
+                    disabled={formLocked}
+                    onValueChange={(value) => {
+                      if (value === "auto" || value === "enabled" || value === "disabled") {
+                        patchForm({ responsesContinuation: value });
+                      }
+                    }}
+                  >
+                    <SelectTrigger className="mt-1 h-8 text-xs bg-background">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="auto" className="text-xs">
+                        {t("channels.responsesContinuation.auto")}
+                      </SelectItem>
+                      <SelectItem value="enabled" className="text-xs">
+                        {t("channels.responsesContinuation.enabled")}
+                      </SelectItem>
+                      <SelectItem value="disabled" className="text-xs">
+                        {t("channels.responsesContinuation.disabled")}
+                      </SelectItem>
+                    </SelectContent>
+                  </Select>
+                  <p className="mt-1 text-[11px] leading-4 text-muted-foreground">
+                    {t("channels.fields.responsesContinuationHint")}
+                  </p>
+                </div>
+              ) : null}
 
               <div>
                 <label className="text-xs font-medium text-muted-foreground">

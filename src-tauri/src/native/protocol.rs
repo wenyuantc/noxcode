@@ -17,6 +17,19 @@ pub fn normalize_protocol(value: &str) -> Result<&'static str, String> {
     }
 }
 
+pub fn normalize_responses_continuation(value: Option<&str>) -> Result<&'static str, String> {
+    match value
+        .map(str::trim)
+        .filter(|item| !item.is_empty())
+        .unwrap_or("auto")
+    {
+        "auto" => Ok("auto"),
+        "enabled" => Ok("enabled"),
+        "disabled" => Ok("disabled"),
+        _ => Err("Responses 续写策略必须是 auto、enabled 或 disabled".to_string()),
+    }
+}
+
 pub fn normalize_base_url(value: &str) -> Result<String, String> {
     let trimmed = value.trim().trim_end_matches('/').to_string();
     if trimmed.is_empty() {
@@ -214,6 +227,10 @@ pub fn record_to_channel(record: AiChannelRecord) -> Result<AiChannel, String> {
         extra_headers_json: record.extra_headers_json,
         models: parse_channel_models_json(&record.models_json)?,
         lite_model: normalize_optional_text(record.lite_model.as_deref()),
+        responses_continuation: normalize_responses_continuation(Some(
+            record.responses_continuation.as_str(),
+        ))?
+        .to_string(),
         enabled: record.enabled != 0,
         api_key,
         api_key_configured,
@@ -232,6 +249,21 @@ mod tests {
         assert_eq!(normalize_protocol("claude").unwrap(), PROTOCOL_ANTHROPIC);
         assert_eq!(normalize_protocol("responses").unwrap(), PROTOCOL_CODEX);
         assert!(normalize_protocol("gemini").is_err());
+    }
+
+    #[test]
+    fn responses_continuation_normalizes() {
+        assert_eq!(normalize_responses_continuation(None).unwrap(), "auto");
+        assert_eq!(normalize_responses_continuation(Some("")).unwrap(), "auto");
+        assert_eq!(
+            normalize_responses_continuation(Some("enabled")).unwrap(),
+            "enabled"
+        );
+        assert_eq!(
+            normalize_responses_continuation(Some("disabled")).unwrap(),
+            "disabled"
+        );
+        assert!(normalize_responses_continuation(Some("websocket")).is_err());
     }
 
     #[test]
@@ -386,6 +418,7 @@ mod tests {
             created_at: "2026-08-20 00:00:00".to_string(),
             updated_at: "2026-08-20 00:00:00".to_string(),
             lite_model: None,
+            responses_continuation: "auto".to_string(),
         }
     }
 

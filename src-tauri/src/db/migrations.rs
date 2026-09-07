@@ -421,6 +421,14 @@ pub fn get_all_migrations() -> Vec<Migration> {
             "#,
             kind: tauri_plugin_sql::MigrationKind::Up,
         },
+        Migration {
+            version: 11,
+            description: "ai_channels responses continuation policy",
+            sql: r#"
+                ALTER TABLE ai_channels ADD COLUMN responses_continuation TEXT NOT NULL DEFAULT 'auto';
+            "#,
+            kind: tauri_plugin_sql::MigrationKind::Up,
+        },
     ]
 }
 
@@ -466,7 +474,7 @@ mod tests {
         for (index, migration) in get_all_migrations().iter().enumerate() {
             assert_eq!(migration.version, index as i64 + 1);
         }
-        assert_eq!(latest_migration_version(), 10);
+        assert_eq!(latest_migration_version(), 11);
         assert_eq!(
             get_all_migrations()
                 .last()
@@ -597,6 +605,9 @@ mod tests {
                     .map(|row| row.get::<String, _>("name"))
                     .collect();
             assert!(channel_columns.iter().any(|name| name == "lite_model"));
+            assert!(channel_columns
+                .iter()
+                .any(|name| name == "responses_continuation"));
         });
     }
 

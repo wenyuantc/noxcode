@@ -265,6 +265,8 @@ export interface GitPullResult {
 
 export type AiChannelProtocol = "openai" | "anthropic" | "codex";
 
+export type ResponsesContinuation = "auto" | "enabled" | "disabled";
+
 export const CHANNEL_INPUT_TYPES = ["text", "image", "video"] as const;
 export type ChannelInputType = (typeof CHANNEL_INPUT_TYPES)[number];
 
@@ -299,6 +301,7 @@ export interface AiChannel {
   extra_headers_json: string | null;
   models: AiChannelModel[];
   lite_model?: string | null;
+  responses_continuation: ResponsesContinuation;
   enabled: boolean;
   api_key: string | null;
   api_key_configured: boolean;
@@ -314,6 +317,7 @@ export interface CreateAiChannelInput {
   extra_headers_json?: string | null;
   models?: AiChannelModel[];
   lite_model?: string | null;
+  responses_continuation?: ResponsesContinuation | null;
   enabled?: boolean;
 }
 
@@ -325,6 +329,7 @@ export interface UpdateAiChannelInput {
   extra_headers_json?: string | null;
   models?: AiChannelModel[];
   lite_model?: string | null;
+  responses_continuation?: ResponsesContinuation | null;
   enabled?: boolean;
 }
 

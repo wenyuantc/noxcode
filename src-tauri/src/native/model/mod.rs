@@ -11,6 +11,8 @@ pub mod sse;
 pub mod types;
 pub mod usage;
 
-pub use client::{ListedModels, ModelClient, ModelClientConfig, PromptCacheMode};
+pub use client::{
+    ListedModels, ModelClient, ModelClientConfig, PromptCacheMode, ResponsesContinuationMode,
+};
 pub use retry::RetryConfig;
 pub use usage::usage_to_delta;

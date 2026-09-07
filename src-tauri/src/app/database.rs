@@ -716,11 +716,17 @@ mod tests {
             let status = fetch_database_migration_status(&pool)
                 .await
                 .expect("fetch migration status");
-            assert_eq!(status.current_version, Some(10));
-            assert_eq!(status.applied_count, 10);
+            assert_eq!(
+                status.current_version,
+                Some(crate::db::migrations::latest_migration_version())
+            );
+            assert_eq!(
+                status.applied_count,
+                crate::db::migrations::latest_migration_version()
+            );
             assert_eq!(
                 status.current_description.as_deref(),
-                Some("agent_sessions soft archive")
+                Some("ai_channels responses continuation policy")
             );
         });
     }
@@ -742,10 +748,11 @@ mod tests {
             assert!(script.contains("-- noxcode SQL backup"));
             assert!(script.contains("INSERT INTO \"ai_channels\""));
 
-            let (_, status) = validate_sql_backup_script(script, 10)
+            let latest = crate::db::migrations::latest_migration_version();
+            let (_, status) = validate_sql_backup_script(script, latest)
                 .await
                 .expect("validate backup script");
-            assert_eq!(status.current_version, Some(10));
+            assert_eq!(status.current_version, Some(latest));
         });
     }
 }

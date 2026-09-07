@@ -19,7 +19,8 @@ use crate::native::model::{ModelClient, ModelClientConfig, RetryConfig};
 use crate::native::model_catalog::normalize_channel_model_config;
 use crate::native::protocol::{
     normalize_base_url, normalize_extra_headers_json, normalize_protocol,
-    parse_channel_models_json, record_to_channel, serialize_channel_models,
+    normalize_responses_continuation, parse_channel_models_json, record_to_channel,
+    serialize_channel_models,
 };
 
 fn normalize_channel_name(value: &str) -> Result<String, String> {
@@ -159,6 +160,7 @@ fn channel_client(
         retry: RetryConfig::none(),
         timeout: Duration::from_secs(20),
         network: network.clone(),
+        responses_continuation: crate::native::model::ResponsesContinuationMode::Auto,
     })
 }
 
@@ -226,9 +228,11 @@ pub(crate) async fn create_ai_channel_with(
     let now = now_sqlite();
     let api_key = normalize_optional_text(payload.api_key.as_deref());
     let lite_model = normalize_lite_model(payload.lite_model.as_deref(), &models);
+    let responses_continuation =
+        normalize_responses_continuation(payload.responses_continuation.as_deref())?.to_string();
 
     sqlx::query(
-        "INSERT INTO ai_channels (id, name, protocol, base_url, api_key, extra_headers_json, models_json, enabled, created_at, updated_at, lite_model) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)",
+        "INSERT INTO ai_channels (id, name, protocol, base_url, api_key, extra_headers_json, models_json, enabled, created_at, updated_at, lite_model, responses_continuation) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)",
     )
     .bind(&id)
     .bind(&name)
@@ -241,6 +245,7 @@ pub(crate) async fn create_ai_channel_with(
     .bind(&now)
     .bind(&now)
     .bind(&lite_model)
+    .bind(&responses_continuation)
     .execute(pool)
     .await
     .map_err(|error| format!("创建渠道失败: {error}"))?;
@@ -287,6 +292,12 @@ pub(crate) async fn update_ai_channel_with(
         None => normalize_lite_model(current.lite_model.as_deref(), &effective_models),
     };
     let enabled = updates.enabled.map(i64::from).unwrap_or(current.enabled);
+    let responses_continuation = match updates.responses_continuation.as_deref() {
+        Some(value) => normalize_responses_continuation(Some(value))?.to_string(),
+        None => {
+            normalize_responses_continuation(Some(&current.responses_continuation))?.to_string()
+        }
+    };
     let now = now_sqlite();
     let incoming_key = normalize_optional_text(updates.api_key.as_deref());
     let api_key = if let Some(secret) = incoming_key {
@@ -296,7 +307,7 @@ pub(crate) async fn update_ai_channel_with(
     };
 
     sqlx::query(
-        "UPDATE ai_channels SET name = $1, protocol = $2, base_url = $3, api_key = $4, extra_headers_json = $5, models_json = $6, enabled = $7, updated_at = $8, lite_model = $10 WHERE id = $9",
+        "UPDATE ai_channels SET name = $1, protocol = $2, base_url = $3, api_key = $4, extra_headers_json = $5, models_json = $6, enabled = $7, updated_at = $8, lite_model = $10, responses_continuation = $11 WHERE id = $9",
     )
     .bind(&name)
     .bind(&protocol)
@@ -308,6 +319,7 @@ pub(crate) async fn update_ai_channel_with(
     .bind(&now)
     .bind(id)
     .bind(&lite_model)
+    .bind(&responses_continuation)
     .execute(pool)
     .await
     .map_err(|error| format!("更新渠道失败: {error}"))?;
@@ -442,6 +454,7 @@ mod tests {
                 input_types: None,
             }]),
             lite_model: Some("gpt-4o".to_string()),
+            responses_continuation: None,
             enabled: Some(true),
         }
     }
@@ -461,6 +474,7 @@ mod tests {
             assert_eq!(created.models.len(), 1);
             assert_eq!(created.models[0].id, "gpt-4o");
             assert_eq!(created.models[0].context_tokens, Some(128000));
+            assert_eq!(created.responses_continuation, "auto");
 
             let listed = list_ai_channels_with(&pool).await.expect("list");
             assert_eq!(listed.len(), 1);
@@ -493,6 +507,7 @@ mod tests {
                     extra_headers_json: None,
                     models: Some(vec![model.clone()]),
                     lite_model: None,
+                    responses_continuation: None,
                     enabled: None,
                 },
             )
@@ -515,6 +530,7 @@ mod tests {
                     extra_headers_json: None,
                     models: Some(vec![model.clone()]),
                     lite_model: None,
+                    responses_continuation: None,
                     enabled: None,
                 },
             )
@@ -536,6 +552,7 @@ mod tests {
                     extra_headers_json: None,
                     models: Some(vec![model]),
                     lite_model: None,
+                    responses_continuation: None,
                     enabled: None,
                 },
             )
@@ -566,6 +583,7 @@ mod tests {
                     extra_headers_json: None,
                     models: None,
                     lite_model: None,
+                    responses_continuation: None,
                     enabled: None,
                 },
             )
@@ -587,6 +605,7 @@ mod tests {
                     extra_headers_json: None,
                     models: None,
                     lite_model: Some(None),
+                    responses_continuation: None,
                     enabled: None,
                 },
             )
@@ -604,12 +623,60 @@ mod tests {
                     extra_headers_json: None,
                     models: None,
                     lite_model: Some(Some("not-a-model".to_string())),
+                    responses_continuation: None,
                     enabled: None,
                 },
             )
             .await
             .expect("bogus lite");
             assert!(bogus.lite_model.is_none());
+        });
+    }
+
+    #[test]
+    fn update_responses_continuation_validates() {
+        tauri::async_runtime::block_on(async {
+            let pool = setup_migrated_pool().await;
+            let created = create_ai_channel_with(&pool, sample_create())
+                .await
+                .expect("create");
+            let enabled = update_ai_channel_with(
+                &pool,
+                &created.id,
+                UpdateAiChannel {
+                    name: None,
+                    protocol: None,
+                    base_url: None,
+                    api_key: None,
+                    extra_headers_json: None,
+                    models: None,
+                    lite_model: None,
+                    responses_continuation: Some("enabled".to_string()),
+                    enabled: None,
+                },
+            )
+            .await
+            .expect("enable continuation");
+            assert_eq!(enabled.responses_continuation, "enabled");
+            let rejected = update_ai_channel_with(
+                &pool,
+                &created.id,
+                UpdateAiChannel {
+                    name: None,
+                    protocol: None,
+                    base_url: None,
+                    api_key: None,
+                    extra_headers_json: None,
+                    models: None,
+                    lite_model: None,
+                    responses_continuation: Some("websocket".to_string()),
+                    enabled: None,
+                },
+            )
+            .await;
+            assert!(rejected.is_err());
+            let listed = list_ai_channels_with(&pool).await.expect("list");
+            assert_eq!(listed[0].responses_continuation, "enabled");
         });
     }
 
@@ -641,6 +708,7 @@ mod tests {
             created_at: "2026-08-20 00:00:00".to_string(),
             updated_at: "2026-08-20 00:00:00".to_string(),
             lite_model: None,
+            responses_continuation: "auto".to_string(),
         };
         assert!(require_channel_api_key(&record).is_err());
         record.api_key = Some(" sk-live ".to_string());

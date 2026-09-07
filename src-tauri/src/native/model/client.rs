@@ -1,5 +1,6 @@
 use std::collections::{hash_map::DefaultHasher, HashMap};
 use std::hash::{Hash, Hasher};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -118,6 +119,27 @@ pub struct ModelClientConfig {
     pub retry: RetryConfig,
     pub timeout: Duration,
     pub network: NetworkSettings,
+    /// Codex Responses 是否发送 `previous_response_id`。`Auto` 仅官方 OpenAI 主机启用。
+    pub responses_continuation: ResponsesContinuationMode,
+}
+
+/// Codex Responses 续写策略。Sub2API / NewAPI 等中转在 HTTP 上常拒绝 `previous_response_id`。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ResponsesContinuationMode {
+    #[default]
+    Auto,
+    Enabled,
+    Disabled,
+}
+
+impl ResponsesContinuationMode {
+    pub fn from_stored(value: &str) -> Self {
+        match value.trim() {
+            "enabled" => Self::Enabled,
+            "disabled" => Self::Disabled,
+            _ => Self::Auto,
+        }
+    }
 }
 
 /// Prompt cache 策略：`Auto` 只对官方端点开启（Anthropic 的 `cache_control`、
@@ -188,6 +210,9 @@ pub struct ModelClient {
     /// is cloned for child agents, so a map prevents a child request from
     /// accidentally continuing the parent's server-side conversation.
     continuations: Arc<Mutex<HashMap<String, ResponseContinuation>>>,
+    /// Sticky: this gateway rejected `previous_response_id`. Shared across clones
+    /// so a child agent does not probe the same 400 again.
+    continuation_unsupported: Arc<AtomicBool>,
 }
 
 #[derive(Debug, Clone)]
@@ -215,6 +240,7 @@ impl Clone for ModelClient {
             // a matching prompt accidentally attach to its parent's
             // `previous_response_id`.
             continuations: Arc::new(Mutex::new(HashMap::new())),
+            continuation_unsupported: self.continuation_unsupported.clone(),
         }
     }
 }
@@ -236,6 +262,7 @@ impl ModelClient {
             prompt_cache: self.prompt_cache,
             prompt_cache_key: self.prompt_cache_key.clone(),
             continuations: self.continuations.clone(),
+            continuation_unsupported: self.continuation_unsupported.clone(),
         }
     }
 }
@@ -254,6 +281,7 @@ impl ModelClient {
             prompt_cache: PromptCacheMode::Auto,
             prompt_cache_key: None,
             continuations: Arc::new(Mutex::new(HashMap::new())),
+            continuation_unsupported: Arc::new(AtomicBool::new(false)),
         })
     }
 
@@ -453,6 +481,7 @@ impl ModelClient {
                         && !retried_continuation
                         && is_continuation_rejection(&error) =>
                 {
+                    self.continuation_unsupported.store(true, Ordering::SeqCst);
                     self.clear_continuation(&conversation_key);
                     retried_continuation = true;
                     continue;
@@ -988,8 +1017,21 @@ impl ModelClient {
         }
     }
 
+    fn continuation_allowed(&self) -> bool {
+        if self.continuation_unsupported.load(Ordering::SeqCst) {
+            return false;
+        }
+        match self.config.responses_continuation {
+            ResponsesContinuationMode::Disabled => false,
+            ResponsesContinuationMode::Enabled => true,
+            ResponsesContinuationMode::Auto => {
+                host_supports_prompt_cache(&self.config.base_url, &self.config.protocol)
+            }
+        }
+    }
+
     fn continuation_for(&self, key: &str, messages: &[Message]) -> Option<ResponseContinuation> {
-        if self.config.protocol != PROTOCOL_CODEX {
+        if self.config.protocol != PROTOCOL_CODEX || !self.continuation_allowed() {
             return None;
         }
         let mut continuations = self.continuations.lock().ok()?;
@@ -1008,7 +1050,7 @@ impl ModelClient {
     }
 
     fn update_continuation(&self, key: &str, messages: &[Message], response_id: Option<String>) {
-        if self.config.protocol != PROTOCOL_CODEX {
+        if self.config.protocol != PROTOCOL_CODEX || !self.continuation_allowed() {
             return;
         }
         let Ok(mut continuations) = self.continuations.lock() else {
@@ -1325,6 +1367,27 @@ mod tests {
             retry,
             timeout: Duration::from_secs(5),
             network: NetworkSettings::default(),
+            // Mock servers are localhost; Auto would skip continuation. Tests that
+            // exercise previous_response_id opt in with Enabled.
+            responses_continuation: ResponsesContinuationMode::Enabled,
+        })
+        .expect("client")
+    }
+
+    fn client_with_protocol_mode(
+        base_url: String,
+        protocol: &str,
+        mode: ResponsesContinuationMode,
+    ) -> ModelClient {
+        ModelClient::new(ModelClientConfig {
+            protocol: protocol.to_string(),
+            base_url,
+            api_key: "sk-secret-key".to_string(),
+            extra_headers: HashMap::new(),
+            retry: RetryConfig::none(),
+            timeout: Duration::from_secs(5),
+            network: NetworkSettings::default(),
+            responses_continuation: mode,
         })
         .expect("client")
     }
@@ -1670,7 +1733,7 @@ mod tests {
     #[tokio::test]
     async fn responses_falls_back_when_gateway_rejects_continuation() {
         let first = r#"{"id":"resp_1","output":[{"type":"message","content":[{"type":"output_text","text":"first"}]}]}"#;
-        let rejected = r#"{"error":{"message":"unknown parameter previous_response_id"}}"#;
+        let rejected = r#"{"error":{"message":"previous_response_id requires an OpenAI API-key account for HTTP requests","type":"invalid_request_error","param":"","code":null}}"#;
         let third = r#"{"id":"resp_3","output":[{"type":"message","content":[{"type":"output_text","text":"fallback"}]}]}"#;
         let (base, requests) = serve_capture_sequence(vec![
             (200, first.to_string()),
@@ -1836,6 +1899,183 @@ mod tests {
         assert_eq!(requests.len(), 2);
         assert_eq!(requests[1]["previous_response_id"], "resp_parent");
         assert_eq!(requests[1]["input"].as_array().map(Vec::len), Some(1));
+    }
+
+    #[tokio::test]
+    async fn responses_does_not_retry_continuation_on_later_turns() {
+        let first = r#"{"id":"resp_1","output":[{"type":"message","content":[{"type":"output_text","text":"first"}]}]}"#;
+        let rejected = r#"{"error":{"message":"previous_response_id requires an OpenAI API-key account for HTTP requests"}}"#;
+        let fallback = r#"{"id":"resp_3","output":[{"type":"message","content":[{"type":"output_text","text":"fallback"}]}]}"#;
+        let later = r#"{"id":"resp_4","output":[{"type":"message","content":[{"type":"output_text","text":"later"}]}]}"#;
+        let (base, requests) = serve_capture_sequence(vec![
+            (200, first.to_string()),
+            (400, rejected.to_string()),
+            (200, fallback.to_string()),
+            (200, later.to_string()),
+        ])
+        .await;
+        let client = client_with_protocol(base, PROTOCOL_CODEX);
+        let mut messages = vec![Message::system("rules"), Message::user("inspect")];
+        client
+            .chat(ChatRequest {
+                messages: &messages,
+                tools: &[],
+                model: "gpt-5.4",
+                effort: None,
+                max_output_tokens: None,
+                thinking_enabled: false,
+            })
+            .await
+            .expect("first response");
+        messages.push(Message::assistant_text("first"));
+        messages.push(Message::tool_result("call_1", "tool output"));
+        client
+            .chat(ChatRequest {
+                messages: &messages,
+                tools: &[],
+                model: "gpt-5.4",
+                effort: None,
+                max_output_tokens: None,
+                thinking_enabled: false,
+            })
+            .await
+            .expect("fallback response");
+        messages.push(Message::assistant_text("fallback"));
+        messages.push(Message::user("continue"));
+        let (message, _) = client
+            .chat(ChatRequest {
+                messages: &messages,
+                tools: &[],
+                model: "gpt-5.4",
+                effort: None,
+                max_output_tokens: None,
+                thinking_enabled: false,
+            })
+            .await
+            .expect("later response");
+        assert_eq!(message.content, "later");
+
+        let requests = requests.lock().expect("captured requests");
+        assert_eq!(requests.len(), 4);
+        assert_eq!(requests[1]["previous_response_id"], "resp_1");
+        assert!(requests[2].get("previous_response_id").is_none());
+        assert!(requests[3].get("previous_response_id").is_none());
+        assert_eq!(requests[3]["input"].as_array().map(Vec::len), Some(5));
+    }
+
+    #[tokio::test]
+    async fn responses_auto_skips_continuation_on_unofficial_host() {
+        let first = r#"{"id":"resp_1","output":[{"type":"message","content":[{"type":"output_text","text":"first"}]}]}"#;
+        let second = r#"{"id":"resp_2","output":[{"type":"message","content":[{"type":"output_text","text":"second"}]}]}"#;
+        let (base, requests) =
+            serve_capture_sequence(vec![(200, first.to_string()), (200, second.to_string())]).await;
+        let client =
+            client_with_protocol_mode(base, PROTOCOL_CODEX, ResponsesContinuationMode::Auto);
+        let mut messages = vec![Message::system("rules"), Message::user("inspect")];
+        client
+            .chat(ChatRequest {
+                messages: &messages,
+                tools: &[],
+                model: "gpt-5.6-sol",
+                effort: None,
+                max_output_tokens: None,
+                thinking_enabled: false,
+            })
+            .await
+            .expect("first response");
+        messages.push(Message::assistant_text("first"));
+        messages.push(Message::tool_result("call_1", "tool output"));
+        client
+            .chat(ChatRequest {
+                messages: &messages,
+                tools: &[],
+                model: "gpt-5.6-sol",
+                effort: None,
+                max_output_tokens: None,
+                thinking_enabled: false,
+            })
+            .await
+            .expect("second response");
+
+        let requests = requests.lock().expect("captured requests");
+        assert_eq!(requests.len(), 2);
+        assert!(requests[0].get("previous_response_id").is_none());
+        assert!(requests[1].get("previous_response_id").is_none());
+        assert_eq!(requests[1]["input"].as_array().map(Vec::len), Some(3));
+    }
+
+    #[tokio::test]
+    async fn responses_disabled_never_sends_previous_response_id() {
+        let first = r#"{"id":"resp_1","output":[{"type":"message","content":[{"type":"output_text","text":"first"}]}]}"#;
+        let second = r#"{"id":"resp_2","output":[{"type":"message","content":[{"type":"output_text","text":"second"}]}]}"#;
+        let (base, requests) =
+            serve_capture_sequence(vec![(200, first.to_string()), (200, second.to_string())]).await;
+        let client =
+            client_with_protocol_mode(base, PROTOCOL_CODEX, ResponsesContinuationMode::Disabled);
+        let mut messages = vec![Message::system("rules"), Message::user("inspect")];
+        client
+            .chat(ChatRequest {
+                messages: &messages,
+                tools: &[],
+                model: "gpt-5.4",
+                effort: None,
+                max_output_tokens: None,
+                thinking_enabled: false,
+            })
+            .await
+            .expect("first response");
+        messages.push(Message::assistant_text("first"));
+        client
+            .chat(ChatRequest {
+                messages: &messages,
+                tools: &[],
+                model: "gpt-5.4",
+                effort: None,
+                max_output_tokens: None,
+                thinking_enabled: false,
+            })
+            .await
+            .expect("second response");
+
+        let requests = requests.lock().expect("captured requests");
+        assert_eq!(requests.len(), 2);
+        assert!(requests[1].get("previous_response_id").is_none());
+    }
+
+    #[test]
+    fn auto_continuation_follows_official_openai_hosts() {
+        assert!(host_supports_prompt_cache(
+            "https://api.openai.com/v1",
+            PROTOCOL_CODEX
+        ));
+        assert!(host_supports_prompt_cache(
+            "https://eastus.openai.azure.com",
+            PROTOCOL_CODEX
+        ));
+        assert!(!host_supports_prompt_cache(
+            "https://hub.51token.link",
+            PROTOCOL_CODEX
+        ));
+        assert!(!host_supports_prompt_cache(
+            "https://newapi.example.com",
+            PROTOCOL_CODEX
+        ));
+        assert_eq!(
+            ResponsesContinuationMode::from_stored("enabled"),
+            ResponsesContinuationMode::Enabled
+        );
+        assert_eq!(
+            ResponsesContinuationMode::from_stored("disabled"),
+            ResponsesContinuationMode::Disabled
+        );
+        assert_eq!(
+            ResponsesContinuationMode::from_stored("auto"),
+            ResponsesContinuationMode::Auto
+        );
+        assert_eq!(
+            ResponsesContinuationMode::from_stored("nope"),
+            ResponsesContinuationMode::Auto
+        );
     }
 
     #[tokio::test]
@@ -2179,6 +2419,7 @@ mod tests {
             retry: RetryConfig::none(),
             timeout: Duration::from_secs(30),
             network: NetworkSettings::default(),
+            responses_continuation: ResponsesContinuationMode::Auto,
         })
         .expect("live client");
         let listed = client.list_models().await.expect("list_models");

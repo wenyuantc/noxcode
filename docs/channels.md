@@ -49,6 +49,12 @@ flowchart LR
 | `anthropic` | `claude` | `/v1/messages` | `/v1/models` |
 | `codex` | `responses` / `openai-responses` | `/v1/responses` | `/v1/models` |
 
+Codex 渠道另有 `responses_continuation`（`auto` / `enabled` / `disabled`）：
+
+- `auto`（默认）：`api.openai.com` / `*.openai.com` / `*.openai.azure.com` 发送 `previous_response_id` 做增量续写；其它主机（Sub2API、NewAPI、51token 等）发全量 `input`。
+- `enabled`：始终尝试官方续写。网关 400 拒绝后本会话粘性切全量，不再每步探测。
+- `disabled`：永远全量 `input`，不发送 `previous_response_id`。
+
 Base URL 必须是 `http://` 或 `https://`，末尾 `/` 会去掉后再拼路径。
 
 鉴权：anthropic 用 `x-api-key` + `anthropic-version: 2023-06-01`；其余用 `Authorization: Bearer`。`extra_headers` 禁止覆盖这两个头。

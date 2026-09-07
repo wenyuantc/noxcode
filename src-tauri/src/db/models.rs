@@ -155,6 +155,9 @@ pub struct AiChannelRecord {
     /// 轻量模型（压缩摘要 / 记忆抽取 / 钩子判定用），为空则用主模型。
     #[sqlx(default)]
     pub lite_model: Option<String>,
+    /// Codex Responses 续写：`auto` / `enabled` / `disabled`。
+    #[sqlx(default)]
+    pub responses_continuation: String,
 }
 
 /// 目录条目缺省输入类型：未声明时视为仅文本。
@@ -191,11 +194,17 @@ pub struct AiChannel {
     pub models: Vec<ChannelModelConfig>,
     #[serde(default)]
     pub lite_model: Option<String>,
+    #[serde(default = "default_responses_continuation")]
+    pub responses_continuation: String,
     pub enabled: bool,
     pub api_key: Option<String>,
     pub api_key_configured: bool,
     pub created_at: String,
     pub updated_at: String,
+}
+
+fn default_responses_continuation() -> String {
+    "auto".to_string()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -208,6 +217,8 @@ pub struct CreateAiChannel {
     pub models: Option<Vec<ChannelModelConfig>>,
     #[serde(default)]
     pub lite_model: Option<String>,
+    #[serde(default)]
+    pub responses_continuation: Option<String>,
     pub enabled: Option<bool>,
 }
 
@@ -222,6 +233,8 @@ pub struct UpdateAiChannel {
     pub models: Option<Vec<ChannelModelConfig>>,
     #[serde(default, deserialize_with = "deserialize_explicit_nullable")]
     pub lite_model: Option<Option<String>>,
+    #[serde(default)]
+    pub responses_continuation: Option<String>,
     pub enabled: Option<bool>,
 }
 

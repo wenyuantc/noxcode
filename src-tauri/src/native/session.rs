@@ -38,7 +38,7 @@ use crate::native::model::call_log::{
     CallLogContext, CALL_KIND_CHAT, CALL_KIND_ONE_SHOT, CALL_KIND_PLAN,
 };
 use crate::native::model::types::StreamDelta;
-use crate::native::model::{ModelClient, ModelClientConfig};
+use crate::native::model::{ModelClient, ModelClientConfig, ResponsesContinuationMode};
 use crate::native::model_catalog::{
     apply_catalog_defaults, fill_from_catalog, resolve_runtime_reasoning_effort,
 };
@@ -1092,6 +1092,9 @@ async fn load_native_client_from_channel(
         retry: crate::native::settings::effective_model_retry_config(app),
         timeout: Duration::from_secs(if thinking_enabled { 300 } else { 120 }),
         network: load_network_settings(app)?,
+        responses_continuation: ResponsesContinuationMode::from_stored(
+            &channel.responses_continuation,
+        ),
     })?
     .with_call_log(
         CallLogContext {
@@ -1881,6 +1884,7 @@ async fn start_native_session_locked(
         input_queue,
         join,
         allow_all_high_risk,
+        allow_session_commands: Arc::new(AtomicBool::new(false)),
         working,
         pending_compactions: Arc::default(),
         permission_rules,
@@ -3616,6 +3620,7 @@ mod tests {
             input_queue: Arc::new(NativeInputQueue::new("sess-1")),
             join,
             allow_all_high_risk: Arc::new(AtomicBool::new(false)),
+            allow_session_commands: Arc::new(AtomicBool::new(false)),
             working: Arc::new(AtomicBool::new(false)),
             pending_compactions: Arc::default(),
             permission_rules: crate::native::permission_rules::shared_rules(Default::default()),
@@ -3965,6 +3970,7 @@ mod tests {
             input_queue: Arc::new(NativeInputQueue::new("sess-1")),
             join: tokio::spawn(async {}),
             allow_all_high_risk: Arc::new(AtomicBool::new(false)),
+            allow_session_commands: Arc::new(AtomicBool::new(false)),
             working: Arc::new(AtomicBool::new(false)),
             pending_compactions: Arc::default(),
             pending_permission: VecDeque::new(),
@@ -4039,6 +4045,7 @@ mod tests {
             input_queue: Arc::new(NativeInputQueue::new("sess-1")),
             join: tokio::spawn(async {}),
             allow_all_high_risk: Arc::new(AtomicBool::new(false)),
+            allow_session_commands: Arc::new(AtomicBool::new(false)),
             working: Arc::new(AtomicBool::new(false)),
             pending_compactions: Arc::default(),
             pending_permission: VecDeque::new(),

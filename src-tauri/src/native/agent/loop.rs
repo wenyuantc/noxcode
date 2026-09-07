@@ -2738,6 +2738,7 @@ mod tests {
             retry: crate::native::model::RetryConfig::none(),
             timeout: Duration::from_secs(5),
             network: crate::app::network_settings::NetworkSettings::default(),
+            responses_continuation: crate::native::model::ResponsesContinuationMode::Auto,
         })
         .unwrap();
         (client, server)
@@ -3026,6 +3027,7 @@ mod tests {
             retry: crate::native::model::RetryConfig::none(),
             timeout: Duration::from_millis(50),
             network: crate::app::network_settings::NetworkSettings::default(),
+            responses_continuation: crate::native::model::ResponsesContinuationMode::Auto,
         })
         .expect("client");
         let text = runner
@@ -3834,6 +3836,7 @@ mod tests {
             retry: crate::native::model::RetryConfig::none(),
             timeout: Duration::from_millis(50),
             network: crate::app::network_settings::NetworkSettings::default(),
+            responses_continuation: crate::native::model::ResponsesContinuationMode::Auto,
         })
         .expect("client");
         let text = runner
@@ -4626,6 +4629,7 @@ mod tests {
             retry: crate::native::model::RetryConfig::none(),
             timeout: Duration::from_secs(1),
             network: crate::app::network_settings::NetworkSettings::default(),
+            responses_continuation: crate::native::model::ResponsesContinuationMode::Auto,
         })
         .expect("client")
         .with_call_log_context(

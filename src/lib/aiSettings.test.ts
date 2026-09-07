@@ -31,6 +31,7 @@ function channel(id: string, models: AiChannelModel[], enabled = true): AiChanne
     base_url: "https://example.test",
     extra_headers_json: null,
     models,
+    responses_continuation: "auto",
     enabled,
     api_key: null,
     api_key_configured: true,

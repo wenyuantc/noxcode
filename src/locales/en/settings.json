@@ -106,7 +106,14 @@
       "extraHeaders": "Extra headers (JSON object, optional)",
       "liteModel": "Lite model (compaction, memory, hook judgement)",
       "liteModelNone": "Use the main model",
-      "liteModelHint": "A cheaper model from this channel for internal calls: context summaries, memory extraction / consolidation and agent hooks. Logged with model_role = lite."
+      "liteModelHint": "A cheaper model from this channel for internal calls: context summaries, memory extraction / consolidation and agent hooks. Logged with model_role = lite.",
+      "responsesContinuation": "Responses continuation",
+      "responsesContinuationHint": "Official OpenAI can chain with previous_response_id. Sub2API / NewAPI HTTP relays usually reject that field — use full replay or keep Auto."
+    },
+    "responsesContinuation": {
+      "auto": "Auto (official hosts chain, relays send full input)",
+      "enabled": "Official chaining (previous_response_id)",
+      "disabled": "Relay full replay (Sub2API / NewAPI)"
     },
     "protocols": {
       "openai": "OpenAI Chat Completions",
