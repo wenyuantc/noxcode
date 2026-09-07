@@ -155,6 +155,7 @@ pub(crate) async fn get_agent_session_log_lines_with(
     pool: &SqlitePool,
     session_id: &str,
     after_event_id: Option<&str>,
+    before_event_id: Option<&str>,
     limit: Option<i64>,
 ) -> Result<Vec<AgentSessionEvent>, String> {
     let rows = if let Some(after) = after_event_id
@@ -178,8 +179,32 @@ pub(crate) async fn get_agent_session_log_lines_with(
         .bind(limit)
         .fetch_all(pool)
         .await
-    } else if let Some(limit_val) = limit {
-        let limit = limit_val.clamp(1, 50_000);
+    } else if let Some(before) = before_event_id
+        .map(str::trim)
+        .filter(|item| !item.is_empty())
+    {
+        let limit = limit.unwrap_or(1_000).clamp(1, 50_000);
+        sqlx::query_as::<_, AgentSessionEvent>(
+            r#"
+            SELECT id, session_id, event_type, message, created_at FROM (
+                SELECT rowid, * FROM agent_session_events
+                WHERE session_id = $1
+                  AND (created_at, rowid) < (
+                      SELECT created_at, rowid FROM agent_session_events WHERE id = $2
+                  )
+                ORDER BY created_at DESC, rowid DESC
+                LIMIT $3
+            ) AS earlier
+            ORDER BY created_at ASC, rowid ASC
+            "#,
+        )
+        .bind(session_id)
+        .bind(before)
+        .bind(limit)
+        .fetch_all(pool)
+        .await
+    } else {
+        let limit = limit.unwrap_or(2_000).clamp(1, 50_000);
         sqlx::query_as::<_, AgentSessionEvent>(
             r#"
             SELECT id, session_id, event_type, message, created_at FROM (
@@ -193,18 +218,6 @@ pub(crate) async fn get_agent_session_log_lines_with(
         )
         .bind(session_id)
         .bind(limit)
-        .fetch_all(pool)
-        .await
-    } else {
-        sqlx::query_as::<_, AgentSessionEvent>(
-            r#"
-            SELECT id, session_id, event_type, message, created_at FROM agent_session_events
-            WHERE session_id = $1
-            ORDER BY created_at ASC, rowid ASC
-            LIMIT 10000
-            "#,
-        )
-        .bind(session_id)
         .fetch_all(pool)
         .await
     };
@@ -343,10 +356,18 @@ pub async fn get_agent_session_log_lines<R: Runtime>(
     app: AppHandle<R>,
     session_id: String,
     after_event_id: Option<String>,
+    before_event_id: Option<String>,
     limit: Option<i64>,
 ) -> Result<Vec<AgentSessionEvent>, String> {
     let pool = sqlite_pool(&app).await?;
-    get_agent_session_log_lines_with(&pool, &session_id, after_event_id.as_deref(), limit).await
+    get_agent_session_log_lines_with(
+        &pool,
+        &session_id,
+        after_event_id.as_deref(),
+        before_event_id.as_deref(),
+        limit,
+    )
+    .await
 }
 
 #[tauri::command]
@@ -464,7 +485,7 @@ mod tests {
             .unwrap()
             .is_empty());
         assert_eq!(
-            get_agent_session_log_lines_with(&pool, "archive", None, None)
+            get_agent_session_log_lines_with(&pool, "archive", None, None, None)
                 .await
                 .unwrap()[0]
                 .message
@@ -850,7 +871,7 @@ mod tests {
             .expect("event");
         }
 
-        let rows = get_agent_session_log_lines_with(&pool, "sess-1", None, Some(2))
+        let rows = get_agent_session_log_lines_with(&pool, "sess-1", None, None, Some(2))
             .await
             .expect("latest window");
         assert_eq!(
@@ -883,32 +904,50 @@ mod tests {
         }
 
         // 1. Initial query: should return all 4 in exact insertion order
-        let rows = get_agent_session_log_lines_with(&pool, "sess-same-sec", None, Some(10))
+        let rows = get_agent_session_log_lines_with(&pool, "sess-same-sec", None, None, Some(10))
             .await
             .expect("fetch all");
         let ids: Vec<&str> = rows.iter().map(|e| e.id.as_str()).collect();
         assert_eq!(ids, vec!["evt-1", "evt-2", "evt-3", "evt-4"]);
 
         // 1.1 Query without limit: should also return all 4 in ASC order
-        let all_rows = get_agent_session_log_lines_with(&pool, "sess-same-sec", None, None)
+        let all_rows = get_agent_session_log_lines_with(&pool, "sess-same-sec", None, None, None)
             .await
             .expect("fetch without limit");
         let all_ids: Vec<&str> = all_rows.iter().map(|e| e.id.as_str()).collect();
         assert_eq!(all_ids, vec!["evt-1", "evt-2", "evt-3", "evt-4"]);
 
         // 2. Fetch latest 2: should be evt-3, evt-4 in ASC order
-        let recent = get_agent_session_log_lines_with(&pool, "sess-same-sec", None, Some(2))
+        let recent = get_agent_session_log_lines_with(&pool, "sess-same-sec", None, None, Some(2))
             .await
             .expect("fetch latest 2");
         let recent_ids: Vec<&str> = recent.iter().map(|e| e.id.as_str()).collect();
         assert_eq!(recent_ids, vec!["evt-3", "evt-4"]);
 
         // 3. Incremental query after evt-2: should return evt-3, evt-4
-        let after =
-            get_agent_session_log_lines_with(&pool, "sess-same-sec", Some("evt-2"), Some(10))
-                .await
-                .expect("fetch after evt-2");
+        let after = get_agent_session_log_lines_with(
+            &pool,
+            "sess-same-sec",
+            Some("evt-2"),
+            None,
+            Some(10),
+        )
+        .await
+        .expect("fetch after evt-2");
         let after_ids: Vec<&str> = after.iter().map(|e| e.id.as_str()).collect();
         assert_eq!(after_ids, vec!["evt-3", "evt-4"]);
+
+        // 4. Paging earlier before evt-3: should return evt-1, evt-2
+        let earlier = get_agent_session_log_lines_with(
+            &pool,
+            "sess-same-sec",
+            None,
+            Some("evt-3"),
+            Some(10),
+        )
+        .await
+        .expect("fetch before evt-3");
+        let earlier_ids: Vec<&str> = earlier.iter().map(|e| e.id.as_str()).collect();
+        assert_eq!(earlier_ids, vec!["evt-1", "evt-2"]);
     }
 }

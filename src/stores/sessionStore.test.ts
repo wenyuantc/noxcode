@@ -497,4 +497,32 @@ describe("sessionStore history", () => {
     await useSessionStore.getState().loadHistory("s1");
     expect(useSessionStore.getState().usage.s1?.used_tokens).toBe(9);
   });
+
+  it("loads earlier history with beforeEventId and prepends to existing lines", async () => {
+    // Return 2000 items to trigger hasMoreEarlier: true
+    const batch1: AgentSessionEvent[] = Array.from({ length: 2000 }, (_, i) =>
+      event(`e${i + 2000}`),
+    );
+    getLines.mockResolvedValueOnce(batch1);
+
+    await useSessionStore.getState().ensureHistory("s1");
+    expect(useSessionStore.getState().hasMoreEarlier.s1).toBe(true);
+    expect(useSessionStore.getState().lines.s1?.length).toBe(2000);
+    expect(useSessionStore.getState().lines.s1?.[0]?.id).toBe("e2000");
+
+    // Load earlier page before e2000
+    const batch2: AgentSessionEvent[] = [event("e100"), event("e101")];
+    getLines.mockResolvedValueOnce(batch2);
+
+    const loaded = await useSessionStore.getState().loadEarlierHistory("s1");
+    expect(loaded).toBe(true);
+    expect(getLines).toHaveBeenLastCalledWith("s1", undefined, 1000, "e2000");
+    expect(useSessionStore.getState().lines.s1?.length).toBe(2002);
+    expect(useSessionStore.getState().lines.s1?.[0]?.id).toBe("e100");
+    expect(useSessionStore.getState().lines.s1?.[1]?.id).toBe("e101");
+    expect(useSessionStore.getState().lines.s1?.[2]?.id).toBe("e2000");
+    // Since batch2.length < 1000, hasMoreEarlier is now false
+    expect(useSessionStore.getState().hasMoreEarlier.s1).toBe(false);
+    expect(useSessionStore.getState().loadingEarlier.s1).toBe(false);
+  });
 });

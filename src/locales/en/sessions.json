@@ -1,5 +1,7 @@
 {
   "newSession": "New session",
+  "loadEarlier": "Load earlier history",
+  "loadingEarlier": "Loading earlier history...",
   "stop": "Stop",
   "send": "Send",
   "queuedInput": {

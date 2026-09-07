@@ -64,9 +64,12 @@ interface SessionState {
   permissions: Record<string, Record<string, NativePermissionRequest>>;
   planQuestions: Record<string, Record<string, NativePlanQuestionRequest>>;
   planApprovals: Record<string, Record<string, NativePlanApprovalRequest>>;
+  hasMoreEarlier: Record<string, boolean>;
+  loadingEarlier: Record<string, boolean>;
   selectSession: (id: string | null) => void;
   ensureHistory: (sessionId: string) => Promise<void>;
   loadHistory: (sessionId: string) => Promise<void>;
+  loadEarlierHistory: (sessionId: string) => Promise<boolean>;
   onStarted: (session: AgentSessionStarted) => void;
   onStdout: (output: AgentSessionOutput) => void;
   onDelta: (delta: NativeTextDelta) => void;
@@ -92,6 +95,8 @@ export const useSessionStore = create<SessionState>((set, get) => ({
   planModeRunBySession: {},
   lines: {},
   historyLoaded: {},
+  hasMoreEarlier: {},
+  loadingEarlier: {},
   configurationBySession: {},
   backgroundBySession: {},
   inputQueueBySession: {},
@@ -125,7 +130,9 @@ export const useSessionStore = create<SessionState>((set, get) => ({
       let request = historyRequests.get(sessionId);
       if (!request) {
         request = (async () => {
-          const events = await getAgentSessionLogLines(sessionId);
+          const limit = 2000;
+          const events = await getAgentSessionLogLines(sessionId, undefined, limit);
+          const hasMore = events.length >= limit;
           set((state) => {
             const liveLines = new Map(
               (state.lines[sessionId] ?? []).map((line) => [line.id, line]),
@@ -150,6 +157,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
                 ],
               },
               historyLoaded: { ...state.historyLoaded, [sessionId]: true },
+              hasMoreEarlier: { ...state.hasMoreEarlier, [sessionId]: hasMore },
             };
           });
         })().finally(() => historyRequests.delete(sessionId));
@@ -158,6 +166,51 @@ export const useSessionStore = create<SessionState>((set, get) => ({
       await request;
     }
     hydrateUsage(sessionId);
+  },
+  loadEarlierHistory: async (sessionId: string) => {
+    const state = get();
+    if (state.loadingEarlier[sessionId] || !state.hasMoreEarlier[sessionId]) {
+      return false;
+    }
+    const currentLines = state.lines[sessionId] ?? [];
+    const firstLineId = currentLines[0]?.id;
+    if (!firstLineId) return false;
+
+    set((s) => ({
+      loadingEarlier: { ...s.loadingEarlier, [sessionId]: true },
+    }));
+
+    try {
+      const limit = 1000;
+      const events = await getAgentSessionLogLines(sessionId, undefined, limit, firstLineId);
+      const hasMore = events.length >= limit;
+      const history = events.map((event) =>
+        hydrateSessionLine({
+          id: event.id,
+          sessionId,
+          text: event.message ?? "",
+          createdAt: event.created_at,
+        }),
+      );
+      const newIds = new Set(history.map((line) => line.id));
+      set((s) => ({
+        lines: {
+          ...s.lines,
+          [sessionId]: [
+            ...history,
+            ...(s.lines[sessionId] ?? []).filter((line) => !newIds.has(line.id)),
+          ],
+        },
+        hasMoreEarlier: { ...s.hasMoreEarlier, [sessionId]: hasMore },
+        loadingEarlier: { ...s.loadingEarlier, [sessionId]: false },
+      }));
+      return history.length > 0;
+    } catch {
+      set((s) => ({
+        loadingEarlier: { ...s.loadingEarlier, [sessionId]: false },
+      }));
+      return false;
+    }
   },
   loadHistory: async (sessionId) => {
     get().selectSession(sessionId);

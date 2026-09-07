@@ -405,8 +405,14 @@ export function getAgentSessionLogLines(
   sessionId: string,
   afterEventId?: string,
   limit?: number,
+  beforeEventId?: string,
 ): Promise<AgentSessionEvent[]> {
-  return invoke("get_agent_session_log_lines", { sessionId, afterEventId, limit });
+  return invoke("get_agent_session_log_lines", {
+    sessionId,
+    afterEventId,
+    beforeEventId,
+    limit,
+  });
 }
 
 export function prepareAgentSessionResume(sessionId: string): Promise<AgentSessionResumeInfo> {

@@ -1,5 +1,7 @@
 {
   "newSession": "新会话",
+  "loadEarlier": "加载更早历史",
+  "loadingEarlier": "正在加载更早历史...",
   "stop": "停止",
   "send": "发送",
   "queuedInput": {

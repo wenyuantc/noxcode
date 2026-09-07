@@ -1,5 +1,5 @@
 import { useVirtualizer } from "@tanstack/react-virtual";
-import { ArrowDown, Loader2 } from "lucide-react";
+import { ArrowDown, History, Loader2 } from "lucide-react";
 import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 
@@ -179,6 +179,9 @@ export const EventStream = memo(function EventStream({
     (state) => Object.values(state.planQuestions[sessionId] ?? {})[0],
   );
   const hasAsk = planQuestion?.session_record_id === sessionId;
+  const hasMoreEarlier = useSessionStore((state) => state.hasMoreEarlier[sessionId]);
+  const loadingEarlier = useSessionStore((state) => state.loadingEarlier[sessionId]);
+  const loadEarlierHistory = useSessionStore((state) => state.loadEarlierHistory);
   const items = useMemo(() => groupSessionLines(lines), [lines]);
   const blocks = useMemo(() => buildTurnBlocks(items), [items]);
   const lastUserBlockId = useMemo(() => {
@@ -255,6 +258,23 @@ export const EventStream = memo(function EventStream({
     setShowLatest(false);
     applyScrollToLatest();
   }, [applyScrollToLatest]);
+
+  const handleLoadEarlier = useCallback(async () => {
+    const node = parentRef.current;
+    if (!node) return;
+    const previousScrollHeight = node.scrollHeight;
+    const previousScrollTop = node.scrollTop;
+    programmaticRef.current = true;
+    pinnedRef.current = false;
+    await loadEarlierHistory(sessionId);
+    requestAnimationFrame(() => {
+      if (parentRef.current) {
+        const heightDiff = parentRef.current.scrollHeight - previousScrollHeight;
+        parentRef.current.scrollTop = previousScrollTop + heightDiff;
+      }
+      programmaticRef.current = false;
+    });
+  }, [loadEarlierHistory, sessionId]);
 
   useEffect(() => {
     if (!active || !working) return;
@@ -349,6 +369,28 @@ export const EventStream = memo(function EventStream({
           programmaticRef.current = false;
         }}
       >
+        {hasMoreEarlier ? (
+          <div className="mx-auto mb-4 flex max-w-3xl justify-center">
+            <button
+              type="button"
+              disabled={loadingEarlier}
+              onClick={handleLoadEarlier}
+              className="flex items-center gap-1.5 rounded-md px-3 py-1.5 text-xs text-muted-foreground transition hover:bg-muted hover:text-foreground disabled:pointer-events-none disabled:opacity-50"
+            >
+              {loadingEarlier ? (
+                <>
+                  <Loader2 className="size-3.5 animate-spin" />
+                  <span>{t("loadingEarlier")}</span>
+                </>
+              ) : (
+                <>
+                  <History className="size-3.5" />
+                  <span>{t("loadEarlier")}</span>
+                </>
+              )}
+            </button>
+          </div>
+        ) : null}
         {virtualize ? (
           <div
             className="relative mx-auto max-w-3xl"
