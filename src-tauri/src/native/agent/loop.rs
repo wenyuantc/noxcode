@@ -4136,6 +4136,7 @@ mod tests {
             PermissionRule {
                 id: "deny-agent".to_string(),
                 external_path: None,
+                plan_bash: None,
                 capability: PermissionCapability::Subagent,
                 pattern: "*".to_string(),
                 source: PatternSource::ToolName,

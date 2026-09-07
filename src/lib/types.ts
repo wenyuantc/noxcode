@@ -698,6 +698,7 @@ export interface PermissionRuleSuggestion {
   capability: PermissionCapability;
   pattern: string;
   source: PermissionPatternSource;
+  plan_bash?: PlanBashRule | null;
 }
 
 export interface PermissionRule {
@@ -708,6 +709,12 @@ export interface PermissionRule {
   scope: PermissionRuleScope;
   note: string;
   external_path?: { target: PermissionTarget; scope: PathAccessScope } | null;
+  plan_bash?: PlanBashRule | null;
+}
+
+export interface PlanBashRule {
+  target: PermissionTarget;
+  workspace_root: string;
 }
 
 export type PermissionTarget =

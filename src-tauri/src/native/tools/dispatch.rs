@@ -25,7 +25,8 @@ use super::patch::{extract_patch_text, parse_patch, patch_counts, plan_mutations
 use super::paths::resolve_under_workspace;
 use super::permission::{
     classify_native_tool_risk, classify_plan_bash_risk, suggest_rule, NativePermissionDecision,
-    NativeToolRisk, NativeToolRiskKind, PermissionRuleSuggestion, PermissionRules, RuleDecision,
+    NativeToolRisk, NativeToolRiskKind, PermissionRuleSuggestion, PermissionRules, PlanBashRule,
+    RuleDecision,
 };
 use super::question::{format_ask_question_result, parse_ask_question_args, PlanQuestionAnswer};
 use super::ssh::SshToolRuntime;
@@ -833,7 +834,7 @@ fn call_enter_plan_mode(ctx: &ToolCtx) -> Result<String, String> {
     }
     ctx.set_read_only(true);
     ctx.set_plan_mode(true);
-    Ok("已进入计划模式：使用只读工具摸底；写入或高风险 Bash 命令须用户单次确认，确认后仍保持计划模式。计划写好后调用 ExitPlanMode 提交，等用户批准再实施。".to_string())
+    Ok("已进入计划模式：使用只读工具摸底；写入或高风险 Bash 命令须用户授权，可选择本次允许或始终允许，授权后仍保持计划模式。计划写好后调用 ExitPlanMode 提交，等用户批准再实施。".to_string())
 }
 
 async fn call_exit_plan_mode(ctx: &ToolCtx, arguments: &str) -> Result<String, String> {
@@ -1016,7 +1017,20 @@ async fn enforce_permissions(
     let decision = ctx
         .permission_rules
         .read()
-        .map(|rules| rules.evaluate(contract, name, arguments, Some(&root)))
+        .map(|rules| {
+            if plan_bash {
+                rules.evaluate_plan_bash(
+                    contract,
+                    arguments,
+                    &PlanBashRule {
+                        target: ctx.permission_target(),
+                        workspace_root: root.to_string_lossy().into_owned(),
+                    },
+                )
+            } else {
+                rules.evaluate(contract, name, arguments, Some(&root))
+            }
+        })
         .unwrap_or(RuleDecision::NoMatch);
     match decision {
         RuleDecision::Deny(rule) => {
@@ -1026,7 +1040,7 @@ async fn enforce_permissions(
                 rule.pattern
             ));
         }
-        RuleDecision::Allow(_) if !plan_bash => return Ok(()),
+        RuleDecision::Allow(_) => return Ok(()),
         RuleDecision::Ask(rule) => {
             return request_permission(
                 ctx,
@@ -1046,7 +1060,7 @@ async fn enforce_permissions(
             )
             .await;
         }
-        RuleDecision::NoMatch | RuleDecision::Allow(_) => {}
+        RuleDecision::NoMatch => {}
     }
     if plan_bash {
         return match classify_plan_bash_risk(arguments) {
@@ -1140,18 +1154,18 @@ async fn request_permission(
     } else {
         None
     };
-    let allow_once_only = ctx.is_plan_mode() && name == "Bash";
-    // Plan Bash approvals cannot grant permission to other calls or end planning.
+    let plan_bash = ctx.is_plan_mode() && name == "Bash";
+    // Plan Bash grants authorize a command, never the whole session or plan exit.
     // ask 规则显式要求确认，不受 yolo / 会话放行影响。
     let rule_forced = kind == NativeToolRiskKind::Rule;
-    if !allow_once_only
+    if !plan_bash
         && !rule_forced
         && kind != NativeToolRiskKind::Mcp
         && ctx.allow_all_high_risk.load(Ordering::SeqCst)
     {
         return Ok(());
     }
-    if !allow_once_only && kind == NativeToolRiskKind::Overwrite && ctx.auto_approve_overwrite {
+    if !plan_bash && kind == NativeToolRiskKind::Overwrite && ctx.auto_approve_overwrite {
         return Ok(());
     }
     // permission_request 钩子可以代替用户直接给出 allow / deny；ask 则继续弹窗。
@@ -1159,7 +1173,7 @@ async fn request_permission(
         run_permission_request_hooks(&ctx.hook_runtime(), name, arguments, kind, &summary).await
     {
         match hook_decision.decision {
-            HookDecision::Allow if !allow_once_only && kind != NativeToolRiskKind::ExternalPath => {
+            HookDecision::Allow if !plan_bash && kind != NativeToolRiskKind::ExternalPath => {
                 return Ok(())
             }
             HookDecision::Allow => {}
@@ -1173,8 +1187,16 @@ async fn request_permission(
         }
     }
     let contract = ctx.contract_for(name).await;
-    let suggested_rule = if allow_once_only {
-        None
+    let suggested_rule = if plan_bash {
+        Some(PermissionRuleSuggestion {
+            capability: super::contract::PermissionCapability::Bash,
+            pattern: string_arg(&parse_args(arguments)?, "command")?,
+            source: super::contract::PatternSource::Command,
+            plan_bash: Some(PlanBashRule {
+                target: ctx.permission_target(),
+                workspace_root: ctx.rules_workspace_root().to_string_lossy().into_owned(),
+            }),
+        })
     } else {
         suggest_rule(
             &contract,
@@ -1196,7 +1218,7 @@ async fn request_permission(
         }
     }
     let Some(requester) = ctx.request_permission.clone() else {
-        if file_access.is_some() || allow_once_only {
+        if file_access.is_some() || plan_bash {
             return Err("当前没有可用的权限确认通道，操作未执行".to_string());
         }
         // Setting off, or tests that skip the UI channel.
@@ -1216,7 +1238,7 @@ async fn request_permission(
         mcp_server_id,
         suggested_rule: suggested_rule.clone(),
         file_access: file_access.clone(),
-        allow_once_only,
+        allow_once_only: false,
     };
     let (tx, rx) = oneshot::channel();
     requester(prompt, tx);
@@ -1263,13 +1285,15 @@ async fn request_permission(
     if ctx.cancel.is_cancelled() {
         return Err("已取消".to_string());
     }
-    if allow_once_only
+    if plan_bash
         && !matches!(
             decision,
-            NativePermissionDecision::AllowOnce | NativePermissionDecision::Deny
+            NativePermissionDecision::AllowOnce
+                | NativePermissionDecision::AllowAlways
+                | NativePermissionDecision::Deny
         )
     {
-        return Err("计划模式下的 Bash 命令只能本次允许或拒绝".to_string());
+        return Err("计划模式下的 Bash 命令不支持会话或服务器整体放行".to_string());
     }
     match decision {
         NativePermissionDecision::AllowSession | NativePermissionDecision::AllowServer
@@ -1290,6 +1314,22 @@ async fn request_permission(
             Ok(())
         }
         NativePermissionDecision::AllowAlways => {
+            if plan_bash {
+                let saved = suggested_rule.as_ref().is_some_and(|suggestion| {
+                    ctx.permission_rules_snapshot().allow.iter().any(|rule| {
+                        rule.capability == suggestion.capability
+                            && rule.source == suggestion.source
+                            && rule.pattern == suggestion.pattern
+                            && rule.plan_bash == suggestion.plan_bash
+                            && rule.external_path.is_none()
+                    })
+                });
+                return if saved {
+                    Ok(())
+                } else {
+                    Err("命令授权尚未保存，操作未执行".to_string())
+                };
+            }
             if file_access.is_some() {
                 return Ok(());
             }
@@ -1306,6 +1346,7 @@ async fn request_permission(
                             scope: super::permission::RuleScope::Workspace,
                             note: String::new(),
                             external_path: None,
+                            plan_bash: None,
                         },
                     );
                 }
@@ -2378,6 +2419,7 @@ mod tests {
                 PermissionRule {
                     id: "skill-read".to_string(),
                     external_path: None,
+                    plan_bash: None,
                     capability: PermissionCapability::Read,
                     pattern: "**".to_string(),
                     source: PatternSource::Path,
@@ -2633,6 +2675,7 @@ mod tests {
                 scope: RuleScope::Workspace,
                 note: String::new(),
                 external_path: None,
+                plan_bash: None,
             },
         );
         ctx.hooks = vec![crate::db::models::NativeHook::shell(
@@ -2646,7 +2689,10 @@ mod tests {
         let seen = Arc::new(Mutex::new(Vec::new()));
         let seen_sink = seen.clone();
         ctx.request_permission = Some(Arc::new(move |prompt, tx| {
-            assert!(prompt.allow_once_only && prompt.suggested_rule.is_none());
+            assert!(
+                !prompt.allow_once_only
+                    && prompt.suggested_rule.as_ref().unwrap().plan_bash.is_some()
+            );
             let mut seen = seen_sink.lock().unwrap();
             seen.push(prompt.summary);
             tx.send(if seen.len() == 1 {
@@ -2854,6 +2900,7 @@ mod tests {
         let rule = |capability, pattern: &str, source| PermissionRule {
             id: pattern.to_string(),
             external_path: None,
+            plan_bash: None,
             capability,
             pattern: pattern.to_string(),
             source,

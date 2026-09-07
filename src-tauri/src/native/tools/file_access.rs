@@ -195,6 +195,7 @@ impl FileAccessPrompt {
                     source: PatternSource::Path,
                     scope,
                     note: "由权限确认对话框保存".to_string(),
+                    plan_bash: None,
                     external_path: Some(ExternalPathRule {
                         target: self.target.clone(),
                         scope: path_scope,

@@ -480,7 +480,7 @@ pub fn ask_question_spec() -> ToolSpec {
 pub fn enter_plan_mode_spec() -> ToolSpec {
     spec(
         "EnterPlanMode",
-        "Switch to planning before a non-trivial implementation. Read-only tools remain available, including local SQLiteQuery. Bash commands that write, are high-risk, or cannot be verified read-only require explicit one-call approval and do not end planning. Write/Edit/ApplyPatch remain blocked. Explore, then call ExitPlanMode with the full plan for user approval or finish the turn and wait; implementation never starts automatically.",
+        "Switch to planning before a non-trivial implementation. Read-only tools remain available, including local SQLiteQuery. Bash commands that write, are high-risk, or cannot be verified read-only require user approval or an exact Always Allow grant for the same workspace and host; this never ends planning. Write/Edit/ApplyPatch remain blocked. Explore, then call ExitPlanMode with the full plan for user approval or finish the turn and wait; implementation never starts automatically.",
         json!({"type": "object", "properties": {}}),
     )
 }

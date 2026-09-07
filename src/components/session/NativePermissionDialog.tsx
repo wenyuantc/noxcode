@@ -183,6 +183,13 @@ export function NativePermissionDialog() {
             </label>
           </fieldset>
         ) : null}
+        {suggestion?.plan_bash ? (
+          <p className="text-xs text-muted-foreground whitespace-pre-wrap break-words [overflow-wrap:anywhere]">
+            {permissionTargetLabel(suggestion.plan_bash.target) || t("permissionLocalTarget")}
+            {" · "}
+            {suggestion.plan_bash.workspace_root}
+          </p>
+        ) : null}
         {error?.requestId === pending?.request_id ? (
           <p
             role="alert"
@@ -198,6 +205,7 @@ export function NativePermissionDialog() {
             </Button>
             {access ||
             pending?.allow_once_only ||
+            suggestion?.plan_bash ||
             pending?.tool_name === "WorkspaceHooks" ? null : pending?.kind === "mcp" ? (
               <Button onClick={() => resolve("allow_server")}>{t("permissionAllowServer")}</Button>
             ) : (
@@ -213,7 +221,7 @@ export function NativePermissionDialog() {
                 className="h-auto min-h-8 whitespace-normal break-words [overflow-wrap:anywhere]"
                 onClick={() => resolve("allow_always")}
               >
-                {access
+                {access || suggestion?.plan_bash
                   ? t("permissionAlways")
                   : t("permissionAllowAlways", { pattern: suggestion?.pattern })}
               </Button>

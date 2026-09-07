@@ -291,6 +291,7 @@ impl NativeAgentManager {
                 scope,
                 note: "由权限确认对话框保存".to_string(),
                 external_path: None,
+                plan_bash: suggestion.plan_bash.clone(),
             }]
         };
         crate::native::permission_rules::add_rules(config_dir, root, RuleEffect::Allow, rules)?;
@@ -441,6 +442,19 @@ impl NativeAgentManager {
         {
             session.pending_permission.push_front(pending);
             return Err("计划模式下的 Bash 命令只能本次允许或拒绝".to_string());
+        }
+        if pending
+            .request
+            .suggested_rule
+            .as_ref()
+            .is_some_and(|rule| rule.plan_bash.is_some())
+            && matches!(
+                decision,
+                NativePermissionDecision::AllowSession | NativePermissionDecision::AllowServer
+            )
+        {
+            session.pending_permission.push_front(pending);
+            return Err("计划模式下的 Bash 命令不支持会话或服务器整体放行".to_string());
         }
         if pending.request.file_access.is_some()
             && matches!(
@@ -696,6 +710,110 @@ mod tests {
         assert!(manager
             .resolve_plan_approval("plan", "late", approved())
             .is_err());
+    }
+
+    #[tokio::test]
+    async fn plan_command_always_allow_persists_before_execution_and_can_be_revoked() {
+        use crate::native::tools::dispatch::{execute_tool, ToolCtx};
+        use crate::native::tools::local::LocalWorkspace;
+        let root = tempfile::tempdir().unwrap();
+        let config = tempfile::tempdir().unwrap();
+        let command = r#"{"command":"printf approved > result.txt"}"#;
+        let mut ctx = ToolCtx::new(LocalWorkspace::new(root.path().into()));
+        ctx.set_plan_mode(true);
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        ctx.request_permission = Some(Arc::new(move |prompt, reply| {
+            tx.send((prompt, reply)).unwrap();
+        }));
+        let mut session = live_session("plan-save");
+        session.workspace_root = Some(root.path().into());
+        session.permission_rules = ctx.permission_rules.clone();
+        session.plan_mode = ctx.plan_mode.clone();
+        let mut manager = NativeAgentManager::new();
+        manager.add_session(session);
+        {
+            let execution = execute_tool(&ctx, "Bash", command);
+            tokio::pin!(execution);
+            let (prompt, reply) = tokio::select! {
+                result = &mut execution => panic!("command executed before approval: {result:?}"),
+                request = rx.recv() => request.unwrap(),
+            };
+            let (mut request, _) = pending(&prompt.request_id, "Bash");
+            request.reply = reply;
+            request.request.suggested_rule = prompt.suggested_rule;
+            let request_id = prompt.request_id;
+            manager.enqueue_permission("plan-save", request).unwrap();
+            for decision in [
+                NativePermissionDecision::AllowSession,
+                NativePermissionDecision::AllowServer,
+            ] {
+                assert!(manager
+                    .resolve_permission("plan-save", &request_id, decision)
+                    .is_err());
+            }
+            std::fs::write(root.path().join(".noxcode"), "block rule storage").unwrap();
+            assert!(manager
+                .save_permission_rules(config.path(), "plan-save", &request_id, None, None)
+                .is_err());
+            assert!(!root.path().join("result.txt").exists());
+            assert!(ctx.permission_rules_snapshot().is_empty());
+            assert_eq!(
+                manager
+                    .get_session("plan-save")
+                    .unwrap()
+                    .pending_permission
+                    .len(),
+                1
+            );
+            std::fs::remove_file(root.path().join(".noxcode")).unwrap();
+            manager
+                .save_permission_rules(config.path(), "plan-save", &request_id, None, None)
+                .unwrap();
+            manager
+                .resolve_permission(
+                    "plan-save",
+                    &request_id,
+                    NativePermissionDecision::AllowAlways,
+                )
+                .unwrap();
+            execution.await.unwrap();
+        }
+        assert_eq!(
+            std::fs::read_to_string(root.path().join("result.txt")).unwrap(),
+            "approved"
+        );
+        assert!(ctx.is_plan_mode());
+        assert!(!ctx.allow_all_high_risk.load(Ordering::SeqCst));
+        let mut resumed = ToolCtx::new(LocalWorkspace::new(root.path().into()));
+        resumed.set_plan_mode(true);
+        resumed.permission_rules = crate::native::permission_rules::shared_rules(
+            crate::native::permission_rules::load_effective_rules(config.path(), Some(root.path())),
+        );
+        resumed.request_permission = Some(Arc::new(|_, reply| {
+            reply.send(NativePermissionDecision::Deny).unwrap();
+        }));
+        execute_tool(&resumed, "Bash", command).await.unwrap();
+        assert!(execute_tool(
+            &resumed,
+            "Bash",
+            r#"{"command":"printf changed > result.txt"}"#
+        )
+        .await
+        .is_err());
+        let rules = resumed.permission_rules_snapshot();
+        assert_eq!(rules.allow.len(), 1);
+        assert_eq!(rules.allow[0].pattern, "printf approved > result.txt");
+        crate::native::permission_rules::delete_rule(
+            config.path(),
+            Some(root.path()),
+            &rules.allow[0].id,
+        )
+        .unwrap();
+        resumed.permission_rules = crate::native::permission_rules::shared_rules(
+            crate::native::permission_rules::load_effective_rules(config.path(), Some(root.path())),
+        );
+        assert!(execute_tool(&resumed, "Bash", command).await.is_err());
+        assert!(resumed.is_plan_mode());
     }
 
     #[tokio::test]
@@ -1099,6 +1217,7 @@ mod tests {
             capability: crate::native::tools::contract::PermissionCapability::Bash,
             pattern: "echo*".into(),
             source: crate::native::tools::contract::PatternSource::Command,
+            plan_bash: None,
         });
         drop(reply);
         manager.enqueue_permission("one", pending).unwrap();

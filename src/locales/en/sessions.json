@@ -130,7 +130,7 @@
     },
     "plan": {
       "title": "Plan mode",
-      "description": "Approve the plan to implement; writes and risky commands require one-time approval."
+      "description": "Approve the plan to implement; writes and risky commands require authorization."
     },
     "yolo": {
       "title": "Full access",

@@ -4,7 +4,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use super::contract::{PatternSource, PermissionCapability, ToolContract};
-use super::file_access::{external_rule_matches, ExternalPathRule, FileAccessPrompt};
+use super::file_access::{
+    external_rule_matches, ExternalPathRule, FileAccessPrompt, PermissionTarget,
+};
 use super::glob::glob_match;
 use super::patch::{extract_patch_text, parse_patch, patch_counts};
 
@@ -620,6 +622,12 @@ fn default_rule_source() -> PatternSource {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PlanBashRule {
+    pub target: PermissionTarget,
+    pub workspace_root: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PermissionRule {
     #[serde(default)]
     pub id: String,
@@ -634,6 +642,8 @@ pub struct PermissionRule {
     pub note: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub external_path: Option<ExternalPathRule>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plan_bash: Option<PlanBashRule>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -660,6 +670,8 @@ pub struct PermissionRuleSuggestion {
     pub capability: PermissionCapability,
     pub pattern: String,
     pub source: PatternSource,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plan_bash: Option<PlanBashRule>,
 }
 
 impl PermissionRules {
@@ -693,6 +705,7 @@ impl PermissionRules {
                 && existing.source == rule.source)
                 || existing.scope != rule.scope
                 || existing.external_path != rule.external_path
+                || existing.plan_bash != rule.plan_bash
         });
         list.push(rule);
     }
@@ -742,6 +755,34 @@ impl PermissionRules {
             return RuleDecision::Ask(rule.clone());
         }
         RuleDecision::NoMatch
+    }
+
+    pub fn evaluate_plan_bash(
+        &self,
+        contract: &ToolContract,
+        arguments: &str,
+        context: &PlanBashRule,
+    ) -> RuleDecision {
+        let candidates =
+            RuleCandidates::from_call("Bash", arguments, Some(Path::new(&context.workspace_root)));
+        let exact_match = |rule: &&PermissionRule| {
+            rule.capability == PermissionCapability::Bash
+                && rule.source == PatternSource::Command
+                && rule.external_path.is_none()
+                && rule.plan_bash.as_ref() == Some(context)
+                && candidates.command.as_deref() == Some(rule.pattern.as_str())
+        };
+        let restriction_matches =
+            |rule: &&PermissionRule| exact_match(rule) || rule_matches(rule, contract, &candidates);
+        if let Some(rule) = self.deny.iter().find(restriction_matches) {
+            RuleDecision::Deny(rule.clone())
+        } else if let Some(rule) = self.ask.iter().find(restriction_matches) {
+            RuleDecision::Ask(rule.clone())
+        } else if let Some(rule) = self.allow.iter().find(exact_match) {
+            RuleDecision::Allow(rule.clone())
+        } else {
+            RuleDecision::NoMatch
+        }
     }
 
     pub fn evaluate_file_access(
@@ -869,7 +910,10 @@ fn rule_matches(
     contract: &ToolContract,
     candidates: &RuleCandidates,
 ) -> bool {
-    if rule.external_path.is_some() || rule.capability != contract.permission {
+    if rule.external_path.is_some()
+        || rule.plan_bash.is_some()
+        || rule.capability != contract.permission
+    {
         return false;
     }
     let pattern = rule.pattern.trim();
@@ -942,6 +986,7 @@ pub fn suggest_rule(
                 capability: PermissionCapability::Bash,
                 pattern,
                 source: PatternSource::Command,
+                plan_bash: None,
             })
         }
         PermissionCapability::Edit if tool_name != "ApplyPatch" => {
@@ -950,12 +995,14 @@ pub fn suggest_rule(
                 capability: PermissionCapability::Edit,
                 pattern: path,
                 source: PatternSource::Path,
+                plan_bash: None,
             })
         }
         capability => Some(PermissionRuleSuggestion {
             capability,
             pattern: tool_name.to_string(),
             source: PatternSource::ToolName,
+            plan_bash: None,
         }),
     }
 }
@@ -963,6 +1010,91 @@ pub fn suggest_rule(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn plan_command_grants_are_literal_and_bound_to_the_execution_context() {
+        let context = PlanBashRule {
+            target: PermissionTarget::Local,
+            workspace_root: "/project".into(),
+        };
+        let command = "ls -la \"$HOME/Application Support/\" 2>/dev/null | head -30";
+        let mut allowed = rule(PermissionCapability::Bash, command, PatternSource::Command);
+        allowed.plan_bash = Some(context.clone());
+        let mut rules = PermissionRules {
+            allow: vec![allowed],
+            ..Default::default()
+        };
+        let contract = super::super::contract::builtin_contract("Bash").unwrap();
+        let args = |command: &str| serde_json::json!({"command":command}).to_string();
+        assert!(matches!(
+            rules.evaluate_plan_bash(contract, &args(command), &context),
+            RuleDecision::Allow(_)
+        ));
+        for changed in [
+            format!("{command}; touch bad"),
+            command.replace("head -30", "head -50"),
+        ] {
+            assert_eq!(
+                rules.evaluate_plan_bash(contract, &args(&changed), &context),
+                RuleDecision::NoMatch
+            );
+        }
+        for other in [
+            PlanBashRule {
+                workspace_root: "/other".into(),
+                ..context.clone()
+            },
+            PlanBashRule {
+                target: PermissionTarget::Ssh {
+                    config_id: "ssh".into(),
+                    host: "host".into(),
+                    port: 22,
+                    username: "user".into(),
+                },
+                ..context.clone()
+            },
+        ] {
+            assert_eq!(
+                rules.evaluate_plan_bash(contract, &args(command), &other),
+                RuleDecision::NoMatch
+            );
+        }
+        // Shell glob characters belong to the approved command, not the grant syntax.
+        rules.allow[0].pattern = "ls *.txt".into();
+        assert_eq!(
+            rules.evaluate_plan_bash(contract, &args("ls private.txt"), &context),
+            RuleDecision::NoMatch
+        );
+        assert!(matches!(
+            rules.evaluate_plan_bash(contract, &args("ls *.txt"), &context),
+            RuleDecision::Allow(_)
+        ));
+        rules.ask.push(rule(
+            PermissionCapability::Bash,
+            "ls*",
+            PatternSource::Command,
+        ));
+        assert!(matches!(
+            rules.evaluate_plan_bash(contract, &args("ls *.txt"), &context),
+            RuleDecision::Ask(_)
+        ));
+        rules.deny.push(rule(
+            PermissionCapability::Bash,
+            "ls*",
+            PatternSource::Command,
+        ));
+        assert!(matches!(
+            rules.evaluate_plan_bash(contract, &args("ls *.txt"), &context),
+            RuleDecision::Deny(_)
+        ));
+        rules.deny.clear();
+        rules.ask.clear();
+        rules.allow[0].plan_bash = None;
+        assert_eq!(
+            rules.evaluate_plan_bash(contract, &args("ls *.txt"), &context),
+            RuleDecision::NoMatch
+        );
+    }
 
     #[test]
     fn plan_shell_only_auto_allows_verified_read_commands() {
@@ -1019,6 +1151,7 @@ mod tests {
         PermissionRule {
             id: format!("{pattern}-{}", pattern.len()),
             external_path: None,
+            plan_bash: None,
             capability,
             pattern: pattern.to_string(),
             source,

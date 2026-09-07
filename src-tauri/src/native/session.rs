@@ -2481,8 +2481,7 @@ async fn run_native_loop(
                 &profile_id,
                 Some(&workspace_id),
                 &kind,
-                "[PLAN] 已进入计划模式：等待批准后实施；写入或高风险 Bash 命令须单次确认"
-                    .to_string(),
+                "[PLAN] 已进入计划模式：等待批准后实施；写入或高风险 Bash 命令须授权".to_string(),
             )
             .await;
         }
@@ -3673,6 +3672,7 @@ mod tests {
                 capability: PermissionCapability::Bash,
                 pattern: "rm".to_string(),
                 source: PatternSource::Command,
+                plan_bash: None,
             }),
         };
         let event = super::permission_event("sess-1", &request);

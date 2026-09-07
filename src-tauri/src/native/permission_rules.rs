@@ -163,8 +163,40 @@ fn normalize_rule(mut rule: PermissionRule) -> Result<PermissionRule, String> {
     if rule.pattern.is_empty() {
         return Err("规则模式不能为空".to_string());
     }
-    if rule.pattern.chars().count() > 512 {
+    if rule.pattern.chars().count()
+        > if rule.plan_bash.is_some() {
+            32_000
+        } else {
+            512
+        }
+    {
         return Err("规则模式过长".to_string());
+    }
+    if let Some(plan) = &rule.plan_bash {
+        if rule.capability != PermissionCapability::Bash
+            || rule.source != PatternSource::Command
+            || rule.external_path.is_some()
+        {
+            return Err("计划命令规则只能使用 Bash 能力及命令来源".to_string());
+        }
+        let valid_root = match &plan.target {
+            PermissionTarget::Local => Path::new(&plan.workspace_root).is_absolute(),
+            PermissionTarget::Ssh {
+                config_id,
+                host,
+                port,
+                username,
+            } => {
+                !config_id.is_empty()
+                    && !host.is_empty()
+                    && !username.is_empty()
+                    && (1..=65535).contains(port)
+                    && plan.workspace_root.starts_with('/')
+            }
+        };
+        if !valid_root {
+            return Err("计划命令规则的执行目标或工作区无效".to_string());
+        }
     }
     if let Some(external) = &rule.external_path {
         if !matches!(
@@ -465,6 +497,7 @@ mod tests {
     fn rule(pattern: &str, scope: RuleScope) -> PermissionRule {
         PermissionRule {
             external_path: None,
+            plan_bash: None,
             id: String::new(),
             capability: PermissionCapability::Bash,
             pattern: pattern.to_string(),

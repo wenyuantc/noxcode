@@ -48,6 +48,36 @@ describe("plan Bash permission controls", () => {
     useWorkspaceStore.setState({ sessions: [] });
   });
 
+  it("offers always allow for a plan command without offering session access", () => {
+    useSessionStore.getState().setPermission({
+      session_record_id: "plan",
+      request_id: "request",
+      profile_id: "",
+      workspace_id: "workspace",
+      session_kind: "plan",
+      tool_name: "Bash",
+      kind: "opaque",
+      summary:
+        'ls -la "$HOME/Library/Application Support/com.wenyuan.noxcode/" 2>/dev/null | head -30',
+      remote: false,
+      mcp_server_id: null,
+      allow_once_only: false,
+      suggested_rule: {
+        capability: "bash",
+        source: "command",
+        pattern: "ls -la",
+        plan_bash: { target: { kind: "local" }, workspace_root: "/workspace" },
+      },
+    });
+    const html = renderToStaticMarkup(<NativePermissionDialog />);
+    expect(html).toContain("permissionAllowOnce");
+    expect(html).toContain("permissionAlways");
+    expect(html).toContain("permissionDeny");
+    expect(html).not.toContain("permissionAllowSession");
+    expect(html).not.toContain("permissionAllowServer");
+    expect(html).toContain("/workspace");
+  });
+
   it.each([true, false])(
     "limits one-call request actions when allow_once_only=%s",
     (allowOnceOnly) => {

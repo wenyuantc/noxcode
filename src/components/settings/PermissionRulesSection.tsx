@@ -188,9 +188,21 @@ export function PermissionRulesSection() {
                   defaultValue: rule.capability,
                 })}
               </span>
-              <code className="min-w-0 truncate rounded-md bg-muted/60 px-2 py-0.5 font-mono text-xs text-foreground font-semibold">
+              <code
+                title={rule.pattern}
+                className="min-w-0 truncate rounded-md bg-muted/60 px-2 py-0.5 font-mono text-xs text-foreground font-semibold"
+              >
                 {rule.pattern}
               </code>
+              {rule.plan_bash ? (
+                <span className="text-xs text-muted-foreground break-words [overflow-wrap:anywhere]">
+                  {t("sessions:permission.plan.title")} ·{" "}
+                  {permissionTargetLabel(rule.plan_bash.target) ||
+                    t("sessions:permissionLocalTarget")}
+                  {" · "}
+                  {rule.plan_bash.workspace_root}
+                </span>
+              ) : null}
               {rule.external_path ? (
                 <span className="text-xs break-words [overflow-wrap:anywhere]">
                   {t("settings:permissions.externalPath")} ·{" "}

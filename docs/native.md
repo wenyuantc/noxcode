@@ -31,7 +31,7 @@ P4 把进程内编程 Agent 接到渠道 + 工作区外壳。数据流仍是 `Re
 
 `session_kind` 只有 `execution` 与 `plan`，表示启动类型，不能替代当前运行模式。`plan_mode=true` 时本轮结束后保持计划模式，等待输入；不会自动注入实施指令。计划模式由启动参数决定，不写入 `native-settings.json`。`ExitPlanMode` 必须收到当前请求的用户批准才解除限制；拒绝、取消、超时或无审批通道均保持计划模式。用户也可在会话空闲后通过模式选择器切换。runner 与 manager 共享计划模式原子状态，运行配置快照从该状态读取；`native-plan-mode` 携带 `input_queue_id` 区分每次运行，前端不允许旧启动快照覆盖同次运行的模式事件。子 Agent 的切换不会广播到父会话。
 
-计划模式的本地与 SSH `Bash` 可用：可验证的只读命令直接执行；写入、高风险及无法确认只读的命令必须逐次确认，即使开启 yolo、build 或命中 allow 规则也不能跳过，批准钩子也不能代替用户。审批使用现有权限 IPC，事件中的 `allow_once_only=true` 限制为「本次允许 / 拒绝」，后端同时拒绝会话放行、服务器放行和保存白名单。仅本次命令获批，计划模式不变。命令按 PreToolUse 改写后的最终参数检查；含脚本、解释器、重定向及未验证包装器的命令保守地要求确认。Bash 不提供操作系统级只读沙箱；数据库查询优先使用 `SQLiteQuery`。`Write / Edit / ApplyPatch` 及写入型 MCP 仍被禁止，explore 子 Agent 不开放 Bash。
+计划模式的本地与 SSH `Bash` 可用：可验证的只读命令直接执行；写入、高风险及无法确认只读的命令需用户授权，提供「本次允许 / 始终允许 / 拒绝」。始终允许将完整命令作为字面值保存到当前工作区权限文件，附加 `plan_bash: { target, workspace_root }` 元数据以绑定执行主机和工作目录，保存成功后执行，后续计划会话命中时免确认；通配符仅作为命令内容，不扩大授权范围。可在权限设置中查看、删除，删除后重新询问。旧规则缺少该元数据时不扩权，yolo、build、普通 allow 规则和批准钩子也不跳过确认；显式 deny/ask 仍优先。命令获批后计划模式不变，不支持会话或服务器整体放行。复用现有权限 IPC 和原子写入流程，保存失败保留请求且不执行。命令按 PreToolUse 改写后的最终参数检查；含脚本、解释器、重定向及未验证包装器的命令保守地要求确认。Bash 不提供操作系统级只读沙箱；数据库查询优先使用 `SQLiteQuery`。`Write / Edit / ApplyPatch` 及写入型 MCP 仍被禁止，explore 子 Agent 不开放 Bash。
 
 权限模式（`permission_mode`）四档，对齐 ZCode：`default` 变更前确认；`edit` 自动放行 `Overwrite`（删除 / 推送 / 强制 Git / 不透明命令 / MCP 仍弹确认）；`build` 再放行不透明 shell 与带 `readOnlyHint` 的 MCP；`yolo` 完全访问（`allow_all_high_risk=true`，只有 ask 规则仍会确认）。旧文件的 `confirm / auto_edit / full` 与 Claude Code 的 `acceptEdits / auto / bypassPermissions / dontAsk` 读入时映射到新名；`confirm_high_risk: false` 读成 `yolo`。`plan` 是会话态：既可由 Composer 选择在启动时进入，也可由模型调用 `EnterPlanMode` 进入；`ExitPlanMode` 提交计划触发 `native-plan-approval-request`，用户批准后恢复执行模式，退回则连同反馈交回模型继续修改。
 
