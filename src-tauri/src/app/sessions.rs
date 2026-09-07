@@ -13,6 +13,23 @@ use crate::git::{delete_checkpoints_for_session, resolve_git_target};
 use crate::native::manager::NativeAgentManager;
 use crate::native::transcript::has_transcript;
 
+const LIST_AGENT_SESSIONS_SQL: &str = r#"
+    SELECT s.*, t.model AS model
+    FROM agent_sessions s
+    LEFT JOIN native_session_transcripts t
+      ON t.session_record_id = s.id AND t.deleted_at IS NULL
+    WHERE ($1 IS NULL OR s.workspace_id = $1) AND s.archived = $3
+    ORDER BY s.pinned DESC, s.started_at DESC, s.id ASC
+    LIMIT $2 OFFSET $4
+"#;
+const FETCH_AGENT_SESSION_SQL: &str = r#"
+    SELECT s.*, t.model AS model
+    FROM agent_sessions s
+    LEFT JOIN native_session_transcripts t
+      ON t.session_record_id = s.id AND t.deleted_at IS NULL
+    WHERE s.id = $1
+"#;
+
 pub(crate) async fn list_agent_sessions_with(
     pool: &SqlitePool,
     workspace_id: Option<&str>,
@@ -21,14 +38,7 @@ pub(crate) async fn list_agent_sessions_with(
     offset: Option<i64>,
 ) -> Result<Vec<AgentSessionRecord>, String> {
     let limit = limit.unwrap_or(50).clamp(1, 200);
-    let rows = sqlx::query_as::<_, AgentSessionRecord>(
-        r#"
-        SELECT * FROM agent_sessions
-        WHERE ($1 IS NULL OR workspace_id = $1) AND archived = $3
-        ORDER BY pinned DESC, started_at DESC, id ASC
-        LIMIT $2 OFFSET $4
-        "#,
-    )
+    let rows = sqlx::query_as::<_, AgentSessionRecord>(LIST_AGENT_SESSIONS_SQL)
     .bind(workspace_id)
     .bind(limit)
     .bind(i32::from(archived.unwrap_or(false)))
@@ -67,12 +77,12 @@ async fn fetch_agent_session_with(
     pool: &SqlitePool,
     session_id: &str,
 ) -> Result<AgentSessionRecord, String> {
-    sqlx::query_as("SELECT * FROM agent_sessions WHERE id = $1")
-        .bind(session_id)
-        .fetch_optional(pool)
-        .await
-        .map_err(|error| format!("读取会话失败: {error}"))?
-        .ok_or_else(|| format!("会话不存在: {session_id}"))
+    sqlx::query_as(FETCH_AGENT_SESSION_SQL)
+    .bind(session_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(|error| format!("读取会话失败: {error}"))?
+    .ok_or_else(|| format!("会话不存在: {session_id}"))
 }
 
 pub(crate) async fn rename_agent_session_with(
@@ -612,6 +622,63 @@ mod tests {
                 .is_empty()
         );
         let _ = new_id();
+    }
+
+    #[tokio::test]
+    async fn list_and_fetch_return_transcript_model() {
+        let pool = setup_migrated_pool().await;
+        seed_session(&pool, "with-model").await;
+        seed_session(&pool, "without-model").await;
+        sqlx::query(
+            r#"
+            INSERT INTO native_session_transcripts (
+                session_record_id, workspace_id, model, turns, messages_json, created_at, updated_at
+            ) VALUES ('with-model', 'ws-1', 'grok-4.6', 1, '[]', '2026-01-01 00:00:00', '2026-01-01 00:00:00')
+            "#,
+        )
+        .execute(&pool)
+        .await
+        .expect("transcript");
+        sqlx::query(
+            r#"
+            INSERT INTO native_session_transcripts (
+                session_record_id, workspace_id, model, turns, messages_json,
+                created_at, updated_at, deleted_at
+            ) VALUES (
+                'without-model', 'ws-1', 'hidden', 1, '[]',
+                '2026-01-01 00:00:00', '2026-01-01 00:00:00', '2026-01-02 00:00:00'
+            )
+            "#,
+        )
+        .execute(&pool)
+        .await
+        .expect("deleted transcript");
+
+        let listed = list_agent_sessions_with(&pool, Some("ws-1"), Some(10), None, None)
+            .await
+            .expect("list");
+        let with_model = listed
+            .iter()
+            .find(|session| session.id == "with-model")
+            .expect("with-model");
+        let without_model = listed
+            .iter()
+            .find(|session| session.id == "without-model")
+            .expect("without-model");
+        assert_eq!(with_model.model.as_deref(), Some("grok-4.6"));
+        assert_eq!(without_model.model, None);
+
+        let renamed = rename_agent_session_with(&pool, "with-model", "kept")
+            .await
+            .expect("rename");
+        assert_eq!(renamed.model.as_deref(), Some("grok-4.6"));
+        assert_eq!(
+            fetch_agent_session_with(&pool, "without-model")
+                .await
+                .expect("fetch")
+                .model,
+            None
+        );
     }
 
     #[tokio::test]

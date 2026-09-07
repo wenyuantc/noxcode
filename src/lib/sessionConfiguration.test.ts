@@ -1,8 +1,10 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { finishNativeInput } from "./backend";
 import { changeSessionConfiguration } from "./sessionConfiguration";
+import { useChannelStore } from "@/stores/channelStore";
 import { useSessionStore } from "@/stores/sessionStore";
-import type { AgentSessionStarted, NativeSessionRuntime } from "./types";
+import { useWorkspaceStore } from "@/stores/workspaceStore";
+import type { AgentSession, AgentSessionStarted, NativeSessionRuntime } from "./types";
 
 vi.mock("./backend", () => ({ finishNativeInput: vi.fn(), getAgentSessionLogLines: vi.fn() }));
 
@@ -20,6 +22,31 @@ const live: AgentSessionStarted = {
   session_record_id: "s1",
   runtime,
 };
+
+const session = (id: string, model: string | null): AgentSession => ({
+  id,
+  ai_channel_id: "old-ch",
+  workspace_id: "ws",
+  working_dir: null,
+  execution_target: "local",
+  ssh_config_id: null,
+  target_host_label: null,
+  session_kind: "execution",
+  status: "exited",
+  started_at: "t",
+  ended_at: null,
+  exit_code: null,
+  resume_session_id: null,
+  pinned: 0,
+  archived: 0,
+  input_tokens: null,
+  output_tokens: null,
+  total_tokens: null,
+  reasoning_tokens: null,
+  cached_tokens: null,
+  created_at: "t",
+  model,
+});
 
 describe("session configuration", () => {
   beforeEach(() => {
@@ -65,5 +92,24 @@ describe("session configuration", () => {
     );
     expect(useSessionStore.getState().liveBySession.s1).toEqual(live);
     expect(useSessionStore.getState().configurationBySession.s1).toEqual(runtime);
+  });
+  it("creates configuration for a historical session without touching others", async () => {
+    useSessionStore.setState({
+      liveBySession: {},
+      configurationBySession: { s2: { ...runtime, model: "other" } },
+      turnState: {},
+      planModeBySession: {},
+    });
+    useWorkspaceStore.setState({ sessions: [session("s3", "old-model")] });
+    useChannelStore.setState({ activeChannelId: "global-ch", activeModelId: "global-model" });
+    await changeSessionConfiguration("s3", { model: "new" });
+    expect(useSessionStore.getState().configurationBySession.s3).toEqual({
+      ai_channel_id: "old-ch",
+      model: "new",
+      reasoning_effort: null,
+      permission_mode: "default",
+      plan_mode: false,
+    });
+    expect(useSessionStore.getState().configurationBySession.s2.model).toBe("other");
   });
 });

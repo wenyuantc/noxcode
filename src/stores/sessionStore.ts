@@ -27,12 +27,16 @@ function hydrateUsage(sessionId: string) {
   const workspace = useWorkspaceStore.getState();
   const channels = useChannelStore.getState();
   const session = workspace.sessions.find((item) => item.id === sessionId);
+  const runtime = current.configurationBySession[sessionId];
   const usage = resolveHistoricalUsage({
     sessionId,
     contextUsageJson: session?.context_usage_json,
     lines: current.lines[sessionId] ?? [],
     limitTokens: resolveHistoryLimitTokens(
-      session,
+      {
+        ai_channel_id: runtime?.ai_channel_id ?? session?.ai_channel_id ?? null,
+        model: runtime?.model ?? session?.model ?? null,
+      },
       channels.channels,
       channels.activeChannelId,
       channels.activeModelId,

@@ -51,7 +51,7 @@ export function usageFromUsageLines(
 }
 
 export function resolveHistoryLimitTokens(
-  session: Pick<AgentSession, "ai_channel_id"> | undefined,
+  session: Pick<AgentSession, "ai_channel_id" | "model"> | undefined,
   channels: AiChannel[],
   activeChannelId: string | null,
   activeModelId: string | null,
@@ -59,7 +59,8 @@ export function resolveHistoryLimitTokens(
   const channel =
     channels.find((item) => item.id === session?.ai_channel_id) ??
     channels.find((item) => item.id === activeChannelId);
-  const model = channel?.models.find((item) => item.id === activeModelId) ?? channel?.models[0];
+  const modelId = session?.model ?? activeModelId;
+  const model = channel?.models.find((item) => item.id === modelId) ?? channel?.models[0];
   const tokens = model?.context_tokens;
   return tokens && tokens > 0 ? tokens : FALLBACK_CONTEXT_WINDOW_TOKENS;
 }

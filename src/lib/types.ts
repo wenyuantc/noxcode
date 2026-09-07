@@ -524,6 +524,7 @@ export interface AgentSession {
   cached_tokens: number | null;
   created_at: string;
   context_usage_json?: string | null;
+  model?: string | null;
 }
 
 export interface AgentSessionEvent {

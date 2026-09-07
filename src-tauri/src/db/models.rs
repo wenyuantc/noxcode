@@ -287,6 +287,10 @@ pub struct AgentSessionRecord {
     pub pinned: i32,
     pub archived: i32,
     pub context_usage_json: Option<String>,
+    /// 上次实际使用的模型，来自 `native_session_transcripts`；内部 `SELECT *` 时为空。
+    #[sqlx(default)]
+    #[serde(default)]
+    pub model: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, FromRow)]

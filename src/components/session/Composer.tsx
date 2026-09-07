@@ -67,6 +67,7 @@ import {
   type SlashIntent,
 } from "@/lib/composerSlashActions";
 import { applyComposerPlanMode, resolveComposerPlanMode } from "@/lib/planMode";
+import { resolveSessionSelection } from "@/lib/sessionModel";
 import { submitSessionPrompt } from "@/lib/sessionSubmission";
 import { changeSessionConfiguration, finishIdleSession } from "@/lib/sessionConfiguration";
 import { isNativePermissionMode } from "@/lib/types";
@@ -128,6 +129,9 @@ export function Composer({ compact = false }: { compact?: boolean }) {
   const runtime = useSessionStore((state) =>
     selectedSessionId ? state.configurationBySession[selectedSessionId] : undefined,
   );
+  const session = useWorkspaceStore((state) =>
+    selectedSessionId ? state.sessions.find((item) => item.id === selectedSessionId) : undefined,
+  );
   const planModeBySession = useSessionStore((state) => state.planModeBySession);
   const composerPlanMode = resolveComposerPlanMode(
     selectedSessionId,
@@ -146,9 +150,15 @@ export function Composer({ compact = false }: { compact?: boolean }) {
   const pendingCount = useSessionStore((state) =>
     selectedSessionId ? (state.inputQueueBySession[selectedSessionId]?.items.length ?? 0) : 0,
   );
-  const effectiveChannelId = runtime?.ai_channel_id ?? channelId;
+  const { channelId: effectiveChannelId, modelId: selectedModelId } = resolveSessionSelection({
+    sessionId: selectedSessionId,
+    runtime,
+    session,
+    fallbackChannelId: channelId,
+    fallbackModelId: activeModelId,
+  });
   const channel = channels.find((item) => item.id === effectiveChannelId);
-  const model = runtime?.model ?? activeModelId ?? "";
+  const model = selectedModelId ?? "";
   const [error, setError] = useState<string | null>(null);
   const [info, setInfo] = useState<string | null>(null);
   const [helpOpen, setHelpOpen] = useState(false);

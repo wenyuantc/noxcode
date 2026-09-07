@@ -4,6 +4,7 @@ import { useTranslation } from "react-i18next";
 
 import { submitSessionPrompt } from "@/lib/sessionSubmission";
 import { resolveComposerPlanMode } from "@/lib/planMode";
+import { resolveSessionSelection } from "@/lib/sessionModel";
 import type { NativeToolImage } from "@/lib/types";
 import { cn } from "@/lib/utils";
 import { SessionImageThumbs } from "./SessionImageThumbs";
@@ -34,11 +35,20 @@ export function UserBubble({
   const [sending, setSending] = useState(false);
   const copiedTimer = useRef<number>(0);
   const workspaceId = useWorkspaceStore((state) => state.activeWorkspaceId);
-  const archived = useWorkspaceStore((state) =>
-    Boolean(state.sessions.find((item) => item.id === sessionId)?.archived),
+  const session = useWorkspaceStore((state) =>
+    state.sessions.find((item) => item.id === sessionId),
   );
-  const channelId = useChannelStore((state) => state.activeChannelId);
-  const modelId = useChannelStore((state) => state.activeModelId);
+  const archived = Boolean(session?.archived);
+  const fallbackChannelId = useChannelStore((state) => state.activeChannelId);
+  const fallbackModelId = useChannelStore((state) => state.activeModelId);
+  const runtime = useSessionStore((state) => state.configurationBySession[sessionId]);
+  const { channelId, modelId } = resolveSessionSelection({
+    sessionId,
+    runtime,
+    session,
+    fallbackChannelId,
+    fallbackModelId,
+  });
   const defaultPlanMode = useUiStore((state) => state.composerPlanMode);
   const planModeBySession = useSessionStore((state) => state.planModeBySession);
   const planMode = resolveComposerPlanMode(sessionId, planModeBySession, defaultPlanMode);

@@ -4,8 +4,10 @@ import { useTranslation } from "react-i18next";
 import { useState } from "react";
 
 import { cn } from "@/lib/utils";
+import { resolveSessionSelection } from "@/lib/sessionModel";
 import { useChannelStore } from "@/stores/channelStore";
 import { useSessionStore } from "@/stores/sessionStore";
+import { useWorkspaceStore } from "@/stores/workspaceStore";
 import { changeSessionConfiguration } from "@/lib/sessionConfiguration";
 import {
   DropdownMenu,
@@ -35,9 +37,17 @@ export function ChannelModelPicker({
   const runtime = useSessionStore((state) =>
     sessionId ? state.configurationBySession[sessionId] : undefined,
   );
+  const session = useWorkspaceStore((state) =>
+    sessionId ? state.sessions.find((item) => item.id === sessionId) : undefined,
+  );
   const [busy, setBusy] = useState(false);
-  const selectedChannelId = runtime?.ai_channel_id ?? activeChannelId;
-  const selectedModelId = runtime?.model ?? activeModelId;
+  const { channelId: selectedChannelId, modelId: selectedModelId } = resolveSessionSelection({
+    sessionId,
+    runtime,
+    session,
+    fallbackChannelId: activeChannelId,
+    fallbackModelId: activeModelId,
+  });
 
   const enabled = channels.filter((channel) => channel.enabled);
   const channel = channels.find((item) => item.id === selectedChannelId);

@@ -102,6 +102,14 @@ describe("contextUsage", () => {
     expect(resolveHistoryLimitTokens({ ai_channel_id: "ch-1" }, channels, "ch-1", "grok-4.6")).toBe(
       500000,
     );
+    expect(
+      resolveHistoryLimitTokens(
+        { ai_channel_id: "ch-1", model: "grok-4.6" },
+        [channel("ch-1", "grok-4.6", 500000), channel("ch-2", "other", 8000)],
+        "ch-2",
+        "other",
+      ),
+    ).toBe(500000);
     expect(resolveHistoryLimitTokens(undefined, [], null, null)).toBe(
       FALLBACK_CONTEXT_WINDOW_TOKENS,
     );
