@@ -207,10 +207,6 @@ pub(crate) async fn update_ssh_config_with(
 ) -> Result<SshConfig, String> {
     let current = fetch_ssh_config_record_by_id(pool, id).await?;
 
-    let host_changed = updates.host.is_some();
-    let port_changed = updates.port.is_some();
-    let username_changed = updates.username.is_some();
-
     let name = updates
         .name
         .map(|value| value.trim().to_string())
@@ -277,27 +273,16 @@ pub(crate) async fn update_ssh_config_with(
         None
     };
 
-    let password_probe_needs_reset = auth_type != "password"
-        || current.auth_type != "password"
-        || updates.password.is_some()
-        || host_changed
-        || port_changed
-        || username_changed;
-    let password_probe_status = if auth_type == "password" && !password_probe_needs_reset {
-        current.password_probe_status.clone()
-    } else {
-        None
-    };
-    let password_probe_checked_at = if auth_type == "password" && !password_probe_needs_reset {
-        current.password_probe_checked_at.clone()
-    } else {
-        None
-    };
-    let password_probe_message = if auth_type == "password" && !password_probe_needs_reset {
-        current.password_probe_message.clone()
-    } else {
-        None
-    };
+    let connection_changed = host != current.host
+        || port != current.port
+        || username != current.username
+        || auth_type != current.auth_type
+        || private_key_path != current.private_key_path
+        || password_ref != current.password_ref
+        || passphrase_ref != current.passphrase_ref
+        || known_hosts_mode != current.known_hosts_mode
+        || algorithms_json != current.algorithms_json;
+    let password_probe_needs_reset = connection_changed || auth_type != "password";
 
     let update_result = sqlx::query(
         r#"
@@ -311,12 +296,18 @@ pub(crate) async fn update_ssh_config_with(
             password_ref = $8,
             passphrase_ref = $9,
             known_hosts_mode = $10,
-            password_probe_checked_at = $11,
-            password_probe_status = $12,
-            password_probe_message = $13,
-            algorithms_json = $14,
-            updated_at = $15
+            password_probe_checked_at = CASE WHEN $11 THEN NULL ELSE password_probe_checked_at END,
+            password_probe_status = CASE WHEN $11 THEN NULL ELSE password_probe_status END,
+            password_probe_message = CASE WHEN $11 THEN NULL ELSE password_probe_message END,
+            last_checked_at = CASE WHEN $12 THEN NULL ELSE last_checked_at END,
+            last_check_status = CASE WHEN $12 THEN NULL ELSE last_check_status END,
+            last_check_message = CASE WHEN $12 THEN NULL ELSE last_check_message END,
+            algorithms_json = $13,
+            updated_at = $14
         WHERE id = $1
+            AND host IS $15 AND port IS $16 AND username IS $17 AND auth_type IS $18
+            AND private_key_path IS $19 AND password_ref IS $20 AND passphrase_ref IS $21
+            AND known_hosts_mode IS $22 AND algorithms_json IS $23
         "#,
     )
     .bind(id)
@@ -329,13 +320,29 @@ pub(crate) async fn update_ssh_config_with(
     .bind(&password_ref)
     .bind(&passphrase_ref)
     .bind(&known_hosts_mode)
-    .bind(&password_probe_checked_at)
-    .bind(&password_probe_status)
-    .bind(&password_probe_message)
+    .bind(password_probe_needs_reset)
+    .bind(connection_changed)
     .bind(&algorithms_json)
     .bind(now_sqlite())
+    .bind(&current.host)
+    .bind(current.port)
+    .bind(&current.username)
+    .bind(&current.auth_type)
+    .bind(&current.private_key_path)
+    .bind(&current.password_ref)
+    .bind(&current.passphrase_ref)
+    .bind(&current.known_hosts_mode)
+    .bind(&current.algorithms_json)
     .execute(pool)
-    .await;
+    .await
+    .map_err(|error| format!("Failed to update ssh config: {error}"))
+    .and_then(|result| {
+        if result.rows_affected() == 0 {
+            Err("SSH 配置已变更或删除，请重新加载后保存".to_string())
+        } else {
+            Ok(())
+        }
+    });
 
     if let Err(error) = update_result {
         if created_password_ref.is_some() {
@@ -344,7 +351,7 @@ pub(crate) async fn update_ssh_config_with(
         if created_passphrase_ref.is_some() {
             let _ = secrets.delete(passphrase_ref.as_deref());
         }
-        return Err(format!("Failed to update ssh config: {error}"));
+        return Err(error);
     }
 
     if current.password_ref != password_ref {
@@ -388,57 +395,71 @@ pub(crate) async fn delete_ssh_config_with(
 
 pub(crate) async fn write_password_probe_result(
     pool: &SqlitePool,
-    id: &str,
+    record: &SshConfigRecord,
     status: &str,
     message: &str,
     checked_at: &str,
 ) -> Result<(), String> {
-    sqlx::query(
-        r#"
-        UPDATE ssh_configs
-        SET password_probe_checked_at = $2,
-            password_probe_status = $3,
-            password_probe_message = $4,
-            updated_at = $5
-        WHERE id = $1
-        "#,
-    )
-    .bind(id)
-    .bind(checked_at)
-    .bind(status)
-    .bind(message)
-    .bind(now_sqlite())
-    .execute(pool)
-    .await
-    .map_err(|error| format!("Failed to update password probe: {error}"))?;
-    Ok(())
+    write_verification_result(pool, record, status, message, checked_at, false).await
 }
 
 pub(crate) async fn write_connection_check_result(
     pool: &SqlitePool,
-    id: &str,
+    record: &SshConfigRecord,
     status: &str,
     message: &str,
     checked_at: &str,
 ) -> Result<(), String> {
-    sqlx::query(
+    write_verification_result(pool, record, status, message, checked_at, true).await
+}
+
+async fn write_verification_result(
+    pool: &SqlitePool,
+    record: &SshConfigRecord,
+    status: &str,
+    message: &str,
+    checked_at: &str,
+    connection_check: bool,
+) -> Result<(), String> {
+    // 连接测试已完成密码认证和远端 exec，原子更新两组状态。
+    // 只允许本次测试使用的配置写回，不能把旧凭据的成功结果授予新配置。
+    let result = sqlx::query(
         r#"
         UPDATE ssh_configs
-        SET last_checked_at = $2,
-            last_check_status = $3,
-            last_check_message = $4,
+        SET last_checked_at = CASE WHEN $6 THEN $2 ELSE last_checked_at END,
+            last_check_status = CASE WHEN $6 THEN $3 ELSE last_check_status END,
+            last_check_message = CASE WHEN $6 THEN $4 ELSE last_check_message END,
+            password_probe_checked_at = CASE WHEN auth_type = 'password' THEN $2 ELSE NULL END,
+            password_probe_status = CASE WHEN auth_type = 'password' THEN $3 ELSE NULL END,
+            password_probe_message = CASE WHEN auth_type = 'password' THEN $4 ELSE NULL END,
             updated_at = $5
         WHERE id = $1
+            AND host IS $7 AND port IS $8 AND username IS $9 AND auth_type IS $10
+            AND private_key_path IS $11 AND password_ref IS $12 AND passphrase_ref IS $13
+            AND known_hosts_mode IS $14 AND algorithms_json IS $15
         "#,
     )
-    .bind(id)
+    .bind(&record.id)
     .bind(checked_at)
     .bind(status)
     .bind(message)
     .bind(now_sqlite())
+    .bind(connection_check)
+    .bind(&record.host)
+    .bind(record.port)
+    .bind(&record.username)
+    .bind(&record.auth_type)
+    .bind(&record.private_key_path)
+    .bind(&record.password_ref)
+    .bind(&record.passphrase_ref)
+    .bind(&record.known_hosts_mode)
+    .bind(&record.algorithms_json)
     .execute(pool)
     .await
-    .map_err(|error| format!("Failed to update connection check: {error}"))?;
+    .map_err(|error| format!("更新 SSH 验证结果失败: {error}"))?;
+    if result.rows_affected() == 0 {
+        return Err("SSH 配置已变更或删除，请重新测试连接".to_string());
+    }
     Ok(())
 }
 
@@ -488,6 +509,163 @@ mod tests {
         assert_eq!(normalize_known_hosts_mode(Some("accept-new")), "accept-new");
         assert_eq!(normalize_known_hosts_mode(Some("weird")), "accept-new");
         assert_eq!(normalize_known_hosts_mode(None), "accept-new");
+    }
+
+    #[tokio::test]
+    async fn connection_check_atomically_updates_password_verification_only_for_password() {
+        let pool = setup_migrated_pool().await;
+        let dir = tempfile::tempdir().unwrap();
+        let secrets = SecretStore::in_memory(dir.path().to_path_buf());
+        for auth_type in ["password", "key"] {
+            let created = create_ssh_config_with(&pool, &secrets, sample_create(auth_type))
+                .await
+                .unwrap();
+            let record = fetch_ssh_config_record_by_id(&pool, &created.id)
+                .await
+                .unwrap();
+            for status in ["passed", "failed"] {
+                write_connection_check_result(
+                    &pool,
+                    &record,
+                    status,
+                    "result",
+                    "2026-09-07 12:00:00",
+                )
+                .await
+                .unwrap();
+                let config = fetch_ssh_config_by_id(&pool, &created.id).await.unwrap();
+                assert_eq!(config.last_check_status.as_deref(), Some(status));
+                if auth_type == "password" {
+                    assert_eq!(config.password_probe_status, config.last_check_status);
+                    assert_eq!(config.password_probe_checked_at, config.last_checked_at);
+                    assert_eq!(config.password_probe_message, config.last_check_message);
+                    assert_eq!(config.password_execution_allowed, status == "passed");
+                } else {
+                    assert!(config.password_probe_status.is_none());
+                    assert!(config.password_probe_checked_at.is_none());
+                    assert!(config.password_probe_message.is_none());
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn unchanged_full_form_and_name_only_save_preserve_verification() {
+        let pool = setup_migrated_pool().await;
+        let dir = tempfile::tempdir().unwrap();
+        let secrets = SecretStore::in_memory(dir.path().to_path_buf());
+        let created = create_ssh_config_with(&pool, &secrets, sample_create("password"))
+            .await
+            .unwrap();
+        let record = fetch_ssh_config_record_by_id(&pool, &created.id)
+            .await
+            .unwrap();
+        write_connection_check_result(&pool, &record, "passed", "ok", "2026-09-07 12:00:00")
+            .await
+            .unwrap();
+        for updates in [
+            serde_json::json!({"name": "renamed"}),
+            serde_json::json!({
+                "name": "renamed", "host": " example.test ", "port": 22,
+                "username": " deploy ", "auth_type": "password", "private_key_path": null,
+                "known_hosts_mode": "accept-new", "algorithms": null
+            }),
+        ] {
+            let config = update_ssh_config_with(
+                &pool,
+                &secrets,
+                &created.id,
+                serde_json::from_value(updates).unwrap(),
+            )
+            .await
+            .unwrap();
+            assert!(config.password_execution_allowed);
+            assert_eq!(config.last_check_status.as_deref(), Some("passed"));
+            assert_eq!(
+                config.password_probe_checked_at.as_deref(),
+                Some("2026-09-07 12:00:00")
+            );
+        }
+        // 仅改名称不改变认证配置，测试开始时取得的快照仍可写回。
+        write_password_probe_result(&pool, &record, "passed", "probe", "2026-09-07 12:00:01")
+            .await
+            .unwrap();
+        let config = fetch_ssh_config_by_id(&pool, &created.id).await.unwrap();
+        assert_eq!(config.password_probe_message.as_deref(), Some("probe"));
+        assert_eq!(config.last_check_message.as_deref(), Some("ok"));
+    }
+
+    #[tokio::test]
+    async fn connection_changes_reset_verification_and_reject_stale_test_results() {
+        let pool = setup_migrated_pool().await;
+        let dir = tempfile::tempdir().unwrap();
+        let secrets = SecretStore::in_memory(dir.path().to_path_buf());
+        for updates in [
+            serde_json::json!({"host": "other.test"}),
+            serde_json::json!({"port": 2222}),
+            serde_json::json!({"username": "other"}),
+            serde_json::json!({"password": "new-password"}),
+            serde_json::json!({"password": null}),
+            serde_json::json!({"auth_type": "key", "private_key_path": "~/.ssh/id_ed25519"}),
+            serde_json::json!({"known_hosts_mode": "strict"}),
+            serde_json::json!({"algorithms": {"cipher": ["aes256-ctr"]}}),
+        ] {
+            let created = create_ssh_config_with(&pool, &secrets, sample_create("password"))
+                .await
+                .unwrap();
+            let record = fetch_ssh_config_record_by_id(&pool, &created.id)
+                .await
+                .unwrap();
+            write_connection_check_result(&pool, &record, "passed", "ok", "2026-09-07 12:00:00")
+                .await
+                .unwrap();
+            let updated = update_ssh_config_with(
+                &pool,
+                &secrets,
+                &created.id,
+                serde_json::from_value(updates.clone()).unwrap(),
+            )
+            .await
+            .unwrap();
+            assert!(updated.last_check_status.is_none(), "{updates}");
+            assert!(updated.last_checked_at.is_none(), "{updates}");
+            assert!(updated.last_check_message.is_none(), "{updates}");
+            assert!(updated.password_probe_status.is_none(), "{updates}");
+            assert!(updated.password_probe_checked_at.is_none(), "{updates}");
+            assert!(updated.password_probe_message.is_none(), "{updates}");
+            assert!(!updated.password_execution_allowed, "{updates}");
+            for status in ["passed", "failed"] {
+                assert!(
+                    write_connection_check_result(
+                        &pool,
+                        &record,
+                        status,
+                        "stale",
+                        "2026-09-07 12:00:01"
+                    )
+                    .await
+                    .unwrap_err()
+                    .contains("已变更"),
+                    "{updates}"
+                );
+                assert!(
+                    write_password_probe_result(
+                        &pool,
+                        &record,
+                        status,
+                        "stale",
+                        "2026-09-07 12:00:01"
+                    )
+                    .await
+                    .unwrap_err()
+                    .contains("已变更"),
+                    "{updates}"
+                );
+            }
+            let unchanged = fetch_ssh_config_by_id(&pool, &created.id).await.unwrap();
+            assert!(unchanged.password_probe_status.is_none());
+            assert!(unchanged.last_check_status.is_none());
+        }
     }
 
     #[test]
@@ -576,7 +754,10 @@ mod tests {
             let created = create_ssh_config_with(&pool, &secrets, sample_create("password"))
                 .await
                 .expect("create");
-            write_password_probe_result(&pool, &created.id, "passed", "ok", "2026-01-01 00:00:00")
+            let record = fetch_ssh_config_record_by_id(&pool, &created.id)
+                .await
+                .unwrap();
+            write_password_probe_result(&pool, &record, "passed", "ok", "2026-01-01 00:00:00")
                 .await
                 .expect("probe");
 

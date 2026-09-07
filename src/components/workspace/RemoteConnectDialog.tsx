@@ -1,8 +1,9 @@
 import { open } from "@tauri-apps/plugin-dialog";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 
 import { createSshConfig, listSshConfigs, testSshConnection } from "@/lib/backend";
+import { RemoteConnectionValidationError, submitRemoteConnection } from "@/lib/remoteConnection";
 import type { CreateSshConfigInput, SshConfig } from "@/lib/types";
 import { Button } from "@/components/ui/button";
 import {
@@ -39,50 +40,94 @@ export function RemoteConnectDialog({
     password: "",
   });
   const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const submitting = useRef(false);
+  const generation = useRef(0);
+  const configRequest = useRef(0);
 
   useEffect(() => {
+    const current = ++generation.current;
+    const request = ++configRequest.current;
     if (!isOpen) return;
-    void listSshConfigs().then((items) => {
-      setConfigs(items);
-      if (items[0]) setSshConfigId(items[0].id);
-    });
+    void listSshConfigs()
+      .then((items) => {
+        if (generation.current !== current || configRequest.current !== request) return;
+        setConfigs(items);
+        setSshConfigId((id) =>
+          items.some((config) => config.id === id) ? id : (items[0]?.id ?? ""),
+        );
+      })
+      .catch((err) => {
+        if (generation.current === current && configRequest.current === request) {
+          setError(String(err));
+        }
+      });
+    return () => {
+      generation.current += 1;
+    };
   }, [isOpen]);
 
   const submit = async () => {
+    if (submitting.current) return;
+    submitting.current = true;
+    setBusy(true);
     setError(null);
+    const current = generation.current;
+    const isCurrent = () => generation.current === current;
     try {
-      let configId = sshConfigId;
-      if (creating) {
-        const created = await createSshConfig({
-          ...form,
-          port: form.port || 22,
-        });
-        configId = created.id;
-        await testSshConnection(created.id).catch(() => undefined);
-      }
-      if (!configId || !remotePath.trim()) {
-        setError(t("ssh:remotePath"));
-        return;
-      }
-      await create({
-        name: name.trim() || form.name || remotePath.trim(),
-        workspace_type: "ssh",
-        ssh_config_id: configId,
-        remote_repo_path: remotePath.trim(),
-      });
-      onOpenChange(false);
+      const completed = await submitRemoteConnection(
+        {
+          name,
+          remotePath,
+          sshConfigId: creating ? undefined : sshConfigId,
+          newConfig: creating ? form : undefined,
+        },
+        {
+          createSshConfig,
+          testSshConnection,
+          createWorkspace: create,
+          isCurrent,
+          onConfigCreated: (config) => {
+            if (!isCurrent()) return;
+            // 初次加载的旧列表即使在测试失败后才返回，也不能抹掉刚保存的配置 ID。
+            configRequest.current += 1;
+            setConfigs((items) => [config, ...items.filter((item) => item.id !== config.id)]);
+            setSshConfigId(config.id);
+            setCreating(false);
+            setName((value) => (value.trim() ? value : config.name));
+            setForm((value) => ({ ...value, password: "" }));
+          },
+        },
+      );
+      if (completed) onOpenChange(false);
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      if (isCurrent()) {
+        setError(
+          err instanceof RemoteConnectionValidationError
+            ? t(`ssh:validation.${err.field}`)
+            : err instanceof Error
+              ? err.message
+              : String(err),
+        );
+      }
+    } finally {
+      submitting.current = false;
+      setBusy(false);
     }
   };
 
   return (
-    <Dialog open={isOpen} onOpenChange={onOpenChange}>
+    <Dialog
+      open={isOpen}
+      onOpenChange={(next) => {
+        if (!submitting.current) onOpenChange(next);
+      }}
+    >
       <DialogContent className="max-w-lg">
         <DialogHeader>
           <DialogTitle>{t("git:remoteConnect")}</DialogTitle>
         </DialogHeader>
-        <div className="space-y-3">
+        <fieldset disabled={busy} className="space-y-3" aria-busy={busy}>
           <label className="flex items-center gap-2 text-sm">
             <input
               type="checkbox"
@@ -111,7 +156,7 @@ export function RemoteConnectDialog({
               <Input
                 placeholder={t("ssh:port")}
                 value={String(form.port ?? 22)}
-                onChange={(event) => setForm({ ...form, port: Number(event.target.value) || 22 })}
+                onChange={(event) => setForm({ ...form, port: Number(event.target.value) })}
               />
               <select
                 className="h-8 rounded-md border px-2 text-sm"
@@ -130,7 +175,7 @@ export function RemoteConnectDialog({
                   onClick={() => {
                     void open({ multiple: false }).then((path) => {
                       if (typeof path === "string") {
-                        setForm({ ...form, private_key_path: path });
+                        setForm((current) => ({ ...current, private_key_path: path }));
                       }
                     });
                   }}
@@ -170,12 +215,14 @@ export function RemoteConnectDialog({
             onChange={(event) => setRemotePath(event.target.value)}
           />
           {error ? <p className="text-sm text-destructive">{error}</p> : null}
-        </div>
+        </fieldset>
         <DialogFooter>
-          <Button variant="ghost" onClick={() => onOpenChange(false)}>
+          <Button variant="ghost" disabled={busy} onClick={() => onOpenChange(false)}>
             {t("common:cancel")}
           </Button>
-          <Button onClick={() => void submit()}>{t("common:confirm")}</Button>
+          <Button disabled={busy} onClick={() => void submit()}>
+            {busy ? t("ssh:connecting") : t("common:confirm")}
+          </Button>
         </DialogFooter>
       </DialogContent>
     </Dialog>

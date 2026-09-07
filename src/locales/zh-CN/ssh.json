@@ -15,5 +15,14 @@
   "privateKey": "私钥路径",
   "passphrase": "私钥口令",
   "knownHosts": "known_hosts 策略",
-  "remotePath": "远端仓库路径"
+  "remotePath": "远端仓库路径",
+  "connecting": "连接中…",
+  "validation": {
+    "remotePath": "请填写远端仓库路径",
+    "config": "请选择 SSH 配置",
+    "requiredFields": "请填写配置名称、主机和用户名",
+    "port": "端口必须是 1 到 65535 之间的整数",
+    "privateKey": "请选择私钥路径",
+    "password": "请填写登录密码"
+  }
 }

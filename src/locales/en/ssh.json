@@ -15,5 +15,14 @@
   "privateKey": "Private key path",
   "passphrase": "Passphrase",
   "knownHosts": "known_hosts policy",
-  "remotePath": "Remote repo path"
+  "remotePath": "Remote repo path",
+  "connecting": "Connecting…",
+  "validation": {
+    "remotePath": "Enter the remote repository path",
+    "config": "Select an SSH configuration",
+    "requiredFields": "Enter the configuration name, host, and username",
+    "port": "Port must be an integer between 1 and 65535",
+    "privateKey": "Select a private key path",
+    "password": "Enter the login password"
+  }
 }

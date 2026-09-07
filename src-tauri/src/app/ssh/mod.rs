@@ -56,17 +56,29 @@ pub(crate) fn resolve_connect_params<R: Runtime>(
     record: &SshConfigRecord,
     require_password_probe: bool,
 ) -> Result<ConnectParams, String> {
-    if require_password_probe
-        && record.auth_type == "password"
+    if require_password_probe {
+        validate_password_execution(record)?;
+    }
+    let secrets = SecretStore::for_app(app)?;
+    connect_params_with_secrets(record, &secrets)
+}
+
+pub(crate) fn validate_password_execution(record: &SshConfigRecord) -> Result<(), String> {
+    if record.auth_type == "password"
         && !matches!(
             record.password_probe_status.as_deref(),
             Some("passed" | "available")
         )
     {
-        return Err("密码认证尚未通过探测，禁止执行远端命令".to_string());
+        return Err("密码认证尚未通过探测，禁止执行远端命令。请在「设置 → SSH」中完成「测试连接」或「密码探测」，通过后结束旧运行实例，再从原会话续聊（保留历史）".to_string());
     }
+    Ok(())
+}
 
-    let secrets = SecretStore::for_app(app)?;
+fn connect_params_with_secrets(
+    record: &SshConfigRecord,
+    secrets: &SecretStore,
+) -> Result<ConnectParams, String> {
     let auth = match record.auth_type.as_str() {
         "password" => {
             let password = secrets
@@ -169,12 +181,23 @@ pub(crate) async fn probe_ssh_password_auth<R: Runtime>(
 ) -> Result<PasswordAuthProbeResult, String> {
     let pool = sqlite_pool(&app).await?;
     let record = fetch_ssh_config_record_by_id(&pool, &ssh_config_id).await?;
-    let label = ssh_config_target_host_label(&record);
+    let secrets = SecretStore::for_app(&app)?;
+    let ssh_pool = app.state::<SshPool>().inner().clone();
+    probe_ssh_password_auth_with(&pool, &secrets, &ssh_pool, &record).await
+}
+
+async fn probe_ssh_password_auth_with(
+    pool: &sqlx::SqlitePool,
+    secrets: &SecretStore,
+    ssh_pool: &SshPool,
+    record: &SshConfigRecord,
+) -> Result<PasswordAuthProbeResult, String> {
+    let ssh_config_id = record.id.clone();
+    let label = ssh_config_target_host_label(record);
     let checked_at = now_sqlite();
 
     if record.auth_type != "password" {
         let message = "当前配置不是密码认证，无需探测".to_string();
-        write_password_probe_result(&pool, &ssh_config_id, "failed", &message, &checked_at).await?;
         return Ok(PasswordAuthProbeResult {
             ssh_config_id,
             target_host_label: label,
@@ -185,16 +208,13 @@ pub(crate) async fn probe_ssh_password_auth<R: Runtime>(
         });
     }
 
-    let params = resolve_connect_params(&app, &record, false)?;
-    let ssh_pool = app.state::<SshPool>().inner().clone();
-    ssh_pool.invalidate(&ssh_config_id).await;
-    let result = ssh_pool
-        .exec(
-            &params,
-            "printf 'noxcode-password-probe' >/dev/null",
-            ExecOptions::default(),
-        )
-        .await;
+    let result = run_ssh_verification(
+        secrets,
+        ssh_pool,
+        record,
+        "printf 'noxcode-password-probe' >/dev/null",
+    )
+    .await;
     let (status, message) = match result {
         Ok(output) if output.success() => ("passed".to_string(), "密码认证探测通过".to_string()),
         Ok(output) => (
@@ -205,9 +225,9 @@ pub(crate) async fn probe_ssh_password_auth<R: Runtime>(
                 output.stderr_lossy()
             ),
         ),
-        Err(error) => ("failed".to_string(), error.to_string()),
+        Err(error) => ("failed".to_string(), error),
     };
-    write_password_probe_result(&pool, &ssh_config_id, &status, &message, &checked_at).await?;
+    write_password_probe_result(pool, record, &status, &message, &checked_at).await?;
     Ok(PasswordAuthProbeResult {
         ssh_config_id,
         target_host_label: label,
@@ -243,23 +263,48 @@ pub(crate) async fn test_ssh_connection<R: Runtime>(
 ) -> Result<SshConnectionTestResult, String> {
     let pool = sqlite_pool(&app).await?;
     let record = fetch_ssh_config_record_by_id(&pool, &ssh_config_id).await?;
-    let label = ssh_config_target_host_label(&record);
-    let params = resolve_connect_params(&app, &record, false)?;
+    let secrets = SecretStore::for_app(&app)?;
     let ssh_pool = app.state::<SshPool>().inner().clone();
-    ssh_pool.invalidate(&ssh_config_id).await;
+    test_ssh_connection_with(&pool, &secrets, &ssh_pool, &record).await
+}
 
+async fn run_ssh_verification(
+    secrets: &SecretStore,
+    ssh_pool: &SshPool,
+    record: &SshConfigRecord,
+    command: &str,
+) -> Result<SshCommandOutput, String> {
+    ssh_pool.invalidate(&record.id).await;
+    let params = connect_params_with_secrets(record, secrets)?;
+    // 验证不能复用并发工具或其他测试的认证连接，否则旧密码也可能“测通”。
+    let verification_pool = SshPool::new(
+        ssh_pool.trust().clone(),
+        std::time::Duration::from_secs(120),
+    );
+    let result = verification_pool
+        .exec(&params, command, ExecOptions::default())
+        .await
+        .map_err(Into::into);
+    verification_pool.shutdown().await;
+    result
+}
+
+async fn test_ssh_connection_with(
+    pool: &sqlx::SqlitePool,
+    secrets: &SecretStore,
+    ssh_pool: &SshPool,
+    record: &SshConfigRecord,
+) -> Result<SshConnectionTestResult, String> {
+    let ssh_config_id = record.id.clone();
+    let label = ssh_config_target_host_label(record);
     let command = build_remote_shell_command(
         "echo ok && uname -a && pwd && (git --version 2>/dev/null || echo 'git: not found')",
     );
     let checked_at = now_sqlite();
-    match ssh_pool
-        .exec(&params, &command, ExecOptions::default())
-        .await
-    {
+    match run_ssh_verification(secrets, ssh_pool, record, &command).await {
         Ok(output) if output.success() => {
             let (uname, remote_git_version) = parse_connection_test_output(&output);
-            write_connection_check_result(&pool, &ssh_config_id, "passed", "连接成功", &checked_at)
-                .await?;
+            write_connection_check_result(pool, record, "passed", "连接成功", &checked_at).await?;
             Ok(SshConnectionTestResult {
                 ssh_config_id,
                 target_host_label: label,
@@ -277,8 +322,7 @@ pub(crate) async fn test_ssh_connection<R: Runtime>(
                 output.exit_code,
                 output.stderr_lossy()
             );
-            write_connection_check_result(&pool, &ssh_config_id, "failed", &message, &checked_at)
-                .await?;
+            write_connection_check_result(pool, record, "failed", &message, &checked_at).await?;
             Ok(SshConnectionTestResult {
                 ssh_config_id,
                 target_host_label: label,
@@ -291,9 +335,8 @@ pub(crate) async fn test_ssh_connection<R: Runtime>(
             })
         }
         Err(error) => {
-            let message = error.to_string();
-            write_connection_check_result(&pool, &ssh_config_id, "failed", &message, &checked_at)
-                .await?;
+            let message = error;
+            write_connection_check_result(pool, record, "failed", &message, &checked_at).await?;
             Ok(SshConnectionTestResult {
                 ssh_config_id,
                 target_host_label: label,

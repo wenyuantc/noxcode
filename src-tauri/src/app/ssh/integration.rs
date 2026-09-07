@@ -5,8 +5,15 @@ use std::time::Duration;
 use russh::keys::ssh_key::LineEnding;
 use russh::keys::{Algorithm, PrivateKey};
 
+use crate::app::secret_store::SecretStore;
+use crate::db::models::{CreateSshConfig, SshConfigRecord};
+use crate::db::test_support::setup_migrated_pool;
+
 use super::algorithms::{legacy_preset, SshAlgorithms};
 use super::client::{AuthMaterial, ConnectParams};
+use super::configs::{
+    create_ssh_config_with, fetch_ssh_config_record_by_id, update_ssh_config_with,
+};
 use super::error::SshError;
 use super::exec::ExecOptions;
 use super::known_hosts::{HostTrustBroker, HostTrustEvent, KnownHostsPolicy};
@@ -39,6 +46,200 @@ fn password_params(port: u16, known_hosts: PathBuf, policy: KnownHostsPolicy) ->
         known_hosts_path: known_hosts,
         algorithms: None,
     }
+}
+
+async fn create_password_record(
+    db: &sqlx::SqlitePool,
+    secrets: &SecretStore,
+    port: u16,
+    password: &str,
+) -> SshConfigRecord {
+    let config = create_ssh_config_with(
+        db,
+        secrets,
+        CreateSshConfig {
+            name: "verification".to_string(),
+            host: "127.0.0.1".to_string(),
+            port: Some(i64::from(port)),
+            username: "tester".to_string(),
+            auth_type: "password".to_string(),
+            password: Some(password.to_string()),
+            private_key_path: None,
+            passphrase: None,
+            known_hosts_mode: Some("off".to_string()),
+            algorithms: None,
+        },
+    )
+    .await
+    .unwrap();
+    fetch_ssh_config_record_by_id(db, &config.id).await.unwrap()
+}
+
+#[tokio::test]
+async fn connection_test_enables_password_tools_and_persists_auth_failures() {
+    let server = TestSshServer::start(TestServerOpts::default()).await;
+    let db = setup_migrated_pool().await;
+    let dir = tempfile::tempdir().unwrap();
+    let secrets = SecretStore::in_memory(dir.path().to_path_buf());
+    let pool = test_pool();
+    let record = create_password_record(&db, &secrets, server.port, "secret").await;
+    assert!(super::validate_password_execution(&record).is_err());
+    let result = super::test_ssh_connection_with(&db, &secrets, &pool, &record)
+        .await
+        .unwrap();
+    assert!(result.ok, "{}", result.message);
+    assert_eq!(result.uname.as_deref(), Some("Linux testhost"));
+    assert_eq!(
+        result.remote_git_version.as_deref(),
+        Some("git version 2.39.5")
+    );
+    let verified = fetch_ssh_config_record_by_id(&db, &record.id)
+        .await
+        .unwrap();
+    super::validate_password_execution(&verified).unwrap();
+    assert_eq!(
+        verified.password_probe_checked_at.as_deref(),
+        Some(result.checked_at.as_str())
+    );
+    assert_eq!(verified.password_probe_checked_at, verified.last_checked_at);
+    let params = super::connect_params_with_secrets(&verified, &secrets).unwrap();
+    assert!(pool
+        .exec(&params, "echo ready", ExecOptions::default())
+        .await
+        .unwrap()
+        .success());
+
+    // 后端已保存通过状态但凭据丢失：参数解析失败也必须撤销通过状态。
+    secrets.delete(record.password_ref.as_deref()).unwrap();
+    let failed = super::test_ssh_connection_with(&db, &secrets, &pool, &verified)
+        .await
+        .unwrap();
+    assert!(!failed.ok);
+    assert!(failed.message.contains("未配置 SSH 密码"));
+    let failed_record = fetch_ssh_config_record_by_id(&db, &record.id)
+        .await
+        .unwrap();
+    assert_eq!(failed_record.last_check_status.as_deref(), Some("failed"));
+    assert_eq!(
+        failed_record.password_probe_status.as_deref(),
+        Some("failed")
+    );
+    assert!(super::validate_password_execution(&failed_record).is_err());
+
+    let wrong = create_password_record(&db, &secrets, server.port, "wrong").await;
+    let failed = super::test_ssh_connection_with(&db, &secrets, &pool, &wrong)
+        .await
+        .unwrap();
+    assert!(!failed.ok);
+    let wrong = fetch_ssh_config_record_by_id(&db, &wrong.id).await.unwrap();
+    assert_eq!(wrong.password_probe_status.as_deref(), Some("failed"));
+    pool.shutdown().await;
+}
+
+#[tokio::test]
+async fn connection_test_rejects_success_for_changed_configuration() {
+    let server = TestSshServer::start(TestServerOpts::default()).await;
+    let db = setup_migrated_pool().await;
+    let dir = tempfile::tempdir().unwrap();
+    let secrets = SecretStore::in_memory(dir.path().to_path_buf());
+    let pool = test_pool();
+    let record = create_password_record(&db, &secrets, server.port, "secret").await;
+    update_ssh_config_with(
+        &db,
+        &secrets,
+        &record.id,
+        serde_json::from_value(serde_json::json!({"host": "other.invalid"})).unwrap(),
+    )
+    .await
+    .unwrap();
+    // 旧快照仍能连上测试服务器，但它的认证成功不能标记新主机通过。
+    let error = super::test_ssh_connection_with(&db, &secrets, &pool, &record)
+        .await
+        .unwrap_err();
+    assert!(error.contains("已变更"));
+    let current = fetch_ssh_config_record_by_id(&db, &record.id)
+        .await
+        .unwrap();
+    assert!(current.password_probe_status.is_none());
+    assert!(current.last_check_status.is_none());
+    assert!(server.connections.load(std::sync::atomic::Ordering::SeqCst) > 0);
+}
+
+#[tokio::test]
+async fn password_probe_rejects_command_failure_and_can_pass_independently() {
+    let db = setup_migrated_pool().await;
+    let dir = tempfile::tempdir().unwrap();
+    let secrets = SecretStore::in_memory(dir.path().to_path_buf());
+    let pool = test_pool();
+    // 默认服务器不识别 printf，返回 127，不能仅凭认证成功放行。
+    let server = TestSshServer::start(TestServerOpts::default()).await;
+    let record = create_password_record(&db, &secrets, server.port, "secret").await;
+    let result = super::probe_ssh_password_auth_with(&db, &secrets, &pool, &record)
+        .await
+        .unwrap();
+    assert!(!result.supported);
+    assert!(result.message.contains("127"));
+    let current = fetch_ssh_config_record_by_id(&db, &record.id)
+        .await
+        .unwrap();
+    assert_eq!(current.password_probe_status.as_deref(), Some("failed"));
+
+    let server = TestSshServer::start(TestServerOpts {
+        real_shell: true,
+        ..TestServerOpts::default()
+    })
+    .await;
+    let record = create_password_record(&db, &secrets, server.port, "secret").await;
+    let result = super::probe_ssh_password_auth_with(&db, &secrets, &pool, &record)
+        .await
+        .unwrap();
+    assert!(result.supported, "{}", result.message);
+    let current = fetch_ssh_config_record_by_id(&db, &record.id)
+        .await
+        .unwrap();
+    super::validate_password_execution(&current).unwrap();
+    assert!(current.last_check_status.is_none());
+}
+
+#[tokio::test]
+async fn key_connection_test_does_not_set_password_verification() {
+    let key = PrivateKey::random(&mut rand::rng(), Algorithm::Ed25519).unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("id_ed25519");
+    key.write_openssh_file(&path, LineEnding::LF).unwrap();
+    let server = TestSshServer::start(TestServerOpts {
+        authorized_public_key: Some(key.public_key().clone()),
+        ..TestServerOpts::default()
+    })
+    .await;
+    let db = setup_migrated_pool().await;
+    let secrets = SecretStore::in_memory(dir.path().to_path_buf());
+    let record = create_password_record(&db, &secrets, server.port, "secret").await;
+    update_ssh_config_with(
+        &db,
+        &secrets,
+        &record.id,
+        serde_json::from_value(
+            serde_json::json!({"auth_type": "key", "private_key_path": path.to_string_lossy()}),
+        )
+        .unwrap(),
+    )
+    .await
+    .unwrap();
+    let record = fetch_ssh_config_record_by_id(&db, &record.id)
+        .await
+        .unwrap();
+    let pool = test_pool();
+    let result = super::test_ssh_connection_with(&db, &secrets, &pool, &record)
+        .await
+        .unwrap();
+    assert!(result.ok, "{}", result.message);
+    let current = fetch_ssh_config_record_by_id(&db, &record.id)
+        .await
+        .unwrap();
+    assert_eq!(current.last_check_status.as_deref(), Some("passed"));
+    assert!(current.password_probe_status.is_none());
+    super::validate_password_execution(&current).unwrap();
 }
 
 #[tokio::test]

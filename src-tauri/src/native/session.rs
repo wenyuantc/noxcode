@@ -12,14 +12,15 @@ use crate::app::network_settings::{load_network_settings, proxy_env_vars};
 use crate::app::sessions::{
     lock_agent_session_operation, persist_context_usage_with, require_unarchived_session_with,
 };
-use crate::app::shared::{new_id, now_sqlite, sqlite_pool, EXECUTION_TARGET_SSH};
+use crate::app::shared::{new_id, now_sqlite, sqlite_pool};
 use crate::app::ssh::configs::fetch_ssh_config_record_by_id;
+use crate::app::ssh::validate_password_execution;
 use crate::db::models::{
     AgentSessionExit, AgentSessionOutput, AgentSessionRecord, AgentSessionStarted,
     NativeContextUsage, NativePlanModeChanged, NativeSessionRuntime, NativeTextDelta,
-    NativeToolEvent, NativeToolImage, NativeTurnState, StartNativeSessionInput,
+    NativeToolEvent, NativeToolImage, NativeTurnState, SshConfigRecord, StartNativeSessionInput,
 };
-use crate::engine::context::resolve_workspace_execution_context_with_pool;
+use crate::engine::context::{resolve_workspace_execution_context_with_pool, ExecutionContext};
 use crate::engine::UsageDelta;
 use crate::git::create_checkpoint;
 use crate::native::agent::compact::{BudgetSnapshot, ContextWindow};
@@ -1559,6 +1560,22 @@ async fn configure_local_tool_runtime(
     }
 }
 
+async fn load_session_ssh_config(
+    pool: &sqlx::SqlitePool,
+    execution_context: &ExecutionContext,
+) -> Result<Option<SshConfigRecord>, String> {
+    if !execution_context.is_ssh() {
+        return Ok(None);
+    }
+    let ssh_id = execution_context
+        .ssh_config_id
+        .as_deref()
+        .ok_or_else(|| "SSH 工作区缺少 ssh_config_id".to_string())?;
+    let config = fetch_ssh_config_record_by_id(pool, ssh_id).await?;
+    validate_password_execution(&config)?;
+    Ok(Some(config))
+}
+
 #[tauri::command]
 pub async fn start_native_session(
     app: AppHandle,
@@ -1645,6 +1662,8 @@ async fn start_native_session_locked(
         .working_dir
         .clone()
         .ok_or_else(|| format!("{ENGINE_LABEL} 工作区缺少工作目录"))?;
+    // 在创建/重新激活会话及发起模型请求前失败，避免所有远程工具反复触发同一门槛。
+    let ssh_config = load_session_ssh_config(&pool, &execution_context).await?;
 
     let channel_id = payload.ai_channel_id.trim().to_string();
     if channel_id.is_empty() {
@@ -1747,21 +1766,12 @@ async fn start_native_session_locked(
         // OpenAI / Responses 按会话打 prompt_cache_key，Anthropic 走 cache_control。
         .with_prompt_cache_key(session_record_id.clone());
 
-    let ssh = if execution_context.execution_target == EXECUTION_TARGET_SSH {
-        let ssh_id = execution_context
-            .ssh_config_id
-            .as_deref()
-            .ok_or_else(|| "SSH 工作区缺少 ssh_config_id".to_string())?;
-        let config = fetch_ssh_config_record_by_id(&pool, ssh_id).await?;
-        Some(SshToolRuntime {
-            app: app.clone(),
-            config,
-            root: run_cwd.clone(),
-            authorized_paths: Vec::new(),
-        })
-    } else {
-        None
-    };
+    let ssh = ssh_config.map(|config| SshToolRuntime {
+        app: app.clone(),
+        config,
+        root: run_cwd.clone(),
+        authorized_paths: Vec::new(),
+    });
 
     if let Ok(target) = crate::git::resolve_git_target(&app, &workspace_id).await {
         if let Err(error) = create_checkpoint(
@@ -3482,6 +3492,87 @@ mod tests {
     use crate::native::agent::compact::{BudgetSnapshot, ContextWindow};
     use crate::native::agent::r#loop::AgentDiagnosticsSnapshot;
     use crate::native::input_queue::NativeInputQueue;
+
+    #[tokio::test]
+    async fn ssh_session_preflight_requires_verified_password_and_returns_config() {
+        let pool = crate::db::test_support::setup_migrated_pool().await;
+        sqlx::query(
+            "INSERT INTO ssh_configs (id, name, host, username, auth_type) VALUES ('ssh-preflight', 'test', 'example.test', 'tester', 'password')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        let context = crate::engine::context::ExecutionContext {
+            execution_target: "ssh".to_string(),
+            working_dir: Some("/repo".to_string()),
+            ssh_config_id: Some("ssh-preflight".to_string()),
+            target_host_label: Some("tester@example.test:22".to_string()),
+        };
+        for status in [None, Some("failed"), Some("unknown")] {
+            sqlx::query("UPDATE ssh_configs SET password_probe_status = $1, last_check_status = 'passed' WHERE id = 'ssh-preflight'")
+                .bind(status)
+                .execute(&pool)
+                .await
+                .unwrap();
+            let error = super::load_session_ssh_config(&pool, &context)
+                .await
+                .unwrap_err();
+            assert!(error.contains("密码"), "{error}");
+            assert!(error.contains("设置"), "{error}");
+        }
+        for status in ["passed", "available"] {
+            sqlx::query(
+                "UPDATE ssh_configs SET password_probe_status = $1 WHERE id = 'ssh-preflight'",
+            )
+            .bind(status)
+            .execute(&pool)
+            .await
+            .unwrap();
+            let config = super::load_session_ssh_config(&pool, &context)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(config.id, "ssh-preflight");
+            assert_eq!(config.password_probe_status.as_deref(), Some(status));
+        }
+        let session_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM agent_sessions")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(session_count, 0);
+    }
+
+    #[tokio::test]
+    async fn ssh_session_preflight_keeps_local_and_key_sessions_available() {
+        let pool = crate::db::test_support::setup_migrated_pool().await;
+        let mut context = crate::engine::context::ExecutionContext::local_default();
+        assert!(super::load_session_ssh_config(&pool, &context)
+            .await
+            .unwrap()
+            .is_none());
+        context.execution_target = "ssh".to_string();
+        assert!(super::load_session_ssh_config(&pool, &context)
+            .await
+            .unwrap_err()
+            .contains("ssh_config_id"));
+        context.ssh_config_id = Some("ssh-key-preflight".to_string());
+        assert!(super::load_session_ssh_config(&pool, &context)
+            .await
+            .unwrap_err()
+            .contains("不存在"));
+        sqlx::query(
+            "INSERT INTO ssh_configs (id, name, host, username, auth_type, private_key_path) VALUES ('ssh-key-preflight', 'test', 'example.test', 'tester', 'key', '/test/id_ed25519')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        let config = super::load_session_ssh_config(&pool, &context)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(config.auth_type, "key");
+        assert!(config.password_probe_status.is_none());
+    }
 
     #[test]
     fn live_followup_rejects_silently_ignored_configuration_changes() {

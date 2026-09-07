@@ -59,6 +59,12 @@ flowchart LR
 - 连接超时 15s。keepalive 30s，最多 5 次无响应后视为死连接。
 - 已记录在 known_hosts 的算法会排到 `Preferred::DEFAULT.key` 前面，避免 RSA-only 记录被误判成新主机。
 
+密码配置的「测试连接」完成真实认证和远端命令后，会原子更新 `last_check_*` 与 `password_probe_*`；成功即允许后续远端工具，无需再单独点一次密码探测。失败（含凭据读取失败）记录为失败，不保留旧的密码执行资格。密钥认证不写密码探测通过状态。独立「密码探测」仍可使用。
+
+两种测试都使用独立的短期 SSH 连接池，共享主机信任 broker，但不复用其他测试或工具的已认证连接。验证结果仅能写回本次使用的连接/认证配置；测试期间更改配置后，旧结果会被拒绝并提示重新测试。
+
+保存配置时比较规范化后的实际值：原值完整表单保存或仅改名称保留验证状态；修改主机、端口、用户名、认证方式、密码/密钥/口令、known_hosts 策略或算法后清除旧验证状态。历史上仅有 `last_check_status=passed` 的配置不自动回填授权，需真实重测。
+
 返回值是自定义 `SshCommandOutput { stdout, stderr, exit_code }`，不是 `std::process::Output`。后续 `tools/ssh.rs` 用 `.success()`（`exit_code == Some(0)`）。
 
 远端命令走 `sh -lc '<bootstrap><script>'`。bootstrap 只补通用 PATH（`/opt/homebrew/bin`、`/usr/local/bin`、`$HOME/.local/bin`、`$HOME/bin`），不含 Node / nvm / pnpm。
@@ -118,6 +124,10 @@ flowchart LR
 | `local` | `repo_path` 存在且为目录 | `local` |
 | `ssh` | 必须有 `ssh_config_id` 与 `remote_repo_path` | `ssh`，label 为 `user@host:port` |
 
+远程项目连接对话框在创建工作区前测试新建或已有 SSH 配置，失败展示原因并停止，不静默创建不可连接的工作区。新配置已保存但测试失败时保留配置 ID，重试不重复创建。
+
+Native 会话新建/冷恢复时在创建会话记录、调用模型前检查密码执行资格，并把同一配置快照交给工具 runtime。存活会话仍使用原快照；修正配置并验证成功后，应结束旧运行实例，再从原会话续聊（保留 ID 和历史），而不是直接往旧 runtime 追加输入。
+
 ## Tauri 命令
 
 | 命令 | 作用 |
@@ -125,10 +135,10 @@ flowchart LR
 | `list_ssh_configs` | 列出配置（无密文） |
 | `get_ssh_config` | 按 id 取一条 |
 | `create_ssh_config` | 创建；密码 / 口令写入 keyring |
-| `update_ssh_config` | 更新后 `pool.invalidate`；改 host/port/user/auth/password 会重置探测字段 |
+| `update_ssh_config` | 更新后 `pool.invalidate`；连接/认证参数实际变化才清除旧验证状态，原值保存不重置 |
 | `delete_ssh_config` | 仍被 `workspaces.ssh_config_id` 引用则报「当前 SSH 配置仍被工作区引用，不能删除」 |
 | `probe_ssh_password_auth` | 仅 password 类型；远端 `printf 'noxcode-password-probe' >/dev/null`；写 `password_probe_*` 为 `passed` / `failed` |
-| `test_ssh_connection` | 强制新连接；远端 `echo ok && uname -a && pwd && (git --version 2>/dev/null \|\| echo 'git: not found')`；写 `last_check_*` |
+| `test_ssh_connection` | 强制新连接；远端 `echo ok && uname -a && pwd && (git --version 2>/dev/null \|\| echo 'git: not found')`；写 `last_check_*`，密码配置同步 `password_probe_*` |
 | `list_ssh_config_file_hosts` | 列出 `~/.ssh/config` 中的具体 Host |
 | `import_ssh_config_file_host` | 按别名合并导入预填 |
 | `resolve_ssh_host_trust` | `ask` 模式确认回传 |
