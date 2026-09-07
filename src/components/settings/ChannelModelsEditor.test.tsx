@@ -51,6 +51,25 @@ describe("ChannelModelsEditor", () => {
     expect(html).not.toContain("channel-model-0-thinking-low");
   });
 
+  it("automatically expands newly added models with empty id", () => {
+    const html = renderToString(
+      <I18nextProvider i18n={i18n}>
+        <ChannelModelsEditor
+          models={[
+            model({
+              id: "",
+              thinking_enabled: false,
+            }),
+          ]}
+          catalog={[]}
+          disabled={false}
+          onChange={() => undefined}
+        />
+      </I18nextProvider>,
+    );
+    expect(html).toContain("channel-model-0-input-text");
+  });
+
   it("hides thinking level checkboxes when thinking is turned off", () => {
     const html = renderEditor([
       model({

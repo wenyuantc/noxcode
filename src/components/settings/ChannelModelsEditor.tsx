@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { ChevronRight, Lock, Plus, Sparkles, Trash2 } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
@@ -26,12 +26,19 @@ import {
 } from "@/components/ui/select";
 import { cn } from "@/lib/utils";
 
+let keyCounter = 0;
+function generateKey() {
+  keyCounter += 1;
+  return `model-item-${keyCounter}`;
+}
+
 interface ChannelModelItemProps {
   model: AiChannelModel;
   index: number;
   catalog: ModelCatalogEntry[];
   disabled?: boolean;
-  defaultOpen?: boolean;
+  isOpen: boolean;
+  onToggleOpen: () => void;
   onUpdate: (updated: AiChannelModel) => void;
   onDelete: () => void;
 }
@@ -41,12 +48,12 @@ function ChannelModelItem({
   index,
   catalog,
   disabled = false,
-  defaultOpen = false,
+  isOpen,
+  onToggleOpen,
   onUpdate,
   onDelete,
 }: ChannelModelItemProps) {
   const { t } = useTranslation("settings");
-  const [isOpen, setIsOpen] = useState(defaultOpen || !model.id.trim());
 
   const entry = lookupModelCatalog(catalog, model.id);
   const thinkingOn = model.thinking_enabled === true;
@@ -59,7 +66,7 @@ function ChannelModelItem({
     <div className="rounded-xl border border-border/70 bg-card shadow-2xs transition-all hover:border-border overflow-hidden">
       <div
         className="flex items-center justify-between gap-2 px-3 py-2 cursor-pointer select-none bg-muted/20 hover:bg-muted/30 transition-colors"
-        onClick={() => setIsOpen((prev) => !prev)}
+        onClick={onToggleOpen}
       >
         <div className="flex items-center gap-2 min-w-0 flex-1">
           <ChevronRight
@@ -326,9 +333,66 @@ export function ChannelModelsEditor({
   onChange,
 }: ChannelModelsEditorProps) {
   const { t } = useTranslation("settings");
+  const [keys, setKeys] = useState<string[]>(() => models.map(() => generateKey()));
+  const [openKeys, setOpenKeys] = useState<Set<string>>(() => {
+    const initial = new Set<string>();
+    // When defaultOpen is true, all models open; when false, newly added models (empty ID) open.
+    models.forEach((m, idx) => {
+      if (defaultOpen || !m.id.trim()) {
+        const key = keys[idx] ?? `initial-${idx}`;
+        initial.add(key);
+      }
+    });
+    return initial;
+  });
+
+  // Synchronize keys if models array length changes from outside
+  useEffect(() => {
+    setKeys((prevKeys) => {
+      if (prevKeys.length === models.length) return prevKeys;
+      if (models.length > prevKeys.length) {
+        const addedCount = models.length - prevKeys.length;
+        const newKeys = Array.from({ length: addedCount }, () => generateKey());
+        return [...prevKeys, ...newKeys];
+      }
+      return prevKeys.slice(0, models.length);
+    });
+  }, [models.length]);
 
   const updateAt = (index: number, next: AiChannelModel) => {
     onChange(models.map((item, itemIndex) => (itemIndex === index ? next : item)));
+  };
+
+  const handleAddModel = () => {
+    const newKey = generateKey();
+    setKeys((prev) => [...prev, newKey]);
+    setOpenKeys((prev) => new Set(prev).add(newKey));
+    onChange([...models, emptyChannelModel()]);
+  };
+
+  const handleDeleteModel = (index: number) => {
+    const keyToDelete = keys[index];
+    if (keyToDelete) {
+      setOpenKeys((prev) => {
+        const next = new Set(prev);
+        next.delete(keyToDelete);
+        return next;
+      });
+    }
+    setKeys((prev) => prev.filter((_, i) => i !== index));
+    onChange(models.filter((_, itemIndex) => itemIndex !== index));
+  };
+
+  const toggleOpen = (itemKey: string) => {
+    setOpenKeys((prev) => {
+      const next = new Set(prev);
+      if (next.has(itemKey)) {
+        next.delete(itemKey);
+      } else {
+        next.add(itemKey);
+      }
+      return next;
+    });
   };
 
   return (
@@ -345,7 +409,7 @@ export function ChannelModelsEditor({
           variant="outline"
           size="sm"
           disabled={disabled}
-          onClick={() => onChange([...models, emptyChannelModel()])}
+          onClick={handleAddModel}
           className="h-6 text-xs gap-1 px-2"
         >
           <Plus className="size-3" />
@@ -358,18 +422,24 @@ export function ChannelModelsEditor({
           {t("channels.fields.modelsEmpty")}
         </p>
       ) : (
-        models.map((model, index) => (
-          <ChannelModelItem
-            key={`${model.id}-${index}`}
-            model={model}
-            index={index}
-            catalog={catalog}
-            disabled={disabled}
-            defaultOpen={defaultOpen}
-            onUpdate={(next) => updateAt(index, next)}
-            onDelete={() => onChange(models.filter((_, itemIndex) => itemIndex !== index))}
-          />
-        ))
+        models.map((model, index) => {
+          const itemKey = keys[index] ?? `fallback-${index}`;
+          const isItemOpen = defaultOpen || openKeys.has(itemKey);
+
+          return (
+            <ChannelModelItem
+              key={itemKey}
+              model={model}
+              index={index}
+              catalog={catalog}
+              disabled={disabled}
+              isOpen={isItemOpen}
+              onToggleOpen={() => toggleOpen(itemKey)}
+              onUpdate={(next) => updateAt(index, next)}
+              onDelete={() => handleDeleteModel(index)}
+            />
+          );
+        })
       )}
       <p className="text-[11px] text-muted-foreground">{t("channels.fields.modelsHint")}</p>
     </div>
