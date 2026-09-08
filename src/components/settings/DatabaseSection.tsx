@@ -14,6 +14,7 @@ import { useTranslation } from "react-i18next";
 
 import { backupDatabase, healthCheck, openDatabaseFolder, restoreDatabase } from "@/lib/backend";
 import type { AppHealthCheck } from "@/lib/types";
+import { formatDate, formatFileSize } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import { useChannelStore } from "@/stores/channelStore";
 import { useSettingsStore } from "@/stores/settingsStore";
@@ -72,6 +73,12 @@ export function DatabaseSection() {
   const openDatabaseFolderTitle = health?.database_path
     ? t("database.actions.openDirectoryAvailable")
     : t("database.actions.pathUnavailable");
+  const stats = health?.database_stats ?? null;
+  const unknown = t("database.maintenance.unknown");
+  const hasSidecarFiles = (stats?.wal_size_bytes ?? 0) > 0 || (stats?.shm_size_bytes ?? 0) > 0;
+  const schemaMatchesLatest =
+    health?.database_current_version != null &&
+    health.database_current_version === health.database_latest_version;
 
   const refreshHealth = useCallback(async () => {
     const next = await healthCheck();
@@ -209,11 +216,19 @@ export function DatabaseSection() {
         icon={Database}
         title={t("database.maintenance.title")}
         description={t("database.maintenance.description")}
-        badge={health ? `迁移版本 v${health.database_current_version}` : undefined}
+        badge={
+          health
+            ? t("database.maintenance.migrationBadge", {
+                version: health.database_current_version ?? t("database.maintenance.unknown"),
+              })
+            : undefined
+        }
         headerAction={
           <div className="flex items-center gap-1.5">
             <span className="size-2 rounded-full bg-emerald-500 shadow-2xs shadow-emerald-500/50" />
-            <span className="text-xs text-muted-foreground font-medium">运行正常</span>
+            <span className="text-xs text-muted-foreground font-medium">
+              {t("database.maintenance.statusOk")}
+            </span>
           </div>
         }
         divided
@@ -236,7 +251,7 @@ export function DatabaseSection() {
               className="h-7 text-xs gap-1"
             >
               {copied ? <Check className="size-3 text-emerald-500" /> : <Copy className="size-3" />}
-              {copied ? "已复制" : "复制路径"}
+              {copied ? t("database.maintenance.copied") : t("database.maintenance.copyPath")}
             </Button>
             <Button
               type="button"
@@ -257,13 +272,124 @@ export function DatabaseSection() {
           </div>
         </SettingRow>
 
-        <SettingRow title="迁移版本状态" description="数据库当前架构版本与最新目标版本保持一致。">
+        <SettingRow
+          title={t("database.maintenance.tableCountLabel")}
+          description={t("database.maintenance.tableCountDescription")}
+        >
+          <span className="rounded-md border border-border/60 bg-muted/40 px-2 py-0.5 font-mono text-xs text-foreground">
+            {stats
+              ? t("database.maintenance.tableCountValue", { count: stats.table_count })
+              : unknown}
+          </span>
+        </SettingRow>
+
+        <SettingRow
+          title={t("database.maintenance.sizeLabel")}
+          description={
+            stats
+              ? hasSidecarFiles
+                ? t("database.maintenance.sizeWithSidecars", {
+                    main: formatFileSize(stats.file_size_bytes),
+                    wal: formatFileSize(stats.wal_size_bytes),
+                    shm: formatFileSize(stats.shm_size_bytes),
+                  })
+                : t("database.maintenance.sizeMainOnly", {
+                    main: formatFileSize(stats.file_size_bytes),
+                  })
+              : undefined
+          }
+        >
+          <span className="rounded-md border border-border/60 bg-muted/40 px-2 py-0.5 font-mono text-xs text-foreground">
+            {stats ? formatFileSize(stats.total_size_bytes) : unknown}
+          </span>
+        </SettingRow>
+
+        <SettingRow
+          title={t("database.maintenance.engineLabel")}
+          description={
+            stats
+              ? [
+                  stats.page_size != null && stats.page_count != null
+                    ? t("database.maintenance.enginePages", {
+                        pageSize: stats.page_size,
+                        pageCount: stats.page_count,
+                      })
+                    : null,
+                  stats.modified_at
+                    ? t("database.maintenance.modifiedAt", {
+                        date: formatDate(stats.modified_at),
+                      })
+                    : null,
+                ]
+                  .filter((item): item is string => Boolean(item))
+                  .join(" · ") || undefined
+              : undefined
+          }
+        >
+          <div className="flex flex-wrap items-center justify-end gap-1.5">
+            {stats?.sqlite_version ? (
+              <span className="rounded-md border border-border/60 bg-muted/40 px-2 py-0.5 font-mono text-xs text-foreground">
+                {t("database.maintenance.sqliteVersion", { version: stats.sqlite_version })}
+              </span>
+            ) : null}
+            {stats?.journal_mode ? (
+              <span className="rounded-md border border-border/60 bg-muted/40 px-2 py-0.5 font-mono text-xs text-muted-foreground uppercase">
+                {stats.journal_mode}
+              </span>
+            ) : null}
+            {stats?.encoding ? (
+              <span className="rounded-md border border-border/60 bg-muted/40 px-2 py-0.5 font-mono text-xs text-muted-foreground">
+                {stats.encoding}
+              </span>
+            ) : null}
+            {!stats ? <span className="text-xs text-muted-foreground">{unknown}</span> : null}
+          </div>
+        </SettingRow>
+
+        {stats && stats.tables.length > 0 ? (
+          <SettingRow
+            title={t("database.maintenance.tablesLabel")}
+            description={t("database.maintenance.tablesDescription")}
+            vertical
+          >
+            <div className="grid w-full grid-cols-1 gap-1.5 sm:grid-cols-2">
+              {stats.tables.map((table) => (
+                <div
+                  key={table.name}
+                  className="flex items-center justify-between gap-3 rounded-md border border-border/60 bg-muted/30 px-2.5 py-1.5"
+                >
+                  <span className="truncate font-mono text-[11px] text-foreground">
+                    {table.name}
+                  </span>
+                  <span className="shrink-0 text-[11px] text-muted-foreground">
+                    {t("database.maintenance.rowCount", { count: table.row_count })}
+                  </span>
+                </div>
+              ))}
+            </div>
+          </SettingRow>
+        ) : null}
+
+        <SettingRow
+          title={t("database.maintenance.migrationStatusLabel")}
+          description={
+            health == null
+              ? t("database.maintenance.detecting")
+              : schemaMatchesLatest
+                ? t("database.maintenance.migrationStatusDescription")
+                : t("database.maintenance.migrationStatusMismatch")
+          }
+        >
           <div className="flex items-center gap-2">
             <span className="rounded-md border border-border/60 bg-muted/40 px-2 py-0.5 font-mono text-xs text-foreground">
-              当前: v{health?.database_current_version ?? "?"}
+              {t("database.maintenance.currentVersionValue", {
+                version: health?.database_current_version ?? "?",
+              })}
             </span>
             <span className="rounded-md border border-border/60 bg-muted/40 px-2 py-0.5 font-mono text-xs text-muted-foreground">
-              目标: v{health?.database_latest_version ?? "?"}
+              {t("database.maintenance.latestVersionValue", {
+                version: health?.database_latest_version ?? "?",
+              })}
             </span>
           </div>
         </SettingRow>

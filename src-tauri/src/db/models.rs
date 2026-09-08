@@ -330,12 +330,35 @@ pub struct GitCheckpoint {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DatabaseTableStat {
+    pub name: String,
+    pub row_count: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DatabaseRuntimeStats {
+    pub table_count: i64,
+    pub file_size_bytes: i64,
+    pub wal_size_bytes: i64,
+    pub shm_size_bytes: i64,
+    pub total_size_bytes: i64,
+    pub modified_at: Option<String>,
+    pub sqlite_version: Option<String>,
+    pub page_size: Option<i64>,
+    pub page_count: Option<i64>,
+    pub journal_mode: Option<String>,
+    pub encoding: Option<String>,
+    pub tables: Vec<DatabaseTableStat>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppHealthCheck {
     pub database_loaded: bool,
     pub database_path: Option<String>,
     pub database_current_version: Option<i64>,
     pub database_current_description: Option<String>,
     pub database_latest_version: i64,
+    pub database_stats: Option<DatabaseRuntimeStats>,
     pub git_available: bool,
     pub git_version: Option<String>,
     pub checked_at: String,

@@ -1,6 +1,28 @@
 import { describe, expect, it } from "vitest";
 
-import { formatScaledTokens } from "./utils";
+import { formatFileSize, formatScaledTokens } from "./utils";
+
+describe("formatFileSize", () => {
+  it("treats empty or invalid sizes as zero bytes", () => {
+    expect(formatFileSize(0)).toBe("0 B");
+    expect(formatFileSize(-12)).toBe("0 B");
+    expect(formatFileSize(Number.NaN)).toBe("0 B");
+  });
+
+  it("keeps values under 1 KB as bytes", () => {
+    expect(formatFileSize(1)).toBe("1 B");
+    expect(formatFileSize(512)).toBe("512 B");
+    expect(formatFileSize(1023)).toBe("1023 B");
+  });
+
+  it("uses KB / MB / GB with one decimal unless exact", () => {
+    expect(formatFileSize(1024)).toBe("1 KB");
+    expect(formatFileSize(1536)).toBe("1.5 KB");
+    expect(formatFileSize(1024 * 1024)).toBe("1 MB");
+    expect(formatFileSize(2.5 * 1024 * 1024)).toBe("2.5 MB");
+    expect(formatFileSize(1024 * 1024 * 1024)).toBe("1 GB");
+  });
+});
 
 describe("formatScaledTokens", () => {
   it("keeps values under 1000 as a plain count", () => {
