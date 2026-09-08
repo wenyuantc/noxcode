@@ -565,6 +565,7 @@ export interface StartNativeSessionInput {
   image_paths?: string[] | null;
   plan_mode?: boolean | null;
   permission_mode?: string | null;
+  isolate_worktree?: boolean | null;
 }
 
 export interface AgentSessionStarted {
@@ -596,6 +597,8 @@ export interface NativeSessionRuntime {
   reasoning_effort: string | null;
   permission_mode: string;
   plan_mode: boolean;
+  worktree_path?: string | null;
+  sandbox_active?: boolean;
 }
 
 export interface PendingSessionConfiguration {
@@ -639,6 +642,24 @@ export interface NativeBackgroundTask {
 export interface NativeBackgroundTasks {
   session_record_id: string;
   tasks: NativeBackgroundTask[];
+}
+
+export type NativeBackgroundProcessStatus = "running" | "exited" | "stopped" | "failed";
+
+export interface NativeBackgroundProcess {
+  process_id: string;
+  command: string;
+  description: string;
+  status: NativeBackgroundProcessStatus;
+  pid?: number | null;
+  started_at_ms: number;
+  exit_code?: number | null;
+  output_preview: string;
+}
+
+export interface NativeBackgroundProcesses {
+  session_record_id: string;
+  processes: NativeBackgroundProcess[];
 }
 
 export type NativeToolPhase = "start" | "result";
@@ -987,6 +1008,9 @@ export interface NativeSettings {
   bash_default_timeout_secs: number;
   shell_snapshot_enabled: boolean;
   rg_sidecar_enabled: boolean;
+  lsp_enabled: boolean;
+  bash_sandbox_enabled: boolean;
+  isolate_session_worktree: boolean;
   auto_compact_threshold_percent: number;
   microcompact_enabled: boolean;
   memory_enabled: boolean;
@@ -1018,6 +1042,9 @@ export interface UpdateNativeSettingsInput {
   bash_default_timeout_secs?: number;
   shell_snapshot_enabled?: boolean;
   rg_sidecar_enabled?: boolean;
+  lsp_enabled?: boolean;
+  bash_sandbox_enabled?: boolean;
+  isolate_session_worktree?: boolean;
   auto_compact_threshold_percent?: number;
   microcompact_enabled?: boolean;
   memory_enabled?: boolean;

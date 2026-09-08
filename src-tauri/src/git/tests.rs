@@ -1203,6 +1203,25 @@ async fn commit_message_context_prefers_staged_diff() {
     assert!(!context.contains("worktree change"), "{context}");
 }
 
+#[tokio::test]
+async fn add_list_and_remove_detached_worktree() {
+    let env = local_env().await;
+    let path = env.dir.path().join("isolated-wt");
+    let path_text = path.to_string_lossy().into_owned();
+    super::worktree::add_detached(&env.target, &path_text)
+        .await
+        .expect("add worktree");
+    assert!(path.join("README.md").is_file());
+    let items = super::worktree::list_worktrees(&env.target)
+        .await
+        .expect("list");
+    assert!(items.iter().any(|item| item.path == path_text), "{items:?}");
+    super::worktree::remove_worktree(&env.target, &path_text)
+        .await
+        .expect("remove");
+    assert!(!path.exists());
+}
+
 fn nix_is_root() -> bool {
     unsafe { libc::geteuid() == 0 }
 }

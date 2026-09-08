@@ -320,5 +320,13 @@
   "backgroundTaskExpandAll": "Expand All",
   "backgroundTaskCollapseAll": "Collapse All",
   "backgroundTaskSendHint": "Send instruction to this task...",
-  "backgroundTaskStopHint": "Stop background task"
+  "backgroundTaskStopHint": "Stop background task",
+  "backgroundProcessesTitle": "Background Processes",
+  "backgroundProcessesCount": "{{count}} processes",
+  "backgroundProcessesRunningCount": "{{count}} running",
+  "backgroundProcessRunning": "Running",
+  "backgroundProcessExited": "Exited",
+  "backgroundProcessFailed": "Failed",
+  "backgroundProcessStopped": "Stopped",
+  "backgroundProcessStopHint": "Stop background process"
 }

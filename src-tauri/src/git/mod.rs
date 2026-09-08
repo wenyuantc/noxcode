@@ -9,6 +9,7 @@ mod preview;
 mod repo;
 mod stage;
 mod status;
+pub(crate) mod worktree;
 
 #[cfg(test)]
 mod tests;
@@ -86,6 +87,34 @@ pub(crate) async fn resolve_git_target<R: Runtime>(
             pool: app.state::<SshPool>().inner().clone(),
             params,
             repo_path: working_dir,
+        })
+    } else {
+        Ok(GitTarget::Local(PathBuf::from(working_dir)))
+    }
+}
+
+/// 用会话当前工作目录解析 Git 目标，SSH 配置仍来自工作区。
+pub(crate) async fn resolve_git_target_at<R: Runtime>(
+    app: &AppHandle<R>,
+    workspace_id: &str,
+    working_dir: &str,
+) -> Result<GitTarget, String> {
+    let pool = sqlite_pool(app).await?;
+    let ctx = resolve_workspace_execution_context_with_pool(&pool, workspace_id).await?;
+    let working_dir = working_dir.trim();
+    if working_dir.is_empty() {
+        return Err("工作目录为空".to_string());
+    }
+    if ctx.is_ssh() {
+        let ssh_config_id = ctx
+            .ssh_config_id
+            .ok_or_else(|| "SSH 工作区缺少 ssh_config_id".to_string())?;
+        let record = fetch_ssh_config_record_by_id(&pool, &ssh_config_id).await?;
+        let params = resolve_connect_params(app, &record, true)?;
+        Ok(GitTarget::Ssh {
+            pool: app.state::<SshPool>().inner().clone(),
+            params,
+            repo_path: working_dir.to_string(),
         })
     } else {
         Ok(GitTarget::Local(PathBuf::from(working_dir)))

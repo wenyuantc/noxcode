@@ -14,6 +14,7 @@ import {
   onNativeTextDelta,
   onNativeTurnState,
   onNativeBackgroundTasks,
+  onNativeBackgroundProcesses,
   onNativeRequestResolved,
   onNativeInputQueue,
 } from "@/lib/backend";
@@ -66,6 +67,11 @@ export function useNativeEvents() {
     track(onNativeInputQueue((payload) => useSessionStore.getState().onInputQueue(payload)));
     track(
       onNativeBackgroundTasks((payload) => useSessionStore.getState().onBackgroundTasks(payload)),
+    );
+    track(
+      onNativeBackgroundProcesses((payload) =>
+        useSessionStore.getState().onBackgroundProcesses(payload),
+      ),
     );
     track(onNativeRequestResolved((payload) => useSessionStore.getState().resolveRequest(payload)));
     track(onNativeTextDelta((delta) => useSessionStore.getState().onDelta(delta)));

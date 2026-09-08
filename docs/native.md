@@ -31,7 +31,7 @@ P4 把进程内编程 Agent 接到渠道 + 工作区外壳。数据流仍是 `Re
 
 `session_kind` 只有 `execution` 与 `plan`，表示启动类型，不能替代当前运行模式。`plan_mode=true` 时本轮结束后保持计划模式，等待输入；不会自动注入实施指令。计划模式由启动参数决定，不写入 `native-settings.json`。`ExitPlanMode` 必须收到当前请求的用户批准才解除限制；拒绝、取消或无审批通道均保持计划模式。计划审批一直等到用户批准、退回或会话取消，不套用高风险确认超时。用户也可在会话空闲后通过模式选择器切换。runner 与 manager 共享计划模式原子状态，运行配置快照从该状态读取；`native-plan-mode` 携带 `input_queue_id` 区分每次运行，前端不允许旧启动快照覆盖同次运行的模式事件。子 Agent 的切换不会广播到父会话。
 
-计划模式的本地与 SSH `Bash` 可用：可验证的只读命令直接执行；写入、高风险及无法确认只读的命令需用户授权，提供「本次允许 / 始终允许 / 当前会话允许所有命令 / 拒绝」。始终允许将完整命令作为字面值保存到当前工作区权限文件，附加 `plan_bash: { target, workspace_root }` 元数据以绑定执行主机和工作目录，保存成功后执行，后续计划会话命中时免确认；通配符仅作为命令内容，不扩大授权范围。可在权限设置中查看、删除，删除后重新询问。旧规则缺少该元数据时不扩权，yolo、build、普通 allow 规则和批准钩子也不跳过确认；显式 deny/ask 仍优先。命令获批后计划模式不变。复用现有权限 IPC 和原子写入流程，保存失败保留请求且不执行。命令按 PreToolUse 改写后的最终参数检查；含脚本、解释器、重定向及未验证包装器的命令保守地要求确认。Bash 不提供操作系统级只读沙箱；数据库查询优先使用 `SQLiteQuery`。`Write / Edit / ApplyPatch` 及写入型 MCP 仍被禁止，explore 子 Agent 不开放 Bash。
+计划模式的本地与 SSH `Bash` 可用：可验证的只读命令直接执行；写入、高风险及无法确认只读的命令需用户授权，提供「本次允许 / 始终允许 / 当前会话允许所有命令 / 拒绝」。始终允许将完整命令作为字面值保存到当前工作区权限文件，附加 `plan_bash: { target, workspace_root }` 元数据以绑定执行主机和工作目录，保存成功后执行，后续计划会话命中时免确认；通配符仅作为命令内容，不扩大授权范围。可在权限设置中查看、删除，删除后重新询问。旧规则缺少该元数据时不扩权，yolo、build、普通 allow 规则和批准钩子也不跳过确认；显式 deny/ask 仍优先。命令获批后计划模式不变。复用现有权限 IPC 和原子写入流程，保存失败保留请求且不执行。命令按 PreToolUse 改写后的最终参数检查；含脚本、解释器、重定向及未验证包装器的命令保守地要求确认。本地 Bash 可按设置套操作系统沙箱，但计划模式本身不是只读沙箱；数据库查询优先使用 `SQLiteQuery`。`Write / Edit / ApplyPatch` 及写入型 MCP 仍被禁止，explore 子 Agent 不开放 Bash。
 
 「当前会话允许所有命令」使用独立 IPC 决策 `allow_session_commands`，仅为当前运行会话设置 Bash 免确认状态，立即执行当前命令并释放该会话已排队的 Bash 确认。后续本地或 SSH Bash 不再弹窗，包括高风险、写入及 ask 规则；显式 deny 仍直接拒绝。状态由当前会话及其工具上下文共享，不切换 yolo、不退出计划模式，不写权限文件或数据库，不影响其他会话及非 Bash 工具的审批；会话结束、重启或重新启动历史会话后失效。过期、取消或非 Bash 请求不能获取该授权。
 
@@ -79,12 +79,15 @@ P4 把进程内编程 Agent 接到渠道 + 工作区外壳。数据流仍是 `Re
 每个内置工具在 [`tools/catalog.rs`](../src-tauri/src/native/tools/catalog.rs) 声明一份 [`ToolContract`](../src-tauri/src/native/tools/contract.rs)：`read_only / destructive / concurrent_safe / side_effect_scope / risk_level / needs_approval / allowed_in_plan_mode / permission（能力）/ pattern_sources / result_budget / timeout`。MCP 工具按 `tools/list` 返回的 `annotations.readOnlyHint / destructiveHint` 动态生成契约，缺省视为需审批、串行。
 
 - 计划模式与 explore 子 Agent 的只读白名单来自契约的 `allowed_in_plan_mode`，不再硬编码。
-- 同一轮里连续的 `concurrent_safe && !destructive && !needs_approval` 调用（Read / Glob / Grep / WebFetch / WebSearch / Skill / TodoRead）并行执行，上限 8，结果按模型给出的顺序回填；写工具与 Bash 串行；连续 `Agent` 调用仍成批并行。
+- 同一轮里连续的 `concurrent_safe && !destructive && !needs_approval` 调用（Read / Glob / Grep / Lsp / WebFetch / WebSearch / Skill / TodoRead）并行执行，上限 8，结果按模型给出的顺序回填；写工具与 Bash 串行；连续 `Agent` 调用仍成批并行。
 - 结果预算：输出超过 `result_budget.max_model_bytes` 且策略为 `Artifact` 时，完整内容写入 `$APPCONFIG/artifacts/<session>/<id>.txt` 并登记 `native_tool_artifacts`，模型只看到头（Glob / Grep / WebFetch / Agent / MCP）或尾（Bash）预览加 artifact 路径；`Read` 允许读取 artifact 目录。之后仍按 `max_tool_output_tokens` 截断兜底。
 - 逐工具超时：Read / Write / Edit / Glob / Skill / Todo 30 秒，Grep 60 秒，ApplyPatch 60 秒，WebFetch / WebSearch 45 秒；Bash 自带超时（默认 `bash_default_timeout_secs`，模型可覆盖到 600 秒）；Agent、AskQuestion 与 ExitPlanMode 不设超时。
 - `Edit` 匹配策略链：exact → quote_normalized → line_number_prefix_stripped → escape_normalized → unicode_escape_normalized → indentation_flexible → line_trimmed → block_anchor，结果里注明命中策略；CRLF 文件保持 CRLF。本地 Write / Edit 会校验文件自上次 Read 后未被修改，否则要求重新 Read；文件不存在时给出同目录相近文件名提示。
 - `Read` 支持 png / jpg / gif / webp：图片作为紧随工具结果的用户消息附件交给模型。
-- `Bash`：会话开始时导出一次 login shell 快照（函数 / 别名 / shell 选项 / PATH）到 `$APPCONFIG/shell-snapshots/`，之后每次只 `source` 快照再 `eval` 命令；导出失败或关闭 `shell_snapshot_enabled` 时回退 `bash -lc`。`Grep` 在 `rg_sidecar_enabled` 且找到打包的 `tools/rg` 或 PATH 上的 `rg` 时用 ripgrep，否则用 Rust 正则遍历。
+- `Bash`：会话开始时导出一次 login shell 快照（函数 / 别名 / shell 选项 / PATH）到 `$APPCONFIG/shell-snapshots/`，之后每次只 `source` 快照再 `eval` 命令；导出失败或关闭 `shell_snapshot_enabled` 时回退 `bash -lc`。`run_in_background=true` 把命令登记到会话进程表，立即返回 `process_id`；用 `ProcessList` / `ProcessOutput` / `ProcessStop` / `Monitor` 跟踪。仅本地会话支持后台 Bash。`Grep` 在 `rg_sidecar_enabled` 且找到打包的 `tools/rg` 或 PATH 上的 `rg` 时用 ripgrep，否则用 Rust 正则遍历。
+- `Lsp`：本地会话按文件扩展名懒启动 `rust-analyzer` / `typescript-language-server` / `pyright-langserver` / `gopls` / `clangd`。支持 goToDefinition、findReferences、hover、documentSymbol、workspaceSymbol、goToImplementation、diagnostics。`Write` / `Edit` / `ApplyPatch` 成功后把诊断附到工具结果。设置项 `lsp_enabled` 默认开；SSH 工作区不启动 language server。
+- 本地 Bash 可开启操作系统沙箱（`bash_sandbox_enabled`，默认关）：Linux 用 `bwrap` 只读根 + 可写工作区，macOS 用 `sandbox-exec`。找不到实现时回退并在结果里注明。SSH 不套沙箱。
+- 新会话可按 `isolate_session_worktree`（或启动参数 `isolate_worktree`）创建 detached git worktree：本地路径 `$APPCONFIG/worktrees/<session_id>`，SSH 为 `$HOME/.noxcode/worktrees/<session_id>`。非 git 仓库跳过并提示。会话内也可用 `EnterWorktree` / `ExitWorktree`。工具后 checkpoint 打在当前活动目录。删除会话时会移除托管 worktree。Git 面板仍看工作区主目录。
 - 未验证 Shell 命令默认需要授权；重定向覆盖、`cp/mv`、所有 `git restore` 均进入风险判断。本地 Bash 同时排空两路输出并限内存，超时或取消时终止独立进程组；SSH Bash 透传 deadline / cancel 并发送终止信号、关闭通道。超出硬上限的输出仅保留尾部，不能从 artifact 恢复被丢弃前缀。
 - 本地文件工具按真实路径及最近存在父目录检查边界，额外读写根保持各自权限，递归搜索不跟随符号链接；SSH 文件工具拒绝符号链接路径。SSH Write 支持防覆盖创建新文件，覆盖旧文件仍要求 Read 与内容指纹匹配。这些边界不等同于操作系统级 Shell 沙箱。
 - 本地会话的 `Read / Glob / Grep` 默认允许只读访问当前有效技能目录及其附属文件，遵守启停、重名覆盖和子 Agent 的技能筛选。技能父目录及写入需额外授权，yolo 按完全访问处理。相对路径以工作区为基准，未指定路径的搜索只扫描工作区。链接按真实目录检查，递归搜索不跟随链接逃逸；直接访问外部链接目标仍须经过外部路径授权。

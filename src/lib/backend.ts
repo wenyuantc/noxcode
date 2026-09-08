@@ -51,6 +51,8 @@ import type {
   NativeApiCallLogPage,
   NativeUsageAnalytics,
   NativeAutomation,
+  NativeBackgroundProcess,
+  NativeBackgroundProcesses,
   NativeBackgroundTask,
   NativeBackgroundTasks,
   NativeInputQueue,
@@ -551,6 +553,27 @@ export function onNativeBackgroundTasks(
   callback: (payload: NativeBackgroundTasks) => void,
 ): Promise<UnlistenFn> {
   return listen<NativeBackgroundTasks>("native-background-tasks", (event) =>
+    callback(event.payload),
+  );
+}
+
+export function listNativeBackgroundProcesses(
+  sessionRecordId: string,
+): Promise<NativeBackgroundProcess[]> {
+  return invoke("list_native_background_processes", { sessionRecordId });
+}
+
+export function stopNativeBackgroundProcess(
+  sessionRecordId: string,
+  processId: string,
+): Promise<NativeBackgroundProcess> {
+  return invoke("stop_native_background_process", { sessionRecordId, processId });
+}
+
+export function onNativeBackgroundProcesses(
+  callback: (payload: NativeBackgroundProcesses) => void,
+): Promise<UnlistenFn> {
+  return listen<NativeBackgroundProcesses>("native-background-processes", (event) =>
     callback(event.payload),
   );
 }

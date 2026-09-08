@@ -33,6 +33,7 @@ import { GoalRow } from "./GoalRow";
 import { RetryRow } from "./RetryRow";
 import { AgentStatusRow, McpStatusRow, PermissionStatusRow } from "./SessionStatusRows";
 import { PlanAskCard } from "./PlanAskCard";
+import { BackgroundProcesses } from "./BackgroundProcesses";
 import { BackgroundTasks } from "./BackgroundTasks";
 import { PendingPlanApproval, PlanRow } from "./PlanRow";
 import { SubagentRow } from "./SubagentRow";
@@ -435,6 +436,7 @@ export const EventStream = memo(function EventStream({
           <div className="mx-auto mt-4 max-w-3xl space-y-4">
             <PendingPlanApproval sessionId={sessionId} />
             <BackgroundTasks sessionId={sessionId} />
+            <BackgroundProcesses sessionId={sessionId} />
           </div>
         </div>
       </div>

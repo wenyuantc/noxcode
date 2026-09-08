@@ -413,6 +413,15 @@ pub async fn delete_agent_session<R: Runtime>(
             if let Err(error) = delete_checkpoints_for_session(&pool, &target, &session_id).await {
                 eprintln!("[git] 清理会话 checkpoint 失败: {error}");
             }
+            if let Some(working_dir) = session.working_dir.as_deref() {
+                if crate::git::worktree::is_managed_worktree_path(working_dir, &session_id) {
+                    if let Err(error) =
+                        crate::git::worktree::remove_worktree(&target, working_dir).await
+                    {
+                        eprintln!("[git] 清理会话 worktree 失败: {error}");
+                    }
+                }
+            }
         }
     }
     if let Ok(config_dir) = app.path().app_config_dir() {

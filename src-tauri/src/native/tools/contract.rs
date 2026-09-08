@@ -51,6 +51,9 @@ pub enum PermissionCapability {
     SessionContextRead,
     GoalRead,
     Workflow,
+    Lsp,
+    Process,
+    Worktree,
 }
 
 impl PermissionCapability {
@@ -74,6 +77,9 @@ impl PermissionCapability {
             Self::SessionContextRead => "session.context.read",
             Self::GoalRead => "goal.read",
             Self::Workflow => "workflow",
+            Self::Lsp => "lsp",
+            Self::Process => "process",
+            Self::Worktree => "worktree",
         }
     }
 }

@@ -145,6 +145,12 @@ struct RawNativeSettings {
     #[serde(default)]
     rg_sidecar_enabled: Option<bool>,
     #[serde(default)]
+    lsp_enabled: Option<bool>,
+    #[serde(default)]
+    bash_sandbox_enabled: Option<bool>,
+    #[serde(default)]
+    isolate_session_worktree: Option<bool>,
+    #[serde(default)]
     auto_compact_threshold_percent: Option<i32>,
     #[serde(default)]
     microcompact_enabled: Option<bool>,
@@ -459,6 +465,9 @@ fn default_settings() -> NativeSettings {
         bash_default_timeout_secs: DEFAULT_NATIVE_BASH_DEFAULT_TIMEOUT_SECS,
         shell_snapshot_enabled: true,
         rg_sidecar_enabled: true,
+        lsp_enabled: true,
+        bash_sandbox_enabled: false,
+        isolate_session_worktree: false,
         auto_compact_threshold_percent: DEFAULT_NATIVE_AUTO_COMPACT_THRESHOLD_PERCENT,
         microcompact_enabled: true,
         memory_enabled: true,
@@ -491,6 +500,9 @@ fn normalize_settings(raw: RawNativeSettings) -> NativeSettings {
         ),
         shell_snapshot_enabled: raw.shell_snapshot_enabled.unwrap_or(true),
         rg_sidecar_enabled: raw.rg_sidecar_enabled.unwrap_or(true),
+        lsp_enabled: raw.lsp_enabled.unwrap_or(true),
+        bash_sandbox_enabled: raw.bash_sandbox_enabled.unwrap_or(false),
+        isolate_session_worktree: raw.isolate_session_worktree.unwrap_or(false),
         auto_compact_threshold_percent: normalize_native_auto_compact_threshold_percent(
             raw.auto_compact_threshold_percent,
         ),
@@ -582,6 +594,9 @@ fn save_native_settings<R: Runtime>(
         ))),
         shell_snapshot_enabled: Some(settings.shell_snapshot_enabled),
         rg_sidecar_enabled: Some(settings.rg_sidecar_enabled),
+        lsp_enabled: Some(settings.lsp_enabled),
+        bash_sandbox_enabled: Some(settings.bash_sandbox_enabled),
+        isolate_session_worktree: Some(settings.isolate_session_worktree),
         auto_compact_threshold_percent: Some(normalize_native_auto_compact_threshold_percent(
             Some(settings.auto_compact_threshold_percent),
         )),
@@ -739,6 +754,15 @@ async fn merge_native_settings<R: Runtime>(
     }
     if let Some(rg_sidecar_enabled) = updates.rg_sidecar_enabled {
         next.rg_sidecar_enabled = rg_sidecar_enabled;
+    }
+    if let Some(lsp_enabled) = updates.lsp_enabled {
+        next.lsp_enabled = lsp_enabled;
+    }
+    if let Some(bash_sandbox_enabled) = updates.bash_sandbox_enabled {
+        next.bash_sandbox_enabled = bash_sandbox_enabled;
+    }
+    if let Some(isolate_session_worktree) = updates.isolate_session_worktree {
+        next.isolate_session_worktree = isolate_session_worktree;
     }
     if let Some(auto_compact_threshold_percent) = updates.auto_compact_threshold_percent {
         next.auto_compact_threshold_percent =
@@ -1065,6 +1089,9 @@ mod tests {
         );
         assert!(settings.shell_snapshot_enabled);
         assert!(settings.rg_sidecar_enabled);
+        assert!(settings.lsp_enabled);
+        assert!(!settings.bash_sandbox_enabled);
+        assert!(!settings.isolate_session_worktree);
         assert!(settings.hooks.is_empty());
         assert!(settings.global_prompt_template.is_empty());
         assert_eq!(

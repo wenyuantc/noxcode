@@ -18,6 +18,8 @@ import type {
   NativePlanQuestionRequest,
   NativeTextDelta,
   NativeRequestResolved,
+  NativeBackgroundProcess,
+  NativeBackgroundProcesses,
   NativeBackgroundTask,
   NativeBackgroundTasks,
   NativeSessionRuntime,
@@ -66,6 +68,7 @@ interface SessionState {
   pendingConfigurationBySession: Record<string, PendingSessionConfiguration>;
   configurationRevisionBySession: Record<string, number>;
   backgroundBySession: Record<string, NativeBackgroundTask[]>;
+  processesBySession: Record<string, NativeBackgroundProcess[]>;
   inputQueueBySession: Record<string, NativeInputQueue>;
   turnState: Record<string, string>;
   usage: Record<string, NativeContextUsage>;
@@ -91,6 +94,7 @@ interface SessionState {
   setPlanApproval: (request: NativePlanApprovalRequest) => void;
   resolveRequest: (request: NativeRequestResolved) => void;
   onBackgroundTasks: (payload: NativeBackgroundTasks) => void;
+  onBackgroundProcesses: (payload: NativeBackgroundProcesses) => void;
   onInputQueue: (payload: NativeInputQueue) => void;
   setConfiguration: (sessionId: string, runtime: NativeSessionRuntime) => void;
   setPendingConfiguration: (sessionId: string, pending: PendingSessionConfiguration) => void;
@@ -113,6 +117,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
   pendingConfigurationBySession: {},
   configurationRevisionBySession: {},
   backgroundBySession: {},
+  processesBySession: {},
   inputQueueBySession: {},
   turnState: {},
   usage: {},
@@ -271,6 +276,9 @@ export const useSessionStore = create<SessionState>((set, get) => ({
       backgroundBySession: current.liveBySession[id]
         ? current.backgroundBySession
         : { ...current.backgroundBySession, [id]: [] },
+      processesBySession: current.liveBySession[id]
+        ? current.processesBySession
+        : { ...current.processesBySession, [id]: [] },
       turnState: {
         ...current.turnState,
         [id]: current.liveBySession[id] ? (current.turnState[id] ?? "working") : "working",
@@ -374,6 +382,12 @@ export const useSessionStore = create<SessionState>((set, get) => ({
               : task,
         ),
       },
+      processesBySession: {
+        ...get().processesBySession,
+        [exit.session_record_id]: (get().processesBySession[exit.session_record_id] ?? []).map(
+          (process) => (process.status === "running" ? { ...process, status: "stopped" } : process),
+        ),
+      },
       turnState: { ...get().turnState, [exit.session_record_id]: "ended" },
     });
   },
@@ -432,6 +446,10 @@ export const useSessionStore = create<SessionState>((set, get) => ({
   onBackgroundTasks: ({ session_record_id, tasks }) =>
     set((state) => ({
       backgroundBySession: { ...state.backgroundBySession, [session_record_id]: tasks },
+    })),
+  onBackgroundProcesses: ({ session_record_id, processes }) =>
+    set((state) => ({
+      processesBySession: { ...state.processesBySession, [session_record_id]: processes },
     })),
   setConfiguration: (sessionId, runtime) =>
     set((state) => ({

@@ -1531,6 +1531,7 @@ fn attach_mutation_checkpoint(
 
     let inflight = Arc::new(AtomicBool::new(false));
     let app = app.clone();
+    let active_root = runner.ctx.active_root.clone();
     runner.ctx.on_mutation = Some(Arc::new(move |tool_name: &str| {
         if inflight
             .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
@@ -1542,11 +1543,16 @@ fn attach_mutation_checkpoint(
         let app = app.clone();
         let workspace_id = workspace_id.clone();
         let session_record_id = session_record_id.clone();
+        let active_root = active_root.clone();
         let label = format!("after_tool_call:{tool_name}");
         tauri::async_runtime::spawn(async move {
             let result = async {
                 let pool = sqlite_pool(&app).await?;
-                let target = crate::git::resolve_git_target(&app, &workspace_id).await?;
+                let cwd = active_root
+                    .read()
+                    .map(|root| root.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                let target = crate::git::resolve_git_target_at(&app, &workspace_id, &cwd).await?;
                 create_checkpoint(
                     &pool,
                     &target,
@@ -1574,6 +1580,7 @@ async fn configure_local_tool_runtime(
     app: &AppHandle,
     runner: &mut AgentRunner,
     session_record_id: &str,
+    workspace_id: &str,
 ) {
     let settings = match crate::native::settings::load_native_settings(app) {
         Ok(settings) => settings,
@@ -1585,6 +1592,7 @@ async fn configure_local_tool_runtime(
     runner.ctx.workspace.bash_default_timeout =
         Duration::from_secs(settings.bash_default_timeout_secs.max(1) as u64);
     let config_dir = app.path().app_config_dir().ok();
+    runner.ctx.app_config_dir = config_dir.clone();
     if settings.rg_sidecar_enabled {
         let bundled = app.path().resource_dir().ok().map(|dir| dir.join("tools"));
         runner.ctx.workspace.rg_binary =
@@ -1597,6 +1605,32 @@ async fn configure_local_tool_runtime(
                 Err(error) => eprintln!("[native] 导出 shell 快照失败，回退 bash -lc: {error}"),
             }
         }
+    }
+    runner.ctx.workspace.sandbox = crate::native::tools::sandbox::SandboxPolicy {
+        enabled: settings.bash_sandbox_enabled && runner.ctx.ssh.is_none(),
+        extra_write_roots: Vec::new(),
+    };
+    if settings.lsp_enabled && runner.ctx.ssh.is_none() {
+        runner.ctx.lsp = Some(Arc::new(crate::native::tools::lsp::LspHub::new(
+            runner.ctx.active_workspace_root(),
+            true,
+        )));
+    }
+    let processes = Arc::new(crate::native::tools::processes::ProcessRegistry::new());
+    let emit_app = app.clone();
+    let emit_session = session_record_id.to_string();
+    processes.set_on_change(Some(Arc::new(move |items| {
+        let _ = emit_app.emit(
+            "native-background-processes",
+            serde_json::json!({
+                "session_record_id": emit_session,
+                "processes": items,
+            }),
+        );
+    })));
+    runner.ctx.processes = Some(processes);
+    if let Ok(target) = crate::git::resolve_git_target(app, workspace_id).await {
+        runner.ctx.git_target = Some(target);
     }
     if let Some(dir) = config_dir.as_ref() {
         let record_app = app.clone();
@@ -1619,6 +1653,65 @@ async fn configure_local_tool_runtime(
             .extra_read_roots
             .push(store.dir().to_path_buf());
         runner.set_artifact_store(Arc::new(store));
+    }
+}
+
+async fn maybe_isolate_session_worktree(
+    app: &AppHandle,
+    workspace_id: &str,
+    session_record_id: &str,
+    run_cwd: &mut String,
+    isolate: bool,
+    is_resume: bool,
+    existing_working_dir: Option<&str>,
+) -> (Option<String>, Vec<String>) {
+    let mut notices = Vec::new();
+    if is_resume {
+        if let Some(existing) = existing_working_dir
+            .map(str::trim)
+            .filter(|item| !item.is_empty())
+        {
+            if crate::git::worktree::is_managed_worktree_path(existing, session_record_id) {
+                *run_cwd = existing.to_string();
+                return (Some(existing.to_string()), notices);
+            }
+        }
+        return (None, notices);
+    }
+    if !isolate {
+        return (None, notices);
+    }
+    match crate::git::resolve_git_target(app, workspace_id).await {
+        Ok(target) => {
+            let path = match &target {
+                crate::git::GitTarget::Local(_) => match app.path().app_config_dir() {
+                    Ok(dir) => crate::git::worktree::local_worktree_path(&dir, session_record_id)
+                        .to_string_lossy()
+                        .into_owned(),
+                    Err(error) => {
+                        notices.push(format!("无法解析配置目录，已跳过 worktree 隔离：{error}"));
+                        return (None, notices);
+                    }
+                },
+                crate::git::GitTarget::Ssh { .. } => {
+                    crate::git::worktree::remote_worktree_path(session_record_id)
+                }
+            };
+            match crate::git::worktree::add_detached(&target, &path).await {
+                Ok(_) => {
+                    *run_cwd = path.clone();
+                    (Some(path), notices)
+                }
+                Err(error) => {
+                    notices.push(format!("无法创建隔离 worktree，已使用主工作区：{error}"));
+                    (None, notices)
+                }
+            }
+        }
+        Err(_) => {
+            notices.push("工作区不是 git 仓库，已跳过 worktree 隔离".to_string());
+            (None, notices)
+        }
     }
 }
 
@@ -1724,10 +1817,11 @@ async fn start_native_session_locked(
     let pool = sqlite_pool(&app).await?;
     let execution_context =
         resolve_workspace_execution_context_with_pool(&pool, &workspace_id).await?;
-    let run_cwd = execution_context
+    let workspace_root = execution_context
         .working_dir
         .clone()
         .ok_or_else(|| format!("{ENGINE_LABEL} 工作区缺少工作目录"))?;
+    let mut run_cwd = workspace_root.clone();
     // 在创建/重新激活会话及发起模型请求前失败，避免所有远程工具反复触发同一门槛。
     let ssh_config = load_session_ssh_config(&pool, &execution_context).await?;
 
@@ -1768,6 +1862,40 @@ async fn start_native_session_locked(
     } else {
         None
     };
+    let native_settings = crate::native::settings::load_native_settings(&app).ok();
+    let isolate = payload.isolate_worktree.unwrap_or_else(|| {
+        native_settings
+            .as_ref()
+            .map(|settings| settings.isolate_session_worktree)
+            .unwrap_or(false)
+    });
+    let existing_working_dir = if let Some(resume_id) = resume_id.as_deref() {
+        sqlx::query_scalar::<_, Option<String>>(
+            "SELECT working_dir FROM agent_sessions WHERE id = $1",
+        )
+        .bind(resume_id)
+        .fetch_optional(&pool)
+        .await
+        .ok()
+        .flatten()
+        .flatten()
+    } else {
+        None
+    };
+    let (session_worktree, startup_notices) = maybe_isolate_session_worktree(
+        &app,
+        &workspace_id,
+        &session_record_id,
+        &mut run_cwd,
+        isolate,
+        resume_id.is_some(),
+        existing_working_dir.as_deref(),
+    )
+    .await;
+    let sandbox_active = native_settings
+        .as_ref()
+        .is_some_and(|settings| settings.bash_sandbox_enabled)
+        && ssh_config.is_none();
     let session_record_id = if let Some(resume_id) = resume_id.as_deref() {
         reactivate_agent_session(
             &pool,
@@ -1839,7 +1967,7 @@ async fn start_native_session_locked(
         authorized_paths: Vec::new(),
     });
 
-    if let Ok(target) = crate::git::resolve_git_target(&app, &workspace_id).await {
+    if let Ok(target) = crate::git::resolve_git_target_at(&app, &workspace_id, &run_cwd).await {
         if let Err(error) = create_checkpoint(
             &pool,
             &target,
@@ -1865,6 +1993,8 @@ async fn start_native_session_locked(
         reasoning_effort: run.effort.clone(),
         permission_mode: permission_mode.clone(),
         plan_mode,
+        worktree_path: session_worktree.clone(),
+        sandbox_active,
     };
     let input_queue = Arc::new(NativeInputQueue::new(&session_record_id));
     let queue_app = app.clone();
@@ -1887,7 +2017,7 @@ async fn start_native_session_locked(
     ));
     let permission_storage_root =
         if execution_context.execution_target == crate::app::shared::EXECUTION_TARGET_LOCAL {
-            Some(PathBuf::from(&run_cwd))
+            Some(PathBuf::from(&workspace_root))
         } else {
             app.path()
                 .app_config_dir()
@@ -1956,6 +2086,9 @@ async fn start_native_session_locked(
             permission_mode,
             live_model_run,
             transcript_model_run,
+            workspace_root,
+            session_worktree,
+            startup_notices,
         )
         .await;
     });
@@ -1964,6 +2097,7 @@ async fn start_native_session_locked(
         runtime: Some(runtime),
         plan_mode: Arc::new(AtomicBool::new(plan_mode)),
         background: None,
+        processes: None,
         closing: false,
         info: NativeSessionInfo {
             profile_id: String::new(),
@@ -2152,12 +2286,17 @@ async fn apply_session_configuration(
             .map(|item| item.permission_mode.clone())
             .unwrap_or_else(|| crate::native::settings::PERMISSION_MODE_DEFAULT.to_string());
         let plan_mode = session.plan_mode.load(Ordering::SeqCst);
+        let previous = session.runtime.clone();
         let runtime = NativeSessionRuntime {
             ai_channel_id: next.channel_id.clone(),
             model: next.model.clone(),
             reasoning_effort: next.effort.clone(),
             permission_mode,
             plan_mode,
+            worktree_path: previous
+                .as_ref()
+                .and_then(|item| item.worktree_path.clone()),
+            sandbox_active: previous.as_ref().is_some_and(|item| item.sandbox_active),
         };
         session.runtime = Some(runtime.clone());
         runtime
@@ -2279,6 +2418,9 @@ async fn run_native_loop(
     permission_mode: String,
     live_model: SharedLiveModel,
     transcript_model: Arc<Mutex<String>>,
+    workspace_root: String,
+    session_worktree: Option<String>,
+    startup_notices: Vec<String>,
 ) {
     let followup_rx = Arc::new(Mutex::new(followup_rx));
     let mut config_revision = 0_u64;
@@ -2287,7 +2429,14 @@ async fn run_native_loop(
     runner.ctx.extra_env = load_network_settings(&app)
         .map(|settings| proxy_env_vars(&settings))
         .unwrap_or_default();
-    configure_local_tool_runtime(&app, &mut runner, &session_record_id).await;
+    runner.ctx.original_root = PathBuf::from(&workspace_root);
+    if let Ok(mut root) = runner.ctx.active_root.write() {
+        *root = PathBuf::from(&run_cwd);
+    }
+    if let Ok(mut stored) = runner.ctx.worktree_path.write() {
+        *stored = session_worktree;
+    }
+    configure_local_tool_runtime(&app, &mut runner, &session_record_id, &workspace_id).await;
     runner.ctx.cancel = cancel.clone();
     runner.ctx.allow_all_high_risk = allow_all_high_risk;
     runner.ctx.permission_rules = permission_rules;
@@ -2308,6 +2457,7 @@ async fn run_native_loop(
         .get_session_mut(&session_record_id)
     {
         session.background = Some(runner.background.clone());
+        session.processes = runner.ctx.processes.clone();
         runner.ctx.plan_mode = session.plan_mode.clone();
         runner.ctx.allow_session_commands = session.allow_session_commands.clone();
     }
@@ -2364,6 +2514,34 @@ async fn run_native_loop(
                 Some(&workspace_id),
                 &kind,
                 notice.to_string(),
+            )
+            .await;
+        }
+        for notice in &startup_notices {
+            emit_native_line(
+                &app,
+                &session_record_id,
+                &profile_id,
+                Some(&workspace_id),
+                &kind,
+                format!("[WORKTREE] {notice}"),
+            )
+            .await;
+        }
+        if let Some(path) = runner
+            .ctx
+            .worktree_path
+            .read()
+            .ok()
+            .and_then(|slot| slot.clone())
+        {
+            emit_native_line(
+                &app,
+                &session_record_id,
+                &profile_id,
+                Some(&workspace_id),
+                &kind,
+                format!("[WORKTREE] 会话工作目录已隔离到 {path}"),
             )
             .await;
         }
@@ -3271,6 +3449,12 @@ async fn run_native_loop(
             code,
         },
     );
+    if let Some(lsp) = runner.ctx.lsp.take() {
+        lsp.shutdown().await;
+    }
+    if let Some(processes) = runner.ctx.processes.as_ref() {
+        processes.stop_all();
+    }
     manager_state
         .lock()
         .await
@@ -3315,6 +3499,9 @@ async fn stop_native_process(
     let Some(session) = session else {
         return Ok(true);
     };
+    if let Some(processes) = session.processes.as_ref() {
+        processes.stop_all();
+    }
     session.cancel.cancel();
     session.input_queue.close();
     let _ = session.followup_tx.send(NativeFollowup::Finish).await;
@@ -3670,12 +3857,17 @@ async fn apply_plan_implementation_model(
             .map(|item| item.permission_mode.clone())
             .unwrap_or_else(|| crate::native::settings::PERMISSION_MODE_DEFAULT.to_string());
         let plan_mode = session.plan_mode.load(Ordering::SeqCst);
+        let previous = session.runtime.clone();
         let runtime = NativeSessionRuntime {
             ai_channel_id: next.channel_id.clone(),
             model: next.model.clone(),
             reasoning_effort: next.effort.clone(),
             permission_mode,
             plan_mode,
+            worktree_path: previous
+                .as_ref()
+                .and_then(|item| item.worktree_path.clone()),
+            sandbox_active: previous.as_ref().is_some_and(|item| item.sandbox_active),
         };
         session.runtime = Some(runtime.clone());
         let transcript = session
@@ -3929,6 +4121,40 @@ async fn background_registry(
         .background
         .clone()
         .ok_or_else(|| "会话尚未完成初始化".to_string())
+}
+
+#[tauri::command]
+pub async fn list_native_background_processes(
+    state: State<'_, Arc<Mutex<NativeAgentManager>>>,
+    session_record_id: String,
+) -> Result<Vec<crate::native::tools::processes::ProcessSnapshot>, String> {
+    Ok(state
+        .lock()
+        .await
+        .get_session(&session_record_id)
+        .and_then(|session| session.processes.as_ref())
+        .map(|registry| registry.snapshots())
+        .unwrap_or_default())
+}
+
+#[tauri::command]
+pub async fn stop_native_background_process(
+    state: State<'_, Arc<Mutex<NativeAgentManager>>>,
+    session_record_id: String,
+    process_id: String,
+) -> Result<crate::native::tools::processes::ProcessSnapshot, String> {
+    let manager = state.lock().await;
+    let session = manager
+        .get_session(&session_record_id)
+        .ok_or_else(|| "会话已结束".to_string())?;
+    if session.closing {
+        return Err("会话正在结束".to_string());
+    }
+    session
+        .processes
+        .as_ref()
+        .ok_or_else(|| "会话尚未完成初始化".to_string())?
+        .stop(&process_id)
 }
 
 #[tauri::command]
@@ -4269,6 +4495,8 @@ mod tests {
             reasoning_effort: Some("high".to_string()),
             permission_mode: "default".to_string(),
             plan_mode: false,
+            worktree_path: None,
+            sandbox_active: false,
         };
         let base =
             serde_json::json!({"ai_channel_id":"channel", "workspace_id":"ws", "prompt":"next"});
@@ -4474,6 +4702,7 @@ mod tests {
             plan_mode: std::sync::Arc::default(),
             allow_session_commands: std::sync::Arc::default(),
             background: None,
+            processes: None,
             closing: false,
             cancel,
             followup_tx: tx,
@@ -4827,6 +5056,7 @@ mod tests {
             plan_mode: std::sync::Arc::default(),
             allow_session_commands: std::sync::Arc::default(),
             background: None,
+            processes: None,
             closing: false,
             cancel: CancelFlag::new(),
             followup_tx: tx,
@@ -4905,6 +5135,7 @@ mod tests {
             plan_mode: std::sync::Arc::default(),
             allow_session_commands: std::sync::Arc::default(),
             background: None,
+            processes: None,
             closing: false,
             cancel: CancelFlag::new(),
             followup_tx: tx,

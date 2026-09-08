@@ -3,12 +3,15 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { useSessionStore } from "@/stores/sessionStore";
 import { BackgroundNoticeRow } from "./BackgroundNoticeRow";
+import { BackgroundProcesses } from "./BackgroundProcesses";
 import { BackgroundTasks } from "./BackgroundTasks";
 
 vi.mock("@/lib/backend", () => ({
   listNativeBackgroundTasks: vi.fn().mockResolvedValue([]),
   sendNativeBackgroundMessage: vi.fn().mockResolvedValue(undefined),
   stopNativeBackgroundTask: vi.fn().mockResolvedValue(undefined),
+  listNativeBackgroundProcesses: vi.fn().mockResolvedValue([]),
+  stopNativeBackgroundProcess: vi.fn().mockResolvedValue({}),
 }));
 
 vi.mock("react-i18next", () => ({
@@ -36,6 +39,7 @@ describe("BackgroundNoticeRow and BackgroundTasks", () => {
   beforeEach(() => {
     useSessionStore.setState({
       backgroundBySession: {},
+      processesBySession: {},
       liveBySession: {},
     });
   });
@@ -120,5 +124,31 @@ describe("BackgroundNoticeRow and BackgroundTasks", () => {
     expect(html).toContain("#task-2");
     expect(html).toContain("代码审核");
     expect(html).toContain("backgroundTaskCompleted");
+  });
+
+  it("renders BackgroundProcesses dashboard card with running count and command", () => {
+    useSessionStore.setState({
+      liveBySession: { s1: {} as unknown as import("@/lib/types").AgentSessionStarted },
+      processesBySession: {
+        s1: [
+          {
+            process_id: "1",
+            command: "npm run dev",
+            description: "dev server",
+            status: "running",
+            started_at_ms: 1,
+            output_preview: "listening",
+          },
+        ],
+      },
+    });
+
+    const html = renderToStaticMarkup(<BackgroundProcesses sessionId="s1" />);
+    expect(html).toContain("backgroundProcessesTitle");
+    expect(html).toContain("backgroundProcessesCount");
+    expect(html).toContain("backgroundProcessesRunningCount");
+    expect(html).toContain("dev server");
+    expect(html).toContain("npm run dev");
+    expect(html).toContain("backgroundProcessRunning");
   });
 });

@@ -415,6 +415,12 @@ pub struct NativeSettings {
     pub shell_snapshot_enabled: bool,
     #[serde(default = "default_true")]
     pub rg_sidecar_enabled: bool,
+    #[serde(default = "default_true")]
+    pub lsp_enabled: bool,
+    #[serde(default)]
+    pub bash_sandbox_enabled: bool,
+    #[serde(default)]
+    pub isolate_session_worktree: bool,
     #[serde(default = "default_auto_compact_threshold_percent")]
     pub auto_compact_threshold_percent: i32,
     #[serde(default = "default_true")]
@@ -558,6 +564,12 @@ pub struct UpdateNativeSettings {
     #[serde(default)]
     pub rg_sidecar_enabled: Option<bool>,
     #[serde(default)]
+    pub lsp_enabled: Option<bool>,
+    #[serde(default)]
+    pub bash_sandbox_enabled: Option<bool>,
+    #[serde(default)]
+    pub isolate_session_worktree: Option<bool>,
+    #[serde(default)]
     pub auto_compact_threshold_percent: Option<i32>,
     #[serde(default)]
     pub microcompact_enabled: Option<bool>,
@@ -686,6 +698,8 @@ pub struct StartNativeSessionInput {
     pub image_paths: Option<Vec<String>>,
     pub plan_mode: Option<bool>,
     pub permission_mode: Option<String>,
+    #[serde(default)]
+    pub isolate_worktree: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -707,6 +721,10 @@ pub struct NativeSessionRuntime {
     pub reasoning_effort: Option<String>,
     pub permission_mode: String,
     pub plan_mode: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worktree_path: Option<String>,
+    #[serde(default)]
+    pub sandbox_active: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

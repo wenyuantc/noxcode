@@ -231,6 +231,7 @@ async fn collect_bash_output(
         exit_code,
         output: output.into_text(),
         timed_out: false,
+        sandbox_note: None,
     })
 }
 
@@ -239,6 +240,7 @@ fn timed_out_status() -> CommandStatus {
         exit_code: -1,
         output: "Bash 超时".to_string(),
         timed_out: true,
+        sandbox_note: None,
     }
 }
 

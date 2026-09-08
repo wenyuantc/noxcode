@@ -320,5 +320,13 @@
   "backgroundTaskExpandAll": "全部展开",
   "backgroundTaskCollapseAll": "全部收起",
   "backgroundTaskSendHint": "向该后台任务追加指令...",
-  "backgroundTaskStopHint": "停止后台任务"
+  "backgroundTaskStopHint": "停止后台任务",
+  "backgroundProcessesTitle": "后台进程",
+  "backgroundProcessesCount": "{{count}} 个进程",
+  "backgroundProcessesRunningCount": "{{count}} 运行中",
+  "backgroundProcessRunning": "运行中",
+  "backgroundProcessExited": "已退出",
+  "backgroundProcessFailed": "失败",
+  "backgroundProcessStopped": "已停止",
+  "backgroundProcessStopHint": "停止后台进程"
 }

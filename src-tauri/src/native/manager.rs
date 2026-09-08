@@ -159,6 +159,7 @@ pub struct NativeLiveSession {
     pub runtime: Option<crate::db::models::NativeSessionRuntime>,
     pub plan_mode: Arc<AtomicBool>,
     pub background: Option<Arc<crate::native::agent::background::BackgroundTaskRegistry>>,
+    pub processes: Option<Arc<crate::native::tools::processes::ProcessRegistry>>,
     pub closing: bool,
     pub cancel: CancelFlag,
     pub followup_tx: mpsc::Sender<NativeFollowup>,
@@ -820,6 +821,8 @@ pub(super) mod tests {
             reasoning_effort: None,
             permission_mode: "yolo".into(),
             plan_mode: false,
+            worktree_path: None,
+            sandbox_active: false,
         });
         let root = tempfile::tempdir().unwrap();
         let mut ctx = crate::native::tools::dispatch::ToolCtx::new(
@@ -1144,6 +1147,7 @@ pub(super) mod tests {
             plan_mode: std::sync::Arc::default(),
             allow_session_commands: std::sync::Arc::default(),
             background: None,
+            processes: None,
             closing: false,
             cancel: CancelFlag::new(),
             followup_tx: tx,
@@ -1189,6 +1193,7 @@ pub(super) mod tests {
             plan_mode: std::sync::Arc::default(),
             allow_session_commands: std::sync::Arc::default(),
             background: None,
+            processes: None,
             closing: false,
             cancel: CancelFlag::new(),
             followup_tx: tx,
@@ -1746,6 +1751,7 @@ pub(super) mod tests {
             plan_mode: std::sync::Arc::default(),
             allow_session_commands: std::sync::Arc::default(),
             background: None,
+            processes: None,
             closing: false,
             cancel: CancelFlag::new(),
             followup_tx: tx,

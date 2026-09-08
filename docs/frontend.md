@@ -59,7 +59,9 @@ src/components/git/      GitPanel · DiffView · CheckpointTimeline
 
 `useNativeEvents` 在 `App` 挂一次，把 native 事件写入 `sessionStore`：
 
-`native-session` / `native-session-title` / `native-stdout` / `native-text-delta` / `native-context-usage` / `native-turn-state` / `native-plan-mode` / `native-exit` / `native-permission-request` / `native-plan-question` / `native-plan-approval-request`。
+`native-session` / `native-session-title` / `native-stdout` / `native-text-delta` / `native-context-usage` / `native-turn-state` / `native-plan-mode` / `native-exit` / `native-permission-request` / `native-plan-question` / `native-plan-approval-request` / `native-background-tasks` / `native-background-processes`。
+
+事件流底部除后台子 Agent 面板外，还有 Bash / Monitor 进程表（`list_native_background_processes` / `stop_native_background_process`）。设置页「工具运行时」可开关 LSP、本地 Bash 沙箱、新会话 worktree 隔离。`NativeSessionRuntime` 可带 `worktree_path` 与 `sandbox_active`。
 
 打开历史会话立即改 `selectedSessionId`（侧栏高亮）；`lines` 已缓存则不重拉，无缓存拉最近 200 条。事件流只在当前选中会话的 `lines` 就绪后切换；加载期间隐藏旧会话流并显示加载态，避免侧栏、标题和输入框指向 A、内容仍显示 B。已打开的流保活最近 3 个（`hidden` 不卸 DOM）。live 行只走 `onStdout`（payload 可带 `tool` / `images`），历史结果不得覆盖已有缓存。`ensureHistory` 会解开 `{"nox":1,...}` 信封；旧会话仍按中文前缀文本兜底（FIFO + 子 Agent 分桶）。
 
