@@ -2,17 +2,24 @@ use std::fs;
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
-use tauri::{AppHandle, LogicalSize, Manager, PhysicalSize, Runtime, Window};
+use tauri::{
+    AppHandle, LogicalPosition, LogicalSize, Manager, PhysicalPosition, PhysicalSize, Runtime,
+    Window,
+};
 
 const MAIN_WINDOW_LABEL: &str = "main";
 const WINDOW_STATE_FILE_NAME: &str = "window-state.json";
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 struct PersistedWindowState {
     width: u32,
     height: u32,
     #[serde(default)]
     logical: bool,
+    #[serde(default)]
+    x: Option<f64>,
+    #[serde(default)]
+    y: Option<f64>,
 }
 
 fn app_config_dir<R: Runtime>(app: &AppHandle<R>) -> Result<PathBuf, String> {
@@ -56,11 +63,16 @@ fn load_window_state<R: Runtime>(
     parse_window_state(&raw)
 }
 
-fn state_from_logical_size(size: LogicalSize<u32>) -> Option<PersistedWindowState> {
+fn state_from_logical_size(
+    size: LogicalSize<u32>,
+    position: Option<LogicalPosition<f64>>,
+) -> Option<PersistedWindowState> {
     normalize_window_state(PersistedWindowState {
         width: size.width,
         height: size.height,
         logical: true,
+        x: position.map(|position| position.x),
+        y: position.map(|position| position.y),
     })
 }
 
@@ -76,11 +88,44 @@ fn logical_size_to_restore(
     Some(PhysicalSize::new(state.width, state.height).to_logical(sanitize_scale(scale_factor)))
 }
 
+type MonitorRect = (PhysicalPosition<i32>, PhysicalSize<u32>);
+
+fn window_intersects_monitor(
+    position: PhysicalPosition<i32>,
+    size: PhysicalSize<u32>,
+    monitors: &[MonitorRect],
+) -> bool {
+    let (left, top) = (i64::from(position.x), i64::from(position.y));
+    let (right, bottom) = (left + i64::from(size.width), top + i64::from(size.height));
+    monitors.iter().any(|(monitor_position, monitor_size)| {
+        let (m_left, m_top) = (i64::from(monitor_position.x), i64::from(monitor_position.y));
+        let (m_right, m_bottom) = (
+            m_left + i64::from(monitor_size.width),
+            m_top + i64::from(monitor_size.height),
+        );
+        left < m_right && right > m_left && top < m_bottom && bottom > m_top
+    })
+}
+
+fn restore_position_decision(
+    state: PersistedWindowState,
+    scale_factor: f64,
+    monitors: &[MonitorRect],
+) -> Option<PhysicalPosition<i32>> {
+    let (x, y) = (state.x?, state.y?);
+    let size = logical_size_to_restore(state, scale_factor)?;
+    let position: PhysicalPosition<f64> = LogicalPosition::new(x, y).to_physical(scale_factor);
+    let position = PhysicalPosition::new(position.x.round() as i32, position.y.round() as i32);
+    window_intersects_monitor(position, size.to_physical(scale_factor), monitors)
+        .then_some(position)
+}
+
 fn persist_logical_size<R: Runtime>(
     app: &AppHandle<R>,
     size: LogicalSize<u32>,
+    position: Option<LogicalPosition<f64>>,
 ) -> Result<(), String> {
-    let Some(state) = state_from_logical_size(size) else {
+    let Some(state) = state_from_logical_size(size, position) else {
         return Ok(());
     };
 
@@ -97,8 +142,13 @@ fn persist_physical_size<R: Runtime>(
     app: &AppHandle<R>,
     size: PhysicalSize<u32>,
     scale_factor: f64,
+    position: PhysicalPosition<i32>,
 ) -> Result<(), String> {
-    persist_logical_size(app, size.to_logical(sanitize_scale(scale_factor)))
+    persist_logical_size(
+        app,
+        size.to_logical(sanitize_scale(scale_factor)),
+        Some(position.to_logical(sanitize_scale(scale_factor))),
+    )
 }
 
 pub fn restore_main_window_size<R: Runtime>(app: &AppHandle<R>) -> Result<(), String> {
@@ -119,6 +169,21 @@ pub fn restore_main_window_size<R: Runtime>(app: &AppHandle<R>) -> Result<(), St
         .set_size(size)
         .map_err(|error| format!("恢复窗口尺寸失败: {error}"))?;
 
+    let monitors = window
+        .available_monitors()
+        .map_err(|error| format!("读取显示器信息失败: {error}"))?;
+    let monitor_rects: Vec<MonitorRect> = monitors
+        .iter()
+        .map(|monitor| (*monitor.position(), *monitor.size()))
+        .collect();
+
+    if let Some(position) = restore_position_decision(state, scale, &monitor_rects) {
+        window
+            .set_position(position)
+            .map_err(|error| format!("恢复窗口位置失败: {error}"))?;
+        return Ok(());
+    }
+
     let _ = window.center();
 
     Ok(())
@@ -131,7 +196,10 @@ pub fn save_window_size<R: Runtime>(window: &Window<R>) -> Result<(), String> {
     let scale = window
         .scale_factor()
         .map_err(|error| format!("读取窗口缩放失败: {error}"))?;
-    persist_physical_size(window.app_handle(), size, scale)
+    let position = window
+        .outer_position()
+        .map_err(|error| format!("读取窗口位置失败: {error}"))?;
+    persist_physical_size(window.app_handle(), size, scale, position)
 }
 
 pub async fn save_main_window_size_async<R: Runtime>(app: &AppHandle<R>) -> Result<(), String> {
@@ -144,14 +212,18 @@ pub async fn save_main_window_size_async<R: Runtime>(app: &AppHandle<R>) -> Resu
             };
             let size = window.inner_size().map_err(|error| error.to_string())?;
             let scale = window.scale_factor().map_err(|error| error.to_string())?;
-            Ok::<_, String>(Some(size.to_logical(sanitize_scale(scale))))
+            let position = window.outer_position().map_err(|error| error.to_string())?;
+            Ok::<_, String>(Some((
+                size.to_logical(sanitize_scale(scale)),
+                position.to_logical(sanitize_scale(scale)),
+            )))
         })();
         let _ = tx.send(snapshot);
     })
     .map_err(|error| error.to_string())?;
-    if let Some(size) = rx.await.map_err(|error| error.to_string())?? {
+    if let Some((size, position)) = rx.await.map_err(|error| error.to_string())?? {
         let app = app.clone();
-        tokio::task::spawn_blocking(move || persist_logical_size(&app, size))
+        tokio::task::spawn_blocking(move || persist_logical_size(&app, size, Some(position)))
             .await
             .map_err(|error| error.to_string())??;
     }
@@ -162,9 +234,10 @@ pub async fn save_main_window_size_async<R: Runtime>(app: &AppHandle<R>) -> Resu
 mod tests {
     use super::{
         logical_size_to_restore, normalize_window_state, parse_window_state,
-        state_from_logical_size, PersistedWindowState,
+        restore_position_decision, state_from_logical_size, window_intersects_monitor,
+        PersistedWindowState,
     };
-    use tauri::LogicalSize;
+    use tauri::{LogicalPosition, LogicalSize, PhysicalPosition, PhysicalSize};
 
     #[test]
     fn normalize_window_state_rejects_zero_dimensions() {
@@ -173,6 +246,8 @@ mod tests {
                 width: 0,
                 height: 800,
                 logical: true,
+                x: None,
+                y: None,
             }),
             None
         );
@@ -181,6 +256,8 @@ mod tests {
                 width: 1280,
                 height: 0,
                 logical: true,
+                x: None,
+                y: None,
             }),
             None
         );
@@ -194,6 +271,8 @@ mod tests {
                 width: 3600,
                 height: 2250,
                 logical: false,
+                x: None,
+                y: None,
             })
         );
     }
@@ -206,6 +285,37 @@ mod tests {
                 width: 1440,
                 height: 900,
                 logical: true,
+                x: None,
+                y: None,
+            })
+        );
+    }
+
+    #[test]
+    fn parse_window_state_accepts_position_payload() {
+        assert_eq!(
+            parse_window_state(r#"{"width":1440,"height":900,"logical":true,"x":100.0,"y":200.0}"#)
+                .unwrap(),
+            Some(PersistedWindowState {
+                width: 1440,
+                height: 900,
+                logical: true,
+                x: Some(100.0),
+                y: Some(200.0),
+            })
+        );
+    }
+
+    #[test]
+    fn parse_window_state_legacy_payload_defaults_position_to_none() {
+        assert_eq!(
+            parse_window_state(r#"{"width":1440,"height":900,"logical":true}"#).unwrap(),
+            Some(PersistedWindowState {
+                width: 1440,
+                height: 900,
+                logical: true,
+                x: None,
+                y: None,
             })
         );
     }
@@ -217,18 +327,43 @@ mod tests {
 
     #[test]
     fn state_from_logical_size_skips_invalid_dimensions() {
-        assert_eq!(state_from_logical_size(LogicalSize::new(0, 800)), None);
-        assert_eq!(state_from_logical_size(LogicalSize::new(1280, 0)), None);
+        assert_eq!(
+            state_from_logical_size(LogicalSize::new(0, 800), None),
+            None
+        );
+        assert_eq!(
+            state_from_logical_size(LogicalSize::new(1280, 0), None),
+            None
+        );
     }
 
     #[test]
     fn state_from_logical_size_keeps_valid_dimensions() {
         assert_eq!(
-            state_from_logical_size(LogicalSize::new(1440, 900)),
+            state_from_logical_size(LogicalSize::new(1440, 900), None),
             Some(PersistedWindowState {
                 width: 1440,
                 height: 900,
                 logical: true,
+                x: None,
+                y: None,
+            })
+        );
+    }
+
+    #[test]
+    fn state_from_logical_size_keeps_position() {
+        assert_eq!(
+            state_from_logical_size(
+                LogicalSize::new(1440, 900),
+                Some(LogicalPosition::new(100.0, 200.0)),
+            ),
+            Some(PersistedWindowState {
+                width: 1440,
+                height: 900,
+                logical: true,
+                x: Some(100.0),
+                y: Some(200.0),
             })
         );
     }
@@ -241,6 +376,8 @@ mod tests {
                     width: 3600,
                     height: 2250,
                     logical: false,
+                    x: None,
+                    y: None,
                 },
                 2.0,
             ),
@@ -256,6 +393,8 @@ mod tests {
                     width: 1440,
                     height: 900,
                     logical: true,
+                    x: None,
+                    y: None,
                 },
                 2.0,
             ),
@@ -271,10 +410,82 @@ mod tests {
                     width: 0,
                     height: 800,
                     logical: false,
+                    x: None,
+                    y: None,
                 },
                 2.0,
             ),
             None
         );
+    }
+
+    #[test]
+    fn window_intersects_monitor_detects_overlap() {
+        let monitors = [(PhysicalPosition::new(0, 0), PhysicalSize::new(1920, 1080))];
+        assert!(window_intersects_monitor(
+            PhysicalPosition::new(100, 100),
+            PhysicalSize::new(800, 600),
+            &monitors,
+        ));
+        // 部分在屏幕外仍算相交
+        assert!(window_intersects_monitor(
+            PhysicalPosition::new(-100, 0),
+            PhysicalSize::new(800, 600),
+            &monitors,
+        ));
+        // 完全在屏幕外
+        assert!(!window_intersects_monitor(
+            PhysicalPosition::new(2000, 0),
+            PhysicalSize::new(800, 600),
+            &monitors,
+        ));
+        // 副屏已拔除：位置落在旧副屏区域
+        assert!(!window_intersects_monitor(
+            PhysicalPosition::new(1920, 0),
+            PhysicalSize::new(800, 600),
+            &monitors,
+        ));
+    }
+
+    #[test]
+    fn restore_position_decision_keeps_valid_position() {
+        let state = PersistedWindowState {
+            width: 1440,
+            height: 900,
+            logical: true,
+            x: Some(100.0),
+            y: Some(200.0),
+        };
+        let monitors = [(PhysicalPosition::new(0, 0), PhysicalSize::new(1920, 1080))];
+        assert_eq!(
+            restore_position_decision(state, 2.0, &monitors),
+            Some(PhysicalPosition::new(200, 400))
+        );
+    }
+
+    #[test]
+    fn restore_position_decision_falls_back_when_monitor_missing() {
+        let state = PersistedWindowState {
+            width: 1440,
+            height: 900,
+            logical: true,
+            x: Some(3000.0),
+            y: Some(200.0),
+        };
+        let monitors = [(PhysicalPosition::new(0, 0), PhysicalSize::new(1920, 1080))];
+        assert_eq!(restore_position_decision(state, 1.0, &monitors), None);
+    }
+
+    #[test]
+    fn restore_position_decision_falls_back_without_position() {
+        let state = PersistedWindowState {
+            width: 1440,
+            height: 900,
+            logical: true,
+            x: None,
+            y: None,
+        };
+        let monitors = [(PhysicalPosition::new(0, 0), PhysicalSize::new(1920, 1080))];
+        assert_eq!(restore_position_decision(state, 1.0, &monitors), None);
     }
 }
