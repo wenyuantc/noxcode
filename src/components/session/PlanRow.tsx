@@ -19,15 +19,21 @@ import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import { resolveNativePlanApproval } from "@/lib/backend";
 import { resolveSessionRequest } from "@/lib/nativeRequestResolution";
-import { planApprovalModelArgs, resolveSessionSelection } from "@/lib/sessionModel";
+import {
+  planApprovalModelArgs,
+  resolvePlanApprovalThinking,
+  resolveSessionSelection,
+} from "@/lib/sessionModel";
 import type { GroupedSessionItem, PlanLineStatus } from "@/lib/sessionLines";
 import { parsePlanLine, planTitleFromBody } from "@/lib/sessionLines";
 import { cn } from "@/lib/utils";
 import { useChannelStore } from "@/stores/channelStore";
 import { useSessionStore } from "@/stores/sessionStore";
+import { useUiStore } from "@/stores/uiStore";
 import { useWorkspaceStore } from "@/stores/workspaceStore";
 import { AssistantMarkdown } from "./AssistantMarkdown";
 import { ChannelModelPicker } from "./ChannelModelPicker";
+import { ThinkingLevelPicker } from "./ThinkingLevelPicker";
 
 export function PlanPillButton({
   children,
@@ -217,9 +223,12 @@ export function PendingPlanApproval({ sessionId }: { sessionId: string }) {
   const session = useWorkspaceStore((state) =>
     state.sessions.find((item) => item.id === sessionId),
   );
+  const channels = useChannelStore((state) => state.channels);
   const activeChannelId = useChannelStore((state) => state.activeChannelId);
   const activeModelId = useChannelStore((state) => state.activeModelId);
   const setChannelSelection = useChannelStore((state) => state.setSelection);
+  const composerThinkingLevel = useUiStore((state) => state.composerThinkingLevel);
+  const setComposerThinkingLevel = useUiStore((state) => state.setComposerThinkingLevel);
   const defaultSelection = resolveSessionSelection({
     sessionId,
     runtime,
@@ -234,6 +243,14 @@ export function PendingPlanApproval({ sessionId }: { sessionId: string }) {
   const [expanded, setExpanded] = useState(false);
   const [copied, setCopied] = useState(false);
   const [selection, setSelection] = useState(defaultSelection);
+  const [thinkingLevel, setThinkingLevel] = useState(
+    () =>
+      resolvePlanApprovalThinking({
+        channels,
+        selection: defaultSelection,
+        preferredEffort: runtime?.reasoning_effort ?? composerThinkingLevel,
+      }).effort,
+  );
   const copyTimerRef = useRef<number | undefined>(undefined);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
   const defaultChannelId = defaultSelection.channelId;
@@ -248,6 +265,23 @@ export function PendingPlanApproval({ sessionId }: { sessionId: string }) {
   }, [pendingApproval?.request_id, defaultChannelId, defaultModelId]);
 
   useEffect(() => {
+    setThinkingLevel(
+      resolvePlanApprovalThinking({
+        channels,
+        selection: { channelId: defaultChannelId, modelId: defaultModelId },
+        preferredEffort: runtime?.reasoning_effort ?? composerThinkingLevel,
+      }).effort,
+    );
+  }, [
+    pendingApproval?.request_id,
+    defaultChannelId,
+    defaultModelId,
+    channels,
+    runtime?.reasoning_effort,
+    composerThinkingLevel,
+  ]);
+
+  useEffect(() => {
     return () => window.clearTimeout(copyTimerRef.current);
   }, []);
 
@@ -257,6 +291,11 @@ export function PendingPlanApproval({ sessionId }: { sessionId: string }) {
   const title = planTitleFromBody(planText) ?? t("planDocument");
   const cleanBody = cleanPlanBody(planText, title);
   const isLong = isLongContent(cleanBody || planText);
+  const thinking = resolvePlanApprovalThinking({
+    channels,
+    selection,
+    preferredEffort: thinkingLevel,
+  });
 
   const handleCopy = async () => {
     try {
@@ -272,7 +311,11 @@ export function PendingPlanApproval({ sessionId }: { sessionId: string }) {
   const resolve = async (approved: boolean) => {
     if (busy) return;
     const current = pendingApproval;
-    const modelArgs = planApprovalModelArgs(approved, selection);
+    const modelArgs = planApprovalModelArgs(
+      approved,
+      selection,
+      thinking.enabled ? thinking.effort : null,
+    );
     setBusy(true);
     setError(null);
     try {
@@ -284,10 +327,14 @@ export function PendingPlanApproval({ sessionId }: { sessionId: string }) {
           feedback.trim() || undefined,
           modelArgs.aiChannelId,
           modelArgs.model,
+          modelArgs.reasoningEffort,
         ),
       );
       if (approved && modelArgs.aiChannelId && modelArgs.model) {
         setChannelSelection(modelArgs.aiChannelId, modelArgs.model);
+      }
+      if (approved && modelArgs.reasoningEffort) {
+        setComposerThinkingLevel(modelArgs.reasoningEffort);
       }
     } catch (reason) {
       setError(String(reason));
@@ -436,6 +483,14 @@ export function PendingPlanApproval({ sessionId }: { sessionId: string }) {
               onSelectionChange={(channelId, modelId) => setSelection({ channelId, modelId })}
               className="max-w-[min(16rem,40vw)]"
             />
+            {thinking.enabled ? (
+              <ThinkingLevelPicker
+                value={thinking.effort}
+                levels={thinking.levels}
+                disabled={busy}
+                onChange={setThinkingLevel}
+              />
+            ) : null}
             <Button
               type="button"
               variant="outline"

@@ -1,5 +1,7 @@
 import { renderToStaticMarkup } from "react-dom/server";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { emptyChannelModel } from "@/lib/modelCatalog";
+import { useChannelStore } from "@/stores/channelStore";
 import { useSessionStore } from "@/stores/sessionStore";
 import { groupSessionLines, buildTurnBlocks } from "@/lib/sessionLines";
 import { PlanRow, PendingPlanApproval } from "./PlanRow";
@@ -28,6 +30,11 @@ vi.mock("./ChannelModelPicker", () => ({
     <button type="button">{`channel-model-picker:${selection?.channelId ?? ""}/${selection?.modelId ?? ""}`}</button>
   ),
 }));
+vi.mock("./ThinkingLevelPicker", () => ({
+  ThinkingLevelPicker: ({ value }: { value: string }) => (
+    <button type="button">{`thinking-level-picker:${value}`}</button>
+  ),
+}));
 vi.mock("@/stores/sessionStore", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/stores/sessionStore")>();
   return {
@@ -38,16 +45,31 @@ vi.mock("@/stores/sessionStore", async (importOriginal) => {
     ),
   };
 });
+vi.mock("@/stores/channelStore", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/stores/channelStore")>();
+  return {
+    useChannelStore: Object.assign(
+      (selector: (state: ReturnType<typeof actual.useChannelStore.getState>) => unknown) =>
+        selector(actual.useChannelStore.getState()),
+      actual.useChannelStore,
+    ),
+  };
+});
 
 describe("native interaction rendering", () => {
-  beforeEach(() =>
+  beforeEach(() => {
     useSessionStore.setState({
       permissions: {},
       planQuestions: {},
       planApprovals: {},
       configurationBySession: {},
-    }),
-  );
+    });
+    useChannelStore.setState({
+      channels: [],
+      activeChannelId: null,
+      activeModelId: null,
+    });
+  });
   it("never attaches current approval controls to a historical plan", () => {
     useSessionStore.getState().setPlanApproval({
       session_record_id: "s1",
@@ -72,6 +94,7 @@ describe("native interaction rendering", () => {
     expect(current).toContain("planAddFeedback");
     expect(current).toContain("planCopy");
     expect(current).toContain("channel-model-picker:/");
+    expect(current).not.toContain("thinking-level-picker:");
   });
   it("defaults the approval picker to the current session model", () => {
     useSessionStore.setState({
@@ -95,6 +118,56 @@ describe("native interaction rendering", () => {
     });
     const current = renderToStaticMarkup(<PendingPlanApproval sessionId="s1" />);
     expect(current).toContain("channel-model-picker:ch-1/deepseek-v4-flash");
+    expect(current).not.toContain("thinking-level-picker:");
+  });
+  it("shows the thinking level picker for a thinking-enabled implementation model", () => {
+    useChannelStore.setState({
+      channels: [
+        {
+          id: "ch-1",
+          name: "Myai-Ollama",
+          protocol: "openai",
+          base_url: "http://localhost",
+          extra_headers_json: null,
+          models: [
+            {
+              ...emptyChannelModel("deepseek-v4-flash"),
+              thinking_enabled: true,
+              thinking_level: "high",
+              thinking_levels: ["low", "high", "max"],
+            },
+          ],
+          responses_continuation: "auto",
+          enabled: true,
+          api_key: null,
+          api_key_configured: false,
+          created_at: "",
+          updated_at: "",
+        },
+      ],
+    });
+    useSessionStore.setState({
+      configurationBySession: {
+        s1: {
+          ai_channel_id: "ch-1",
+          model: "deepseek-v4-flash",
+          reasoning_effort: "max",
+          permission_mode: "default",
+          plan_mode: true,
+        },
+      },
+    });
+    useSessionStore.getState().setPlanApproval({
+      session_record_id: "s1",
+      request_id: "new",
+      profile_id: "p",
+      workspace_id: "ws",
+      session_kind: "plan",
+      plan: "new plan",
+    });
+    const current = renderToStaticMarkup(<PendingPlanApproval sessionId="s1" />);
+    expect(current).toContain("channel-model-picker:ch-1/deepseek-v4-flash");
+    expect(current).toContain("thinking-level-picker:max");
   });
   it("renders PlanAskCard with modern layout and options", () => {
     useSessionStore.getState().setPlanQuestion({

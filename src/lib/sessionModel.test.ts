@@ -1,8 +1,10 @@
 import { describe, expect, it } from "vitest";
 
+import { emptyChannelModel } from "./modelCatalog";
 import {
   mergeSessionRuntime,
   planApprovalModelArgs,
+  resolvePlanApprovalThinking,
   resolveSessionSelection,
 } from "./sessionModel";
 import type { NativeSessionRuntime } from "./types";
@@ -106,11 +108,71 @@ describe("planApprovalModelArgs", () => {
     ).toEqual({ aiChannelId: "ch-1", model: "deepseek-v4-flash" });
   });
 
+  it("includes reasoning effort when approving a thinking model", () => {
+    expect(
+      planApprovalModelArgs(true, { channelId: "ch-1", modelId: "deepseek-v4-flash" }, "max"),
+    ).toEqual({
+      aiChannelId: "ch-1",
+      model: "deepseek-v4-flash",
+      reasoningEffort: "max",
+    });
+  });
+
   it("omits the model when rejecting or when the selection is empty", () => {
     expect(
-      planApprovalModelArgs(false, { channelId: "ch-1", modelId: "deepseek-v4-flash" }),
+      planApprovalModelArgs(false, { channelId: "ch-1", modelId: "deepseek-v4-flash" }, "max"),
     ).toEqual({});
-    expect(planApprovalModelArgs(true, { channelId: "  ", modelId: "m" })).toEqual({});
-    expect(planApprovalModelArgs(true, { channelId: null, modelId: "m" })).toEqual({});
+    expect(planApprovalModelArgs(true, { channelId: "  ", modelId: "m" }, "max")).toEqual({});
+    expect(planApprovalModelArgs(true, { channelId: null, modelId: "m" }, "max")).toEqual({});
+    expect(
+      planApprovalModelArgs(true, { channelId: "ch-1", modelId: "deepseek-v4-flash" }, "  "),
+    ).toEqual({ aiChannelId: "ch-1", model: "deepseek-v4-flash" });
+  });
+});
+
+describe("resolvePlanApprovalThinking", () => {
+  const thinkingModel = {
+    ...emptyChannelModel("deepseek-v4-flash"),
+    thinking_enabled: true,
+    thinking_level: "high",
+    thinking_levels: ["low", "high", "max"],
+  };
+  const silentModel = {
+    ...emptyChannelModel("plain"),
+    thinking_enabled: false,
+  };
+  const channels = [
+    { id: "ch-1", models: [thinkingModel] },
+    { id: "ch-2", models: [silentModel] },
+  ];
+
+  it("exposes allowed levels and keeps a valid preferred effort", () => {
+    expect(
+      resolvePlanApprovalThinking({
+        channels,
+        selection: { channelId: "ch-1", modelId: "deepseek-v4-flash" },
+        preferredEffort: "max",
+      }),
+    ).toEqual({ enabled: true, levels: ["low", "high", "max"], effort: "max" });
+  });
+
+  it("falls back to the model default when the preferred effort is out of range", () => {
+    expect(
+      resolvePlanApprovalThinking({
+        channels,
+        selection: { channelId: "ch-1", modelId: "deepseek-v4-flash" },
+        preferredEffort: "xhigh",
+      }).effort,
+    ).toBe("high");
+  });
+
+  it("hides the picker when the selected model has thinking off", () => {
+    expect(
+      resolvePlanApprovalThinking({
+        channels,
+        selection: { channelId: "ch-2", modelId: "plain" },
+        preferredEffort: "max",
+      }),
+    ).toEqual({ enabled: false, levels: [], effort: "medium" });
   });
 });
