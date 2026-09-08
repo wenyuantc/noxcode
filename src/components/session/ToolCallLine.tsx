@@ -16,12 +16,12 @@ export function ToolCallLine({ item }: { item: GroupedSessionItem }) {
         {item.ok === false ? `${t("toolFailed")} · ` : ""}
         {item.toolName ?? item.text.split("\n")[0]}
       </button>
-      {open && item.result ? (
+      {open && item.result !== undefined ? (
         <pre className="mt-1 max-h-80 overflow-auto whitespace-pre-wrap text-xs text-muted-foreground">
           {item.result}
         </pre>
       ) : null}
-      {open && !item.result ? (
+      {open && item.result === undefined ? (
         <p className="text-xs text-muted-foreground">{t("toolResult")}</p>
       ) : null}
     </div>

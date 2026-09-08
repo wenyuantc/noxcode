@@ -14,6 +14,7 @@ import {
   parseUsageLine,
   segmentDurationSeconds,
   sessionLineBody,
+  toolsStillRunning,
 } from "@/lib/sessionLines";
 import { cn, formatTokenCount } from "@/lib/utils";
 import { AssistantMarkdown } from "./AssistantMarkdown";
@@ -256,7 +257,7 @@ export function SubagentRow({ segment, running, nowMs }: SubagentRowProps) {
             <div className="pl-1">
               <ToolSummaryRow
                 items={toolItems}
-                running={isRunning && !toolItems[toolItems.length - 1]?.result}
+                running={isRunning && toolsStillRunning(toolItems)}
               />
             </div>
           ) : null}

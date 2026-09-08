@@ -1025,6 +1025,16 @@ function pairingBucket(item: {
   return item.tool?.subagent_tag ?? item.subagentTag ?? stripSubagentPrefix(item.text).prefix ?? "";
 }
 
+export function hasToolResult(item: Pick<GroupedSessionItem, "result" | "tool">): boolean {
+  return item.tool?.phase === "result" || item.result !== undefined;
+}
+
+export function toolsStillRunning(
+  items: Array<Pick<GroupedSessionItem, "result" | "tool">>,
+): boolean {
+  return items.some((item) => !hasToolResult(item));
+}
+
 function applyToolResult(item: GroupedSessionItem, result: string, line: RawSessionLine): void {
   item.result = result;
   if (line.tool) {
@@ -1042,7 +1052,7 @@ function pairToolResult(
   const callId = line.tool?.call_id;
   if (callId) {
     const hit = grouped.find(
-      (item) => item.kind === "tool" && !item.result && item.tool?.call_id === callId,
+      (item) => item.kind === "tool" && !hasToolResult(item) && item.tool?.call_id === callId,
     );
     if (hit) {
       applyToolResult(hit, result, line);
@@ -1051,7 +1061,7 @@ function pairToolResult(
   }
   const bucket = pairingBucket({ tool: line.tool, text: line.text });
   for (const item of grouped) {
-    if (item.kind !== "tool" || item.result) continue;
+    if (item.kind !== "tool" || hasToolResult(item)) continue;
     if (pairingBucket(item) !== bucket) continue;
     applyToolResult(item, result, line);
     return true;

@@ -41,6 +41,8 @@ import {
   thinkingText,
   toolTitle,
   workDurationSeconds,
+  hasToolResult,
+  toolsStillRunning,
 } from "./sessionLines";
 
 function line(id: string, text: string, createdAt = id) {
@@ -164,6 +166,75 @@ describe("sessionLines", () => {
     expect(grouped[0]?.ok).toBe(false);
     expect(grouped[1]?.result).toBe("b-content");
     expect(grouped[1]?.ok).toBe(true);
+  });
+
+  it("treats an empty tool result as complete and does not re-pair it", () => {
+    const grouped = groupSessionLines([
+      line("1", "[读取] a.ts"),
+      line("2", "[工具结果]"),
+      line("3", "[读取] b.ts"),
+      line("4", "[工具结果]\nb-content"),
+    ]);
+    expect(grouped).toHaveLength(2);
+    expect(grouped[0]?.result).toBe("");
+    expect(hasToolResult(grouped[0]!)).toBe(true);
+    expect(grouped[1]?.result).toBe("b-content");
+    expect(toolsStillRunning(grouped)).toBe(false);
+  });
+
+  it("keeps a tool running until a structured result arrives, including empty text", () => {
+    const running = groupSessionLines([
+      {
+        ...line("1", "[读取] a.ts"),
+        tool: { phase: "start", call_id: "c1", name: "Read", title: "读取 a.ts" },
+      },
+    ]);
+    expect(toolsStillRunning(running)).toBe(true);
+    const done = groupSessionLines([
+      {
+        ...line("1", "[读取] a.ts"),
+        tool: { phase: "start", call_id: "c1", name: "Read", title: "读取 a.ts" },
+      },
+      {
+        ...line("2", "[工具结果]"),
+        tool: {
+          phase: "result",
+          call_id: "c1",
+          name: "Read",
+          title: "读取 a.ts",
+          ok: true,
+        },
+      },
+    ]);
+    expect(done[0]?.result).toBe("");
+    expect(done[0]?.tool?.phase).toBe("result");
+    expect(hasToolResult(done[0]!)).toBe(true);
+    expect(toolsStillRunning(done)).toBe(false);
+  });
+
+  it("marks a tool group running when any item is still incomplete", () => {
+    const grouped = groupSessionLines([
+      {
+        ...line("1", "[读取] a.ts"),
+        tool: { phase: "start", call_id: "c1", name: "Read", title: "读取 a.ts" },
+      },
+      {
+        ...line("2", "[读取] b.ts"),
+        tool: { phase: "start", call_id: "c2", name: "Read", title: "读取 b.ts" },
+      },
+      {
+        ...line("3", "[工具结果]"),
+        tool: {
+          phase: "result",
+          call_id: "c2",
+          name: "Read",
+          title: "读取 b.ts",
+          ok: true,
+        },
+      },
+    ]);
+    expect(hasToolResult(grouped[1]!)).toBe(true);
+    expect(toolsStillRunning(grouped)).toBe(true);
   });
 
   it("unwraps persisted stdout envelopes", () => {
