@@ -186,13 +186,31 @@ jobs:
             fi
           done
 
+      # upload-artifact 把 FinalizeArtifact 403 标成 non-retryable；GitHub CDN
+      # 瞬时失败会直接让整次发版停掉。步骤级重试一次即可覆盖这类抖动。
       - name: 上传 ${{ matrix.platform_name }} 安装包
+        id: upload_artifacts
+        continue-on-error: true
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.artifact_name }}
           path: ${{ matrix.artifact_path }}
           if-no-files-found: error
           retention-days: 14
+
+      - name: 等待后重试上传
+        if: steps.upload_artifacts.outcome == 'failure'
+        run: sleep 15
+
+      - name: 重试上传 ${{ matrix.platform_name }} 安装包
+        if: steps.upload_artifacts.outcome == 'failure'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact_name }}
+          path: ${{ matrix.artifact_path }}
+          if-no-files-found: error
+          retention-days: 14
+          overwrite: true
 
   # 仅在 push tag（v*）时发布；workflow_dispatch 只构建、不发版。
   publish-release:
