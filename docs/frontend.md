@@ -16,9 +16,10 @@ P5 落地单主界面 + 全屏设置。布局学 ZCode：左侧两级树、输�
 ## 目录
 
 ```
-src/main.tsx             i18n init → applyTheme / applyCodeAppearance → App
+src/main.tsx             i18n init → applyTheme / applyCodeAppearance → 禁 WebView 默认右键 → App
 src/App.tsx              四条路由 + 权限 / SSH 信任对话框
 src/lib/backend.ts       唯一 IPC 出口
+src/lib/disableDefaultContextMenu.ts  桌面端拦截 WebView 自带 Back / Reload 右键菜单
 src/lib/appUpdate.ts     检查 / 下载 / 重启桌面更新
 src/lib/apiLogs.ts       API 调用记录格式化 / 分页
 src/lib/sessionLines.ts  行前缀解析、结构化 tool 信封、call_id / 子 Agent 分桶配对、时序 segments（同一回合按编号折叠进首个窗口，即使事件交错）/ 待办解析
@@ -70,7 +71,7 @@ Composer / 编辑重发 / 重试走 `submitSessionPrompt`：有选中会话则 `
 
 ## 工作区 / 分支 / 命令面板
 
-会话行右键、悬浮「更多」和顶部分支右侧「更多」共用 `SessionMenu` 的六项操作：置顶 / 取消置顶、重命名、归档 / 取消归档、打开目录、复制路径、复制会话 ID。菜单目标按会话 ID 固定，不随当前选中项改变；会话行不再提供悬浮图钉或删除按钮。重命名保存完整非空名称，列表仍用紧凑标题并通过 tooltip 展示原名。目录优先取目标会话 `working_dir`，回退至其所属工作区；SSH 仅允许复制远端路径。本机目录经 Rust 校验后交给 opener，macOS 显示「在 Finder 中打开」，Windows / Linux 显示「打开项目目录」。
+会话行右键、悬浮「更多」和顶部分支右侧「更多」共用 `SessionMenu` 的六项操作：置顶 / 取消置顶、重命名、归档 / 取消归档、打开目录、复制路径、复制会话 ID。菜单目标按会话 ID 固定，不随当前选中项改变；会话行不再提供悬浮图钉或删除按钮。桌面端在 `main.tsx` 捕获阶段拦截 `contextmenu`，去掉 WebView 自带的 Back / Reload 菜单；自定义 `SessionMenu` 不受影响。浏览器 `npm run dev` 仍保留浏览器右键。重命名保存完整非空名称，列表仍用紧凑标题并通过 tooltip 展示原名。目录优先取目标会话 `working_dir`，回退至其所属工作区；SSH 仅允许复制远端路径。本机目录经 Rust 校验后交给 opener，macOS 显示「在 Finder 中打开」，Windows / Linux 显示「打开项目目录」。
 
 侧栏工作区列表下方「已归档」默认折叠，每页 50 条；普通列表、置顶分组及命令面板排除已归档会话。Store 按 ID 合并缓存并防止过期刷新覆盖刚完成的操作。归档当前会话回空态，其余会话归档不改变选择；打开归档会话只能查看，输入区显示「取消归档任务」，编辑重发及重试禁用。归档不清理数据或置顶标记。存在工作回合、排队输入、待处理审批 / 问题或后台任务时，前后端均禁止归档；Rust 的归档、续聊、重启、输入及压缩共用按会话互斥锁，已归档会话在续聊前必须显式恢复。
 
