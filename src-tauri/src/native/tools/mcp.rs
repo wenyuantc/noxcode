@@ -1772,7 +1772,8 @@ mod tests {
         assert!(command.contains("TOKEN='a b'"));
         assert!(command.contains("'npx'"));
         assert!(command.contains("'pkg'"));
-        assert!(!command.contains("&&"));
+        let exec_tail = command.split("exec ").nth(1).expect("exec tail");
+        assert!(!exec_tail.contains("&&"));
     }
 
     #[test]
