@@ -148,7 +148,7 @@ P4 把进程内编程 Agent 接到渠道 + 工作区外壳。数据流仍是 `Re
 
 ## 工具与 MCP 子进程环境
 
-会话启动时把 `network-settings.json` 转成代理 / CA 环境变量：代理写入大小写 `HTTP_PROXY` / `HTTPS_PROXY`，不代理地址写入 `NO_PROXY`，自定义 CA 写入 `SSL_CERT_FILE` / `NODE_EXTRA_CA_CERTS`。本地 Bash 和本地 MCP 子进程会注入这些变量；MCP 自身的 `env` 随后应用。SSH 远端 Bash 与远端 MCP 不注入本机网络设置。
+会话启动时把 `network-settings.json` 转成代理 / CA 环境变量：代理写入大小写 `HTTP_PROXY` / `HTTPS_PROXY`，不代理地址写入 `NO_PROXY`，自定义 CA 写入 `SSL_CERT_FILE` / `NODE_EXTRA_CA_CERTS`。本地 Bash 和本地 MCP 子进程会注入这些变量；MCP 自身的 `env` 随后应用。本地 stdio MCP 还会把 Homebrew / nvm / fnm / volta 等常见目录并入 PATH，并把 `npx` 这类裸命令解析成绝对路径后再 spawn，避免桌面进程 PATH 过短导致 `os error 2`。SSH 远端 Bash 与远端 MCP 不注入本机网络设置。
 
 子 Agent 克隆父 Agent 的 `ToolCtx.extra_env`，因此本地 Bash 的网络环境在子 Agent 中保持一致。
 
