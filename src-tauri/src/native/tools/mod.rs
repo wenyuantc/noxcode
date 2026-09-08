@@ -3,6 +3,7 @@
 
 pub mod cancel;
 pub mod catalog;
+pub mod command_path;
 pub mod contract;
 pub mod dispatch;
 pub mod file_access;

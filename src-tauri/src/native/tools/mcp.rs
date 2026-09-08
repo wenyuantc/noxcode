@@ -23,7 +23,7 @@ use tokio::sync::mpsc;
 
 use crate::app::network_settings::{load_network_settings, proxy_env_vars};
 use crate::app::ssh::exec::{spawn_ssh_command, SshCommandStream, SshStreamEvent};
-use crate::app::ssh::shell::shell_escape_single_quoted;
+use crate::app::ssh::shell::{remote_shell_bootstrap, shell_escape_single_quoted};
 use crate::db::models::{McpServerConfig, SshConfigRecord, MCP_TRANSPORT_HTTP, MCP_TRANSPORT_SSE};
 use crate::native::model::types::ToolSpec;
 use crate::process_spawn::configure_tokio_command;
@@ -272,7 +272,11 @@ pub fn remote_mcp_shell_command(server: &McpServerConfig) -> Result<String, Stri
     for arg in &server.args {
         parts.push(shell_escape_single_quoted(arg));
     }
-    Ok(format!("exec {}", parts.join(" ")))
+    Ok(format!(
+        "{}exec {}",
+        remote_shell_bootstrap(),
+        parts.join(" ")
+    ))
 }
 
 impl McpSession {
@@ -1330,11 +1334,14 @@ async fn spawn_local(
     if server.command.trim().is_empty() {
         return Err("MCP 启动命令不能为空".to_string());
     }
-    let mut command = Command::new(server.command.trim());
+    let program = super::command_path::resolve_program(server.command.trim())
+        .map_err(|error| format!("启动 MCP 失败: {error}"))?;
+    let mut command = Command::new(&program);
     command.args(&server.args);
     for (key, value) in extra_env {
         command.env(key, value);
     }
+    command.env("PATH", super::command_path::augmented_path());
     let mut seen = HashMap::new();
     for env in &server.env {
         let key = env.key.trim();
@@ -1351,9 +1358,16 @@ async fn spawn_local(
         .kill_on_drop(true);
     configure_tokio_command(&mut command);
     configure_process_group(&mut command);
-    let mut child = command
-        .spawn()
-        .map_err(|error| format!("启动 MCP 失败: {error}"))?;
+    let mut child = command.spawn().map_err(|error| {
+        if error.kind() == std::io::ErrorKind::NotFound {
+            format!(
+                "启动 MCP 失败: {}",
+                super::command_path::command_not_found(server.command.trim())
+            )
+        } else {
+            format!("启动 MCP 失败: {error}")
+        }
+    })?;
     let stdin = child
         .stdin
         .take()
@@ -1753,11 +1767,13 @@ mod tests {
     #[test]
     fn remote_command_uses_exec_and_escapes() {
         let command = remote_mcp_shell_command(&sample_server()).expect("cmd");
-        assert!(command.starts_with("exec "));
+        assert!(command.contains("PATH="));
+        assert!(command.contains("exec "));
         assert!(command.contains("TOKEN='a b'"));
         assert!(command.contains("'npx'"));
         assert!(command.contains("'pkg'"));
-        assert!(!command.contains("&&"));
+        let exec_tail = command.split("exec ").nth(1).expect("exec tail");
+        assert!(!exec_tail.contains("&&"));
     }
 
     #[test]

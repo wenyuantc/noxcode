@@ -645,7 +645,7 @@ export function McpSettingsTab() {
     openCreate({
       name: "playwright",
       command: "npx",
-      args: ["@playwright/mcp@latest"],
+      args: ["-y", "@playwright/mcp@latest"],
       notes: t("mcp.playwright.notes"),
       enabled: true,
     });

@@ -67,7 +67,7 @@ flowchart LR
 
 返回值是自定义 `SshCommandOutput { stdout, stderr, exit_code }`，不是 `std::process::Output`。后续 `tools/ssh.rs` 用 `.success()`（`exit_code == Some(0)`）。
 
-远端命令走 `sh -lc '<bootstrap><script>'`。bootstrap 只补通用 PATH（`/opt/homebrew/bin`、`/usr/local/bin`、`$HOME/.local/bin`、`$HOME/bin`），不含 Node / nvm / pnpm。
+远端命令走 `sh -lc '<bootstrap><script>'`。bootstrap 只补通用 PATH（`/opt/homebrew/bin`、`/usr/local/bin`、`$HOME/.local/bin`、`$HOME/bin`），不含 Node / nvm / pnpm。远端 stdio MCP 同样前置这段 bootstrap 再 `exec` 启动命令；设置页「测试」仍只走本机 spawn。
 
 ## 算法偏好
 
