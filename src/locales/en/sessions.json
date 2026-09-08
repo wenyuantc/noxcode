@@ -193,6 +193,7 @@
   "contextCapacity": "Context capacity",
   "contextCacheShort": "cache {{rate}}%",
   "contextCacheRate": "Cache rate {{rate}}%",
+  "contextTotalUsage": "Total usage {{count}}",
   "contextCategoryMcp": "MCP tools",
   "contextCategorySystemTools": "System tools",
   "contextCategorySkills": "Skills",

@@ -60,6 +60,17 @@ export function formatCompactTokens(value: number, locale = getCurrentAppLocale(
   return String(count);
 }
 
+/** 1_000 → K, 1_000_000 → M, 1_000_000_000 → B；单位值固定两位小数。 */
+export function formatScaledTokens(value: number): string {
+  const count = Math.max(0, Math.round(value));
+  if (count < 1_000) return String(count);
+  const kText = (count / 1_000).toFixed(2);
+  if (Number(kText) < 1_000) return `${kText}K`;
+  const mText = (count / 1_000_000).toFixed(2);
+  if (Number(mText) < 1_000) return `${mText}M`;
+  return `${(count / 1_000_000_000).toFixed(2)}B`;
+}
+
 export function greetingPeriod(now = new Date()): "morning" | "afternoon" | "evening" {
   const hour = now.getHours();
   if (hour < 12) return "morning";

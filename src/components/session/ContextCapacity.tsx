@@ -3,7 +3,7 @@ import { useTranslation } from "react-i18next";
 
 import { getCurrentAppLocale } from "@/lib/i18n/locale";
 import type { NativeContextUsage } from "@/lib/types";
-import { cn, formatCompactTokens } from "@/lib/utils";
+import { cn, formatCompactTokens, formatScaledTokens } from "@/lib/utils";
 
 const CATEGORIES = [
   { key: "mcp_tokens", labelKey: "contextCategoryMcp", swatch: "bg-sky-500" },
@@ -91,11 +91,18 @@ export function ContextCapacity({
               {usedLabel}/{limitLabel} ({occupancy.toFixed(1)}%)
             </span>
           </div>
-          {cacheRate != null ? (
-            <p className="mt-1 text-muted-foreground">
-              {t("contextCacheRate", { rate: cacheRate.toFixed(1) })}
-            </p>
-          ) : null}
+          <div className="mt-1 flex items-center gap-2 text-muted-foreground">
+            {cacheRate != null ? (
+              <span className="min-w-0 flex-1 truncate">
+                {t("contextCacheRate", { rate: cacheRate.toFixed(1) })}
+              </span>
+            ) : (
+              <span className="min-w-0 flex-1" />
+            )}
+            <span className="shrink-0 tabular-nums text-foreground">
+              {t("contextTotalUsage", { count: formatScaledTokens(used) })}
+            </span>
+          </div>
           <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-muted">
             <div className="h-full rounded-full bg-sky-500" style={{ width: `${occupancy}%` }} />
           </div>

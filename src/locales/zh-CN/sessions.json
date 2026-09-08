@@ -193,6 +193,7 @@
   "contextCapacity": "上下文容量",
   "contextCacheShort": "缓存 {{rate}}%",
   "contextCacheRate": "缓存率 {{rate}}%",
+  "contextTotalUsage": "总用量 {{count}}",
   "contextCategoryMcp": "MCP 工具",
   "contextCategorySystemTools": "系统工具",
   "contextCategorySkills": "技能",
