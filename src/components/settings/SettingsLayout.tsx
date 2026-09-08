@@ -1,4 +1,4 @@
-import { useEffect, type ComponentType } from "react";
+import { useEffect, useState, type ComponentType } from "react";
 import { useTranslation } from "react-i18next";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import {
@@ -21,6 +21,7 @@ import {
   Zap,
 } from "lucide-react";
 
+import { formatAppVersionLabel, getAppVersion, packageAppVersion } from "@/lib/appUpdate";
 import { cn } from "@/lib/utils";
 import { useChannelStore } from "@/stores/channelStore";
 import { useSettingsStore } from "@/stores/settingsStore";
@@ -89,14 +90,47 @@ const GROUPS = [
   },
 ] as const;
 
+export function SettingsBrandFooter({ version }: { version: string }) {
+  const label = formatAppVersionLabel(version);
+  return (
+    <div className="flex items-center justify-between border-t border-sidebar-border/70 px-3.5 py-2.5">
+      <span className="text-[11px] font-medium tracking-tight text-muted-foreground/60">
+        noxcode
+      </span>
+      {label ? (
+        <span className="text-[10px] font-mono text-muted-foreground/50">{label}</span>
+      ) : null}
+    </div>
+  );
+}
+
 export function SettingsLayout() {
   const { t } = useTranslation(["settings", "layout", "nav"]);
   const { section } = useParams();
   const navigate = useNavigate();
   const current = section ?? "general";
+  const [appVersion, setAppVersion] = useState(packageAppVersion);
 
   useEffect(() => {
     void Promise.all([useSettingsStore.getState().load(), useChannelStore.getState().load()]);
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    void getAppVersion()
+      .then((version) => {
+        if (!cancelled) {
+          setAppVersion(version);
+        }
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setAppVersion(packageAppVersion);
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   useEffect(() => {
@@ -169,12 +203,7 @@ export function SettingsLayout() {
         </div>
 
         {/* 底部品牌标语 */}
-        <div className="flex items-center justify-between border-t border-sidebar-border/70 px-3.5 py-2.5">
-          <span className="text-[11px] font-medium tracking-tight text-muted-foreground/60">
-            noxcode
-          </span>
-          <span className="text-[10px] font-mono text-muted-foreground/50">v0.2</span>
-        </div>
+        <SettingsBrandFooter version={appVersion} />
       </aside>
 
       {/* 主内容区 */}

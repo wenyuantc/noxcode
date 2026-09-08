@@ -1,9 +1,21 @@
 import { describe, expect, it, vi } from "vitest";
+import { getVersion } from "@tauri-apps/api/app";
 
-import { mapUpdaterError, relaunchApp, updaterErrorI18nKey } from "@/lib/appUpdate";
+import {
+  formatAppVersionLabel,
+  getAppVersion,
+  mapUpdaterError,
+  packageAppVersion,
+  relaunchApp,
+  updaterErrorI18nKey,
+} from "@/lib/appUpdate";
 import { restartApp } from "@/lib/backend";
+import { version as packageVersion } from "../../package.json";
 
 vi.mock("@/lib/backend", () => ({ restartApp: vi.fn() }));
+vi.mock("@tauri-apps/api/app", () => ({
+  getVersion: vi.fn(),
+}));
 
 it("restarts through the backend cleanup coordinator and propagates IPC failures", async () => {
   const restart = vi.mocked(restartApp);
@@ -58,6 +70,35 @@ describe("mapUpdaterError", () => {
   it("falls back to unknown for other failures", () => {
     expect(mapUpdaterError("the platform `windows-arm64` was not found")).toBe("unknown");
     expect(mapUpdaterError({ message: 12 })).toBe("unknown");
+  });
+});
+
+describe("app version", () => {
+  it("keeps the package fallback aligned with package.json", () => {
+    expect(packageAppVersion).toBe(packageVersion);
+    expect(packageAppVersion).not.toBe("0.2");
+  });
+
+  it("formats a version label with a single v prefix", () => {
+    expect(formatAppVersionLabel("0.3.5")).toBe("v0.3.5");
+    expect(formatAppVersionLabel("v0.3.5")).toBe("v0.3.5");
+    expect(formatAppVersionLabel("  1.0.0  ")).toBe("v1.0.0");
+    expect(formatAppVersionLabel("")).toBe("");
+  });
+
+  it("returns the Tauri version when available", async () => {
+    vi.mocked(getVersion).mockResolvedValueOnce("9.9.9");
+    await expect(getAppVersion()).resolves.toBe("9.9.9");
+  });
+
+  it("falls back to package.json when Tauri version is unavailable", async () => {
+    vi.mocked(getVersion).mockRejectedValueOnce(new Error("not tauri"));
+    await expect(getAppVersion()).resolves.toBe(packageAppVersion);
+  });
+
+  it("falls back to package.json when Tauri returns an empty version", async () => {
+    vi.mocked(getVersion).mockResolvedValueOnce("   ");
+    await expect(getAppVersion()).resolves.toBe(packageAppVersion);
   });
 });
 
