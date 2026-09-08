@@ -3550,12 +3550,35 @@ pub async fn compact_native_session(
     Ok(true)
 }
 
+fn resolve_plan_implementation_effort(
+    current: Option<&str>,
+    requested: Option<&str>,
+) -> Option<String> {
+    requested
+        .map(str::trim)
+        .filter(|item| !item.is_empty())
+        .map(ToOwned::to_owned)
+        .or_else(|| current.map(ToOwned::to_owned))
+}
+
+fn plan_implementation_unchanged(
+    current_channel: &str,
+    current_model: &str,
+    current_effort: Option<&str>,
+    next_channel: &str,
+    next_model: &str,
+    next_effort: Option<&str>,
+) -> bool {
+    current_channel == next_channel && current_model == next_model && current_effort == next_effort
+}
+
 async fn apply_plan_implementation_model(
     app: &AppHandle,
     manager_state: &Arc<Mutex<NativeAgentManager>>,
     session_record_id: &str,
     ai_channel_id: &str,
     model: &str,
+    reasoning_effort: Option<&str>,
 ) -> Result<(), String> {
     let snapshot = {
         let manager = manager_state.lock().await;
@@ -3571,12 +3594,21 @@ async fn apply_plan_implementation_model(
             .as_ref()
             .map(|item| item.model.as_str())
             .unwrap_or("");
-        if current_channel == ai_channel_id && current_model == model {
-            return Ok(());
-        }
-        let effort = runtime
+        let current_effort = runtime
             .as_ref()
             .and_then(|item| item.reasoning_effort.clone());
+        let effort =
+            resolve_plan_implementation_effort(current_effort.as_deref(), reasoning_effort);
+        if plan_implementation_unchanged(
+            current_channel,
+            current_model,
+            current_effort.as_deref(),
+            ai_channel_id,
+            model,
+            effort.as_deref(),
+        ) {
+            return Ok(());
+        }
         let workspace_id = session.info.workspace_id.clone().unwrap_or_default();
         let profile_id = session.info.profile_id.clone();
         let session_kind = session.info.session_kind.clone();
@@ -3670,8 +3702,14 @@ async fn apply_plan_implementation_model(
         Some(&workspace_id),
         &session_kind,
         format!(
-            "[内置 Agent] 实施改用 渠道={} 协议={} model={}",
-            next.channel_name, next.protocol, next.model
+            "[内置 Agent] 实施改用 渠道={} 协议={} model={}{}",
+            next.channel_name,
+            next.protocol,
+            next.model,
+            next.effort
+                .as_deref()
+                .map(|effort| format!(" 思考={effort}"))
+                .unwrap_or_default()
         ),
     )
     .await;
@@ -3689,6 +3727,7 @@ pub async fn resolve_native_plan_approval(
     feedback: Option<String>,
     ai_channel_id: Option<String>,
     model: Option<String>,
+    reasoning_effort: Option<String>,
 ) -> Result<(), String> {
     state
         .lock()
@@ -3702,6 +3741,10 @@ pub async fn resolve_native_plan_approval(
         .as_deref()
         .map(str::trim)
         .filter(|item| !item.is_empty());
+    let effort = reasoning_effort
+        .as_deref()
+        .map(str::trim)
+        .filter(|item| !item.is_empty());
     if approved {
         if let (Some(channel), Some(model)) = (channel, model) {
             apply_plan_implementation_model(
@@ -3710,6 +3753,7 @@ pub async fn resolve_native_plan_approval(
                 &session_record_id,
                 channel,
                 model,
+                effort,
             )
             .await?;
         }
@@ -4175,6 +4219,46 @@ mod tests {
             .unwrap();
         assert_eq!(config.auth_type, "key");
         assert!(config.password_probe_status.is_none());
+    }
+
+    #[test]
+    fn plan_implementation_keeps_current_effort_unless_requested() {
+        assert_eq!(
+            super::resolve_plan_implementation_effort(Some("high"), None).as_deref(),
+            Some("high")
+        );
+        assert_eq!(
+            super::resolve_plan_implementation_effort(Some("high"), Some("  ")).as_deref(),
+            Some("high")
+        );
+        assert_eq!(
+            super::resolve_plan_implementation_effort(Some("high"), Some("max")).as_deref(),
+            Some("max")
+        );
+        assert!(super::plan_implementation_unchanged(
+            "ch",
+            "model",
+            Some("high"),
+            "ch",
+            "model",
+            Some("high")
+        ));
+        assert!(!super::plan_implementation_unchanged(
+            "ch",
+            "model",
+            Some("high"),
+            "ch",
+            "model",
+            Some("max")
+        ));
+        assert!(!super::plan_implementation_unchanged(
+            "ch",
+            "old",
+            Some("high"),
+            "ch",
+            "new",
+            Some("high")
+        ));
     }
 
     #[test]

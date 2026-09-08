@@ -667,6 +667,7 @@ export function resolveNativePlanApproval(
   feedback?: string,
   aiChannelId?: string,
   model?: string,
+  reasoningEffort?: string,
 ): Promise<void> {
   return invoke("resolve_native_plan_approval", {
     sessionRecordId,
@@ -675,6 +676,7 @@ export function resolveNativePlanApproval(
     feedback: feedback ?? null,
     aiChannelId: aiChannelId ?? null,
     model: model ?? null,
+    reasoningEffort: reasoningEffort ?? null,
   });
 }
 

@@ -1,8 +1,25 @@
-import type { AgentSession, NativeSessionRuntime } from "@/lib/types";
+import {
+  composerThinkingEnabled,
+  composerThinkingLevels,
+  resolveComposerThinkingLevel,
+} from "@/lib/modelCatalog";
+import type { AgentSession, AiChannelModel, NativeSessionRuntime } from "@/lib/types";
 
 export interface SessionModelSelection {
   channelId: string | null;
   modelId: string | null;
+}
+
+export interface PlanApprovalModelArgs {
+  aiChannelId?: string;
+  model?: string;
+  reasoningEffort?: string;
+}
+
+export interface PlanApprovalThinking {
+  enabled: boolean;
+  levels: string[];
+  effort: string;
 }
 
 function nonEmpty(value: string | null | undefined): string | null {
@@ -35,15 +52,32 @@ export function resolveSessionSelection(input: {
   };
 }
 
+export function resolvePlanApprovalThinking(input: {
+  channels: { id: string; models: AiChannelModel[] }[];
+  selection: SessionModelSelection;
+  preferredEffort?: string | null;
+}): PlanApprovalThinking {
+  const channel = input.channels.find((item) => item.id === input.selection.channelId);
+  const model = channel?.models.find((item) => item.id === input.selection.modelId) ?? null;
+  const levels = composerThinkingLevels(model);
+  return {
+    enabled: composerThinkingEnabled(model) && levels.length > 0,
+    levels,
+    effort: resolveComposerThinkingLevel(levels, input.preferredEffort, model?.thinking_level),
+  };
+}
+
 export function planApprovalModelArgs(
   approved: boolean,
   selection: SessionModelSelection,
-): { aiChannelId?: string; model?: string } {
+  reasoningEffort?: string | null,
+): PlanApprovalModelArgs {
   if (!approved) return {};
   const aiChannelId = nonEmpty(selection.channelId) ?? undefined;
   const model = nonEmpty(selection.modelId) ?? undefined;
   if (!aiChannelId || !model) return {};
-  return { aiChannelId, model };
+  const effort = nonEmpty(reasoningEffort) ?? undefined;
+  return effort ? { aiChannelId, model, reasoningEffort: effort } : { aiChannelId, model };
 }
 
 export function mergeSessionRuntime(
