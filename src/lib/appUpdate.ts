@@ -1,7 +1,8 @@
 import { getVersion } from "@tauri-apps/api/app";
 import { isTauri } from "@tauri-apps/api/core";
-import { relaunch } from "@tauri-apps/plugin-process";
 import { check, type DownloadEvent, type Update } from "@tauri-apps/plugin-updater";
+
+import { restartApp } from "@/lib/backend";
 
 export type UpdaterErrorCode =
   "network" | "already_latest" | "signature" | "dev_mode" | "cancelled" | "unknown";
@@ -166,5 +167,5 @@ export async function downloadAndInstallUpdate(
 }
 
 export async function relaunchApp(): Promise<void> {
-  await relaunch();
+  await restartApp();
 }

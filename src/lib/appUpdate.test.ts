@@ -1,6 +1,18 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
-import { mapUpdaterError, updaterErrorI18nKey } from "@/lib/appUpdate";
+import { mapUpdaterError, relaunchApp, updaterErrorI18nKey } from "@/lib/appUpdate";
+import { restartApp } from "@/lib/backend";
+
+vi.mock("@/lib/backend", () => ({ restartApp: vi.fn() }));
+
+it("restarts through the backend cleanup coordinator and propagates IPC failures", async () => {
+  const restart = vi.mocked(restartApp);
+  restart.mockResolvedValueOnce();
+  await relaunchApp();
+  expect(restart).toHaveBeenCalledTimes(1);
+  restart.mockRejectedValueOnce(new Error("IPC failed"));
+  await expect(relaunchApp()).rejects.toThrow("IPC failed");
+});
 
 describe("mapUpdaterError", () => {
   it("maps a missing update to already latest", () => {
