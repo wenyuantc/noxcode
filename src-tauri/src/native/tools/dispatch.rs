@@ -867,13 +867,6 @@ async fn call_exit_plan_mode(ctx: &ToolCtx, arguments: &str) -> Result<String, S
                 tokio::time::sleep(Duration::from_millis(50)).await;
             }
         } => Err("已取消".to_string()),
-        _ = async {
-            if ctx.permission_timeout.is_zero() {
-                std::future::pending::<()>().await;
-            } else {
-                tokio::time::sleep(ctx.permission_timeout).await;
-            }
-        } => Err("计划审批超时，保持计划模式".to_string()),
         result = rx => result.map_err(|_| "计划审批通道已关闭，保持计划模式".to_string()),
     };
     let answer = match answer {
@@ -2620,17 +2613,14 @@ mod tests {
 
     #[tokio::test]
     async fn plan_approval_failure_never_unlocks_tools() {
-        for scenario in ["closed", "cancelled", "timeout"] {
+        for scenario in ["closed", "cancelled"] {
             let root = tempfile::tempdir().unwrap();
             let mut ctx = ctx_for(root.path());
             ctx.set_plan_mode(true);
-            ctx.permission_timeout = Duration::from_millis(5);
-            let held = Arc::new(Mutex::new(None));
-            let held_sink = held.clone();
             let cancel = ctx.cancel.clone();
-            ctx.request_plan_approval = Some(Arc::new(move |prompt, tx| match scenario {
+            ctx.request_plan_approval = Some(Arc::new(move |_prompt, tx| match scenario {
                 "closed" => drop(tx),
-                "cancelled" => {
+                _ => {
                     tx.send(PlanApprovalAnswer {
                         approved: true,
                         feedback: String::new(),
@@ -2638,7 +2628,6 @@ mod tests {
                     .unwrap();
                     cancel.cancel();
                 }
-                _ => *held_sink.lock().unwrap() = Some((prompt.request_id, tx)),
             }));
             let expired = Arc::new(Mutex::new(false));
             let expired_sink = expired.clone();
@@ -2656,16 +2645,51 @@ mod tests {
             );
             assert!(ctx.is_plan_mode() && ctx.is_read_only(), "{scenario}");
             assert!(*expired.lock().unwrap(), "{scenario}");
-            let held_reply = held.lock().unwrap().take();
-            if let Some((_, tx)) = held_reply {
-                assert!(tx
-                    .send(PlanApprovalAnswer {
-                        approved: true,
-                        feedback: String::new()
-                    })
-                    .is_err());
-            }
         }
+    }
+
+    #[tokio::test]
+    async fn plan_approval_ignores_permission_timeout() {
+        let root = tempfile::tempdir().unwrap();
+        let mut ctx = ctx_for(root.path());
+        ctx.set_plan_mode(true);
+        ctx.permission_timeout = Duration::from_millis(20);
+        let held = Arc::new(Mutex::new(None));
+        let held_sink = held.clone();
+        ctx.request_plan_approval = Some(Arc::new(move |_prompt, tx| {
+            *held_sink.lock().unwrap() = Some(tx);
+        }));
+        let expired = Arc::new(Mutex::new(false));
+        let expired_sink = expired.clone();
+        ctx.expire_plan_approval = Some(Arc::new(move |_| {
+            let expired = expired_sink.clone();
+            tauri::async_runtime::spawn(async move {
+                *expired.lock().unwrap() = true;
+            })
+        }));
+        let pending = tokio::spawn({
+            let ctx = ctx.clone();
+            async move { execute_tool(&ctx, "ExitPlanMode", r#"{"plan":"change files"}"#).await }
+        });
+        let tx = loop {
+            if let Some(tx) = held.lock().unwrap().take() {
+                break tx;
+            }
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        };
+        tokio::time::sleep(Duration::from_millis(60)).await;
+        tx.send(PlanApprovalAnswer {
+            approved: true,
+            feedback: String::new(),
+        })
+        .expect("approval still open after permission timeout");
+        let result = pending
+            .await
+            .expect("join")
+            .expect("approved without timing out");
+        assert!(result.contains("已批准"), "{result}");
+        assert!(!ctx.is_plan_mode() && !ctx.is_read_only());
+        assert!(!*expired.lock().unwrap());
     }
 
     #[tokio::test]

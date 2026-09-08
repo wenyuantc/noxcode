@@ -488,7 +488,7 @@ pub fn enter_plan_mode_spec() -> ToolSpec {
 pub fn exit_plan_mode_spec() -> ToolSpec {
     spec(
         "ExitPlanMode",
-        "Submit the finished plan for user approval. Only a positive response to this request ends plan mode and enables implementation. Rejection, cancellation, timeout or an unavailable approval channel keeps planning restrictions. Only call after exploring enough to write a concrete plan; if rejected, revise and call again.",
+        "Submit the finished plan for user approval. Only a positive response to this request ends plan mode and enables implementation. Rejection, cancellation or an unavailable approval channel keeps planning restrictions. The request waits until the user answers or the session is cancelled; it does not time out. Only call after exploring enough to write a concrete plan; if rejected, revise and call again.",
         json!({
             "type": "object",
             "properties": {
