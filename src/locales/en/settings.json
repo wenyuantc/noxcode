@@ -413,6 +413,7 @@
     "progressPercent": "{{percent}}%",
     "installed": "The update is installed. Restart the app to use the new version.",
     "restart": "Restart now",
+    "restarting": "Restarting",
     "restartFailed": "Failed to restart: {{detail}}",
     "errors": {
       "network": "Could not reach the update server. Check your network and try again.",

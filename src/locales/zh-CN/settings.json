@@ -413,6 +413,7 @@
     "progressPercent": "{{percent}}%",
     "installed": "更新已安装。请重启应用以使用新版本。",
     "restart": "立即重启",
+    "restarting": "正在重启",
     "restartFailed": "重启失败：{{detail}}",
     "errors": {
       "network": "无法连接更新服务器，请检查网络后重试。",

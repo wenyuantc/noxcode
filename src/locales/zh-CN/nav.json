@@ -5,6 +5,7 @@
   "update": "更新",
   "downloading": "下载中",
   "restartUpdate": "重启更新",
+  "restarting": "正在重启",
   "updateAvailableTitle": "更新到 {{version}}",
   "apiLogs": "API 调用记录",
   "backToWorkspace": "返回工作区",
