@@ -20,7 +20,9 @@ describe("installDisableDefaultContextMenu", () => {
     addEventListener(type, listener, options) {
       expect(type).toBe("contextmenu");
       expect(options).toBe(true);
-      listeners.set(type, listener);
+      if (listener) {
+        listeners.set(type, listener);
+      }
     },
     removeEventListener(type, listener, options) {
       expect(type).toBe("contextmenu");
