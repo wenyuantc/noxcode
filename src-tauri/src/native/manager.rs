@@ -7,6 +7,7 @@ use std::sync::{Arc, Weak};
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 
+use crate::native::live_model::SharedLiveModel;
 use crate::native::model::types::NativeImage;
 use crate::native::permission_rules::SharedPermissionRules;
 use crate::native::tools::dispatch::PlanApprovalAnswer;
@@ -175,6 +176,8 @@ pub struct NativeLiveSession {
     pub pending_permission: VecDeque<PendingPermission>,
     pub pending_question: VecDeque<PendingPlanQuestion>,
     pub pending_plan_approval: VecDeque<PendingPlanApproval>,
+    pub live_model: Option<SharedLiveModel>,
+    pub transcript_model: Option<Arc<tokio::sync::Mutex<String>>>,
 }
 
 impl NativeLiveSession {
@@ -383,6 +386,7 @@ impl NativeAgentManager {
                 let _ = pending.reply.send(PlanApprovalAnswer {
                     approved: false,
                     feedback: "会话已停止".to_string(),
+                    ..Default::default()
                 });
             }
         }
@@ -434,6 +438,28 @@ impl NativeAgentManager {
             .pending_plan_approval
             .front()
             .map(|item| item.request.clone()))
+    }
+
+    pub fn require_plan_approval(
+        &self,
+        session_record_id: &str,
+        request_id: &str,
+    ) -> Result<(), String> {
+        let session = self
+            .sessions
+            .get(session_record_id)
+            .ok_or_else(|| "没有运行中的内置 Agent 会话".to_string())?;
+        if session.cancel.is_cancelled() || session.closing {
+            return Err("会话已停止，不能批准计划".to_string());
+        }
+        let pending = session
+            .pending_plan_approval
+            .front()
+            .ok_or_else(|| "没有待批准的计划".to_string())?;
+        if pending.request.request_id != request_id {
+            return Err("计划批准请求已过期".to_string());
+        }
+        Ok(())
     }
 
     pub fn expire_plan_approval(
@@ -831,6 +857,7 @@ pub(super) mod tests {
         let approved = || PlanApprovalAnswer {
             approved: true,
             feedback: String::new(),
+            ..Default::default()
         };
         assert!(manager
             .resolve_plan_approval("plan", "old", approved())
@@ -1131,6 +1158,8 @@ pub(super) mod tests {
             permission_rules: crate::native::permission_rules::shared_rules(Default::default()),
             workspace_root: None,
             pending_plan_approval: VecDeque::new(),
+            live_model: None,
+            transcript_model: None,
         });
         assert!(manager.has_channel_processes("ch-1"));
         assert!(manager.has_workspace_processes("ws-1"));
@@ -1174,6 +1203,8 @@ pub(super) mod tests {
             permission_rules: crate::native::permission_rules::shared_rules(Default::default()),
             workspace_root: None,
             pending_plan_approval: VecDeque::new(),
+            live_model: None,
+            transcript_model: None,
         }
     }
 
@@ -1729,6 +1760,8 @@ pub(super) mod tests {
             permission_rules: crate::native::permission_rules::shared_rules(Default::default()),
             workspace_root: None,
             pending_plan_approval: VecDeque::new(),
+            live_model: None,
+            transcript_model: None,
         });
         let (pending, pending_rx) = pending("r1", "Write");
         let _ = manager.enqueue_permission("sess-shutdown", pending);

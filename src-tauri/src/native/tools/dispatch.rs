@@ -62,6 +62,10 @@ pub struct PlanApprovalAnswer {
     pub approved: bool,
     #[serde(default)]
     pub feedback: String,
+    #[serde(default)]
+    pub ai_channel_id: Option<String>,
+    #[serde(default)]
+    pub model: Option<String>,
 }
 
 pub type PlanApprovalRequester =
@@ -2624,6 +2628,7 @@ mod tests {
                     tx.send(PlanApprovalAnswer {
                         approved: true,
                         feedback: String::new(),
+                        ..Default::default()
                     })
                     .unwrap();
                     cancel.cancel();
@@ -2681,6 +2686,7 @@ mod tests {
         tx.send(PlanApprovalAnswer {
             approved: true,
             feedback: String::new(),
+            ..Default::default()
         })
         .expect("approval still open after permission timeout");
         let result = pending
@@ -3001,6 +3007,7 @@ mod tests {
                 } else {
                     "先补测试".to_string()
                 },
+                ..Default::default()
             });
         }));
         let rejected = execute_tool(&ctx, "ExitPlanMode", r#"{"plan":"v1"}"#)
@@ -3187,5 +3194,20 @@ mod tests {
         assert!(child.todos_snapshot().is_empty());
         assert!(!child.has_read(&ctx.workspace.resolve("a.txt").unwrap().to_string_lossy()));
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn plan_approval_answer_defaults_optional_model_fields() {
+        let answer: PlanApprovalAnswer = serde_json::from_str(r#"{"approved":true}"#).unwrap();
+        assert!(answer.approved);
+        assert!(answer.feedback.is_empty());
+        assert!(answer.ai_channel_id.is_none());
+        assert!(answer.model.is_none());
+        let with_model: PlanApprovalAnswer = serde_json::from_str(
+            r#"{"approved":true,"ai_channel_id":"ch-1","model":"deepseek-v4-flash"}"#,
+        )
+        .unwrap();
+        assert_eq!(with_model.ai_channel_id.as_deref(), Some("ch-1"));
+        assert_eq!(with_model.model.as_deref(), Some("deepseek-v4-flash"));
     }
 }

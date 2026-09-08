@@ -19,6 +19,15 @@ vi.mock("react-i18next", () => ({ useTranslation: () => ({ t: (key: string) => k
 vi.mock("./AssistantMarkdown", () => ({
   AssistantMarkdown: ({ text }: { text: string }) => <p>{text}</p>,
 }));
+vi.mock("./ChannelModelPicker", () => ({
+  ChannelModelPicker: ({
+    selection,
+  }: {
+    selection?: { channelId: string | null; modelId: string | null };
+  }) => (
+    <button type="button">{`channel-model-picker:${selection?.channelId ?? ""}/${selection?.modelId ?? ""}`}</button>
+  ),
+}));
 vi.mock("@/stores/sessionStore", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/stores/sessionStore")>();
   return {
@@ -32,7 +41,12 @@ vi.mock("@/stores/sessionStore", async (importOriginal) => {
 
 describe("native interaction rendering", () => {
   beforeEach(() =>
-    useSessionStore.setState({ permissions: {}, planQuestions: {}, planApprovals: {} }),
+    useSessionStore.setState({
+      permissions: {},
+      planQuestions: {},
+      planApprovals: {},
+      configurationBySession: {},
+    }),
   );
   it("never attaches current approval controls to a historical plan", () => {
     useSessionStore.getState().setPlanApproval({
@@ -57,6 +71,30 @@ describe("native interaction rendering", () => {
     expect(current).toContain("planWaitingApproval");
     expect(current).toContain("planAddFeedback");
     expect(current).toContain("planCopy");
+    expect(current).toContain("channel-model-picker:/");
+  });
+  it("defaults the approval picker to the current session model", () => {
+    useSessionStore.setState({
+      configurationBySession: {
+        s1: {
+          ai_channel_id: "ch-1",
+          model: "deepseek-v4-flash",
+          reasoning_effort: null,
+          permission_mode: "default",
+          plan_mode: true,
+        },
+      },
+    });
+    useSessionStore.getState().setPlanApproval({
+      session_record_id: "s1",
+      request_id: "new",
+      profile_id: "p",
+      workspace_id: "ws",
+      session_kind: "plan",
+      plan: "new plan",
+    });
+    const current = renderToStaticMarkup(<PendingPlanApproval sessionId="s1" />);
+    expect(current).toContain("channel-model-picker:ch-1/deepseek-v4-flash");
   });
   it("renders PlanAskCard with modern layout and options", () => {
     useSessionStore.getState().setPlanQuestion({

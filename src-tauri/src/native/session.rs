@@ -30,6 +30,7 @@ use crate::native::agent::r#loop::{AgentRunner, NativeEvent, TranscriptCheckpoin
 use crate::native::api_logs::sqlite_call_log_sink;
 use crate::native::channels::{fetch_channel_record, require_channel_api_key};
 use crate::native::input_queue::{NativeInputQueue, NativeInputQueueSnapshot};
+use crate::native::live_model::{write_live_model, LiveModelSnapshot, SharedLiveModel};
 use crate::native::manager::{
     take_latest_configuration, NativeAgentManager, NativeCompactionRequest,
     NativeConfigurationRequest, NativeFollowup, NativeLiveSession, NativeSessionInfo,
@@ -934,6 +935,63 @@ struct NativeRunSettings {
     channel_id: String,
     channel_name: String,
     bound_subagent: Option<crate::native::subagents::NativeSubagent>,
+}
+
+fn live_snapshot_from_run(
+    run: &NativeRunSettings,
+    context_token_limit: usize,
+    execution_target: Option<String>,
+    hook_agent: Option<crate::native::tools::hooks::HookAgentHandler>,
+) -> LiveModelSnapshot {
+    LiveModelSnapshot {
+        revision: 0,
+        client: run.client.clone(),
+        model: run.model.clone(),
+        channel_id: run.channel_id.clone(),
+        channel_name: run.channel_name.clone(),
+        protocol: run.protocol.clone(),
+        lite_model: run.lite_model.clone(),
+        effort: run.effort.clone(),
+        max_output_tokens: run.max_output_tokens,
+        thinking_enabled: run.thinking_enabled,
+        context_tokens: run.context_tokens,
+        context_token_limit,
+        execution_target,
+        hook_agent,
+    }
+}
+
+fn sync_run_from_live(run: &mut NativeRunSettings, slot: &SharedLiveModel) {
+    let snap = slot
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .clone();
+    run.client = snap.client;
+    run.model = snap.model;
+    run.channel_id = snap.channel_id;
+    run.channel_name = snap.channel_name;
+    run.protocol = snap.protocol;
+    run.lite_model = snap.lite_model;
+    run.effort = snap.effort;
+    run.max_output_tokens = snap.max_output_tokens;
+    run.thinking_enabled = snap.thinking_enabled;
+    run.context_tokens = snap.context_tokens;
+}
+
+fn publish_live_run(
+    slot: &SharedLiveModel,
+    runner: &mut AgentRunner,
+    run: &NativeRunSettings,
+    app: &AppHandle,
+    execution_target: Option<String>,
+) {
+    let limit =
+        crate::native::settings::session_context_window_tokens(app, run.context_tokens) as usize;
+    let revision = write_live_model(
+        slot,
+        live_snapshot_from_run(run, limit, execution_target, runner.ctx.hook_agent.clone()),
+    );
+    runner.note_live_model_revision(revision);
 }
 
 fn configure_runner_limits(
@@ -1859,6 +1917,17 @@ async fn start_native_session_locked(
     let resume_run = payload.resume_session_id.clone();
     let rules_run = permission_rules.clone();
     let queue_run = input_queue.clone();
+    let context_token_limit =
+        crate::native::settings::session_context_window_tokens(&app, run.context_tokens) as usize;
+    let transcript_model = Arc::new(Mutex::new(run.model.clone()));
+    let live_model = Arc::new(std::sync::Mutex::new(live_snapshot_from_run(
+        &run,
+        context_token_limit,
+        Some(execution_context.execution_target.clone()),
+        None,
+    )));
+    let live_model_run = live_model.clone();
+    let transcript_model_run = transcript_model.clone();
     let join = tokio::spawn(async move {
         if loop_ready_rx.await.is_err() {
             return;
@@ -1885,6 +1954,8 @@ async fn start_native_session_locked(
             plan_mode,
             resume_run,
             permission_mode,
+            live_model_run,
+            transcript_model_run,
         )
         .await;
     });
@@ -1915,6 +1986,8 @@ async fn start_native_session_locked(
         pending_permission: std::collections::VecDeque::new(),
         pending_question: std::collections::VecDeque::new(),
         pending_plan_approval: std::collections::VecDeque::new(),
+        live_model: Some(live_model.clone()),
+        transcript_model: Some(transcript_model.clone()),
     });
     if !registered {
         let _ = update_agent_session_status(
@@ -2128,6 +2201,7 @@ async fn dispatch_session_configuration(
     profile_id: &str,
     input_queue_id: &str,
     config_revision: &mut u64,
+    live_model: &SharedLiveModel,
 ) {
     let request_id = request.request_id.clone();
     let result = apply_session_configuration(
@@ -2145,6 +2219,12 @@ async fn dispatch_session_configuration(
     .await;
     let event = match result {
         Ok((runtime, compacted)) => {
+            let execution_target = if runner.ctx.ssh.is_some() {
+                Some(crate::app::shared::EXECUTION_TARGET_SSH.to_string())
+            } else {
+                Some(crate::app::shared::EXECUTION_TARGET_LOCAL.to_string())
+            };
+            publish_live_run(live_model, runner, run, app, execution_target);
             *config_revision = config_revision.saturating_add(1);
             NativeSessionConfigurationEvent {
                 session_record_id: session_record_id.to_string(),
@@ -2197,6 +2277,8 @@ async fn run_native_loop(
     plan_mode: bool,
     resume_session_id: Option<String>,
     permission_mode: String,
+    live_model: SharedLiveModel,
+    transcript_model: Arc<Mutex<String>>,
 ) {
     let followup_rx = Arc::new(Mutex::new(followup_rx));
     let mut config_revision = 0_u64;
@@ -2628,6 +2710,19 @@ async fn run_native_loop(
     runner.ctx.session_record_id = session_record_id.clone();
     runner.lite_model = run.lite_model.clone();
     runner.ctx.hook_agent = Some(hook_agent_handler(&run));
+    runner.live_model = Some(live_model.clone());
+    let execution_target = if runner.ctx.ssh.is_some() {
+        Some(crate::app::shared::EXECUTION_TARGET_SSH.to_string())
+    } else {
+        Some(crate::app::shared::EXECUTION_TARGET_LOCAL.to_string())
+    };
+    publish_live_run(
+        &live_model,
+        &mut runner,
+        &run,
+        &app,
+        execution_target.clone(),
+    );
     if let Ok(pool) = sqlite_pool(&app).await {
         let goal_app = app.clone();
         let goal_session = session_record_id.clone();
@@ -2700,7 +2795,6 @@ async fn run_native_loop(
         }
     }
     let last_transcript_fingerprint = Arc::new(Mutex::new(None));
-    let transcript_model = Arc::new(Mutex::new(run.model.clone()));
     attach_transcript_checkpoint(
         &mut runner,
         app.clone(),
@@ -2932,6 +3026,8 @@ async fn run_native_loop(
                 break;
             }
         };
+        sync_run_from_live(&mut run, &live_model);
+        *transcript_model.lock().await = run.model.clone();
         // Drain the completed answer before a queued input creates the next UI turn.
         if let Some(events) = &runner.on_event {
             let (reply, done) = tokio::sync::oneshot::channel();
@@ -2976,6 +3072,7 @@ async fn run_native_loop(
                             &profile_id,
                             &input_queue.id,
                             &mut config_revision,
+                            &live_model,
                         )
                         .await;
                         continue;
@@ -3009,6 +3106,7 @@ async fn run_native_loop(
                                 &profile_id,
                                 &input_queue.id,
                                 &mut config_revision,
+                                &live_model,
                             )
                             .await;
                         }
@@ -3452,7 +3550,136 @@ pub async fn compact_native_session(
     Ok(true)
 }
 
+async fn apply_plan_implementation_model(
+    app: &AppHandle,
+    manager_state: &Arc<Mutex<NativeAgentManager>>,
+    session_record_id: &str,
+    ai_channel_id: &str,
+    model: &str,
+) -> Result<(), String> {
+    let snapshot = {
+        let manager = manager_state.lock().await;
+        let session = manager
+            .get_session(session_record_id)
+            .ok_or_else(|| "没有运行中的内置 Agent 会话".to_string())?;
+        let runtime = session.runtime_snapshot();
+        let current_channel = runtime
+            .as_ref()
+            .map(|item| item.ai_channel_id.as_str())
+            .unwrap_or("");
+        let current_model = runtime
+            .as_ref()
+            .map(|item| item.model.as_str())
+            .unwrap_or("");
+        if current_channel == ai_channel_id && current_model == model {
+            return Ok(());
+        }
+        let effort = runtime
+            .as_ref()
+            .and_then(|item| item.reasoning_effort.clone());
+        let workspace_id = session.info.workspace_id.clone().unwrap_or_default();
+        let profile_id = session.info.profile_id.clone();
+        let session_kind = session.info.session_kind.clone();
+        let input_queue_id = session.input_queue.id.clone();
+        let execution_target = session
+            .live_model
+            .as_ref()
+            .and_then(|slot| {
+                slot.lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .execution_target
+                    .clone()
+            })
+            .or_else(|| Some(crate::app::shared::EXECUTION_TARGET_LOCAL.to_string()));
+        (
+            effort,
+            workspace_id,
+            profile_id,
+            session_kind,
+            input_queue_id,
+            execution_target,
+        )
+    };
+    let (effort, workspace_id, profile_id, session_kind, input_queue_id, execution_target) =
+        snapshot;
+    let pool = sqlite_pool(app).await?;
+    let mut next = load_native_client(app, &pool, ai_channel_id, model, effort.as_deref()).await?;
+    next = bind_run_to_session(
+        next,
+        session_record_id,
+        &workspace_id,
+        false,
+        execution_target.clone(),
+    );
+    update_agent_session_channel(&pool, session_record_id, &next.channel_id).await?;
+    let context_token_limit =
+        crate::native::settings::session_context_window_tokens(app, next.context_tokens) as usize;
+    let hook_agent = hook_agent_handler(&next);
+    let runtime = {
+        let mut manager = manager_state.lock().await;
+        let session = manager
+            .get_session_mut(session_record_id)
+            .ok_or_else(|| "会话已结束".to_string())?;
+        if let Some(slot) = &session.live_model {
+            write_live_model(
+                slot,
+                live_snapshot_from_run(
+                    &next,
+                    context_token_limit,
+                    execution_target,
+                    Some(hook_agent),
+                ),
+            );
+        }
+        session.info.channel_id = next.channel_id.clone();
+        let permission_mode = session
+            .runtime
+            .as_ref()
+            .map(|item| item.permission_mode.clone())
+            .unwrap_or_else(|| crate::native::settings::PERMISSION_MODE_DEFAULT.to_string());
+        let plan_mode = session.plan_mode.load(Ordering::SeqCst);
+        let runtime = NativeSessionRuntime {
+            ai_channel_id: next.channel_id.clone(),
+            model: next.model.clone(),
+            reasoning_effort: next.effort.clone(),
+            permission_mode,
+            plan_mode,
+        };
+        session.runtime = Some(runtime.clone());
+        let transcript = session
+            .transcript_model
+            .clone()
+            .unwrap_or_else(|| Arc::new(Mutex::new(next.model.clone())));
+        (runtime, transcript)
+    };
+    let (runtime, transcript_model) = runtime;
+    *transcript_model.lock().await = next.model.clone();
+    let started = AgentSessionStarted {
+        runtime: Some(runtime),
+        input_queue_id: Some(input_queue_id),
+        profile_id: profile_id.clone(),
+        workspace_id: workspace_id.clone(),
+        session_kind: session_kind.clone(),
+        session_record_id: session_record_id.to_string(),
+    };
+    let _ = app.emit("native-session", &started);
+    emit_native_line(
+        app,
+        session_record_id,
+        &profile_id,
+        Some(&workspace_id),
+        &session_kind,
+        format!(
+            "[内置 Agent] 实施改用 渠道={} 协议={} model={}",
+            next.channel_name, next.protocol, next.model
+        ),
+    )
+    .await;
+    Ok(())
+}
+
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 pub async fn resolve_native_plan_approval(
     app: AppHandle,
     state: State<'_, Arc<Mutex<NativeAgentManager>>>,
@@ -3460,13 +3687,41 @@ pub async fn resolve_native_plan_approval(
     request_id: String,
     approved: bool,
     feedback: Option<String>,
+    ai_channel_id: Option<String>,
+    model: Option<String>,
 ) -> Result<(), String> {
+    state
+        .lock()
+        .await
+        .require_plan_approval(&session_record_id, &request_id)?;
+    let channel = ai_channel_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|item| !item.is_empty());
+    let model = model
+        .as_deref()
+        .map(str::trim)
+        .filter(|item| !item.is_empty());
+    if approved {
+        if let (Some(channel), Some(model)) = (channel, model) {
+            apply_plan_implementation_model(
+                &app,
+                state.inner(),
+                &session_record_id,
+                channel,
+                model,
+            )
+            .await?;
+        }
+    }
     let next = state.lock().await.resolve_plan_approval(
         &session_record_id,
         &request_id,
         PlanApprovalAnswer {
             approved,
             feedback: feedback.unwrap_or_default(),
+            ai_channel_id: channel.map(ToOwned::to_owned),
+            model: model.map(ToOwned::to_owned),
         },
     )?;
     emit_request_resolved(&app, &session_record_id, &request_id, "plan_approval");
@@ -4149,6 +4404,8 @@ mod tests {
             pending_permission: Default::default(),
             pending_question: Default::default(),
             pending_plan_approval: Default::default(),
+            live_model: None,
+            transcript_model: None,
         });
         let manager_finish = manager.clone();
         let finish =
@@ -4500,6 +4757,8 @@ mod tests {
             permission_rules: crate::native::permission_rules::shared_rules(Default::default()),
             workspace_root: None,
             pending_plan_approval: VecDeque::new(),
+            live_model: None,
+            transcript_model: None,
         });
         let manager = tokio::sync::Mutex::new(manager);
 
@@ -4576,6 +4835,8 @@ mod tests {
             permission_rules: crate::native::permission_rules::shared_rules(Default::default()),
             workspace_root: None,
             pending_plan_approval: VecDeque::new(),
+            live_model: None,
+            transcript_model: None,
         });
         let manager = tokio::sync::Mutex::new(manager);
         let paths = [path.to_string_lossy().into_owned()];

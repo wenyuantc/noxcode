@@ -665,12 +665,16 @@ export function resolveNativePlanApproval(
   requestId: string,
   approved: boolean,
   feedback?: string,
+  aiChannelId?: string,
+  model?: string,
 ): Promise<void> {
   return invoke("resolve_native_plan_approval", {
     sessionRecordId,
     requestId,
     approved,
     feedback: feedback ?? null,
+    aiChannelId: aiChannelId ?? null,
+    model: model ?? null,
   });
 }
 

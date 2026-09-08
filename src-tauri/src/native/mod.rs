@@ -10,6 +10,7 @@ pub(crate) mod goals;
 pub(crate) mod hooks_config;
 pub(crate) mod images;
 pub(crate) mod input_queue;
+pub(crate) mod live_model;
 pub(crate) mod manager;
 pub(crate) mod mcp_oauth;
 pub(crate) mod mcp_servers;

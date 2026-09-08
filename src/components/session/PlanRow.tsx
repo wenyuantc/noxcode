@@ -19,11 +19,15 @@ import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import { resolveNativePlanApproval } from "@/lib/backend";
 import { resolveSessionRequest } from "@/lib/nativeRequestResolution";
+import { planApprovalModelArgs, resolveSessionSelection } from "@/lib/sessionModel";
 import type { GroupedSessionItem, PlanLineStatus } from "@/lib/sessionLines";
 import { parsePlanLine, planTitleFromBody } from "@/lib/sessionLines";
 import { cn } from "@/lib/utils";
+import { useChannelStore } from "@/stores/channelStore";
 import { useSessionStore } from "@/stores/sessionStore";
+import { useWorkspaceStore } from "@/stores/workspaceStore";
 import { AssistantMarkdown } from "./AssistantMarkdown";
+import { ChannelModelPicker } from "./ChannelModelPicker";
 
 export function PlanPillButton({
   children,
@@ -209,21 +213,39 @@ export function PendingPlanApproval({ sessionId }: { sessionId: string }) {
   const pendingApproval = useSessionStore(
     (state) => Object.values(state.planApprovals[sessionId] ?? {})[0],
   );
+  const runtime = useSessionStore((state) => state.configurationBySession[sessionId]);
+  const session = useWorkspaceStore((state) =>
+    state.sessions.find((item) => item.id === sessionId),
+  );
+  const activeChannelId = useChannelStore((state) => state.activeChannelId);
+  const activeModelId = useChannelStore((state) => state.activeModelId);
+  const setChannelSelection = useChannelStore((state) => state.setSelection);
+  const defaultSelection = resolveSessionSelection({
+    sessionId,
+    runtime,
+    session,
+    fallbackChannelId: activeChannelId,
+    fallbackModelId: activeModelId,
+  });
   const [feedback, setFeedback] = useState("");
   const [showFeedback, setShowFeedback] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [expanded, setExpanded] = useState(false);
   const [copied, setCopied] = useState(false);
+  const [selection, setSelection] = useState(defaultSelection);
   const copyTimerRef = useRef<number | undefined>(undefined);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
+  const defaultChannelId = defaultSelection.channelId;
+  const defaultModelId = defaultSelection.modelId;
 
   useEffect(() => {
     setFeedback("");
     setShowFeedback(false);
     setError(null);
     setExpanded(false);
-  }, [pendingApproval?.request_id]);
+    setSelection({ channelId: defaultChannelId, modelId: defaultModelId });
+  }, [pendingApproval?.request_id, defaultChannelId, defaultModelId]);
 
   useEffect(() => {
     return () => window.clearTimeout(copyTimerRef.current);
@@ -250,6 +272,7 @@ export function PendingPlanApproval({ sessionId }: { sessionId: string }) {
   const resolve = async (approved: boolean) => {
     if (busy) return;
     const current = pendingApproval;
+    const modelArgs = planApprovalModelArgs(approved, selection);
     setBusy(true);
     setError(null);
     try {
@@ -259,8 +282,13 @@ export function PendingPlanApproval({ sessionId }: { sessionId: string }) {
           current.request_id,
           approved,
           feedback.trim() || undefined,
+          modelArgs.aiChannelId,
+          modelArgs.model,
         ),
       );
+      if (approved && modelArgs.aiChannelId && modelArgs.model) {
+        setChannelSelection(modelArgs.aiChannelId, modelArgs.model);
+      }
     } catch (reason) {
       setError(String(reason));
     } finally {
@@ -400,7 +428,14 @@ export function PendingPlanApproval({ sessionId }: { sessionId: string }) {
             ) : null}
           </Button>
 
-          <div className="flex items-center gap-2">
+          <div className="flex min-w-0 items-center gap-2">
+            <ChannelModelPicker
+              disabled={busy}
+              onError={setError}
+              selection={selection}
+              onSelectionChange={(channelId, modelId) => setSelection({ channelId, modelId })}
+              className="max-w-[min(16rem,40vw)]"
+            />
             <Button
               type="button"
               variant="outline"
