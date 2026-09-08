@@ -67,6 +67,7 @@ import {
   type SlashIntent,
 } from "@/lib/composerSlashActions";
 import { applyComposerPlanMode, resolveComposerPlanMode } from "@/lib/planMode";
+import { sessionUsageTotal } from "@/lib/sessionLines";
 import { resolveSessionSelection } from "@/lib/sessionModel";
 import { submitSessionPrompt } from "@/lib/sessionSubmission";
 import { changeSessionConfiguration, finishIdleSession } from "@/lib/sessionConfiguration";
@@ -144,6 +145,10 @@ export function Composer({ compact = false }: { compact?: boolean }) {
   const usage = useSessionStore((state) =>
     selectedSessionId ? state.usage[selectedSessionId] : undefined,
   );
+  const lines = useSessionStore((state) =>
+    selectedSessionId ? state.lines[selectedSessionId] : undefined,
+  );
+  const totalTokens = sessionUsageTotal(lines ?? []);
   const turnState = useSessionStore((state) =>
     live ? state.turnState[live.session_record_id] : undefined,
   );
@@ -991,7 +996,12 @@ export function Composer({ compact = false }: { compact?: boolean }) {
                 }}
               />
             ) : null}
-            <ContextCapacity usage={usage} open={contextOpen} onOpenChange={setContextOpen} />
+            <ContextCapacity
+              usage={usage}
+              totalTokens={totalTokens}
+              open={contextOpen}
+              onOpenChange={setContextOpen}
+            />
           </div>
           <div className="flex shrink-0 items-center gap-1.5 self-end">
             {working && live ? (

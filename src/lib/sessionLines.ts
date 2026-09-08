@@ -981,6 +981,10 @@ export function aggregateUsages(usages: (ParsedUsage | null | undefined)[]): Par
   };
 }
 
+export function sessionUsageTotal(lines: { text: string }[]): number | undefined {
+  return aggregateUsages(lines.map((line) => parseUsageLine(line.text)))?.total;
+}
+
 const PATCH_PLACEHOLDER = "应用多文件补丁";
 
 export function changedFilesFromItems(items: GroupedSessionItem[]): string[] {

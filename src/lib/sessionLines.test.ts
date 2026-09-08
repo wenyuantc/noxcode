@@ -36,6 +36,7 @@ import {
   isParentAgentSpawn,
   subagentSegmentIdentity,
   aggregateUsages,
+  sessionUsageTotal,
   summarizeRetry,
   thinkingDurationSeconds,
   thinkingText,
@@ -1105,6 +1106,17 @@ describe("sessionLines", () => {
 
     expect(aggregateUsages([])).toBeNull();
     expect(aggregateUsages([null, undefined])).toBeNull();
+  });
+
+  it("sums parent and subagent usage lines for session total", () => {
+    expect(
+      sessionUsageTotal([
+        line("1", "[用量] in=60604 out=1111 total=61715"),
+        line("2", "[子 Agent 1(general) - 计划] [用量] in=4000 out=1053 total=5053"),
+        line("3", "not usage"),
+      ]),
+    ).toBe(66768);
+    expect(sessionUsageTotal([line("1", "hello")])).toBeUndefined();
   });
 
   it("parses background task notices and builds background_notice segments", () => {

@@ -20,10 +20,12 @@ function tokenOf(usage: NativeContextUsage, key: (typeof CATEGORIES)[number]["ke
 
 export function ContextCapacity({
   usage,
+  totalTokens,
   open: openProp,
   onOpenChange,
 }: {
   usage?: NativeContextUsage;
+  totalTokens?: number;
   open?: boolean;
   onOpenChange?: (open: boolean) => void;
 }) {
@@ -100,7 +102,9 @@ export function ContextCapacity({
               <span className="min-w-0 flex-1" />
             )}
             <span className="shrink-0 tabular-nums text-foreground">
-              {t("contextTotalUsage", { count: formatScaledTokens(used) })}
+              {t("contextTotalUsage", {
+                count: formatScaledTokens(totalTokens ?? used),
+              })}
             </span>
           </div>
           <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-muted">
