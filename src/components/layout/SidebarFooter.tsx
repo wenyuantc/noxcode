@@ -40,6 +40,7 @@ export function SidebarUpdateButton({
   };
 
   const hasPercent = status === "downloading" && progress?.percent != null;
+  const busy = status === "downloading" || status === "restarting";
   const label = hasPercent ? `${progress.percent}%` : t(labelKey);
   const title =
     status === "downloading"
@@ -53,18 +54,18 @@ export function SidebarUpdateButton({
   return (
     <button
       type="button"
-      disabled={status === "downloading"}
+      disabled={busy}
       onClick={handleClick}
       title={title}
       aria-label={title}
       className={cn(
         "inline-flex shrink-0 items-center justify-center gap-1 rounded-md px-2 py-0.5 text-xs font-medium text-white shadow-xs select-none transition-all duration-150",
-        status === "downloading"
+        busy
           ? "cursor-default bg-blue-600/90 dark:bg-blue-500/90"
           : "cursor-pointer bg-blue-600 hover:bg-blue-500 active:bg-blue-700 dark:bg-blue-500 dark:hover:bg-blue-400 dark:active:bg-blue-600",
       )}
     >
-      {status === "downloading" && !hasPercent ? <Loader2 className="size-3 animate-spin" /> : null}
+      {busy && !hasPercent ? <Loader2 className="size-3 animate-spin" /> : null}
       {label}
     </button>
   );
