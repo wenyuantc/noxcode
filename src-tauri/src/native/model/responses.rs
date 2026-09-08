@@ -196,16 +196,20 @@ fn apply_responses_event(
                 {
                     *usage = parse_usage(raw);
                 }
-                let empty = message.content.is_empty()
-                    && message.reasoning_content.is_empty()
-                    && tools.is_empty();
-                if empty {
+                if message.content.is_empty() && tools.is_empty() {
                     if let Some(output) = payload
                         .pointer("/response/output")
                         .or_else(|| payload.get("output"))
                         .and_then(Value::as_array)
                     {
-                        apply_responses_output(message, tools, output);
+                        let mut completed = Message::assistant_text("");
+                        let mut completed_tools = Vec::new();
+                        apply_responses_output(&mut completed, &mut completed_tools, output);
+                        message.content = completed.content;
+                        if message.reasoning_content.is_empty() {
+                            message.reasoning_content = completed.reasoning_content;
+                        }
+                        tools.extend(completed_tools);
                     }
                 }
             }
@@ -230,7 +234,21 @@ fn apply_responses_event(
                 deltas.push(StreamDelta::Reasoning(delta.to_string()));
             }
         }
+        "response.reasoning_summary_text.delta" => {
+            if let Some(delta) = payload.get("delta").and_then(Value::as_str) {
+                message.reasoning_content.push_str(delta);
+                deltas.push(StreamDelta::Reasoning(delta.to_string()));
+            }
+        }
         "response.reasoning_text.done" | "response.reasoning.done" => {
+            if message.reasoning_content.is_empty() {
+                if let Some(text) = payload.get("text").and_then(Value::as_str) {
+                    message.reasoning_content.push_str(text);
+                    deltas.push(StreamDelta::Reasoning(text.to_string()));
+                }
+            }
+        }
+        "response.reasoning_summary_text.done" => {
             if message.reasoning_content.is_empty() {
                 if let Some(text) = payload.get("text").and_then(Value::as_str) {
                     message.reasoning_content.push_str(text);
@@ -272,14 +290,7 @@ fn apply_responses_event(
                 call.arguments.push_str(delta);
             }
         }
-        _ => {
-            if let Some(text) = payload.get("delta").and_then(Value::as_str) {
-                if event_type.contains("text") {
-                    message.content.push_str(text);
-                    deltas.push(StreamDelta::Text(text.to_string()));
-                }
-            }
-        }
+        _ => {}
     }
     deltas
 }
@@ -458,6 +469,49 @@ mod tests {
         let sse = "event: response.output_text.done\ndata: {\"type\":\"response.output_text.done\",\"text\":\"only done\"}\n\n";
         let (message, _) = parse_responses_sse(sse).expect("parse output_text.done");
         assert_eq!(message.content, "only done");
+    }
+
+    #[test]
+    fn keeps_reasoning_summary_out_of_response_text() {
+        let sse = concat!(
+            "event: response.reasoning_summary_text.delta\n",
+            "data: {\"type\":\"response.reasoning_summary_text.delta\",\"delta\":\"思考过程\"}\n\n",
+            "event: response.reasoning_summary_text.done\n",
+            "data: {\"type\":\"response.reasoning_summary_text.done\",\"text\":\"思考过程\"}\n\n",
+            "event: response.output_text.delta\n",
+            "data: {\"type\":\"response.output_text.delta\",\"delta\":\"问候\"}\n\n",
+            "event: response.completed\n",
+            "data: {\"type\":\"response.completed\",\"response\":{\"usage\":{\"input_tokens\":1,\"output_tokens\":1}}}\n\n",
+        );
+        let (message, _) = parse_responses_sse(sse).expect("parse reasoning summary");
+        assert_eq!(message.content, "问候");
+        assert_eq!(message.reasoning_content, "思考过程");
+    }
+
+    #[test]
+    fn ignores_unknown_text_events() {
+        let sse = concat!(
+            "event: response.unknown_text.delta\n",
+            "data: {\"type\":\"response.unknown_text.delta\",\"delta\":\"not output\"}\n\n",
+            "event: response.output_text.delta\n",
+            "data: {\"type\":\"response.output_text.delta\",\"delta\":\"actual output\"}\n\n",
+        );
+        let (message, _) = parse_responses_sse(sse).expect("parse unknown event");
+        assert_eq!(message.content, "actual output");
+        assert_eq!(message.reasoning_content, "");
+    }
+
+    #[test]
+    fn completed_output_fills_text_after_reasoning_summary() {
+        let sse = concat!(
+            "event: response.reasoning_summary_text.delta\n",
+            "data: {\"type\":\"response.reasoning_summary_text.delta\",\"delta\":\"思考\"}\n\n",
+            "event: response.completed\n",
+            "data: {\"type\":\"response.completed\",\"response\":{\"output\":[{\"type\":\"reasoning\",\"summary\":[{\"text\":\"思考\"}]},{\"type\":\"message\",\"content\":[{\"type\":\"output_text\",\"text\":\"问候\"}]}]}}\n\n",
+        );
+        let (message, _) = parse_responses_sse(sse).expect("parse completed output");
+        assert_eq!(message.content, "问候");
+        assert_eq!(message.reasoning_content, "思考");
     }
 
     #[test]
