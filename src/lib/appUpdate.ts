@@ -2,7 +2,10 @@ import { getVersion } from "@tauri-apps/api/app";
 import { isTauri } from "@tauri-apps/api/core";
 import { check, type DownloadEvent, type Update } from "@tauri-apps/plugin-updater";
 
+import { version as packageVersion } from "../../package.json";
 import { restartApp } from "@/lib/backend";
+
+export const packageAppVersion: string = packageVersion;
 
 export type UpdaterErrorCode =
   "network" | "already_latest" | "signature" | "dev_mode" | "cancelled" | "unknown";
@@ -101,8 +104,21 @@ export function isAppUpdateDevMode(): boolean {
   return import.meta.env.DEV === true || !isTauri();
 }
 
+export function formatAppVersionLabel(version: string): string {
+  const trimmed = version.trim();
+  if (!trimmed) {
+    return "";
+  }
+  return trimmed.startsWith("v") || trimmed.startsWith("V") ? trimmed : `v${trimmed}`;
+}
+
 export async function getAppVersion(): Promise<string> {
-  return getVersion();
+  try {
+    const version = (await getVersion()).trim();
+    return version || packageAppVersion;
+  } catch {
+    return packageAppVersion;
+  }
 }
 
 export async function checkForAppUpdate(): Promise<AppUpdateInfo | null> {
