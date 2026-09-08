@@ -296,10 +296,12 @@ mod tests {
     #[test]
     fn resolves_from_augmented_home_bin_when_path_empty() {
         let home = temp_dir();
-        let bin = home.join(".local").join("bin").join("npx");
+        // CI 上 /usr/local/bin/npx 常已存在，用独特命令名才能命中夹具。
+        let name = "noxcode-mcp-path-probe";
+        let bin = home.join(".local").join("bin").join(name);
         write_fake_bin(&bin);
         let search = join_augmented_path(OsStr::new("/does/not/exist"), Some(&home));
-        let resolved = resolve_program_in("npx", &search).expect("augmented npx");
+        let resolved = resolve_program_in(name, &search).expect("augmented probe");
         assert_eq!(resolved, bin);
         let _ = std::fs::remove_dir_all(home);
     }
