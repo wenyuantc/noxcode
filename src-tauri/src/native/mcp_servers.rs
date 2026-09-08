@@ -373,6 +373,15 @@ pub async fn export_mcp_servers_snippet<R: Runtime>(app: AppHandle<R>) -> Result
     Ok(render_mcp_export_snippet(&document))
 }
 
+/// 测试单个 MCP 服务器：连接 + 握手 + 列出工具。成功返回摘要，失败返回错误。
+#[tauri::command]
+pub async fn test_mcp_server<R: Runtime>(
+    app: AppHandle<R>,
+    server: McpServerConfig,
+) -> Result<String, String> {
+    crate::native::tools::mcp::test_mcp_server_connection(&app, &server).await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

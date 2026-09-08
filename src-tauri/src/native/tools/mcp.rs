@@ -1604,11 +1604,60 @@ pub async fn connect_mcp_servers<R: Runtime>(
             }
         }
     }
-    McpConnectResult {
+            McpConnectResult {
         session,
         warnings,
         connected,
     }
+}
+
+/// 测试单个 MCP 服务器：连接 + 握手 + 列出工具。成功返回摘要，失败返回错误。
+pub async fn test_mcp_server_connection<R: Runtime>(
+    app: &AppHandle<R>,
+    server: &McpServerConfig,
+) -> Result<String, String> {
+    let handlers = McpHostHandlers::default();
+    let mut live = match server.transport.as_str() {
+        MCP_TRANSPORT_HTTP | MCP_TRANSPORT_SSE => {
+            let bearer = match crate::native::mcp_oauth::bearer_token_for(app, server).await {
+                Ok(token) => token,
+                Err(error) => return Err(format!("OAuth 令牌不可用：{error}")),
+            };
+            if server.transport == MCP_TRANSPORT_HTTP {
+                connect_http(server, bearer).await?
+            } else {
+                connect_sse(server, bearer).await?
+            }
+        }
+        _ => {
+            let extra_env = match load_network_settings(app) {
+                Ok(settings) => proxy_env_vars(&settings),
+                Err(error) => return Err(format!("读取网络设置失败：{error}")),
+            };
+            spawn_local(server, &extra_env).await?
+        }
+    };
+    let summary = match handshake(&mut live, &handlers).await {
+        Ok(()) => {
+            let extras = live.resources.len() + live.prompts.len();
+            if extras > 0 {
+                format!(
+                    "连接成功：{} 个工具，{} 个资源，{} 个提示模板",
+                    live.tools.len(),
+                    live.resources.len(),
+                    live.prompts.len()
+                )
+            } else {
+                format!("连接成功：{} 个工具", live.tools.len())
+            }
+        }
+        Err(error) => {
+            live.shutdown().await;
+            return Err(format!("握手失败：{error}"));
+        }
+    };
+    live.shutdown().await;
+    Ok(summary)
 }
 
 #[cfg(test)]

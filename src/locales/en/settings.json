@@ -435,9 +435,10 @@
       "loading": "Loading MCP configuration...",
       "empty": "No MCP servers yet. Click Add Server."
     },
-    "actions": {
+            "actions": {
       "addServer": "Add server",
       "addPlaywright": "Add Playwright preset",
+      "test": "Test",
       "edit": "Edit",
       "create": "Create",
       "save": "Save",

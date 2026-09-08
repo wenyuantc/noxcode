@@ -3,6 +3,7 @@ import { confirm } from "@tauri-apps/plugin-dialog";
 import {
   Blocks,
   Download,
+  FlaskConical,
   Globe,
   KeyRound,
   Loader2,
@@ -23,6 +24,7 @@ import {
   onNativeMcpOAuth,
   resetMcpServers,
   startMcpOAuth,
+  testMcpServer,
   updateMcpServers,
 } from "@/lib/backend";
 import type { McpEnvVar, McpOAuthConfig, McpServerConfig, McpTransport } from "@/lib/types";
@@ -380,6 +382,7 @@ export function McpSettingsTab() {
   const [saving, setSaving] = useState<"save" | "delete" | "reset" | null>(null);
   const [deleteConfirming, setDeleteConfirming] = useState(false);
   const [togglingId, setTogglingId] = useState<string | null>(null);
+  const [testingId, setTestingId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [message, setMessage] = useState<string | null>(null);
   const [modalError, setModalError] = useState<string | null>(null);
@@ -576,6 +579,21 @@ export function McpSettingsTab() {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
       setTogglingId(null);
+    }
+  };
+
+  const handleTest = async (server: McpServerConfig) => {
+    if (testingId !== null) return;
+    setTestingId(server.id);
+    setError(null);
+    setMessage(null);
+    try {
+      const summary = await testMcpServer(server);
+      setMessage(summary);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setTestingId(null);
     }
   };
 
@@ -778,6 +796,21 @@ export function McpSettingsTab() {
                         title={server.enabled ? t("mcp.status.enabled") : t("mcp.status.disabled")}
                       />
                     </div>
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      onClick={() => void handleTest(server)}
+                      disabled={testingId !== null}
+                      className="h-7 text-xs gap-1"
+                    >
+                      {testingId === server.id ? (
+                        <Loader2 className="size-3 animate-spin" />
+                      ) : (
+                        <FlaskConical className="size-3" />
+                      )}
+                      {t("mcp.actions.test")}
+                    </Button>
                     <Button
                       type="button"
                       variant="outline"

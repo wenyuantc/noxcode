@@ -435,9 +435,10 @@
       "loading": "加载 MCP 配置...",
       "empty": "暂无 MCP 服务器，请点击添加服务器。"
     },
-    "actions": {
+            "actions": {
       "addServer": "添加服务器",
       "addPlaywright": "添加 Playwright 预设",
+      "test": "测试",
       "edit": "编辑",
       "create": "创建",
       "save": "保存",

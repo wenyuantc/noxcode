@@ -811,6 +811,10 @@ export function exportMcpServersSnippet(): Promise<string> {
   return invoke("export_mcp_servers_snippet");
 }
 
+export function testMcpServer(server: McpServerConfig): Promise<string> {
+  return invoke("test_mcp_server", { server });
+}
+
 export function startMcpOAuth(serverId: string): Promise<McpOAuthStart> {
   return invoke("start_mcp_oauth", { serverId });
 }
