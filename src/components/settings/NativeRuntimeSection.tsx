@@ -1,10 +1,10 @@
-import { Bot, Gauge, RefreshCw, Save, ShieldCheck, Sparkles, Terminal } from "lucide-react";
-import { useEffect, useState } from "react";
+import { Bot, Gauge, RefreshCw, ShieldCheck, Sparkles, Terminal } from "lucide-react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 
 import { updateNativeSettings } from "@/lib/backend";
 import { isNativePermissionMode, NATIVE_PERMISSION_MODES } from "@/lib/types";
-import { Button } from "@/components/ui/button";
+import type { NativeSettings } from "@/lib/types";
 import { Input } from "@/components/ui/input";
 import {
   Select,
@@ -17,7 +17,6 @@ import { Switch } from "@/components/ui/switch";
 import { Textarea } from "@/components/ui/textarea";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { SettingCard, SettingRow } from "./SettingCard";
-import { SettingFeedbackCallout } from "./SettingFeedbackCallout";
 
 const SUBAGENT_POLICIES = ["conservative", "balanced", "aggressive"] as const;
 type SubagentPolicy = (typeof SUBAGENT_POLICIES)[number];
@@ -65,15 +64,49 @@ export function NativeRuntimeSection() {
   const native = useSettingsStore((state) => state.native);
   const setNative = useSettingsStore((state) => state.setNative);
   const [draft, setDraft] = useState(native);
-  const [saving, setSaving] = useState(false);
-  const [feedback, setFeedback] = useState<{
-    variant: "success" | "error";
-    message: string;
-  } | null>(null);
 
+  const initializedRef = useRef(false);
+  const draftRef = useRef(draft);
+  draftRef.current = draft;
+
+  // 仅首次加载时用 native 初始化 draft；自动保存回写不再重置草稿，避免丢失正在编辑的输入
   useEffect(() => {
-    if (native) setDraft(native);
+    if (native && !initializedRef.current) {
+      initializedRef.current = true;
+      setDraft(native);
+    }
   }, [native]);
+
+  // 静默自动保存：失败不打扰用户
+  const persist = useCallback(
+    async (value: NativeSettings) => {
+      try {
+        const updated = await updateNativeSettings(value);
+        setNative(updated);
+      } catch {
+        // 静默失败，保留草稿，下次变更自动重试
+      }
+    },
+    [setNative],
+  );
+
+  // 防抖自动保存：停止变更 600ms 后写入
+  useEffect(() => {
+    if (!initializedRef.current) return;
+    const timer = window.setTimeout(() => {
+      if (draftRef.current) void persist(draftRef.current);
+    }, 600);
+    return () => window.clearTimeout(timer);
+  }, [draft, persist]);
+
+  // 卸载时 flush 未保存的变更
+  useEffect(() => {
+    return () => {
+      if (initializedRef.current && draftRef.current) {
+        void persist(draftRef.current);
+      }
+    };
+  }, [persist]);
 
   if (!native || !draft) return null;
 
@@ -83,42 +116,11 @@ export function NativeRuntimeSection() {
     return t("settings:runtime.policyBalanced");
   };
 
-  const save = async () => {
-    setSaving(true);
-    setFeedback(null);
-    try {
-      const updated = await updateNativeSettings(draft);
-      setNative(updated);
-      setFeedback({ variant: "success", message: t("common:saved") ?? "保存成功" });
-    } catch (err) {
-      setFeedback({ variant: "error", message: String(err) });
-    } finally {
-      setSaving(false);
-    }
-  };
-
   return (
     <div className="space-y-6">
-      {feedback ? (
-        <SettingFeedbackCallout
-          variant={feedback.variant}
-          message={feedback.message}
-          onClose={() => setFeedback(null)}
-        />
-      ) : null}
-
-      {/* 顶部操作区 */}
+      {/* 顶部提示区 */}
       <div className="flex items-center justify-between">
         <p className="text-xs text-muted-foreground">{t("settings:runtime.hint")}</p>
-        <Button
-          size="sm"
-          onClick={() => void save()}
-          disabled={saving}
-          className="h-7 gap-1.5 text-xs"
-        >
-          <Save className="size-3.5" />
-          {saving ? t("common:loading", { defaultValue: "保存中…" }) : t("common:save")}
-        </Button>
       </div>
 
       {/* 1. 会话与权限限制 */}
