@@ -35,6 +35,17 @@ export function resolveSessionSelection(input: {
   };
 }
 
+export function planApprovalModelArgs(
+  approved: boolean,
+  selection: SessionModelSelection,
+): { aiChannelId?: string; model?: string } {
+  if (!approved) return {};
+  const aiChannelId = nonEmpty(selection.channelId) ?? undefined;
+  const model = nonEmpty(selection.modelId) ?? undefined;
+  if (!aiChannelId || !model) return {};
+  return { aiChannelId, model };
+}
+
 export function mergeSessionRuntime(
   current: NativeSessionRuntime | undefined,
   changes: Partial<NativeSessionRuntime>,

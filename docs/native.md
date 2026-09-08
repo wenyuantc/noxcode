@@ -35,7 +35,7 @@ P4 把进程内编程 Agent 接到渠道 + 工作区外壳。数据流仍是 `Re
 
 「当前会话允许所有命令」使用独立 IPC 决策 `allow_session_commands`，仅为当前运行会话设置 Bash 免确认状态，立即执行当前命令并释放该会话已排队的 Bash 确认。后续本地或 SSH Bash 不再弹窗，包括高风险、写入及 ask 规则；显式 deny 仍直接拒绝。状态由当前会话及其工具上下文共享，不切换 yolo、不退出计划模式，不写权限文件或数据库，不影响其他会话及非 Bash 工具的审批；会话结束、重启或重新启动历史会话后失效。过期、取消或非 Bash 请求不能获取该授权。
 
-权限模式（`permission_mode`）四档，对齐 ZCode：`default` 变更前确认；`edit` 自动放行 `Overwrite`（删除 / 推送 / 强制 Git / 不透明命令 / MCP 仍弹确认）；`build` 再放行不透明 shell 与带 `readOnlyHint` 的 MCP；`yolo` 完全访问（`allow_all_high_risk=true`，只有 ask 规则仍会确认）。旧文件的 `confirm / auto_edit / full` 与 Claude Code 的 `acceptEdits / auto / bypassPermissions / dontAsk` 读入时映射到新名；`confirm_high_risk: false` 读成 `yolo`。`plan` 是会话态：既可由 Composer 选择在启动时进入，也可由模型调用 `EnterPlanMode` 进入；`ExitPlanMode` 提交计划触发 `native-plan-approval-request`，用户批准后恢复执行模式，退回则连同反馈交回模型继续修改。
+权限模式（`permission_mode`）四档，对齐 ZCode：`default` 变更前确认；`edit` 自动放行 `Overwrite`（删除 / 推送 / 强制 Git / 不透明命令 / MCP 仍弹确认）；`build` 再放行不透明 shell 与带 `readOnlyHint` 的 MCP；`yolo` 完全访问（`allow_all_high_risk=true`，只有 ask 规则仍会确认）。旧文件的 `confirm / auto_edit / full` 与 Claude Code 的 `acceptEdits / auto / bypassPermissions / dontAsk` 读入时映射到新名；`confirm_high_risk: false` 读成 `yolo`。`plan` 是会话态：既可由 Composer 选择在启动时进入，也可由模型调用 `EnterPlanMode` 进入；`ExitPlanMode` 提交计划触发 `native-plan-approval-request`，用户批准后恢复执行模式，退回则连同反馈交回模型继续修改。批准 IPC 可带 `ai_channel_id` / `model`：与当前 runtime 不同时先加载新 client 写入 live slot 并 `emit native-session`，再解除 `ExitPlanMode`；同一回合下一次 `chat()` 用实施模型。模型未变或退回则跳过加载。
 
 ## 权限规则
 
@@ -154,7 +154,7 @@ P4 把进程内编程 Agent 接到渠道 + 工作区外壳。数据流仍是 `Re
 
 ## 命令
 
-会话：`start_native_session`、`stop_native_session`、`stop_native`、`restart_native_session`、`resume_native_session`、`send_native_input`、`finish_native_input`、`resolve_native_tool_permission`（决策含 `allow_always`）、`answer_native_plan_question`、`resolve_native_plan_approval`、`compact_native_session`。
+会话：`start_native_session`、`stop_native_session`、`stop_native`、`restart_native_session`、`resume_native_session`、`send_native_input`、`finish_native_input`、`resolve_native_tool_permission`（决策含 `allow_always`）、`answer_native_plan_question`、`resolve_native_plan_approval`（可选 `ai_channel_id` / `model`，批准时热更换实施模型）、`compact_native_session`。
 
 工作区 / 历史：`list/create/update/delete_workspace`、`check_workspace_health`、`list_agent_sessions`、`get_agent_session_log_lines`、`prepare_agent_session_resume`、`set_agent_session_pinned`、`delete_agent_session`、`list_activity_logs`。
 

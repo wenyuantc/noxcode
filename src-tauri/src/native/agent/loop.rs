@@ -12,6 +12,7 @@ use tokio::task::JoinSet;
 use crate::db::models::{NativeToolEvent, NativeToolPhase};
 use crate::engine::UsageDelta;
 use crate::native::artifacts::{bound_with_artifact, ArtifactStore};
+use crate::native::live_model::{LiveModelSnapshot, SharedLiveModel};
 use crate::native::manager::{NativeCompactionRequest, NativeFollowup};
 use crate::native::model::call_log::{
     CALL_KIND_COMPACT, CALL_KIND_SUBAGENT, MODEL_ROLE_LITE, MODEL_ROLE_MAIN, OPERATION_COMPACT,
@@ -191,6 +192,8 @@ pub struct AgentRunner {
     started_tool_ids: HashSet<String>,
     tool_started_ms: HashMap<String, u64>,
     tool_seq: u32,
+    pub live_model: Option<SharedLiveModel>,
+    live_model_revision: u64,
 }
 
 enum TurnControl {
@@ -303,7 +306,48 @@ impl AgentRunner {
             started_tool_ids: HashSet::new(),
             tool_started_ms: HashMap::new(),
             tool_seq: 0,
+            live_model: None,
+            live_model_revision: 0,
         }
+    }
+
+    pub fn note_live_model_revision(&mut self, revision: u64) {
+        self.live_model_revision = revision;
+    }
+
+    pub fn apply_pending_live_model(&mut self) -> Option<LiveModelSnapshot> {
+        let slot = self.live_model.as_ref()?;
+        let next = slot
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .clone();
+        if next.revision <= self.live_model_revision {
+            return None;
+        }
+        self.live_model_revision = next.revision;
+        self.model_turn = Some(ModelTurnCfg {
+            model: next.model.clone(),
+            effort: next.effort.clone(),
+            max_output_tokens: next.max_output_tokens,
+            thinking_enabled: next.thinking_enabled,
+        });
+        self.lite_model = next.lite_model.clone();
+        self.ctx.hook_agent = next.hook_agent.clone();
+        if let Some(scope) = self.ctx.session_scope.as_mut() {
+            scope.channel_id = next.channel_id.clone();
+            scope.model = next.model.clone();
+        }
+        if next.context_token_limit > 0
+            && next.context_token_limit != self.context_window.token_limit
+        {
+            if next.context_token_limit < self.context_window.token_limit {
+                self.request_downshift_compaction();
+            }
+            self.context_char_limit = next.context_token_limit.saturating_mul(2);
+            self.context_window
+                .set_token_limit(next.context_token_limit);
+        }
+        Some(next)
     }
 
     pub fn cancel(&self) {
@@ -986,9 +1030,20 @@ impl AgentRunner {
         });
         self.begin_user_turn(user, images).await?;
         self.checkpoint_transcript().await;
-        let client = self.observe_client(client);
+        let mut client = self.observe_client(client);
+        let mut model = model.to_string();
+        let mut effort = effort.map(ToOwned::to_owned);
+        let mut max_output_tokens = max_output_tokens;
+        let mut thinking_enabled = thinking_enabled;
         self.streaming = true;
         loop {
+            if let Some(live) = self.apply_pending_live_model() {
+                client = self.observe_client(&live.client);
+                model = live.model;
+                effort = live.effort;
+                max_output_tokens = live.max_output_tokens;
+                thinking_enabled = live.thinking_enabled;
+            }
             if self.inject_steer_messages() {
                 self.checkpoint_transcript().await;
             }
@@ -1020,8 +1075,8 @@ impl AgentRunner {
                 .chat(ChatRequest {
                     messages: &self.messages,
                     tools: tools_now,
-                    model,
-                    effort,
+                    model: &model,
+                    effort: effort.as_deref(),
                     max_output_tokens: call_budget.max_output_tokens,
                     thinking_enabled,
                 })
@@ -3285,6 +3340,7 @@ mod tests {
                 tx.send(PlanApprovalAnswer {
                     approved,
                     feedback: String::new(),
+                    ..Default::default()
                 })
                 .unwrap();
             }));
@@ -4674,6 +4730,67 @@ mod tests {
         assert_eq!(child_ctx.workspace_id.as_deref(), Some("proj-ssh"));
         assert_eq!(child_ctx.execution_target.as_deref(), Some("ssh"));
         assert_eq!(child_ctx.subagent_id.as_deref(), Some("explore"));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn apply_pending_live_model_refreshes_turn_and_window() {
+        use crate::native::live_model::{write_live_model, LiveModelSnapshot};
+        let (mut runner, root) = temp_runner();
+        runner.context_window.set_token_limit(64_000);
+        let client = ModelClient::new(crate::native::model::ModelClientConfig {
+            protocol: "openai".to_string(),
+            base_url: "http://127.0.0.1".to_string(),
+            api_key: "sk-test".to_string(),
+            extra_headers: std::collections::HashMap::new(),
+            retry: crate::native::model::RetryConfig::none(),
+            timeout: Duration::from_secs(1),
+            network: crate::app::network_settings::NetworkSettings::default(),
+            responses_continuation: crate::native::model::ResponsesContinuationMode::Auto,
+        })
+        .expect("client");
+        let slot = std::sync::Arc::new(std::sync::Mutex::new(LiveModelSnapshot {
+            revision: 0,
+            client: client.clone(),
+            model: "old".to_string(),
+            channel_id: "ch-old".to_string(),
+            channel_name: "Old".to_string(),
+            protocol: "openai".to_string(),
+            lite_model: None,
+            effort: Some("low".to_string()),
+            max_output_tokens: None,
+            thinking_enabled: false,
+            context_tokens: Some(64_000),
+            context_token_limit: 64_000,
+            execution_target: None,
+            hook_agent: None,
+        }));
+        runner.live_model = Some(slot.clone());
+        assert!(runner.apply_pending_live_model().is_none());
+        write_live_model(
+            &slot,
+            LiveModelSnapshot {
+                revision: 0,
+                client,
+                model: "deepseek-v4-flash".to_string(),
+                channel_id: "ch-new".to_string(),
+                channel_name: "New".to_string(),
+                protocol: "openai".to_string(),
+                lite_model: Some("lite".to_string()),
+                effort: Some("high".to_string()),
+                max_output_tokens: Some(2048),
+                thinking_enabled: true,
+                context_tokens: Some(8_000),
+                context_token_limit: 8_000,
+                execution_target: None,
+                hook_agent: None,
+            },
+        );
+        let applied = runner.apply_pending_live_model().expect("applied");
+        assert_eq!(applied.model, "deepseek-v4-flash");
+        assert_eq!(runner.lite_model.as_deref(), Some("lite"));
+        assert_eq!(runner.context_window.token_limit, 8_000);
+        assert!(runner.apply_pending_live_model().is_none());
         let _ = fs::remove_dir_all(root);
     }
 }

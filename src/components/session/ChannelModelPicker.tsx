@@ -3,7 +3,7 @@ import { useNavigate } from "react-router-dom";
 import { useTranslation } from "react-i18next";
 
 import { cn } from "@/lib/utils";
-import { resolveSessionSelection } from "@/lib/sessionModel";
+import { resolveSessionSelection, type SessionModelSelection } from "@/lib/sessionModel";
 import { useChannelStore } from "@/stores/channelStore";
 import { useSessionStore } from "@/stores/sessionStore";
 import { useWorkspaceStore } from "@/stores/workspaceStore";
@@ -23,10 +23,16 @@ export function ChannelModelPicker({
   onError,
   onInfo,
   disabled = false,
+  selection,
+  onSelectionChange,
+  className,
 }: {
   onError?: (error: string) => void;
   onInfo?: (message: string) => void;
   disabled?: boolean;
+  selection?: SessionModelSelection;
+  onSelectionChange?: (channelId: string, modelId: string) => void;
+  className?: string;
 }) {
   const { t } = useTranslation("sessions");
   const navigate = useNavigate();
@@ -43,15 +49,17 @@ export function ChannelModelPicker({
   const session = useWorkspaceStore((state) =>
     sessionId ? state.sessions.find((item) => item.id === sessionId) : undefined,
   );
-  const { channelId: selectedChannelId, modelId: selectedModelId } = resolveSessionSelection({
+  const resolved = resolveSessionSelection({
     sessionId,
     runtime,
     session,
     fallbackChannelId: activeChannelId,
     fallbackModelId: activeModelId,
   });
-  const displayChannelId = pending?.ai_channel_id ?? selectedChannelId;
-  const displayModelId = pending?.model ?? selectedModelId;
+  const controlled = Boolean(onSelectionChange);
+  const displayChannelId = selection?.channelId ?? pending?.ai_channel_id ?? resolved.channelId;
+  const displayModelId = selection?.modelId ?? pending?.model ?? resolved.modelId;
+  const showPending = !controlled && Boolean(pending);
 
   const enabled = channels.filter((channel) => channel.enabled);
   const channel = channels.find((item) => item.id === displayChannelId);
@@ -61,6 +69,10 @@ export function ChannelModelPicker({
   const select = async (channelId: string, modelId: string) => {
     if (disabled) return;
     if (channelId === displayChannelId && modelId === displayModelId) return;
+    if (onSelectionChange) {
+      onSelectionChange(channelId, modelId);
+      return;
+    }
     try {
       const result = await changeSessionConfiguration(sessionId, {
         ai_channel_id: channelId,
@@ -76,10 +88,13 @@ export function ChannelModelPicker({
     <DropdownMenu>
       <DropdownMenuTrigger
         disabled={disabled}
-        title={pending ? t("modelPending") : undefined}
-        className="inline-flex h-7 min-w-0 max-w-full cursor-pointer items-center justify-between gap-1.5 rounded-lg border border-border/70 bg-background/80 px-2 text-xs font-medium text-foreground/90 shadow-2xs transition-all duration-150 outline-none hover:bg-muted/40 disabled:opacity-60"
+        title={showPending ? t("modelPending") : undefined}
+        className={cn(
+          "inline-flex h-7 min-w-0 max-w-full cursor-pointer items-center justify-between gap-1.5 rounded-lg border border-border/70 bg-background/80 px-2 text-xs font-medium text-foreground/90 shadow-2xs transition-all duration-150 outline-none hover:bg-muted/40 disabled:opacity-60",
+          className,
+        )}
       >
-        {pending ? <Clock className="size-3 shrink-0 text-amber-500" /> : null}
+        {showPending ? <Clock className="size-3 shrink-0 text-amber-500" /> : null}
         <span className="truncate">{label}</span>
         <ChevronDown className="size-3 shrink-0 text-muted-foreground/70" />
       </DropdownMenuTrigger>

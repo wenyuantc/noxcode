@@ -1,6 +1,10 @@
 import { describe, expect, it } from "vitest";
 
-import { mergeSessionRuntime, resolveSessionSelection } from "./sessionModel";
+import {
+  mergeSessionRuntime,
+  planApprovalModelArgs,
+  resolveSessionSelection,
+} from "./sessionModel";
 import type { NativeSessionRuntime } from "./types";
 
 const runtime: NativeSessionRuntime = {
@@ -92,5 +96,21 @@ describe("mergeSessionRuntime", () => {
       permission_mode: "build",
       plan_mode: false,
     });
+  });
+});
+
+describe("planApprovalModelArgs", () => {
+  it("passes the selected channel and model only when approving", () => {
+    expect(
+      planApprovalModelArgs(true, { channelId: "ch-1", modelId: "deepseek-v4-flash" }),
+    ).toEqual({ aiChannelId: "ch-1", model: "deepseek-v4-flash" });
+  });
+
+  it("omits the model when rejecting or when the selection is empty", () => {
+    expect(
+      planApprovalModelArgs(false, { channelId: "ch-1", modelId: "deepseek-v4-flash" }),
+    ).toEqual({});
+    expect(planApprovalModelArgs(true, { channelId: "  ", modelId: "m" })).toEqual({});
+    expect(planApprovalModelArgs(true, { channelId: null, modelId: "m" })).toEqual({});
   });
 });
