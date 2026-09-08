@@ -63,6 +63,8 @@ describe("sessionStore history", () => {
       stream: {},
       historyLoaded: {},
       configurationBySession: {},
+      pendingConfigurationBySession: {},
+      configurationRevisionBySession: {},
       backgroundBySession: {},
       inputQueueBySession: {},
       permissions: {},
@@ -571,5 +573,125 @@ describe("sessionStore history", () => {
       clear: true,
     });
     expect(useSessionStore.getState().stream.s1).toEqual([]);
+  });
+
+  it("keeps pending model switches isolated per session", () => {
+    const store = useSessionStore.getState();
+    store.setPendingConfiguration("s1", {
+      request_id: "r1",
+      ai_channel_id: "ch-1",
+      model: "a",
+    });
+    store.setPendingConfiguration("s2", {
+      request_id: "r2",
+      ai_channel_id: "ch-2",
+      model: "b",
+    });
+    expect(useSessionStore.getState().pendingConfigurationBySession.s1.model).toBe("a");
+    expect(useSessionStore.getState().pendingConfigurationBySession.s2.model).toBe("b");
+    store.clearPendingConfiguration("s1");
+    expect(useSessionStore.getState().pendingConfigurationBySession.s1).toBeUndefined();
+    expect(useSessionStore.getState().pendingConfigurationBySession.s2.model).toBe("b");
+  });
+
+  it("applies configuration events only when the revision is newer", () => {
+    const store = useSessionStore.getState();
+    store.onStarted({ ...started("s1", "execution"), input_queue_id: "q1" });
+    store.setPendingConfiguration("s1", {
+      request_id: "r2",
+      ai_channel_id: "ch",
+      model: "next",
+    });
+    store.onConfiguration({
+      session_record_id: "s1",
+      request_id: "r1",
+      revision: 1,
+      runtime: {
+        ai_channel_id: "ch",
+        model: "first",
+        reasoning_effort: null,
+        permission_mode: "default",
+        plan_mode: false,
+      },
+    });
+    expect(useSessionStore.getState().configurationBySession.s1.model).toBe("first");
+    expect(useSessionStore.getState().pendingConfigurationBySession.s1.model).toBe("next");
+    store.onConfiguration({
+      session_record_id: "s1",
+      request_id: "r2",
+      revision: 2,
+      runtime: {
+        ai_channel_id: "ch",
+        model: "next",
+        reasoning_effort: "low",
+        permission_mode: "default",
+        plan_mode: false,
+      },
+    });
+    expect(useSessionStore.getState().configurationBySession.s1.model).toBe("next");
+    expect(useSessionStore.getState().liveBySession.s1.runtime?.model).toBe("next");
+    expect(useSessionStore.getState().pendingConfigurationBySession.s1).toBeUndefined();
+    store.onConfiguration({
+      session_record_id: "s1",
+      request_id: "r1",
+      revision: 1,
+      runtime: {
+        ai_channel_id: "ch",
+        model: "first",
+        reasoning_effort: null,
+        permission_mode: "default",
+        plan_mode: false,
+      },
+    });
+    expect(useSessionStore.getState().configurationBySession.s1.model).toBe("next");
+    store.onConfiguration({
+      session_record_id: "s1",
+      request_id: "r-stale-run",
+      revision: 3,
+      input_queue_id: "q-old",
+      runtime: {
+        ai_channel_id: "ch",
+        model: "stale",
+        reasoning_effort: null,
+        permission_mode: "default",
+        plan_mode: false,
+      },
+    });
+    expect(useSessionStore.getState().configurationBySession.s1.model).toBe("next");
+  });
+
+  it("clears pending configuration when the live session exits", () => {
+    const store = useSessionStore.getState();
+    store.onStarted(started("s1", "execution"));
+    store.setPendingConfiguration("s1", {
+      request_id: "r1",
+      ai_channel_id: "ch",
+      model: "next",
+    });
+    store.onExit({ ...started("s1", "execution"), code: 0 });
+    expect(useSessionStore.getState().pendingConfigurationBySession.s1).toBeUndefined();
+  });
+
+  it("clears matching pending configuration on a failed event and ignores others", () => {
+    const store = useSessionStore.getState();
+    store.setPendingConfiguration("s1", {
+      request_id: "r-keep",
+      ai_channel_id: "ch",
+      model: "keep",
+    });
+    store.onConfiguration({
+      session_record_id: "s1",
+      request_id: "r-old",
+      revision: 0,
+      error: "渠道已停用",
+    });
+    expect(useSessionStore.getState().pendingConfigurationBySession.s1.model).toBe("keep");
+    store.onConfiguration({
+      session_record_id: "s1",
+      request_id: "r-keep",
+      revision: 0,
+      error: "渠道已停用",
+    });
+    expect(useSessionStore.getState().pendingConfigurationBySession.s1).toBeUndefined();
   });
 });

@@ -925,28 +925,18 @@ mod tests {
         assert_eq!(recent_ids, vec!["evt-3", "evt-4"]);
 
         // 3. Incremental query after evt-2: should return evt-3, evt-4
-        let after = get_agent_session_log_lines_with(
-            &pool,
-            "sess-same-sec",
-            Some("evt-2"),
-            None,
-            Some(10),
-        )
-        .await
-        .expect("fetch after evt-2");
+        let after =
+            get_agent_session_log_lines_with(&pool, "sess-same-sec", Some("evt-2"), None, Some(10))
+                .await
+                .expect("fetch after evt-2");
         let after_ids: Vec<&str> = after.iter().map(|e| e.id.as_str()).collect();
         assert_eq!(after_ids, vec!["evt-3", "evt-4"]);
 
         // 4. Paging earlier before evt-3: should return evt-1, evt-2
-        let earlier = get_agent_session_log_lines_with(
-            &pool,
-            "sess-same-sec",
-            None,
-            Some("evt-3"),
-            Some(10),
-        )
-        .await
-        .expect("fetch before evt-3");
+        let earlier =
+            get_agent_session_log_lines_with(&pool, "sess-same-sec", None, Some("evt-3"), Some(10))
+                .await
+                .expect("fetch before evt-3");
         let earlier_ids: Vec<&str> = earlier.iter().map(|e| e.id.as_str()).collect();
         assert_eq!(earlier_ids, vec!["evt-1", "evt-2"]);
     }

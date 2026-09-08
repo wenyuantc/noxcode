@@ -19,5 +19,6 @@ describe("ChannelModelPicker", () => {
     expect(html).toContain("max-w-full");
     expect(html).not.toContain("max-w-[min(12rem,100%)]");
     expect(html).not.toContain("max-w-48");
+    expect(html).not.toContain('disabled=""');
   });
 });

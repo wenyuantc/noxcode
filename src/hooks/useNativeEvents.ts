@@ -8,6 +8,7 @@ import {
   onNativePlanApprovalRequest,
   onNativePlanQuestion,
   onNativeSession,
+  onNativeSessionConfiguration,
   onNativeSessionTitle,
   onNativeStdout,
   onNativeTextDelta,
@@ -16,7 +17,9 @@ import {
   onNativeRequestResolved,
   onNativeInputQueue,
 } from "@/lib/backend";
+import { useChannelStore } from "@/stores/channelStore";
 import { useSessionStore } from "@/stores/sessionStore";
+import { useUiStore } from "@/stores/uiStore";
 import { useWorkspaceStore } from "@/stores/workspaceStore";
 
 export function useNativeEvents() {
@@ -41,6 +44,22 @@ export function useNativeEvents() {
     track(
       onNativeSessionTitle(() => {
         void useWorkspaceStore.getState().refreshSessions();
+      }),
+    );
+    track(
+      onNativeSessionConfiguration((payload) => {
+        useSessionStore.getState().onConfiguration(payload);
+        if (payload.runtime && !payload.error) {
+          if (useSessionStore.getState().selectedSessionId === payload.session_record_id) {
+            useChannelStore
+              .getState()
+              .setSelection(payload.runtime.ai_channel_id, payload.runtime.model);
+            if (payload.runtime.reasoning_effort) {
+              useUiStore.getState().setComposerThinkingLevel(payload.runtime.reasoning_effort);
+            }
+          }
+          void useWorkspaceStore.getState().refreshSessions();
+        }
       }),
     );
     track(onNativeStdout((output) => useSessionStore.getState().onStdout(output)));

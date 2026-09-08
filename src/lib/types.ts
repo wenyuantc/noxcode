@@ -598,6 +598,30 @@ export interface NativeSessionRuntime {
   plan_mode: boolean;
 }
 
+export interface PendingSessionConfiguration {
+  request_id: string;
+  ai_channel_id: string;
+  model: string;
+}
+
+export interface UpdateNativeSessionConfigurationInput {
+  session_record_id: string;
+  ai_channel_id: string;
+  model: string;
+  reasoning_effort?: string | null;
+  request_id: string;
+}
+
+export interface NativeSessionConfigurationEvent {
+  session_record_id: string;
+  request_id: string;
+  revision: number;
+  input_queue_id?: string | null;
+  runtime?: NativeSessionRuntime | null;
+  compacted?: boolean;
+  error?: string | null;
+}
+
 export interface NativeRequestResolved {
   session_record_id: string;
   request_id: string;

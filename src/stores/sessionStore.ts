@@ -22,6 +22,8 @@ import type {
   NativeBackgroundTasks,
   NativeSessionRuntime,
   NativeInputQueue,
+  NativeSessionConfigurationEvent,
+  PendingSessionConfiguration,
 } from "@/lib/types";
 import { useChannelStore } from "@/stores/channelStore";
 import { useWorkspaceStore } from "@/stores/workspaceStore";
@@ -61,6 +63,8 @@ interface SessionState {
   lines: Record<string, RawSessionLine[]>;
   historyLoaded: Record<string, boolean>;
   configurationBySession: Record<string, NativeSessionRuntime>;
+  pendingConfigurationBySession: Record<string, PendingSessionConfiguration>;
+  configurationRevisionBySession: Record<string, number>;
   backgroundBySession: Record<string, NativeBackgroundTask[]>;
   inputQueueBySession: Record<string, NativeInputQueue>;
   turnState: Record<string, string>;
@@ -89,6 +93,9 @@ interface SessionState {
   onBackgroundTasks: (payload: NativeBackgroundTasks) => void;
   onInputQueue: (payload: NativeInputQueue) => void;
   setConfiguration: (sessionId: string, runtime: NativeSessionRuntime) => void;
+  setPendingConfiguration: (sessionId: string, pending: PendingSessionConfiguration) => void;
+  clearPendingConfiguration: (sessionId: string) => void;
+  onConfiguration: (payload: NativeSessionConfigurationEvent) => void;
 }
 
 const historyRequests = new Map<string, Promise<void>>();
@@ -103,6 +110,8 @@ export const useSessionStore = create<SessionState>((set, get) => ({
   hasMoreEarlier: {},
   loadingEarlier: {},
   configurationBySession: {},
+  pendingConfigurationBySession: {},
+  configurationRevisionBySession: {},
   backgroundBySession: {},
   inputQueueBySession: {},
   turnState: {},
@@ -246,11 +255,16 @@ export const useSessionStore = create<SessionState>((set, get) => ({
         session.session_kind === "plan");
     if (!hasModeEvent) delete planModeRunBySession[id];
     const runtime = session.runtime ? { ...session.runtime, plan_mode: planMode } : session.runtime;
+    const configurationRevisionBySession = { ...current.configurationRevisionBySession };
+    if (current.liveBySession[id]?.input_queue_id !== session.input_queue_id) {
+      delete configurationRevisionBySession[id];
+    }
     set({
       liveBySession: { ...current.liveBySession, [id]: { ...session, runtime } },
       inputQueueBySession,
       planModeBySession: { ...current.planModeBySession, [id]: planMode },
       planModeRunBySession,
+      configurationRevisionBySession,
       configurationBySession: runtime
         ? { ...current.configurationBySession, [id]: runtime }
         : current.configurationBySession,
@@ -340,6 +354,8 @@ export const useSessionStore = create<SessionState>((set, get) => ({
     delete inputQueueBySession[exit.session_record_id];
     const planModeRunBySession = { ...get().planModeRunBySession };
     delete planModeRunBySession[exit.session_record_id];
+    const pendingConfigurationBySession = { ...get().pendingConfigurationBySession };
+    delete pendingConfigurationBySession[exit.session_record_id];
     set({
       liveBySession,
       stream,
@@ -348,6 +364,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
       planApprovals,
       inputQueueBySession,
       planModeRunBySession,
+      pendingConfigurationBySession,
       backgroundBySession: {
         ...get().backgroundBySession,
         [exit.session_record_id]: (get().backgroundBySession[exit.session_record_id] ?? []).map(
@@ -421,4 +438,64 @@ export const useSessionStore = create<SessionState>((set, get) => ({
       configurationBySession: { ...state.configurationBySession, [sessionId]: runtime },
       planModeBySession: { ...state.planModeBySession, [sessionId]: runtime.plan_mode },
     })),
+  setPendingConfiguration: (sessionId, pending) =>
+    set((state) => ({
+      pendingConfigurationBySession: {
+        ...state.pendingConfigurationBySession,
+        [sessionId]: pending,
+      },
+    })),
+  clearPendingConfiguration: (sessionId) =>
+    set((state) => {
+      if (!Object.prototype.hasOwnProperty.call(state.pendingConfigurationBySession, sessionId)) {
+        return {};
+      }
+      const pendingConfigurationBySession = { ...state.pendingConfigurationBySession };
+      delete pendingConfigurationBySession[sessionId];
+      return { pendingConfigurationBySession };
+    }),
+  onConfiguration: (payload) =>
+    set((state) => {
+      const id = payload.session_record_id;
+      if (payload.error) {
+        const pending = state.pendingConfigurationBySession[id];
+        if (pending?.request_id !== payload.request_id) return {};
+        const pendingConfigurationBySession = { ...state.pendingConfigurationBySession };
+        delete pendingConfigurationBySession[id];
+        return { pendingConfigurationBySession };
+      }
+      if (!payload.runtime) return {};
+      const live = state.liveBySession[id];
+      if (
+        payload.input_queue_id &&
+        live?.input_queue_id &&
+        payload.input_queue_id !== live.input_queue_id
+      ) {
+        return {};
+      }
+      const currentRevision = state.configurationRevisionBySession[id] ?? 0;
+      if (payload.revision <= currentRevision) return {};
+      const pending = state.pendingConfigurationBySession[id];
+      const pendingConfigurationBySession = { ...state.pendingConfigurationBySession };
+      if (pending?.request_id === payload.request_id) {
+        delete pendingConfigurationBySession[id];
+      }
+      return {
+        pendingConfigurationBySession,
+        configurationRevisionBySession: {
+          ...state.configurationRevisionBySession,
+          [id]: payload.revision,
+        },
+        configurationBySession: {
+          ...state.configurationBySession,
+          [id]: payload.runtime,
+        },
+        liveBySession: live
+          ? {
+              ...state.liveBySession,
+              [id]: { ...live, runtime: payload.runtime },
+            }
+          : state.liveBySession,
+      };
+    }),
 }));

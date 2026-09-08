@@ -418,8 +418,19 @@ impl AgentRunner {
         client: &ModelClient,
         instructions: Option<String>,
     ) -> Option<CompactBoundary> {
+        self.compact_now_with(client, CompactTrigger::Manual, instructions)
+            .await
+    }
+
+    /// 立刻压缩；模型切换降窗口时使用 `Downshift`。
+    pub async fn compact_now_with(
+        &mut self,
+        client: &ModelClient,
+        trigger: CompactTrigger,
+        instructions: Option<String>,
+    ) -> Option<CompactBoundary> {
         let client = self.observe_client(client);
-        self.run_compaction(Some(&client), CompactTrigger::Manual, instructions)
+        self.run_compaction(Some(&client), trigger, instructions)
             .await
     }
 

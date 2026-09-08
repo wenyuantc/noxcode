@@ -133,8 +133,10 @@ export const useUiStore = create<UiState>((set, get) => ({
   },
   setComposerThinkingLevel: (value) => {
     const next = value?.trim() || null;
-    if (next) localStorage.setItem(THINKING_LEVEL_KEY, next);
-    else localStorage.removeItem(THINKING_LEVEL_KEY);
+    if (typeof localStorage !== "undefined") {
+      if (next) localStorage.setItem(THINKING_LEVEL_KEY, next);
+      else localStorage.removeItem(THINKING_LEVEL_KEY);
+    }
     set({ composerThinkingLevel: next });
   },
   setTheme: (mode) => {

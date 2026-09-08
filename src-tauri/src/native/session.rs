@@ -17,22 +17,24 @@ use crate::app::ssh::configs::fetch_ssh_config_record_by_id;
 use crate::app::ssh::validate_password_execution;
 use crate::db::models::{
     AgentSessionExit, AgentSessionOutput, AgentSessionRecord, AgentSessionStarted,
-    NativeContextUsage, NativePlanModeChanged, NativeSessionRuntime, NativeTextDelta,
-    NativeToolEvent, NativeToolImage, NativeTurnState, SshConfigRecord, StartNativeSessionInput,
+    NativeContextUsage, NativePlanModeChanged, NativeSessionConfigurationEvent,
+    NativeSessionRuntime, NativeTextDelta, NativeToolEvent, NativeToolImage, NativeTurnState,
+    SshConfigRecord, StartNativeSessionInput, UpdateNativeSessionConfigurationInput,
 };
 use crate::engine::context::{resolve_workspace_execution_context_with_pool, ExecutionContext};
 use crate::engine::UsageDelta;
 use crate::git::create_checkpoint;
-use crate::native::agent::compact::{BudgetSnapshot, ContextWindow};
+use crate::native::agent::compact::{BudgetSnapshot, CompactTrigger, ContextWindow};
 use crate::native::agent::r#loop::AgentDiagnosticsSnapshot;
 use crate::native::agent::r#loop::{AgentRunner, NativeEvent, TranscriptCheckpoint};
 use crate::native::api_logs::sqlite_call_log_sink;
 use crate::native::channels::{fetch_channel_record, require_channel_api_key};
 use crate::native::input_queue::{NativeInputQueue, NativeInputQueueSnapshot};
 use crate::native::manager::{
-    NativeAgentManager, NativeCompactionRequest, NativeFollowup, NativeLiveSession,
-    NativeSessionInfo, PendingPermission, PendingPlanApproval, PendingPlanQuestion,
-    PermissionRequest, PlanApprovalRequest, PlanQuestionRequest,
+    take_latest_configuration, NativeAgentManager, NativeCompactionRequest,
+    NativeConfigurationRequest, NativeFollowup, NativeLiveSession, NativeSessionInfo,
+    PendingPermission, PendingPlanApproval, PendingPlanQuestion, PermissionRequest,
+    PlanApprovalRequest, PlanQuestionRequest,
 };
 use crate::native::mcp_servers::resolve_session_mcp_servers;
 use crate::native::model::call_log::{
@@ -143,7 +145,7 @@ fn attach_transcript_checkpoint(
     session_record_id: String,
     profile_id: String,
     workspace_id: String,
-    model: String,
+    model: Arc<Mutex<String>>,
     last_fingerprint: Arc<Mutex<Option<u64>>>,
 ) {
     let hook: TranscriptCheckpoint = Arc::new(move |messages| {
@@ -154,6 +156,7 @@ fn attach_transcript_checkpoint(
         let model = model.clone();
         let last_fingerprint = last_fingerprint.clone();
         Box::pin(async move {
+            let model = model.lock().await.clone();
             persist_runner_transcript(
                 &app,
                 &session_record_id,
@@ -1819,6 +1822,7 @@ async fn start_native_session_locked(
         session_record_id: session_record_id.clone(),
     };
     let (followup_tx, followup_rx) = mpsc::channel(8);
+    let (config_tx, config_rx) = mpsc::channel(8);
     let cancel = crate::native::tools::CancelFlag::new();
     let allow_all_high_risk = Arc::new(AtomicBool::new(
         crate::native::settings::permission_mode_is_yolo(&permission_mode),
@@ -1871,6 +1875,7 @@ async fn start_native_session_locked(
             working_run,
             rules_run,
             followup_rx,
+            config_rx,
             queue_run,
             session_spawn,
             profile_spawn,
@@ -1898,6 +1903,7 @@ async fn start_native_session_locked(
         },
         cancel,
         followup_tx,
+        config_tx,
         input_queue,
         join,
         allow_all_high_risk,
@@ -1955,11 +1961,224 @@ fn validate_live_configuration(
     }
 }
 
+pub(crate) enum NativeIdleWait {
+    Followup(Option<NativeFollowup>),
+    Configuration(Option<NativeConfigurationRequest>),
+    Input(Option<crate::native::input_queue::NativeQueuedInput>),
+}
+
+pub(crate) async fn recv_idle_wait(
+    followup_rx: &mut mpsc::Receiver<NativeFollowup>,
+    config_rx: &mut mpsc::Receiver<NativeConfigurationRequest>,
+    input_queue: &NativeInputQueue,
+    cancel: &crate::native::tools::CancelFlag,
+    working: &AtomicBool,
+) -> NativeIdleWait {
+    tokio::select! {
+        biased;
+        followup = followup_rx.recv() => NativeIdleWait::Followup(followup),
+        config = config_rx.recv() => NativeIdleWait::Configuration(config),
+        input = input_queue.recv(cancel, working) => NativeIdleWait::Input(input),
+    }
+}
+
+fn apply_run_settings_to_runner(runner: &mut AgentRunner, run: &NativeRunSettings) {
+    runner.lite_model = run.lite_model.clone();
+    runner.ctx.hook_agent = Some(hook_agent_handler(run));
+    if let Some(scope) = runner.ctx.session_scope.as_mut() {
+        scope.channel_id = run.channel_id.clone();
+        scope.model = run.model.clone();
+    }
+}
+
+async fn update_agent_session_channel(
+    pool: &sqlx::SqlitePool,
+    session_id: &str,
+    ai_channel_id: &str,
+) -> Result<(), String> {
+    sqlx::query("UPDATE agent_sessions SET ai_channel_id = $1 WHERE id = $2")
+        .bind(ai_channel_id)
+        .bind(session_id)
+        .execute(pool)
+        .await
+        .map_err(|error| format!("更新会话渠道失败: {error}"))?;
+    Ok(())
+}
+
+fn bind_run_to_session(
+    mut run: NativeRunSettings,
+    session_record_id: &str,
+    workspace_id: &str,
+    plan_mode: bool,
+    execution_target: Option<String>,
+) -> NativeRunSettings {
+    run.client = run
+        .client
+        .with_call_log_context(CallLogContext::for_session(
+            Some(run.channel_id.clone()),
+            Some(run.channel_name.clone()),
+            Some(session_record_id.to_string()),
+            None,
+            Some(workspace_id.to_string()),
+            if plan_mode {
+                CALL_KIND_PLAN
+            } else {
+                CALL_KIND_CHAT
+            },
+            execution_target,
+        ))
+        .with_prompt_cache_key(session_record_id.to_string());
+    run
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn apply_session_configuration(
+    app: &AppHandle,
+    manager_state: &Arc<Mutex<NativeAgentManager>>,
+    run: &mut NativeRunSettings,
+    runner: &mut AgentRunner,
+    request: &NativeConfigurationRequest,
+    session_record_id: &str,
+    workspace_id: &str,
+    transcript_model: &Arc<Mutex<String>>,
+    last_transcript_fingerprint: &Arc<Mutex<Option<u64>>>,
+    profile_id: &str,
+) -> Result<(NativeSessionRuntime, bool), String> {
+    let pool = sqlite_pool(app).await?;
+    let mut next = load_native_client(
+        app,
+        &pool,
+        request.ai_channel_id.trim(),
+        request.model.trim(),
+        request.reasoning_effort.as_deref(),
+    )
+    .await?;
+    next.profile_system_prompt = run.profile_system_prompt.clone();
+    next.bound_subagent = run.bound_subagent.clone();
+    next = bind_run_to_session(
+        next,
+        session_record_id,
+        workspace_id,
+        runner.is_plan_mode(),
+        if runner.ctx.ssh.is_some() {
+            Some(crate::app::shared::EXECUTION_TARGET_SSH.to_string())
+        } else {
+            Some(crate::app::shared::EXECUTION_TARGET_LOCAL.to_string())
+        },
+    );
+    update_agent_session_channel(&pool, session_record_id, &next.channel_id).await?;
+    let runtime = {
+        let mut manager = manager_state.lock().await;
+        let session = manager
+            .get_session_mut(session_record_id)
+            .ok_or_else(|| "会话已结束".to_string())?;
+        session.info.channel_id = next.channel_id.clone();
+        let permission_mode = session
+            .runtime
+            .as_ref()
+            .map(|item| item.permission_mode.clone())
+            .unwrap_or_else(|| crate::native::settings::PERMISSION_MODE_DEFAULT.to_string());
+        let plan_mode = session.plan_mode.load(Ordering::SeqCst);
+        let runtime = NativeSessionRuntime {
+            ai_channel_id: next.channel_id.clone(),
+            model: next.model.clone(),
+            reasoning_effort: next.effort.clone(),
+            permission_mode,
+            plan_mode,
+        };
+        session.runtime = Some(runtime.clone());
+        runtime
+    };
+    apply_run_settings_to_runner(runner, &next);
+    configure_runner_limits(app, runner, next.context_tokens);
+    *transcript_model.lock().await = next.model.clone();
+    let compacted = if runner.context_window.should_compact(&runner.messages) {
+        runner
+            .compact_now_with(&next.client, CompactTrigger::Downshift, None)
+            .await
+            .is_some()
+    } else {
+        false
+    };
+    persist_runner_transcript(
+        app,
+        session_record_id,
+        profile_id,
+        workspace_id,
+        &next.model,
+        &runner.messages,
+        last_transcript_fingerprint.as_ref(),
+    )
+    .await;
+    *run = next;
+    Ok((runtime, compacted))
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn dispatch_session_configuration(
+    app: &AppHandle,
+    manager_state: &Arc<Mutex<NativeAgentManager>>,
+    run: &mut NativeRunSettings,
+    runner: &mut AgentRunner,
+    request: NativeConfigurationRequest,
+    session_record_id: &str,
+    workspace_id: &str,
+    transcript_model: &Arc<Mutex<String>>,
+    last_transcript_fingerprint: &Arc<Mutex<Option<u64>>>,
+    profile_id: &str,
+    input_queue_id: &str,
+    config_revision: &mut u64,
+) {
+    let request_id = request.request_id.clone();
+    let result = apply_session_configuration(
+        app,
+        manager_state,
+        run,
+        runner,
+        &request,
+        session_record_id,
+        workspace_id,
+        transcript_model,
+        last_transcript_fingerprint,
+        profile_id,
+    )
+    .await;
+    let event = match result {
+        Ok((runtime, compacted)) => {
+            *config_revision = config_revision.saturating_add(1);
+            NativeSessionConfigurationEvent {
+                session_record_id: session_record_id.to_string(),
+                request_id,
+                revision: *config_revision,
+                input_queue_id: Some(input_queue_id.to_string()),
+                runtime: Some(runtime),
+                compacted,
+                error: None,
+            }
+        }
+        Err(error) => NativeSessionConfigurationEvent {
+            session_record_id: session_record_id.to_string(),
+            request_id,
+            revision: 0,
+            input_queue_id: Some(input_queue_id.to_string()),
+            runtime: None,
+            compacted: false,
+            error: Some(error),
+        },
+    };
+    let _ = app.emit("native-session-configuration", &event);
+    if let Some(error) = event.error.clone() {
+        let _ = request.reply.send(Err(error));
+    } else {
+        let _ = request.reply.send(Ok(event));
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn run_native_loop(
     app: AppHandle,
     manager_state: Arc<Mutex<NativeAgentManager>>,
-    run: NativeRunSettings,
+    mut run: NativeRunSettings,
     first_prompt: String,
     run_cwd: String,
     ssh: Option<SshToolRuntime>,
@@ -1968,6 +2187,7 @@ async fn run_native_loop(
     working: Arc<AtomicBool>,
     permission_rules: crate::native::permission_rules::SharedPermissionRules,
     followup_rx: mpsc::Receiver<NativeFollowup>,
+    mut config_rx: mpsc::Receiver<NativeConfigurationRequest>,
     input_queue: Arc<NativeInputQueue>,
     session_record_id: String,
     profile_id: String,
@@ -1979,6 +2199,7 @@ async fn run_native_loop(
     permission_mode: String,
 ) {
     let followup_rx = Arc::new(Mutex::new(followup_rx));
+    let mut config_revision = 0_u64;
     let mut runner = AgentRunner::new(LocalWorkspace::new(PathBuf::from(&run_cwd)));
     runner.ctx.ssh = ssh;
     runner.ctx.extra_env = load_network_settings(&app)
@@ -2479,13 +2700,14 @@ async fn run_native_loop(
         }
     }
     let last_transcript_fingerprint = Arc::new(Mutex::new(None));
+    let transcript_model = Arc::new(Mutex::new(run.model.clone()));
     attach_transcript_checkpoint(
         &mut runner,
         app.clone(),
         session_record_id.clone(),
         profile_id.clone(),
         workspace_id.clone(),
-        run.model.clone(),
+        transcript_model.clone(),
         last_transcript_fingerprint.clone(),
     );
     let (event_tx, event_rx) = mpsc::unbounded_channel();
@@ -2738,18 +2960,59 @@ async fn run_native_loop(
                     break;
                 }
                 emit_turn_state(&app, &session_record_id, &working, "waiting_input");
-                // 等待输入时收到 /compact：立刻压缩、写回 transcript，然后继续等待，不算用户回合。
+                // 等待输入时先应用模型配置，再处理 /compact 与输入队列。
                 let followup = loop {
+                    if let Some(request) = take_latest_configuration(&mut config_rx, None) {
+                        dispatch_session_configuration(
+                            &app,
+                            &manager_state,
+                            &mut run,
+                            &mut runner,
+                            request,
+                            &session_record_id,
+                            &workspace_id,
+                            &transcript_model,
+                            &last_transcript_fingerprint,
+                            &profile_id,
+                            &input_queue.id,
+                            &mut config_revision,
+                        )
+                        .await;
+                        continue;
+                    }
                     let mut controls = followup_rx.lock().await;
-                    let followup = tokio::select! {
-                        biased;
-                        control = controls.recv() => control,
-                        input = input_queue.recv(&cancel, &working) => input.map(|input|
-                            NativeFollowup::input_with_images(input.text, input.images)),
-                    };
+                    let wait = recv_idle_wait(
+                        &mut controls,
+                        &mut config_rx,
+                        &input_queue,
+                        &cancel,
+                        &working,
+                    )
+                    .await;
                     drop(controls);
-                    match followup {
-                        Some(NativeFollowup::Compact(mut request)) => {
+                    match wait {
+                        NativeIdleWait::Configuration(request) => {
+                            let Some(request) = take_latest_configuration(&mut config_rx, request)
+                            else {
+                                break None;
+                            };
+                            dispatch_session_configuration(
+                                &app,
+                                &manager_state,
+                                &mut run,
+                                &mut runner,
+                                request,
+                                &session_record_id,
+                                &workspace_id,
+                                &transcript_model,
+                                &last_transcript_fingerprint,
+                                &profile_id,
+                                &input_queue.id,
+                                &mut config_revision,
+                            )
+                            .await;
+                        }
+                        NativeIdleWait::Followup(Some(NativeFollowup::Compact(mut request))) => {
                             emit_turn_state(&app, &session_record_id, &working, "working");
                             if runner
                                 .compact_now(&run.client, request.instructions.take())
@@ -2778,7 +3041,12 @@ async fn run_native_loop(
                             .await;
                             emit_turn_state(&app, &session_record_id, &working, "waiting_input");
                         }
-                        other => break other,
+                        NativeIdleWait::Followup(other) => break other,
+                        NativeIdleWait::Input(input) => {
+                            break input.map(|item| {
+                                NativeFollowup::input_with_images(item.text, item.images)
+                            });
+                        }
                     }
                 };
                 match followup {
@@ -3414,6 +3682,62 @@ pub async fn finish_native_input(
     finish_live_input(state.inner(), &session_record_id).await
 }
 
+#[tauri::command]
+pub async fn update_native_session_configuration(
+    app: AppHandle,
+    state: State<'_, Arc<Mutex<NativeAgentManager>>>,
+    payload: UpdateNativeSessionConfigurationInput,
+) -> Result<NativeSessionConfigurationEvent, String> {
+    crate::app::lifecycle::require_running(&app)?;
+    let session_record_id = payload.session_record_id.trim().to_string();
+    if session_record_id.is_empty() {
+        return Err("会话不存在".to_string());
+    }
+    let ai_channel_id = payload.ai_channel_id.trim().to_string();
+    if ai_channel_id.is_empty() {
+        return Err("必须选择 AI 渠道".to_string());
+    }
+    let model = payload.model.trim().to_string();
+    if model.is_empty() {
+        return Err("必须选择模型".to_string());
+    }
+    let request_id = payload.request_id.trim();
+    let request_id = if request_id.is_empty() {
+        new_id()
+    } else {
+        request_id.to_string()
+    };
+    let reasoning_effort = payload
+        .reasoning_effort
+        .as_deref()
+        .map(str::trim)
+        .filter(|item| !item.is_empty())
+        .map(ToOwned::to_owned);
+    let (reply, done) = tokio::sync::oneshot::channel();
+    let config_tx = {
+        let manager = state.lock().await;
+        manager.require_running()?;
+        let session = manager
+            .get_session(&session_record_id)
+            .ok_or_else(|| "会话未在运行".to_string())?;
+        if session.closing {
+            return Err("内置 Agent 正在结束，请稍后重试".to_string());
+        }
+        session.config_tx.clone()
+    };
+    config_tx
+        .send(NativeConfigurationRequest {
+            request_id,
+            ai_channel_id,
+            model,
+            reasoning_effort,
+            reply,
+        })
+        .await
+        .map_err(|_| "会话已结束".to_string())?;
+    done.await.map_err(|_| "会话已结束".to_string())?
+}
+
 async fn finish_live_input(
     manager_state: &Mutex<NativeAgentManager>,
     session_record_id: &str,
@@ -3515,6 +3839,7 @@ mod tests {
     use crate::native::agent::compact::{BudgetSnapshot, ContextWindow};
     use crate::native::agent::r#loop::AgentDiagnosticsSnapshot;
     use crate::native::input_queue::NativeInputQueue;
+    use crate::native::manager::NativeConfigurationRequest;
 
     #[tokio::test]
     async fn ssh_session_preflight_requires_verified_password_and_returns_config() {
@@ -3625,6 +3950,76 @@ mod tests {
                 "{key}"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn recv_idle_wait_prefers_configuration_over_queued_input() {
+        let (_followup_tx, mut followup_rx) = tokio::sync::mpsc::channel(8);
+        let (config_tx, mut config_rx) = tokio::sync::mpsc::channel(8);
+        let queue = NativeInputQueue::new("sess-config");
+        queue
+            .enqueue("already queued", Vec::new())
+            .expect("enqueue");
+        let (reply, _done) = tokio::sync::oneshot::channel();
+        config_tx
+            .send(NativeConfigurationRequest {
+                request_id: "req-1".into(),
+                ai_channel_id: "ch-new".into(),
+                model: "model-new".into(),
+                reasoning_effort: None,
+                reply,
+            })
+            .await
+            .unwrap();
+        let wait = super::recv_idle_wait(
+            &mut followup_rx,
+            &mut config_rx,
+            &queue,
+            &crate::native::tools::CancelFlag::new(),
+            &std::sync::atomic::AtomicBool::new(false),
+        )
+        .await;
+        match wait {
+            super::NativeIdleWait::Configuration(Some(request)) => {
+                assert_eq!(request.request_id, "req-1");
+                assert_eq!(request.model, "model-new");
+            }
+            _ => panic!("expected configuration first"),
+        }
+        assert_eq!(queue.snapshot().items.len(), 1);
+        assert_eq!(queue.snapshot().items[0].text, "already queued");
+    }
+
+    #[tokio::test]
+    async fn update_agent_session_channel_keeps_the_same_session_id() {
+        let pool = crate::db::test_support::setup_migrated_pool().await;
+        sqlx::query(
+            "INSERT INTO workspaces (id, name, workspace_type, created_at, updated_at) VALUES ('ws-ch', 'ws', 'local', 't', 't')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO ai_channels (id, name, protocol, base_url) VALUES ('ch-old', 'old', 'openai', 'http://x'), ('ch-new', 'new', 'openai', 'http://y')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO agent_sessions (id, ai_channel_id, workspace_id, session_kind, status, started_at, created_at) VALUES ('sess-ch', 'ch-old', 'ws-ch', 'execution', 'running', 't', 't')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        super::update_agent_session_channel(&pool, "sess-ch", "ch-new")
+            .await
+            .unwrap();
+        let channel: String =
+            sqlx::query_scalar("SELECT ai_channel_id FROM agent_sessions WHERE id = 'sess-ch'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(channel, "ch-new");
     }
 
     #[tokio::test]
@@ -3743,6 +4138,7 @@ mod tests {
             closing: false,
             cancel,
             followup_tx: tx,
+            config_tx: crate::native::manager::unused_config_tx(),
             input_queue: Arc::new(NativeInputQueue::new("sess-1")),
             join,
             allow_all_high_risk: Arc::new(AtomicBool::new(false)),
@@ -4093,6 +4489,7 @@ mod tests {
             closing: false,
             cancel: CancelFlag::new(),
             followup_tx: tx,
+            config_tx: crate::native::manager::unused_config_tx(),
             input_queue: Arc::new(NativeInputQueue::new("sess-1")),
             join: tokio::spawn(async {}),
             allow_all_high_risk: Arc::new(AtomicBool::new(false)),
@@ -4168,6 +4565,7 @@ mod tests {
             closing: false,
             cancel: CancelFlag::new(),
             followup_tx: tx,
+            config_tx: crate::native::manager::unused_config_tx(),
             input_queue: Arc::new(NativeInputQueue::new("sess-1")),
             join: tokio::spawn(async {}),
             allow_all_high_risk: Arc::new(AtomicBool::new(false)),

@@ -71,8 +71,10 @@ import type {
   NativePlanModeChanged,
   NativePlanApprovalRequest,
   NativePlanQuestionRequest,
+  NativeSessionConfigurationEvent,
   NativeSessionTitle,
   NativeSettings,
+  UpdateNativeSessionConfigurationInput,
   PermissionRule,
   PermissionRuleEffect,
   PermissionRuleScope,
@@ -482,6 +484,12 @@ export function resumeNativeSession(
   resumeSessionId?: string,
 ): Promise<AgentSessionStarted> {
   return invoke("resume_native_session", { payload, resumeSessionId });
+}
+
+export function updateNativeSessionConfiguration(
+  payload: UpdateNativeSessionConfigurationInput,
+): Promise<NativeSessionConfigurationEvent> {
+  return invoke("update_native_session_configuration", { payload });
 }
 
 export function sendNativeInput(sessionRecordId: string, input: string): Promise<NativeInputQueue> {
@@ -909,6 +917,14 @@ export function onNativeSessionTitle(
   callback: (payload: NativeSessionTitle) => void,
 ): Promise<UnlistenFn> {
   return listen<NativeSessionTitle>("native-session-title", (event) => {
+    callback(event.payload);
+  });
+}
+
+export function onNativeSessionConfiguration(
+  callback: (payload: NativeSessionConfigurationEvent) => void,
+): Promise<UnlistenFn> {
+  return listen<NativeSessionConfigurationEvent>("native-session-configuration", (event) => {
     callback(event.payload);
   });
 }

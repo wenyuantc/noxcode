@@ -155,6 +155,10 @@ export function Composer({ compact = false }: { compact?: boolean }) {
   const pendingCount = useSessionStore((state) =>
     selectedSessionId ? (state.inputQueueBySession[selectedSessionId]?.items.length ?? 0) : 0,
   );
+  const pendingConfiguration = useSessionStore((state) =>
+    selectedSessionId ? state.pendingConfigurationBySession[selectedSessionId] : undefined,
+  );
+  const applyingConfig = Boolean(pendingConfiguration);
   const { channelId: effectiveChannelId, modelId: selectedModelId } = resolveSessionSelection({
     sessionId: selectedSessionId,
     runtime,
@@ -329,7 +333,7 @@ export function Composer({ compact = false }: { compact?: boolean }) {
 
   const working =
     Boolean(live) && (pendingCount > 0 || (turnState !== "waiting_input" && turnState !== "ended"));
-  const sendBusy = sending;
+  const sendBusy = sending || applyingConfig;
 
   const skipMessage = (skip: ComposerImageSkip) => {
     if (skip.reason === "size") return t("sessions:imageTooLarge", { name: skip.name });
@@ -545,15 +549,18 @@ export function Composer({ compact = false }: { compact?: boolean }) {
           return true;
         }
         try {
-          await changeSessionConfiguration(selectedSessionId, {
+          if (live && turnState !== "waiting_input" && turnState !== "ended") {
+            note(t("sessions:modelPending"));
+          }
+          const result = await changeSessionConfiguration(selectedSessionId, {
             ai_channel_id: matched.channelId,
             model: matched.modelId,
           });
-          useChannelStore.getState().setSelection(matched.channelId, matched.modelId);
-          note(t("sessions:slashModelSet", { model: matched.modelId }));
+          if (result?.compacted) note(t("sessions:modelCompacted"));
+          else note(t("sessions:slashModelSet", { model: matched.modelId }));
           setDraft("");
         } catch (reason) {
-          fail(String(reason));
+          fail(`${t("sessions:modelSwitchFailed")}: ${String(reason)}`);
         }
         return true;
       }
@@ -643,7 +650,7 @@ export function Composer({ compact = false }: { compact?: boolean }) {
   };
 
   const send = async () => {
-    if (sendingRef.current || sending) return;
+    if (sendingRef.current || sending || applyingConfig) return;
     const prompt = draft.trim();
     if (!prompt && attachments.length === 0) {
       fail(t("sessions:emptyPrompt"));
@@ -983,12 +990,12 @@ export function Composer({ compact = false }: { compact?: boolean }) {
               onInsertTrigger={insertTrigger}
             />
             <PermissionModePicker disabled={working || sending} onError={setError} />
-            <ChannelModelPicker disabled={working || sending} onError={setError} />
+            <ChannelModelPicker onError={fail} onInfo={note} />
             {composerThinkingEnabled(selectedModel) && efforts.length > 0 ? (
               <ThinkingLevelPicker
                 value={live?.runtime?.reasoning_effort ?? resolvedEffort}
                 levels={efforts}
-                disabled={working || sending}
+                disabled={working || sending || applyingConfig}
                 onChange={(value) => {
                   void changeSessionConfiguration(selectedSessionId, { reasoning_effort: value })
                     .then(() => setEffort(value))

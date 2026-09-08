@@ -686,6 +686,30 @@ pub struct NativeSessionRuntime {
     pub plan_mode: bool,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UpdateNativeSessionConfigurationInput {
+    pub session_record_id: String,
+    pub ai_channel_id: String,
+    pub model: String,
+    pub reasoning_effort: Option<String>,
+    pub request_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NativeSessionConfigurationEvent {
+    pub session_record_id: String,
+    pub request_id: String,
+    pub revision: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_queue_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime: Option<NativeSessionRuntime>,
+    #[serde(default)]
+    pub compacted: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum NativeToolPhase {

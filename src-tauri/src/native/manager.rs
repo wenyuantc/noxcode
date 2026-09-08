@@ -76,6 +76,34 @@ impl NativeFollowup {
     }
 }
 
+pub const CONFIGURATION_SUPERSEDED: &str = "已被更新的模型选择替换";
+
+#[derive(Debug)]
+pub struct NativeConfigurationRequest {
+    pub request_id: String,
+    pub ai_channel_id: String,
+    pub model: String,
+    pub reasoning_effort: Option<String>,
+    pub reply: oneshot::Sender<Result<crate::db::models::NativeSessionConfigurationEvent, String>>,
+}
+
+pub(crate) fn unused_config_tx() -> mpsc::Sender<NativeConfigurationRequest> {
+    mpsc::channel(1).0
+}
+
+pub(crate) fn take_latest_configuration(
+    rx: &mut mpsc::Receiver<NativeConfigurationRequest>,
+    first: Option<NativeConfigurationRequest>,
+) -> Option<NativeConfigurationRequest> {
+    let mut latest = first;
+    while let Ok(next) = rx.try_recv() {
+        if let Some(prev) = latest.replace(next) {
+            let _ = prev.reply.send(Err(CONFIGURATION_SUPERSEDED.to_string()));
+        }
+    }
+    latest
+}
+
 #[derive(Debug, Clone)]
 pub struct PermissionRequest {
     pub request_id: String,
@@ -133,6 +161,7 @@ pub struct NativeLiveSession {
     pub closing: bool,
     pub cancel: CancelFlag,
     pub followup_tx: mpsc::Sender<NativeFollowup>,
+    pub config_tx: mpsc::Sender<NativeConfigurationRequest>,
     pub input_queue: Arc<crate::native::input_queue::NativeInputQueue>,
     pub join: JoinHandle<()>,
     pub allow_all_high_risk: Arc<AtomicBool>,
@@ -207,6 +236,7 @@ impl NativeAgentManager {
                 || session.pending_compactions.load(Ordering::SeqCst) > 0
                 || session.input_queue.is_busy(&session.working)
                 || session.followup_tx.capacity() < session.followup_tx.max_capacity()
+                || session.config_tx.capacity() < session.config_tx.max_capacity()
                 || !session.pending_permission.is_empty()
                 || !session.pending_question.is_empty()
                 || !session.pending_plan_approval.is_empty()
@@ -1090,6 +1120,7 @@ pub(super) mod tests {
             closing: false,
             cancel: CancelFlag::new(),
             followup_tx: tx,
+            config_tx: unused_config_tx(),
             input_queue: Arc::new(crate::native::input_queue::NativeInputQueue::new("s1")),
             join: tokio::spawn(async {}),
             allow_all_high_risk: Arc::new(AtomicBool::new(false)),
@@ -1132,6 +1163,7 @@ pub(super) mod tests {
             closing: false,
             cancel: CancelFlag::new(),
             followup_tx: tx,
+            config_tx: unused_config_tx(),
             input_queue: Arc::new(crate::native::input_queue::NativeInputQueue::new(id)),
             join: tokio::spawn(async {}),
             allow_all_high_risk: Arc::new(AtomicBool::new(false)),
@@ -1686,6 +1718,7 @@ pub(super) mod tests {
             closing: false,
             cancel: CancelFlag::new(),
             followup_tx: tx,
+            config_tx: unused_config_tx(),
             input_queue: Arc::new(crate::native::input_queue::NativeInputQueue::new("s1")),
             join,
             allow_all_high_risk: Arc::new(AtomicBool::new(false)),
@@ -1732,5 +1765,39 @@ pub(super) mod tests {
             second_rx.await.expect("second"),
             NativePermissionDecision::Deny
         );
+    }
+
+    #[tokio::test]
+    async fn take_latest_configuration_keeps_only_the_last_request() {
+        let (tx, mut rx) = mpsc::channel(8);
+        let (first_reply, first_rx) = oneshot::channel();
+        let (second_reply, second_rx) = oneshot::channel();
+        tx.send(NativeConfigurationRequest {
+            request_id: "a".into(),
+            ai_channel_id: "ch-a".into(),
+            model: "model-a".into(),
+            reasoning_effort: None,
+            reply: first_reply,
+        })
+        .await
+        .unwrap();
+        tx.send(NativeConfigurationRequest {
+            request_id: "b".into(),
+            ai_channel_id: "ch-b".into(),
+            model: "model-b".into(),
+            reasoning_effort: Some("low".into()),
+            reply: second_reply,
+        })
+        .await
+        .unwrap();
+        let latest = take_latest_configuration(&mut rx, None).expect("latest");
+        assert_eq!(latest.request_id, "b");
+        assert_eq!(latest.model, "model-b");
+        assert_eq!(
+            first_rx.await.unwrap().unwrap_err(),
+            CONFIGURATION_SUPERSEDED
+        );
+        drop(latest);
+        assert!(second_rx.await.is_err());
     }
 }
