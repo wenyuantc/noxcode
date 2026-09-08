@@ -617,6 +617,169 @@ export function classifyLine(text: string): SessionLineKind {
   return "assistant";
 }
 
+export type ToolHeaderCategory = "read" | "skill" | "search" | "sqlite" | "command" | "tool";
+
+export interface ParsedToolHeader {
+  category: ToolHeaderCategory;
+  badge: string;
+  detail: string;
+  badgeClass: string;
+  failed: boolean;
+}
+
+export function parseToolHeader(item: GroupedSessionItem): ParsedToolHeader {
+  const failed = item.ok === false || item.text.startsWith("[ERROR]");
+  const body = sessionLineBody(item.text).trim();
+  const firstLine = (body.split("\n")[0] ?? body).trim();
+
+  // 1. Skill check
+  if (
+    firstLine.startsWith("[技能]") ||
+    item.toolName?.startsWith("技能") ||
+    item.tool?.name?.toLowerCase() === "skill"
+  ) {
+    const detail = firstLine.startsWith("[技能]")
+      ? firstLine.replace(/^\[技能\]\s*/, "")
+      : item.toolName?.startsWith("技能")
+        ? item.toolName.replace(/^技能\s*/, "")
+        : (item.tool?.args_summary ?? item.tool?.title ?? firstLine);
+    return {
+      category: "skill",
+      badge: "技能",
+      detail: detail.trim(),
+      badgeClass: "border-amber-500/30 bg-amber-500/10 text-amber-700 dark:text-amber-400",
+      failed,
+    };
+  }
+
+  // 2. Read check
+  if (
+    firstLine.startsWith("[读取]") ||
+    item.tool?.name === "read_file" ||
+    item.tool?.name === "Read"
+  ) {
+    const detail =
+      lookupPathText(item) || item.tool?.args_summary || firstLine.replace(/^\[读取\]\s*/, "");
+    return {
+      category: "read",
+      badge: "读取",
+      detail: detail.trim(),
+      badgeClass: "border-emerald-500/30 bg-emerald-500/10 text-emerald-700 dark:text-emerald-400",
+      failed,
+    };
+  }
+
+  // 3. SQLite check
+  if (
+    firstLine.startsWith("[工具] SQLiteQuery") ||
+    firstLine.startsWith("[工具] sqlite") ||
+    item.toolName?.includes("SQLiteQuery") ||
+    item.tool?.name === "SQLiteQuery"
+  ) {
+    const detail =
+      item.tool?.args_summary ??
+      firstLine
+        .replace(/^\[工具\]\s*(?:SQLiteQuery|sqlite)\s*/i, "")
+        .replace(/^SQLiteQuery\s*/i, "");
+    return {
+      category: "sqlite",
+      badge: "SQLite",
+      detail: detail.trim(),
+      badgeClass: "border-violet-500/30 bg-violet-500/10 text-violet-700 dark:text-violet-400",
+      failed,
+    };
+  }
+
+  // 4. Glob / Grep search check
+  const searchMatch = firstLine.match(/^(?:\[工具\]\s*)?(Glob|Grep)\b\s*(.*)$/i);
+  if (searchMatch || item.tool?.name === "Glob" || item.tool?.name === "Grep") {
+    const name = item.tool?.name || searchMatch?.[1] || "Search";
+    const badge = name.charAt(0).toUpperCase() + name.slice(1);
+    const detail = item.tool?.args_summary ?? searchMatch?.[2] ?? "";
+    return {
+      category: "search",
+      badge,
+      detail: detail.trim(),
+      badgeClass: "border-sky-500/30 bg-sky-500/10 text-sky-700 dark:text-sky-400",
+      failed,
+    };
+  }
+
+  // 5. Command / Terminal check
+  if (firstLine.startsWith("[命令]") || item.tool?.name === "Bash" || item.tool?.name === "shell") {
+    const detail = commandText(item) || firstLine.replace(/^\[命令\]\s*/, "");
+    return {
+      category: "command",
+      badge: "终端",
+      detail: detail.trim(),
+      badgeClass: "border-slate-500/30 bg-slate-500/10 text-slate-700 dark:text-slate-300",
+      failed,
+    };
+  }
+
+  // 6. Generic bracket tool: [工具] ToolName args or [Tag] Detail
+  const bracketMatch = firstLine.match(/^\[([^\]]+)\]\s*(.*)$/);
+  if (bracketMatch) {
+    const tag = bracketMatch[1]!.trim();
+    const rest = bracketMatch[2]!.trim();
+    if (tag === "工具") {
+      const subMatch = rest.match(/^([A-Za-z0-9_.-]+)\s*(.*)$/);
+      if (subMatch) {
+        return {
+          category: "tool",
+          badge: subMatch[1]!,
+          detail: subMatch[2]!.trim(),
+          badgeClass: "border-border/60 bg-muted/60 text-muted-foreground",
+          failed,
+        };
+      }
+      return {
+        category: "tool",
+        badge: "工具",
+        detail: rest,
+        badgeClass: "border-border/60 bg-muted/60 text-muted-foreground",
+        failed,
+      };
+    }
+    return {
+      category: "tool",
+      badge: tag,
+      detail: rest,
+      badgeClass: "border-border/60 bg-muted/60 text-muted-foreground",
+      failed,
+    };
+  }
+
+  // 7. Fallback when toolName exists
+  if (item.toolName) {
+    const subMatch = item.toolName.match(/^([A-Za-z0-9_.-]+)\s*(.*)$/);
+    if (subMatch && subMatch[2]) {
+      return {
+        category: "tool",
+        badge: subMatch[1]!,
+        detail: subMatch[2].trim(),
+        badgeClass: "border-border/60 bg-muted/60 text-muted-foreground",
+        failed,
+      };
+    }
+    return {
+      category: "tool",
+      badge: item.toolName,
+      detail: firstLine,
+      badgeClass: "border-border/60 bg-muted/60 text-muted-foreground",
+      failed,
+    };
+  }
+
+  return {
+    category: "tool",
+    badge: "工具",
+    detail: firstLine,
+    badgeClass: "border-border/60 bg-muted/60 text-muted-foreground",
+    failed,
+  };
+}
+
 export function toolTitle(text: string): string {
   const first = (sessionLineBody(text).split("\n")[0] ?? text).trim();
   const match = first.match(/^\[([^\]]+)\]\s*(.*)$/);
@@ -1386,7 +1549,9 @@ export function lineToneClass(kind: SessionLineKind, text: string, ok?: boolean)
     return "text-red-600 dark:text-red-400";
   }
   if (kind === "user") return "text-sky-700 dark:text-sky-300";
-  if (kind === "tool" || kind === "tool_result") return "text-cyan-700 dark:text-cyan-400";
+  if (kind === "tool" || kind === "tool_result") {
+    return "text-foreground/90 dark:text-foreground/85";
+  }
   if (body.startsWith("[思考]")) return "text-muted-foreground";
   if (body.startsWith("[PLAN]") || body.startsWith("[计划]") || body.startsWith("[待办]")) {
     return "text-violet-700 dark:text-violet-400";

@@ -43,6 +43,8 @@ import {
   workDurationSeconds,
   hasToolResult,
   toolsStillRunning,
+  parseToolHeader,
+  lineToneClass,
 } from "./sessionLines";
 
 function line(id: string, text: string, createdAt = id) {
@@ -1199,5 +1201,105 @@ describe("sessionLines", () => {
 
     expect(blocks[1]?.user?.text).toBe("请尽快返回明确问题");
     expect(blocks[1]?.segments.map((s) => s.kind)).toEqual(["assistant"]);
+  });
+
+  describe("parseToolHeader", () => {
+    it("parses skill calls", () => {
+      const parsed = parseToolHeader({
+        id: "1",
+        kind: "tool",
+        text: "[技能] code-review-level",
+        createdAt: "2026-09-08T00:00:00Z",
+      });
+      expect(parsed.category).toBe("skill");
+      expect(parsed.badge).toBe("技能");
+      expect(parsed.detail).toBe("code-review-level");
+      expect(parsed.badgeClass).toContain("amber");
+      expect(parsed.failed).toBe(false);
+    });
+
+    it("parses read file calls", () => {
+      const parsed = parseToolHeader({
+        id: "2",
+        kind: "tool",
+        text: "[读取] /Users/test/review.md",
+        createdAt: "2026-09-08T00:00:00Z",
+      });
+      expect(parsed.category).toBe("read");
+      expect(parsed.badge).toBe("读取");
+      expect(parsed.detail).toBe("/Users/test/review.md");
+      expect(parsed.badgeClass).toContain("emerald");
+    });
+
+    it("parses search calls (Glob / Grep)", () => {
+      const globParsed = parseToolHeader({
+        id: "3",
+        kind: "tool",
+        text: "[工具] Glob src/**/*.{ts,tsx}",
+        createdAt: "2026-09-08T00:00:00Z",
+      });
+      expect(globParsed.category).toBe("search");
+      expect(globParsed.badge).toBe("Glob");
+      expect(globParsed.detail).toBe("src/**/*.{ts,tsx}");
+      expect(globParsed.badgeClass).toContain("sky");
+
+      const grepParsed = parseToolHeader({
+        id: "4",
+        kind: "tool",
+        text: '[工具] Grep "function" src/',
+        createdAt: "2026-09-08T00:00:00Z",
+      });
+      expect(grepParsed.category).toBe("search");
+      expect(grepParsed.badge).toBe("Grep");
+      expect(grepParsed.detail).toBe('"function" src/');
+    });
+
+    it("parses SQLite queries", () => {
+      const parsed = parseToolHeader({
+        id: "5",
+        kind: "tool",
+        text: "[工具] SQLiteQuery SELECT * FROM ai_channels",
+        createdAt: "2026-09-08T00:00:00Z",
+      });
+      expect(parsed.category).toBe("sqlite");
+      expect(parsed.badge).toBe("SQLite");
+      expect(parsed.detail).toBe("SELECT * FROM ai_channels");
+      expect(parsed.badgeClass).toContain("violet");
+    });
+
+    it("parses terminal commands and flags failure", () => {
+      const parsed = parseToolHeader({
+        id: "6",
+        kind: "tool",
+        text: "[命令] cargo test",
+        createdAt: "2026-09-08T00:00:00Z",
+        ok: false,
+      });
+      expect(parsed.category).toBe("command");
+      expect(parsed.badge).toBe("终端");
+      expect(parsed.detail).toBe("cargo test");
+      expect(parsed.badgeClass).toContain("slate");
+      expect(parsed.failed).toBe(true);
+    });
+
+    it("parses generic bracketed tools", () => {
+      const parsed = parseToolHeader({
+        id: "7",
+        kind: "tool",
+        text: "[工具] WebSearch query: Tauri v2",
+        createdAt: "2026-09-08T00:00:00Z",
+      });
+      expect(parsed.category).toBe("tool");
+      expect(parsed.badge).toBe("WebSearch");
+      expect(parsed.detail).toBe("query: Tauri v2");
+    });
+  });
+
+  describe("lineToneClass", () => {
+    it("returns neutral text for tools instead of cyan", () => {
+      expect(lineToneClass("tool", "[工具] Glob src/")).not.toContain("cyan");
+      expect(lineToneClass("tool_result", "[工具结果] ok")).not.toContain("cyan");
+      expect(lineToneClass("tool", "[工具] Glob src/")).toContain("text-foreground");
+    });
   });
 });
