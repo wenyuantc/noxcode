@@ -249,7 +249,9 @@
       "updated": "SSH config updated",
       "deleted": "SSH config deleted",
       "requiredFields": "Name, host, and username are required",
-      "privateKeyRequired": "Key login requires a private key path"
+      "privateKeyRequired": "Key login requires a private key path",
+      "passwordRequired": "Password login requires a password",
+      "passwordAuthRequired": "Password auth probing is only available for password login"
     }
   },
   "runtime": {

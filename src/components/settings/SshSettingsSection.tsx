@@ -14,15 +14,20 @@ import {
   testSshConnection,
   updateSshConfig,
 } from "@/lib/backend";
+import {
+  persistAndProbeSshPasswordAuth,
+  persistAndTestSshConfig,
+  persistSshConfigForm,
+  SshConfigFormValidationError,
+  type SshConfigFormValues,
+} from "@/lib/sshConfigVerification";
 import { formatDate } from "@/lib/utils";
 import type {
   SshAlgorithms,
-  SshAuthType,
   SshConfig,
   SshConfigFileHost,
   SshKnownHostsMode,
   SshSupportedAlgorithms,
-  UpdateSshConfigInput,
 } from "@/lib/types";
 import { Button } from "@/components/ui/button";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
@@ -45,18 +50,7 @@ import {
 import { SettingCard } from "./SettingCard";
 import { SettingFeedbackCallout } from "./SettingFeedbackCallout";
 
-interface SshConfigFormState {
-  name: string;
-  host: string;
-  port: string;
-  username: string;
-  authType: SshAuthType;
-  privateKeyPath: string;
-  password: string;
-  passphrase: string;
-  knownHostsMode: SshKnownHostsMode;
-  algorithms: SshAlgorithms;
-}
+type SshConfigFormState = SshConfigFormValues;
 
 function emptyAlgorithms(): SshAlgorithms {
   return { kex: [], host_key: [], cipher: [], mac: [] };
@@ -221,67 +215,32 @@ export function SshSettingsSection() {
     }
   };
 
+  const rememberConfig = (config: SshConfig) => {
+    setSelectedId(config.id);
+    setConfigs((current) => [config, ...current.filter((item) => item.id !== config.id)]);
+  };
+
+  const formErrorMessage = (err: unknown) => {
+    if (err instanceof SshConfigFormValidationError) {
+      return t(`ssh.messages.${err.field}`);
+    }
+    return err instanceof Error ? err.message : String(err);
+  };
+
   const handleSave = async () => {
     setError(null);
     setMessage(null);
-    if (!form.name.trim() || !form.host.trim() || !form.username.trim()) {
-      setError(t("ssh.messages.requiredFields"));
-      return;
-    }
-    if (form.authType === "key" && !form.privateKeyPath.trim()) {
-      setError(t("ssh.messages.privateKeyRequired"));
-      return;
-    }
-
     setSaving("save");
-    const privateKeyPath = form.authType === "key" ? form.privateKeyPath.trim() || null : null;
-    const algorithms = Object.values(form.algorithms).some((names) => names.length > 0)
-      ? form.algorithms
-      : null;
     try {
-      if (selectedId) {
-        const updates: UpdateSshConfigInput = {
-          name: form.name.trim(),
-          host: form.host.trim(),
-          port: Number(form.port) || 22,
-          username: form.username.trim(),
-          auth_type: form.authType,
-          private_key_path: privateKeyPath,
-          known_hosts_mode: form.knownHostsMode,
-          algorithms,
-        };
-        if (form.authType === "password" && form.password) {
-          updates.password = form.password;
-        }
-        if (form.passphrase) {
-          updates.passphrase = form.passphrase;
-        }
-        const updated = await updateSshConfig(selectedId, updates);
-        setConfigs((current) =>
-          current.map((config) => (config.id === updated.id ? updated : config)),
-        );
-        setDialogOpen(false);
-        setMessage(t("ssh.messages.updated"));
-      } else {
-        const created = await createSshConfig({
-          name: form.name.trim(),
-          host: form.host.trim(),
-          port: Number(form.port) || 22,
-          username: form.username.trim(),
-          auth_type: form.authType,
-          private_key_path: privateKeyPath,
-          password: form.authType === "password" && form.password ? form.password : null,
-          passphrase: form.passphrase || null,
-          known_hosts_mode: form.knownHostsMode,
-          algorithms,
-        });
-        setConfigs((current) => [created, ...current.filter((config) => config.id !== created.id)]);
-        setSelectedId(created.id);
-        setDialogOpen(false);
-        setMessage(t("ssh.messages.created"));
-      }
+      const persisted = await persistSshConfigForm(
+        { selectedId, form },
+        { createSshConfig, updateSshConfig },
+      );
+      rememberConfig(persisted);
+      setDialogOpen(false);
+      setMessage(selectedId ? t("ssh.messages.updated") : t("ssh.messages.created"));
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      setError(formErrorMessage(err));
     } finally {
       setSaving(null);
     }
@@ -315,13 +274,23 @@ export function SshSettingsSection() {
     }
   };
 
+  const verificationApi = {
+    createSshConfig,
+    updateSshConfig,
+    testSshConnection,
+    probeSshPasswordAuth,
+  };
+
   const handleTest = async () => {
-    if (!selectedId) return;
     setSaving("test");
     setError(null);
     setMessage(null);
     try {
-      const result = await testSshConnection(selectedId);
+      const { result } = await persistAndTestSshConfig(
+        { selectedId, form, passwordConfigured: selected?.password_configured },
+        verificationApi,
+        rememberConfig,
+      );
       const items = await listSshConfigs();
       setConfigs(items);
       if (result.ok) {
@@ -330,19 +299,23 @@ export function SshSettingsSection() {
         setError(result.message);
       }
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      setError(formErrorMessage(err));
     } finally {
       setSaving(null);
     }
   };
 
   const handleProbe = async () => {
-    if (!selectedId) return;
+    if (form.authType !== "password") return;
     setSaving("probe");
     setError(null);
     setMessage(null);
     try {
-      const result = await probeSshPasswordAuth(selectedId);
+      const { result } = await persistAndProbeSshPasswordAuth(
+        { selectedId, form, passwordConfigured: selected?.password_configured },
+        verificationApi,
+        rememberConfig,
+      );
       const items = await listSshConfigs();
       setConfigs(items);
       if (result.supported && result.status !== "failed") {
@@ -351,7 +324,7 @@ export function SshSettingsSection() {
         setError(result.message);
       }
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      setError(formErrorMessage(err));
     } finally {
       setSaving(null);
     }
@@ -841,44 +814,36 @@ export function SshSettingsSection() {
                 </div>
               ) : null}
 
-              {!isCreate ? (
-                <div className="flex flex-wrap gap-2">
-                  <Button variant="outline" onClick={() => void handleTest()} disabled={formLocked}>
-                    {saving === "test" ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : null}
-                    {t("ssh.actions.testConnection")}
-                  </Button>
-                  {selected?.auth_type === "password" ? (
-                    <Button
-                      variant="outline"
-                      onClick={() => void handleProbe()}
-                      disabled={formLocked}
-                    >
-                      {saving === "probe" ? (
-                        <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                      ) : null}
-                      {t("ssh.actions.probePassword")}
-                    </Button>
-                  ) : null}
-                </div>
-              ) : null}
-
               {error ? <p className="text-sm text-destructive">{error}</p> : null}
               {message ? <p className="text-sm text-muted-foreground">{message}</p> : null}
             </div>
           </div>
           <DialogFooter className="mt-4 shrink-0">
-            {!isCreate ? (
-              <Button
-                variant="destructive"
-                className="sm:mr-auto"
-                onClick={() => void handleDelete()}
-                disabled={formLocked}
-              >
-                {saving === "delete" ? <Loader2 className="mr-1 h-4 w-4 animate-spin" /> : null}
-                <Trash2 className="mr-1 h-4 w-4" />
-                {t("ssh.actions.delete")}
+            <div className="flex flex-wrap gap-2 sm:mr-auto">
+              <Button variant="outline" onClick={() => void handleTest()} disabled={formLocked}>
+                {saving === "test" ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : null}
+                {t("ssh.actions.testConnection")}
               </Button>
-            ) : null}
+              <Button
+                variant="outline"
+                onClick={() => void handleProbe()}
+                disabled={formLocked || form.authType !== "password"}
+              >
+                {saving === "probe" ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : null}
+                {t("ssh.actions.probePassword")}
+              </Button>
+              {!isCreate ? (
+                <Button
+                  variant="destructive"
+                  onClick={() => void handleDelete()}
+                  disabled={formLocked}
+                >
+                  {saving === "delete" ? <Loader2 className="mr-1 h-4 w-4 animate-spin" /> : null}
+                  <Trash2 className="mr-1 h-4 w-4" />
+                  {t("ssh.actions.delete")}
+                </Button>
+              ) : null}
+            </div>
             <Button variant="outline" onClick={closeDialog} disabled={formLocked}>
               {t("ssh.actions.cancel")}
             </Button>

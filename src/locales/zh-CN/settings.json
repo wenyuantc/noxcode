@@ -249,7 +249,9 @@
       "updated": "SSH 配置已更新",
       "deleted": "SSH 配置已删除",
       "requiredFields": "请填写配置名称、主机和用户名",
-      "privateKeyRequired": "密钥登录需要填写私钥路径"
+      "privateKeyRequired": "密钥登录需要填写私钥路径",
+      "passwordRequired": "密码登录需要填写密码",
+      "passwordAuthRequired": "探测密码认证仅适用于密码登录"
     }
   },
   "runtime": {
