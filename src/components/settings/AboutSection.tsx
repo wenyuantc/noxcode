@@ -48,8 +48,9 @@ export function AboutSection() {
   }, [checkForUpdate]);
 
   const installing = status === "downloading";
-  const installed = status === "ready";
-  const busy = checking || installing;
+  const restarting = status === "restarting";
+  const installed = status === "ready" || restarting;
+  const busy = checking || installing || restarting;
   const displayVersion = currentVersion ?? t("about.unknownVersion");
   const error = relaunchFailedDetail
     ? t("about.restartFailed", { detail: relaunchFailedDetail })
@@ -152,11 +153,16 @@ export function AboutSection() {
                   <Button
                     type="button"
                     size="sm"
+                    disabled={restarting}
                     onClick={() => void relaunch()}
                     className="h-8 text-xs gap-1.5"
                   >
-                    <RotateCw className="size-3.5" />
-                    {t("about.restart")}
+                    {restarting ? (
+                      <Loader2 className="size-3.5 animate-spin" />
+                    ) : (
+                      <RotateCw className="size-3.5" />
+                    )}
+                    {t(restarting ? "about.restarting" : "about.restart")}
                   </Button>
                 )}
               </div>
