@@ -1,6 +1,27 @@
 import { describe, expect, it } from "vitest";
 
-import { isNearBottom, pinAfterUserScroll } from "./sessionScroll";
+import {
+  captureScrollAnchor,
+  isNearBottom,
+  pinAfterUserScroll,
+  scrollDeltaForAnchor,
+} from "./sessionScroll";
+
+describe("captureScrollAnchor", () => {
+  it("keeps the first item that still intersects the viewport", () => {
+    expect(
+      captureScrollAnchor(100, [
+        { key: "a", top: 0, bottom: 80 },
+        { key: "b", top: 90, bottom: 200 },
+      ]),
+    ).toEqual({ key: "b", offset: -10 });
+  });
+
+  it("returns a delta that restores the saved offset", () => {
+    expect(scrollDeltaForAnchor(150, 100, -10)).toBe(60);
+    expect(scrollDeltaForAnchor(90, 100, -10)).toBe(0);
+  });
+});
 
 describe("isNearBottom", () => {
   it("is true at the bottom", () => {

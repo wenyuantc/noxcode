@@ -525,4 +525,51 @@ describe("sessionStore history", () => {
     expect(useSessionStore.getState().hasMoreEarlier.s1).toBe(false);
     expect(useSessionStore.getState().loadingEarlier.s1).toBe(false);
   });
+
+  it("keeps reasoning and text fragments until persisted lines cover them", () => {
+    const store = useSessionStore.getState();
+    store.onDelta({
+      session_record_id: "s1",
+      kind: "reasoning",
+      text: "先看入口",
+      clear: false,
+    });
+    store.onDelta({
+      session_record_id: "s1",
+      kind: "text",
+      text: "正文",
+      clear: false,
+    });
+    expect(useSessionStore.getState().stream.s1?.map((part) => part.kind)).toEqual([
+      "reasoning",
+      "text",
+    ]);
+    store.onStdout({
+      ...stdout("s1", "think-1"),
+      line: "[思考] 8秒\n先看入口",
+    });
+    expect(useSessionStore.getState().stream.s1?.map((part) => part.kind)).toEqual(["text"]);
+    store.onStdout({
+      ...stdout("s1", "text-1"),
+      line: "正文",
+    });
+    expect(useSessionStore.getState().stream.s1).toEqual([]);
+  });
+
+  it("clears live fragments on retry reset", () => {
+    const store = useSessionStore.getState();
+    store.onDelta({
+      session_record_id: "s1",
+      kind: "reasoning",
+      text: "旧思考",
+      clear: false,
+    });
+    store.onDelta({
+      session_record_id: "s1",
+      kind: "text",
+      text: "",
+      clear: true,
+    });
+    expect(useSessionStore.getState().stream.s1).toEqual([]);
+  });
 });

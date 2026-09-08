@@ -3,6 +3,11 @@ import { create } from "zustand";
 import { getAgentSessionLogLines } from "@/lib/backend";
 import { resolveHistoricalUsage, resolveHistoryLimitTokens } from "@/lib/contextUsage";
 import { hydrateSessionLine, type RawSessionLine } from "@/lib/sessionLines";
+import {
+  applyTextDelta,
+  pruneCoveredFragments,
+  type SessionStreamFragment,
+} from "@/lib/sessionStream";
 import type {
   AgentSessionExit,
   AgentSessionOutput,
@@ -60,7 +65,7 @@ interface SessionState {
   inputQueueBySession: Record<string, NativeInputQueue>;
   turnState: Record<string, string>;
   usage: Record<string, NativeContextUsage>;
-  stream: Record<string, { kind: string; text: string }>;
+  stream: Record<string, SessionStreamFragment[]>;
   permissions: Record<string, Record<string, NativePermissionRequest>>;
   planQuestions: Record<string, Record<string, NativePlanQuestionRequest>>;
   planApprovals: Record<string, Record<string, NativePlanApprovalRequest>>;
@@ -262,6 +267,8 @@ export const useSessionStore = create<SessionState>((set, get) => ({
     const current = get().lines[output.session_record_id] ?? [];
     if (output.session_event_id && current.some((line) => line.id === output.session_event_id))
       return;
+    const parts = get().stream[output.session_record_id];
+    const pruned = parts?.length ? pruneCoveredFragments(parts, output.line) : parts;
     set({
       lines: {
         ...get().lines,
@@ -277,23 +284,18 @@ export const useSessionStore = create<SessionState>((set, get) => ({
           }),
         ],
       },
+      stream:
+        pruned && pruned !== parts
+          ? { ...get().stream, [output.session_record_id]: pruned }
+          : get().stream,
     });
   },
   onDelta: (delta) => {
-    if (delta.clear) {
-      set({
-        stream: { ...get().stream, [delta.session_record_id]: { kind: delta.kind, text: "" } },
-      });
-      return;
-    }
-    const current = get().stream[delta.session_record_id] ?? { kind: delta.kind, text: "" };
+    const current = get().stream[delta.session_record_id] ?? [];
     set({
       stream: {
         ...get().stream,
-        [delta.session_record_id]: {
-          kind: delta.kind,
-          text: current.kind === delta.kind ? current.text + delta.text : delta.text,
-        },
+        [delta.session_record_id]: applyTextDelta(current, delta, new Date().toISOString()),
       },
     });
   },

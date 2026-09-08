@@ -1596,8 +1596,7 @@ impl AgentRunner {
         if last_turn {
             assistant.tool_calls.clear();
         }
-        // The persisted lines below supersede whatever streamed live.
-        self.emit_delta_clear();
+        // Keep live fragments until these lines arrive so the transcript does not blink.
         if let Some(line) = thinking_start_line(
             &assistant.reasoning_content,
             self.thinking_elapsed_seconds(),

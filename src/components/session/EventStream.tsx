@@ -7,15 +7,22 @@ import {
   buildTurnBlocks,
   changedFilesFromItems,
   groupSessionLines,
+  hasToolResult,
   lineToneClass,
   parseTodoList,
   sessionLineBody,
-  type GroupedSessionItem,
+  toolsStillRunning,
   type RawSessionLine,
   type SessionTurnBlock,
   type TurnSegment,
 } from "@/lib/sessionLines";
-import { isNearBottom, pinAfterUserScroll } from "@/lib/sessionScroll";
+import {
+  captureScrollAnchor,
+  isNearBottom,
+  pinAfterUserScroll,
+  scrollDeltaForAnchor,
+} from "@/lib/sessionScroll";
+import { attachLiveFragments, EMPTY_STREAM, turnSegmentReactKey } from "@/lib/sessionStream";
 import { cn } from "@/lib/utils";
 import { useSessionStore } from "@/stores/sessionStore";
 import { AssistantMarkdown } from "./AssistantMarkdown";
@@ -41,34 +48,6 @@ import { WorkSummaryBar } from "./WorkSummaryBar";
 const EMPTY_LINES: RawSessionLine[] = [];
 const VIRTUALIZE_AFTER = 24;
 
-function attachLiveStream(
-  block: SessionTurnBlock,
-  stream?: { kind: string; text: string },
-): SessionTurnBlock {
-  if (!stream?.text) return block;
-  const now = new Date().toISOString();
-  const item: GroupedSessionItem = {
-    id: `${block.id}-stream`,
-    kind: stream.kind === "reasoning" ? "system" : "assistant",
-    text: stream.text,
-    createdAt: now,
-  };
-  const segments = [...block.segments];
-  const targetKind = stream.kind === "reasoning" ? "thinking" : "assistant";
-  const last = segments[segments.length - 1];
-  if (last?.kind === targetKind) {
-    segments[segments.length - 1] = { ...last, items: [...last.items, item] };
-  } else {
-    segments.push({ kind: targetKind, items: [item] });
-  }
-  return {
-    ...block,
-    endedAt: now,
-    assistant: targetKind === "assistant" ? [...block.assistant, item] : block.assistant,
-    segments,
-  };
-}
-
 function renderSegment(
   segment: TurnSegment,
   running: boolean,
@@ -91,12 +70,15 @@ function renderSegment(
       return (
         <ToolSummaryRow
           items={segment.items}
-          running={running && !segment.items[segment.items.length - 1]?.result}
+          running={running && toolsStillRunning(segment.items)}
         />
       );
     case "terminal":
       return (
-        <TerminalRow item={segment.items[0]!} running={running && !segment.items[0]?.result} />
+        <TerminalRow
+          item={segment.items[0]!}
+          running={running && !hasToolResult(segment.items[0]!)}
+        />
       );
     case "file":
       return <FileChangeRow items={segment.items} />;
@@ -173,7 +155,7 @@ export const EventStream = memo(function EventStream({
 }) {
   const { t } = useTranslation("sessions");
   const lines = useSessionStore((state) => state.lines[sessionId]) ?? EMPTY_LINES;
-  const stream = useSessionStore((state) => state.stream[sessionId]);
+  const stream = useSessionStore((state) => state.stream[sessionId]) ?? EMPTY_STREAM;
   const turnState = useSessionStore((state) => state.turnState[sessionId]);
   const planQuestion = useSessionStore(
     (state) => Object.values(state.planQuestions[sessionId] ?? {})[0],
@@ -195,14 +177,16 @@ export const EventStream = memo(function EventStream({
   const layoutSignature = `${blocks
     .map((block) => `${block.id}:${block.segments.length}:${block.endedAt}`)
     .join("|")}${hasAsk ? ":ask" : ""}`;
+  const streamSignature = stream.map((part) => `${part.id}:${part.text.length}`).join("|");
   const [nowMs, setNowMs] = useState(() => Date.now());
   const [showLatest, setShowLatest] = useState(false);
   const pinnedRef = useRef(true);
   const programmaticRef = useRef(false);
   const followFrameRef = useRef<number | null>(null);
   const parentRef = useRef<HTMLDivElement>(null);
-  const prevWorkingRef = useRef(working);
-  const prevHasStreamRef = useRef(Boolean(stream?.text));
+  const contentRef = useRef<HTMLDivElement>(null);
+  const blocksRef = useRef(blocks);
+  blocksRef.current = blocks;
   const virtualizer = useVirtualizer({
     count: virtualize ? blocks.length : 0,
     getScrollElement: () => parentRef.current,
@@ -262,39 +246,66 @@ export const EventStream = memo(function EventStream({
   const handleLoadEarlier = useCallback(async () => {
     const node = parentRef.current;
     if (!node) return;
-    const previousScrollHeight = node.scrollHeight;
-    const previousScrollTop = node.scrollTop;
+    const viewportTop = node.getBoundingClientRect().top;
+    const anchor = captureScrollAnchor(
+      viewportTop,
+      Array.from(node.querySelectorAll("[data-block-id]")).map((element) => {
+        const rect = element.getBoundingClientRect();
+        return {
+          key: (element as HTMLElement).dataset.blockId ?? "",
+          top: rect.top,
+          bottom: rect.bottom,
+        };
+      }),
+    );
+    let userMoved = false;
+    const markMoved = () => {
+      userMoved = true;
+    };
+    node.addEventListener("wheel", markMoved);
+    node.addEventListener("pointerdown", markMoved);
     programmaticRef.current = true;
     pinnedRef.current = false;
-    await loadEarlierHistory(sessionId);
-    requestAnimationFrame(() => {
-      if (parentRef.current) {
-        const heightDiff = parentRef.current.scrollHeight - previousScrollHeight;
-        parentRef.current.scrollTop = previousScrollTop + heightDiff;
+    try {
+      await loadEarlierHistory(sessionId);
+    } finally {
+      node.removeEventListener("wheel", markMoved);
+      node.removeEventListener("pointerdown", markMoved);
+    }
+    const restore = () => {
+      const parent = parentRef.current;
+      if (!parent || userMoved || !anchor) {
+        programmaticRef.current = false;
+        return;
       }
-      programmaticRef.current = false;
-    });
-  }, [loadEarlierHistory, sessionId]);
+      const selector = `[data-block-id="${CSS.escape(anchor.key)}"]`;
+      const applyOffset = () => {
+        const target = parent.querySelector(selector);
+        if (target) {
+          parent.scrollTop += scrollDeltaForAnchor(
+            target.getBoundingClientRect().top,
+            parent.getBoundingClientRect().top,
+            anchor.offset,
+          );
+        }
+        programmaticRef.current = false;
+      };
+      const index = blocksRef.current.findIndex((item) => item.id === anchor.key);
+      if (virtualize && index >= 0 && !parent.querySelector(selector)) {
+        virtualizer.scrollToIndex(index, { align: "start" });
+        requestAnimationFrame(applyOffset);
+        return;
+      }
+      applyOffset();
+    };
+    requestAnimationFrame(() => requestAnimationFrame(restore));
+  }, [loadEarlierHistory, sessionId, virtualize, virtualizer]);
 
   useEffect(() => {
     if (!active || !working) return;
     const timer = window.setInterval(() => setNowMs(Date.now()), 1000);
     return () => window.clearInterval(timer);
   }, [active, working]);
-
-  useLayoutEffect(() => {
-    if (!active || !virtualize) return;
-    virtualizer.measure();
-  }, [active, layoutSignature, virtualize, virtualizer]);
-
-  useEffect(() => {
-    const hasStream = Boolean(stream?.text);
-    const streamGone = prevHasStreamRef.current && !hasStream;
-    const workingEnded = prevWorkingRef.current && !working;
-    prevHasStreamRef.current = hasStream;
-    prevWorkingRef.current = working;
-    if (virtualize && (streamGone || workingEnded)) virtualizer.measure();
-  }, [stream?.text, virtualize, working, virtualizer]);
 
   useLayoutEffect(() => {
     if (!active) return;
@@ -309,7 +320,7 @@ export const EventStream = memo(function EventStream({
   }, [
     active,
     layoutSignature,
-    stream?.text,
+    streamSignature,
     blocks.length,
     hasAsk,
     totalSize,
@@ -319,7 +330,7 @@ export const EventStream = memo(function EventStream({
   useEffect(() => {
     if (!active) return;
     const node = parentRef.current;
-    const content = node?.firstElementChild;
+    const content = contentRef.current;
     if (!node || !content) return;
     const observer = new ResizeObserver(() => {
       if (pinnedRef.current) {
@@ -335,6 +346,7 @@ export const EventStream = memo(function EventStream({
       );
     });
     observer.observe(content);
+    observer.observe(node);
     return () => observer.disconnect();
   }, [active, applyScrollToLatest, sessionId, virtualize]);
 
@@ -346,7 +358,7 @@ export const EventStream = memo(function EventStream({
 
   const renderBlock = (block: SessionTurnBlock, index: number) => {
     const isLast = index === blocks.length - 1;
-    const view = isLast ? attachLiveStream(block, stream) : block;
+    const view = isLast ? attachLiveFragments(block, stream) : block;
     return (
       <TurnBlockView
         block={view}
@@ -369,56 +381,61 @@ export const EventStream = memo(function EventStream({
           programmaticRef.current = false;
         }}
       >
-        {hasMoreEarlier ? (
-          <div className="mx-auto mb-4 flex max-w-3xl justify-center">
-            <button
-              type="button"
-              disabled={loadingEarlier}
-              onClick={handleLoadEarlier}
-              className="flex items-center gap-1.5 rounded-md px-3 py-1.5 text-xs text-muted-foreground transition hover:bg-muted hover:text-foreground disabled:pointer-events-none disabled:opacity-50"
-            >
-              {loadingEarlier ? (
-                <>
-                  <Loader2 className="size-3.5 animate-spin" />
-                  <span>{t("loadingEarlier")}</span>
-                </>
-              ) : (
-                <>
-                  <History className="size-3.5" />
-                  <span>{t("loadEarlier")}</span>
-                </>
-              )}
-            </button>
-          </div>
-        ) : null}
-        {virtualize ? (
-          <div
-            className="relative mx-auto max-w-3xl"
-            style={{ height: virtualizer.getTotalSize() }}
-          >
-            {virtualizer.getVirtualItems().map((virtual) => (
-              <div
-                key={virtual.key}
-                data-index={virtual.index}
-                ref={virtualizer.measureElement}
-                className="absolute top-0 left-0 w-full"
-                style={{ transform: `translateY(${virtual.start}px)` }}
+        <div ref={contentRef}>
+          {hasMoreEarlier ? (
+            <div className="mx-auto mb-4 flex max-w-3xl justify-center">
+              <button
+                type="button"
+                disabled={loadingEarlier}
+                onClick={handleLoadEarlier}
+                className="flex items-center gap-1.5 rounded-md px-3 py-1.5 text-xs text-muted-foreground transition hover:bg-muted hover:text-foreground disabled:pointer-events-none disabled:opacity-50"
               >
-                {renderBlock(blocks[virtual.index]!, virtual.index)}
-              </div>
-            ))}
+                {loadingEarlier ? (
+                  <>
+                    <Loader2 className="size-3.5 animate-spin" />
+                    <span>{t("loadingEarlier")}</span>
+                  </>
+                ) : (
+                  <>
+                    <History className="size-3.5" />
+                    <span>{t("loadEarlier")}</span>
+                  </>
+                )}
+              </button>
+            </div>
+          ) : null}
+          {virtualize ? (
+            <div
+              className="relative mx-auto max-w-3xl"
+              style={{ height: virtualizer.getTotalSize() }}
+            >
+              {virtualizer.getVirtualItems().map((virtual) => (
+                <div
+                  key={virtual.key}
+                  data-index={virtual.index}
+                  data-block-id={blocks[virtual.index]?.id}
+                  ref={virtualizer.measureElement}
+                  className="absolute top-0 left-0 w-full"
+                  style={{ transform: `translateY(${virtual.start}px)` }}
+                >
+                  {renderBlock(blocks[virtual.index]!, virtual.index)}
+                </div>
+              ))}
+            </div>
+          ) : (
+            <div className="mx-auto flex max-w-3xl flex-col gap-4">
+              {blocks.map((block, index) => (
+                <div key={block.id} data-block-id={block.id}>
+                  {renderBlock(block, index)}
+                </div>
+              ))}
+              {blocks.length === 0 && hasAsk ? <PlanAskCard sessionId={sessionId} /> : null}
+            </div>
+          )}
+          <div className="mx-auto mt-4 max-w-3xl space-y-4">
+            <PendingPlanApproval sessionId={sessionId} />
+            <BackgroundTasks sessionId={sessionId} />
           </div>
-        ) : (
-          <div className="mx-auto flex max-w-3xl flex-col gap-4">
-            {blocks.map((block, index) => (
-              <div key={block.id}>{renderBlock(block, index)}</div>
-            ))}
-            {blocks.length === 0 && hasAsk ? <PlanAskCard sessionId={sessionId} /> : null}
-          </div>
-        )}
-        <div className="mx-auto mt-4 max-w-3xl space-y-4">
-          <PendingPlanApproval sessionId={sessionId} />
-          <BackgroundTasks sessionId={sessionId} />
         </div>
       </div>
       {showLatest ? (
@@ -472,7 +489,7 @@ const TurnBlockView = memo(function TurnBlockView({
         <WorkSummaryBar block={block} tools={block.tools} working={working} nowMs={nowMs} />
       ) : null}
       {block.segments.map((segment, index) => (
-        <div key={`${segment.kind}-${segment.items[0]?.id ?? index}`}>
+        <div key={turnSegmentReactKey(block.id, segment, index, block.segments)}>
           {renderSegment(
             segment,
             working,
