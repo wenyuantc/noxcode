@@ -13,9 +13,12 @@ use tauri_plugin_opener::OpenerExt;
 
 use crate::app::shared::{
     database_path, now_sqlite, resolve_existing_file_path, resolve_user_file_path, sqlite_pool,
-    DatabaseMigrationStatus, DB_AUTO_IMPORT_BACKUP_PREFIX,
+    DatabaseMigrationStatus, DB_AUTO_IMPORT_BACKUP_PREFIX, SQLITE_DATETIME_FORMAT,
 };
-use crate::db::models::{AppHealthCheck, DatabaseBackupResult, DatabaseRestoreResult};
+use crate::db::models::{
+    AppHealthCheck, DatabaseBackupResult, DatabaseRestoreResult, DatabaseRuntimeStats,
+    DatabaseTableStat,
+};
 use crate::git::preflight;
 
 pub(crate) async fn fetch_database_migration_status(
@@ -72,6 +75,123 @@ fn sql_string_literal(value: &str) -> String {
 
 fn sql_identifier(value: &str) -> String {
     format!("\"{}\"", value.replace('"', "\"\""))
+}
+
+const MIGRATION_TABLE_NAME: &str = "_sqlx_migrations";
+
+fn is_business_table(name: &str) -> bool {
+    name != MIGRATION_TABLE_NAME && !name.starts_with("sqlite_")
+}
+
+fn sidecar_path(database_file: &Path, suffix: &str) -> PathBuf {
+    let mut file_name = database_file
+        .file_name()
+        .map(|name| name.to_os_string())
+        .unwrap_or_default();
+    file_name.push(suffix);
+    database_file.with_file_name(file_name)
+}
+
+fn file_len_or_zero(path: &Path) -> i64 {
+    fs::metadata(path)
+        .ok()
+        .filter(|meta| meta.is_file())
+        .map(|meta| i64::try_from(meta.len()).unwrap_or(i64::MAX))
+        .unwrap_or(0)
+}
+
+fn format_modified_at(path: &Path) -> Option<String> {
+    let modified = fs::metadata(path).ok()?.modified().ok()?;
+    Some(
+        chrono::DateTime::<Utc>::from(modified)
+            .format(SQLITE_DATETIME_FORMAT)
+            .to_string(),
+    )
+}
+
+fn collect_database_file_stats(
+    database_file: Option<&Path>,
+) -> (i64, i64, i64, i64, Option<String>) {
+    let Some(path) = database_file else {
+        return (0, 0, 0, 0, None);
+    };
+
+    let file_size_bytes = file_len_or_zero(path);
+    let wal_size_bytes = file_len_or_zero(&sidecar_path(path, "-wal"));
+    let shm_size_bytes = file_len_or_zero(&sidecar_path(path, "-shm"));
+    (
+        file_size_bytes,
+        wal_size_bytes,
+        shm_size_bytes,
+        file_size_bytes
+            .saturating_add(wal_size_bytes)
+            .saturating_add(shm_size_bytes),
+        format_modified_at(path),
+    )
+}
+
+async fn fetch_pragma_i64(pool: &SqlitePool, pragma: &str) -> Option<i64> {
+    sqlx::query_scalar::<_, i64>(&format!("PRAGMA {pragma}"))
+        .fetch_optional(pool)
+        .await
+        .ok()
+        .flatten()
+}
+
+async fn fetch_pragma_string(pool: &SqlitePool, pragma: &str) -> Option<String> {
+    sqlx::query_scalar::<_, String>(&format!("PRAGMA {pragma}"))
+        .fetch_optional(pool)
+        .await
+        .ok()
+        .flatten()
+}
+
+async fn fetch_table_row_count(pool: &SqlitePool, table_name: &str) -> Result<i64, String> {
+    let query = format!("SELECT COUNT(*) FROM {}", sql_identifier(table_name));
+    sqlx::query_scalar::<_, i64>(&query)
+        .fetch_one(pool)
+        .await
+        .map_err(|error| format!("读取表 {table_name} 行数失败: {error}"))
+}
+
+pub(crate) async fn fetch_database_runtime_stats(
+    pool: &SqlitePool,
+    database_file: Option<&Path>,
+) -> Result<DatabaseRuntimeStats, String> {
+    let table_names = fetch_schema_names(pool, "table")
+        .await?
+        .into_iter()
+        .filter(|name| is_business_table(name))
+        .collect::<Vec<_>>();
+
+    let mut tables = Vec::with_capacity(table_names.len());
+    for name in table_names {
+        let row_count = fetch_table_row_count(pool, &name).await?;
+        tables.push(DatabaseTableStat { name, row_count });
+    }
+
+    let (file_size_bytes, wal_size_bytes, shm_size_bytes, total_size_bytes, modified_at) =
+        collect_database_file_stats(database_file);
+    let sqlite_version = sqlx::query_scalar::<_, String>("SELECT sqlite_version()")
+        .fetch_optional(pool)
+        .await
+        .ok()
+        .flatten();
+
+    Ok(DatabaseRuntimeStats {
+        table_count: tables.len() as i64,
+        file_size_bytes,
+        wal_size_bytes,
+        shm_size_bytes,
+        total_size_bytes,
+        modified_at,
+        sqlite_version,
+        page_size: fetch_pragma_i64(pool, "page_size").await,
+        page_count: fetch_pragma_i64(pool, "page_count").await,
+        journal_mode: fetch_pragma_string(pool, "journal_mode").await,
+        encoding: fetch_pragma_string(pool, "encoding").await,
+        tables,
+    })
 }
 
 pub(crate) fn ensure_statement_terminated(sql: &str) -> String {
@@ -512,6 +632,19 @@ pub async fn health_check<R: Runtime>(app: AppHandle<R>) -> Result<AppHealthChec
         None
     };
 
+    let resolved_database_path = database_path(&app);
+    let database_stats = if let Some(pool) = pool.as_ref() {
+        match fetch_database_runtime_stats(pool, resolved_database_path.as_deref()).await {
+            Ok(stats) => Some(stats),
+            Err(error) => {
+                eprintln!("[db] health_check 读取运行时统计失败: {error}");
+                None
+            }
+        }
+    } else {
+        None
+    };
+
     let git_result = tokio::task::spawn_blocking(preflight::check_local_git)
         .await
         .map_err(|error| format!("探测系统 git 失败: {error}"))?;
@@ -522,7 +655,7 @@ pub async fn health_check<R: Runtime>(app: AppHandle<R>) -> Result<AppHealthChec
 
     Ok(AppHealthCheck {
         database_loaded,
-        database_path: database_path(&app).map(|path| path.to_string_lossy().to_string()),
+        database_path: resolved_database_path.map(|path| path.to_string_lossy().to_string()),
         database_current_version: migration_status
             .as_ref()
             .and_then(|status| status.current_version),
@@ -530,6 +663,7 @@ pub async fn health_check<R: Runtime>(app: AppHandle<R>) -> Result<AppHealthChec
             .as_ref()
             .and_then(|status| status.current_description.clone()),
         database_latest_version: latest_registered_version,
+        database_stats,
         git_available,
         git_version,
         checked_at: now_sqlite(),
@@ -754,5 +888,105 @@ mod tests {
                 .expect("validate backup script");
             assert_eq!(status.current_version, Some(latest));
         });
+    }
+
+    #[test]
+    fn runtime_stats_list_business_tables_after_migrations() {
+        tauri::async_runtime::block_on(async {
+            let pool = setup_migrated_pool().await;
+            sqlx::query(
+                "INSERT INTO ai_channels (id, name, protocol, base_url, api_key) VALUES ('ch-1', 'demo', 'openai', 'https://example.com', 'sk-test')",
+            )
+            .execute(&pool)
+            .await
+            .expect("insert ai channel");
+
+            let stats = fetch_database_runtime_stats(&pool, None)
+                .await
+                .expect("fetch runtime stats");
+
+            let expected_tables = [
+                "activity_logs",
+                "agent_session_events",
+                "agent_sessions",
+                "ai_channels",
+                "git_checkpoints",
+                "native_api_call_logs",
+                "native_automations",
+                "native_goals",
+                "native_session_transcripts",
+                "native_tool_artifacts",
+                "ssh_configs",
+                "workspaces",
+            ];
+            let names = stats
+                .tables
+                .iter()
+                .map(|table| table.name.as_str())
+                .collect::<Vec<_>>();
+
+            assert_eq!(stats.table_count, 12);
+            assert_eq!(names, expected_tables);
+            assert!(!names.contains(&MIGRATION_TABLE_NAME));
+            assert_eq!(
+                stats
+                    .tables
+                    .iter()
+                    .find(|table| table.name == "ai_channels")
+                    .map(|table| table.row_count),
+                Some(1)
+            );
+            assert_eq!(stats.file_size_bytes, 0);
+            assert_eq!(stats.wal_size_bytes, 0);
+            assert_eq!(stats.shm_size_bytes, 0);
+            assert_eq!(stats.total_size_bytes, 0);
+            assert!(stats.sqlite_version.is_some());
+            assert!(stats.page_size.unwrap_or_default() > 0);
+            assert!(stats.page_count.unwrap_or_default() > 0);
+            assert!(stats.journal_mode.is_some());
+            assert!(stats.encoding.is_some());
+        });
+    }
+
+    #[test]
+    fn sums_database_sidecar_file_sizes() {
+        let dir =
+            std::env::temp_dir().join(format!("noxcode-db-stats-{}", crate::app::shared::new_id()));
+        fs::create_dir_all(&dir).expect("create temp dir");
+        let database = dir.join("noxcode.db");
+        fs::write(&database, vec![0_u8; 100]).expect("write db");
+        fs::write(dir.join("noxcode.db-wal"), vec![0_u8; 40]).expect("write wal");
+        fs::write(dir.join("noxcode.db-shm"), vec![0_u8; 8]).expect("write shm");
+
+        let (file_size, wal_size, shm_size, total_size, modified_at) =
+            collect_database_file_stats(Some(&database));
+
+        assert_eq!(file_size, 100);
+        assert_eq!(wal_size, 40);
+        assert_eq!(shm_size, 8);
+        assert_eq!(total_size, 148);
+        assert!(modified_at.is_some());
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn missing_sidecars_count_as_zero() {
+        let dir = std::env::temp_dir().join(format!(
+            "noxcode-db-stats-missing-{}",
+            crate::app::shared::new_id()
+        ));
+        fs::create_dir_all(&dir).expect("create temp dir");
+        let database = dir.join("noxcode.db");
+        fs::write(&database, vec![0_u8; 32]).expect("write db");
+
+        let (file_size, wal_size, shm_size, total_size, _) =
+            collect_database_file_stats(Some(&database));
+
+        assert_eq!(file_size, 32);
+        assert_eq!(wal_size, 0);
+        assert_eq!(shm_size, 0);
+        assert_eq!(total_size, 32);
+        fs::remove_dir_all(&dir).ok();
     }
 }

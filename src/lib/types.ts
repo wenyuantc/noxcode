@@ -872,12 +872,33 @@ export interface QuickPrompt {
   prompt: string;
 }
 
+export interface DatabaseTableStat {
+  name: string;
+  row_count: number;
+}
+
+export interface DatabaseRuntimeStats {
+  table_count: number;
+  file_size_bytes: number;
+  wal_size_bytes: number;
+  shm_size_bytes: number;
+  total_size_bytes: number;
+  modified_at: string | null;
+  sqlite_version: string | null;
+  page_size: number | null;
+  page_count: number | null;
+  journal_mode: string | null;
+  encoding: string | null;
+  tables: DatabaseTableStat[];
+}
+
 export interface AppHealthCheck {
   database_loaded: boolean;
   database_path: string | null;
   database_current_version: number | null;
   database_current_description: string | null;
   database_latest_version: number;
+  database_stats: DatabaseRuntimeStats | null;
   git_available: boolean;
   git_version: string | null;
   checked_at: string;

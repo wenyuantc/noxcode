@@ -60,6 +60,28 @@ export function formatCompactTokens(value: number, locale = getCurrentAppLocale(
   return String(count);
 }
 
+/** 1024 进制文件大小，中英单位均为 B / KB / MB / GB。 */
+export function formatFileSize(bytes: number, _locale = getCurrentAppLocale()): string {
+  if (!Number.isFinite(bytes) || bytes <= 0) {
+    return "0 B";
+  }
+
+  const units = ["B", "KB", "MB", "GB"] as const;
+  let value = bytes;
+  let unit = 0;
+  while (value >= 1024 && unit < units.length - 1) {
+    value /= 1024;
+    unit += 1;
+  }
+
+  if (unit === 0) {
+    return `${Math.round(value)} B`;
+  }
+
+  const text = value >= 100 ? Math.round(value).toString() : value.toFixed(1).replace(/\.0$/, "");
+  return `${text} ${units[unit]}`;
+}
+
 /** 1_000 → K, 1_000_000 → M, 1_000_000_000 → B；单位值固定两位小数。 */
 export function formatScaledTokens(value: number): string {
   const count = Math.max(0, Math.round(value));
