@@ -1337,6 +1337,7 @@ async fn enqueue_live_input(
         return Err("输入内容不能为空".to_string());
     }
     let manager = manager.lock().await;
+    manager.require_running()?;
     let Some(session) = manager.get_session(session_record_id) else {
         return Ok(None);
     };
@@ -1590,6 +1591,8 @@ pub(crate) async fn start_native_with_manager(
     manager_state: Arc<Mutex<NativeAgentManager>>,
     payload: StartNativeSessionInput,
 ) -> Result<AgentSessionStarted, String> {
+    crate::app::lifecycle::require_running(&app)?;
+    manager_state.lock().await.require_running()?;
     let _operation = match payload.resume_session_id.as_deref().map(str::trim) {
         Some(id) if !id.is_empty() => {
             let guard = lock_agent_session_operation(&manager_state, id).await;
@@ -1606,6 +1609,8 @@ async fn start_native_session_locked(
     manager_state: Arc<Mutex<NativeAgentManager>>,
     payload: StartNativeSessionInput,
 ) -> Result<AgentSessionStarted, String> {
+    crate::app::lifecycle::require_running(&app)?;
+    manager_state.lock().await.require_running()?;
     let plan_mode = payload.plan_mode.unwrap_or(false);
     let kind = session_kind(plan_mode);
     let workspace_id = payload.workspace_id.trim().to_string();
@@ -1851,7 +1856,9 @@ async fn start_native_session_locked(
     let rules_run = permission_rules.clone();
     let queue_run = input_queue.clone();
     let join = tokio::spawn(async move {
-        let _ = loop_ready_rx.await;
+        if loop_ready_rx.await.is_err() {
+            return;
+        }
         run_native_loop(
             app_spawn,
             manager_spawn,
@@ -1877,7 +1884,7 @@ async fn start_native_session_locked(
         .await;
     });
 
-    manager_state.lock().await.add_session(NativeLiveSession {
+    let registered = manager_state.lock().await.add_session(NativeLiveSession {
         runtime: Some(runtime),
         plan_mode: Arc::new(AtomicBool::new(plan_mode)),
         background: None,
@@ -1903,6 +1910,17 @@ async fn start_native_session_locked(
         pending_question: std::collections::VecDeque::new(),
         pending_plan_approval: std::collections::VecDeque::new(),
     });
+    if !registered {
+        let _ = update_agent_session_status(
+            &pool,
+            &session_record_id,
+            "exited",
+            Some(0),
+            Some(&now_sqlite()),
+        )
+        .await;
+        return Err("应用正在退出，会话未启动".into());
+    }
     let _ = app.emit("native-session", &started);
     let _ = loop_ready_tx.send(());
     Ok(started)
@@ -2796,24 +2814,26 @@ async fn run_native_loop(
     )
     .await;
 
-    if tokio::time::timeout(
-        Duration::from_secs(20),
-        finish_memory(
-            &app,
-            &run,
-            &runner,
-            memory_dir.as_deref(),
-            memory_settings.as_ref(),
-            &session_record_id,
-            &profile_id,
-            &workspace_id,
-            &kind,
-            cancel.is_cancelled(),
-        ),
-    )
-    .await
-    .is_err()
-    {
+    let memory_finished = tokio::select! {
+        biased;
+        _ = crate::app::lifecycle::fast_restart_requested(&app) => true,
+        result = tokio::time::timeout(
+            Duration::from_secs(20),
+            finish_memory(
+                &app,
+                &run,
+                &runner,
+                memory_dir.as_deref(),
+                memory_settings.as_ref(),
+                &session_record_id,
+                &profile_id,
+                &workspace_id,
+                &kind,
+                cancel.is_cancelled(),
+            ),
+        ) => result.is_ok(),
+    };
+    if !memory_finished {
         eprintln!("[native] 会话结束记忆处理超时，保留已有记录");
     }
 
@@ -3140,6 +3160,7 @@ pub async fn compact_native_session(
     session_record_id: String,
     instructions: Option<String>,
 ) -> Result<bool, String> {
+    crate::app::lifecycle::require_running(&app)?;
     let _operation = lock_agent_session_operation(&state, &session_record_id).await;
     require_unarchived_session_with(&sqlite_pool(&app).await?, &session_record_id).await?;
     let instructions = instructions
@@ -3263,6 +3284,7 @@ pub async fn send_native_input(
     session_record_id: String,
     input: String,
 ) -> Result<NativeInputQueueSnapshot, String> {
+    crate::app::lifecycle::require_running(&app)?;
     let _operation = lock_agent_session_operation(&state, &session_record_id).await;
     require_unarchived_session_with(&sqlite_pool(&app).await?, &session_record_id).await?;
     enqueue_live_input(state.inner().as_ref(), &session_record_id, &input, None)
@@ -3431,6 +3453,7 @@ pub async fn restart_native_session(
     state: State<'_, Arc<Mutex<NativeAgentManager>>>,
     payload: StartNativeSessionInput,
 ) -> Result<AgentSessionStarted, String> {
+    crate::app::lifecycle::require_running(&app)?;
     let restart_id = payload
         .resume_session_id
         .as_deref()

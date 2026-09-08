@@ -53,6 +53,7 @@ describe("sidebarUpdateLabelKey", () => {
     expect(sidebarUpdateLabelKey("available")).toBe("update");
     expect(sidebarUpdateLabelKey("downloading")).toBe("downloading");
     expect(sidebarUpdateLabelKey("ready")).toBe("restartUpdate");
+    expect(sidebarUpdateLabelKey("restarting")).toBe("restarting");
   });
 });
 
@@ -183,5 +184,52 @@ describe("updateStore", () => {
       status: "ready",
       relaunchFailedDetail: "boom",
     });
+  });
+
+  it("shares a single pending restart across callers and keeps it pending after acceptance", async () => {
+    let accept: (() => void) | undefined;
+    relaunch.mockReturnValue(
+      new Promise<void>((resolve) => {
+        accept = resolve;
+      }),
+    );
+    useUpdateStore.setState({ status: "ready", update: sampleUpdate });
+    const aboutRequest = useUpdateStore.getState().relaunch();
+    expect(useUpdateStore.getState().status).toBe("restarting");
+    await useUpdateStore.getState().relaunch();
+    await useUpdateStore.getState().checkForUpdate();
+    await useUpdateStore.getState().startDownload();
+    expect(relaunch).toHaveBeenCalledTimes(1);
+    expect(check).not.toHaveBeenCalled();
+    expect(download).not.toHaveBeenCalled();
+    accept?.();
+    await aboutRequest;
+    expect(useUpdateStore.getState().status).toBe("restarting");
+    await useUpdateStore.getState().relaunch();
+    expect(relaunch).toHaveBeenCalledTimes(1);
+  });
+
+  it("allows retry when restart IPC fails", async () => {
+    relaunch.mockRejectedValueOnce(new Error("IPC failed")).mockResolvedValueOnce();
+    useUpdateStore.setState({ status: "ready", update: sampleUpdate });
+    await useUpdateStore.getState().relaunch();
+    expect(useUpdateStore.getState()).toMatchObject({
+      status: "ready",
+      relaunchFailedDetail: "IPC failed",
+    });
+    await useUpdateStore.getState().relaunch();
+    expect(useUpdateStore.getState()).toMatchObject({
+      status: "restarting",
+      relaunchFailedDetail: null,
+    });
+    expect(relaunch).toHaveBeenCalledTimes(2);
+  });
+
+  it("ignores restart before the update is installed", async () => {
+    for (const status of ["idle", "available", "downloading"] as const) {
+      useUpdateStore.setState({ status });
+      await useUpdateStore.getState().relaunch();
+    }
+    expect(relaunch).not.toHaveBeenCalled();
   });
 });

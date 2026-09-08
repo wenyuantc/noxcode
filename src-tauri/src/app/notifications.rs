@@ -21,6 +21,9 @@ fn truncate_body(body: &str) -> String {
 }
 
 pub(crate) fn notify_if_unfocused<R: Runtime>(app: &AppHandle<R>, title: &str, body: &str) {
+    if super::lifecycle::is_stopping(app) {
+        return;
+    }
     let enabled = match crate::native::settings::load_native_settings(app) {
         Ok(settings) => settings.desktop_notifications,
         Err(error) => {

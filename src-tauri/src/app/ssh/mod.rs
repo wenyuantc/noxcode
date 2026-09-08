@@ -31,6 +31,7 @@ use self::configs::{
     fetch_ssh_config_record_by_id, list_ssh_config_records, ssh_config_target_host_label,
     update_ssh_config_with, write_connection_check_result, write_password_probe_result,
 };
+use self::error::SshError;
 use self::exec::{ExecOptions, SshCommandOutput};
 use self::known_hosts::{default_known_hosts_path, KnownHostsPolicy};
 use self::shell::{build_remote_shell_command, expand_tilde, shell_escape_single_quoted};
@@ -281,10 +282,11 @@ async fn run_ssh_verification(
         ssh_pool.trust().clone(),
         std::time::Duration::from_secs(120),
     );
-    let result = verification_pool
-        .exec(&params, command, ExecOptions::default())
-        .await
-        .map_err(Into::into);
+    let result = tokio::select! {
+        biased;
+        _ = ssh_pool.cancelled() => Err(SshError::ShuttingDown.to_string()),
+        result = verification_pool.exec(&params, command, ExecOptions::default()) => result.map_err(Into::into),
+    };
     verification_pool.shutdown().await;
     result
 }
@@ -418,7 +420,10 @@ pub(crate) async fn list_remote_directories<R: Runtime>(
         let err = output.stderr_lossy();
         let stdout = output.stdout_lossy();
         if stdout.contains("FAILED_CD") {
-            return Err(format!("无法进入目录: {}", if target.is_empty() { "~" } else { target }));
+            return Err(format!(
+                "无法进入目录: {}",
+                if target.is_empty() { "~" } else { target }
+            ));
         }
         return Err(if err.trim().is_empty() {
             format!("列举远程目录失败 (退出码 {:?})", output.exit_code)
@@ -459,4 +464,3 @@ pub(crate) async fn list_remote_directories<R: Runtime>(
         directories,
     })
 }
-

@@ -52,6 +52,8 @@ src/components/git/      GitPanel · DiffView · CheckpointTimeline
 | `settingsStore` | — | native / network / AI 功能 / 快捷提示 |
 | `updateStore` | — | 桌面更新检查 / 下载 / 重启；侧栏按钮与关于页共用 |
 
+更新重启通过 `backend.restartApp()` 调用 `restart_app`，由 Rust 限时异步清理后重启。点击后进入 `restarting`，关于页与侧栏同时显示「正在重启」并禁用重复操作；IPC 接受后保持该状态直到进程退出，仅请求失败时恢复 `ready` 并显示错误。
+
 ## 会话接线
 
 `useNativeEvents` 在 `App` 挂一次，把 native 事件写入 `sessionStore`：

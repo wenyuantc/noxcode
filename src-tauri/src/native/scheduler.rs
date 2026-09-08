@@ -460,6 +460,9 @@ pub async fn run_automation_now(
 
 /// 单次扫描：启动到期的自动化。返回启动的会话数。
 pub async fn scan_once(app: &AppHandle, manager: &Arc<Mutex<NativeAgentManager>>) -> usize {
+    if crate::app::lifecycle::is_stopping(app) {
+        return 0;
+    }
     let Ok(pool) = sqlite_pool(app).await else {
         return 0;
     };
@@ -469,6 +472,9 @@ pub async fn scan_once(app: &AppHandle, manager: &Arc<Mutex<NativeAgentManager>>
     let now = Local::now();
     let mut started = 0;
     for automation in items.into_iter().filter(|item| item.enabled != 0) {
+        if crate::app::lifecycle::is_stopping(app) {
+            break;
+        }
         let due = match automation.next_run_at.as_deref().and_then(parse_local) {
             Some(next) => next <= now,
             None => {
@@ -512,12 +518,20 @@ pub async fn scan_once(app: &AppHandle, manager: &Arc<Mutex<NativeAgentManager>>
 
 /// 后台调度循环；在应用 setup 时启动。
 pub fn spawn_scheduler(app: AppHandle, manager: Arc<Mutex<NativeAgentManager>>) {
+    use tauri::Manager;
+    let stopping = app.state::<crate::app::lifecycle::Lifecycle>().stopping();
     tauri::async_runtime::spawn(async move {
-        // 给数据库插件与主窗口一点启动时间。
-        tokio::time::sleep(Duration::from_secs(10)).await;
-        loop {
-            let _ = scan_once(&app, &manager).await;
-            tokio::time::sleep(SCAN_INTERVAL).await;
+        tokio::select! {
+            biased;
+            _ = stopping.cancelled() => {},
+            _ = async {
+                // 给数据库插件与主窗口一点启动时间。
+                tokio::time::sleep(Duration::from_secs(10)).await;
+                loop {
+                    let _ = scan_once(&app, &manager).await;
+                    tokio::time::sleep(SCAN_INTERVAL).await;
+                }
+            } => {},
         }
     });
 }

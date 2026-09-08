@@ -56,9 +56,15 @@ gh secret set TAURI_SIGNING_PRIVATE_KEY < ~/.tauri/noxcode-updater.key
 
 ## 托盘与窗口
 
-关闭主窗口、托盘「退出」、`Cmd+Q` 都会写入 `$APPCONFIG/window-state.json`（逻辑像素）。启动时 `RunEvent::Ready` 恢复尺寸再显示窗口。关闭主窗口后隐藏到托盘，不退出进程。托盘左键或菜单「显示窗口」恢复；「退出」走 `app.exit(0)`，`RunEvent::Exit` 里关闭 SshPool 并取消 Agent。macOS 点 Dock 图标触发 `RunEvent::Reopen`，同样恢复主窗口。
+关闭主窗口、托盘「退出」、`Cmd+Q` 都会写入 `$APPCONFIG/window-state.json`（逻辑像素）。启动时 `RunEvent::Ready` 恢复尺寸再显示窗口。关闭主窗口后隐藏到托盘，不退出进程。托盘左键或菜单「显示窗口」恢复；macOS 点 Dock 图标触发 `RunEvent::Reopen`，同样恢复主窗口。
 
-命令：`show_main_window`。
+退出由 `app::lifecycle` 协调：`Running → Draining → Exiting`，首次请求决定退出或重启，重复请求不重复清理。更新重启通过 `restart_app` 命令进入后台清理，最后调用 `request_restart()`；普通退出在 `ExitRequested` 暂缓，清理后重新发出退出。`Exit` 不再等待业务资源，前端不授予 process restart 权限。
+
+更新重启总清理预算 5 秒：窗口保存、会话持久化与 MCP 收尾最多 3 秒，SSH 与数据库各最多 1 秒，提前完成即继续。普通退出总预算 30 秒，保留空闲会话的记忆收尾机会；快速重启跳过记忆提取。退出期间停止自动化、新会话、追加输入与新 SSH 连接，所有会话同时收到结束信号，超时取消并中止剩余任务，不无限等待 join。SQL 插件在清理开始时注销，其已创建的连接池保留到最后限时关闭，避免插件的 `Exit` 钩子重复阻塞。预算不包含操作系统启动新进程的耗时；超时前未持久化的内存内容可能无法完整保存。
+
+诊断日志位于 `$APPLOG/lifecycle-<pid>.jsonl`，包含版本、进程、启动与窗口就绪、清理阶段、耗时及超时信息。日志独立于数据库，后台写入，每个文件最多约 1 MiB 并保留一份轮转文件，日志写入失败不阻塞退出。
+
+命令：`show_main_window`、`restart_app`。
 
 ## 图标
 

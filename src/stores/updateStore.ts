@@ -12,9 +12,9 @@ import {
 } from "@/lib/appUpdate";
 
 export type { AppUpdateProgress, AppUpdateInfo, UpdaterErrorCode };
-export type AppUpdateStatus = "idle" | "available" | "downloading" | "ready";
+export type AppUpdateStatus = "idle" | "available" | "downloading" | "ready" | "restarting";
 
-export type SidebarUpdateLabelKey = "update" | "downloading" | "restartUpdate";
+export type SidebarUpdateLabelKey = "update" | "downloading" | "restartUpdate" | "restarting";
 
 function errorDetail(cause: unknown): string {
   if (cause instanceof Error) {
@@ -31,6 +31,8 @@ export function sidebarUpdateLabelKey(status: AppUpdateStatus): SidebarUpdateLab
       return "downloading";
     case "ready":
       return "restartUpdate";
+    case "restarting":
+      return "restarting";
     default:
       return null;
   }
@@ -73,7 +75,7 @@ export const useUpdateStore = create<UpdateState>((set, get) => ({
       return;
     }
     const { status } = get();
-    if (status === "downloading" || status === "ready") {
+    if (status === "downloading" || status === "ready" || status === "restarting") {
       return;
     }
     await get().checkForUpdate({ silent: true });
@@ -82,7 +84,7 @@ export const useUpdateStore = create<UpdateState>((set, get) => ({
   checkForUpdate: async (options) => {
     const silent = options?.silent === true;
     const { status, checking } = get();
-    if (checking || status === "downloading" || status === "ready") {
+    if (checking || status === "downloading" || status === "ready" || status === "restarting") {
       return;
     }
 
@@ -155,11 +157,14 @@ export const useUpdateStore = create<UpdateState>((set, get) => ({
   },
 
   relaunch: async () => {
-    set({ relaunchFailedDetail: null, errorCode: null, errorDetail: "" });
+    if (get().status !== "ready") {
+      return;
+    }
+    set({ status: "restarting", relaunchFailedDetail: null, errorCode: null, errorDetail: "" });
     try {
       await relaunchApp();
     } catch (cause) {
-      set({ relaunchFailedDetail: errorDetail(cause) });
+      set({ status: "ready", relaunchFailedDetail: errorDetail(cause) });
     }
   },
 

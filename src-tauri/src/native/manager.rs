@@ -161,11 +161,27 @@ impl NativeLiveSession {
 pub struct NativeAgentManager {
     sessions: HashMap<String, NativeLiveSession>,
     operation_locks: HashMap<String, Weak<tokio::sync::Mutex<()>>>,
+    stopping: CancelFlag,
 }
 
 impl NativeAgentManager {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    pub(crate) fn with_shutdown(stopping: CancelFlag) -> Self {
+        Self {
+            stopping,
+            ..Self::default()
+        }
+    }
+
+    pub(crate) fn require_running(&self) -> Result<(), String> {
+        if self.stopping.is_cancelled() {
+            Err("应用正在退出，请在重新打开后重试".into())
+        } else {
+            Ok(())
+        }
     }
 
     // Serialize archive/resume/input without holding the manager lock during session startup.
@@ -203,9 +219,19 @@ impl NativeAgentManager {
         })
     }
 
-    pub fn add_session(&mut self, session: NativeLiveSession) {
+    pub fn add_session(&mut self, session: NativeLiveSession) -> bool {
+        if self.stopping.is_cancelled() {
+            session.cancel.cancel();
+            session.input_queue.close();
+            if let Some(background) = &session.background {
+                background.stop_all();
+            }
+            session.join.abort();
+            return false;
+        }
         self.sessions
             .insert(session.info.session_record_id.clone(), session);
+        true
     }
 
     pub fn remove_session(&mut self, session_record_id: &str) -> Option<NativeLiveSession> {
@@ -664,27 +690,69 @@ impl NativeAgentManager {
     }
 }
 
-pub async fn shutdown_all_sessions(manager: &tokio::sync::Mutex<NativeAgentManager>) {
-    let sessions = manager.lock().await.take_all();
-    for mut session in sessions {
-        session.input_queue.close();
-        if session.working.load(Ordering::SeqCst) {
-            session.cancel.cancel();
-        }
-        let _ = session.followup_tx.try_send(NativeFollowup::Finish);
-        if tokio::time::timeout(std::time::Duration::from_secs(30), &mut session.join)
-            .await
-            .is_err()
-        {
-            session.cancel.cancel();
-            session.join.abort();
-            let _ = session.join.await;
+struct ClosingSessions(Vec<NativeLiveSession>);
+
+impl Drop for ClosingSessions {
+    fn drop(&mut self) {
+        for session in &self.0 {
+            if !session.join.is_finished() {
+                session.cancel.cancel();
+                session.input_queue.close();
+                if let Some(background) = &session.background {
+                    background.stop_all();
+                }
+                session.join.abort();
+            }
         }
     }
 }
 
+pub async fn shutdown_all_sessions(
+    manager: &tokio::sync::Mutex<NativeAgentManager>,
+    preserve_memory: bool,
+    deadline: tokio::time::Instant,
+) -> Result<(usize, usize), &'static str> {
+    let mut manager = tokio::time::timeout_at(deadline, manager.lock())
+        .await
+        .map_err(|_| "manager_lock_timed_out")?;
+    manager.stopping.cancel();
+    let mut sessions = ClosingSessions(manager.take_all());
+    drop(manager);
+    // Signal every session before awaiting any join. Drop also aborts them if the
+    // outer shutdown supervisor cancels this future at its shared deadline.
+    for session in &sessions.0 {
+        session.input_queue.close();
+        if !preserve_memory || session.working.load(Ordering::SeqCst) {
+            session.cancel.cancel();
+        }
+        if let Some(background) = &session.background {
+            background.stop_all();
+        }
+        if session
+            .followup_tx
+            .try_send(NativeFollowup::Finish)
+            .is_err()
+        {
+            session.cancel.cancel();
+        }
+    }
+    let _ = tokio::time::timeout_at(
+        deadline,
+        futures_util::future::join_all(sessions.0.iter_mut().map(|session| &mut session.join)),
+    )
+    .await;
+    Ok((
+        sessions.0.len(),
+        sessions
+            .0
+            .iter()
+            .filter(|session| !session.join.is_finished())
+            .count(),
+    ))
+}
+
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use super::*;
 
     #[tokio::test]
@@ -1047,7 +1115,7 @@ mod tests {
         assert_eq!(manager.len(), 0);
     }
 
-    fn live_session(id: &str) -> NativeLiveSession {
+    pub(crate) fn live_session(id: &str) -> NativeLiveSession {
         let (tx, _rx) = mpsc::channel(1);
         NativeLiveSession {
             info: NativeSessionInfo {
@@ -1471,8 +1539,120 @@ mod tests {
             assert!(!cancel_run.is_cancelled());
         });
         manager.add_session(session);
-        shutdown_all_sessions(&tokio::sync::Mutex::new(manager)).await;
+        shutdown_all_sessions(
+            &tokio::sync::Mutex::new(manager),
+            true,
+            tokio::time::Instant::now() + std::time::Duration::from_secs(30),
+        )
+        .await
+        .unwrap();
         assert!(!cancel.is_cancelled());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn shutdown_signals_all_sessions_before_waiting_and_skips_restart_memory() {
+        let mut manager = NativeAgentManager::new();
+        let barrier = Arc::new(tokio::sync::Barrier::new(3));
+        let finished = Arc::new(AtomicUsize::new(0));
+        for id in ["one", "two", "three"] {
+            let mut session = live_session(id);
+            let (tx, mut rx) = mpsc::channel(1);
+            session.followup_tx = tx;
+            let cancel = session.cancel.clone();
+            let barrier = barrier.clone();
+            let finished = finished.clone();
+            session.join = tokio::spawn(async move {
+                assert!(matches!(rx.recv().await, Some(NativeFollowup::Finish)));
+                assert!(cancel.is_cancelled());
+                barrier.wait().await;
+                finished.fetch_add(1, Ordering::SeqCst);
+            });
+            assert!(manager.add_session(session));
+        }
+        let started = tokio::time::Instant::now();
+        let result = shutdown_all_sessions(
+            &tokio::sync::Mutex::new(manager),
+            false,
+            started + std::time::Duration::from_secs(3),
+        )
+        .await
+        .unwrap();
+        assert_eq!(result, (3, 0));
+        assert_eq!(finished.load(Ordering::SeqCst), 3);
+        assert_eq!(started.elapsed(), std::time::Duration::ZERO);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn unresponsive_session_cleanup_is_aborted_at_one_deadline() {
+        let mut manager = NativeAgentManager::new();
+        let mut handles = Vec::new();
+        for id in ["stuck-mcp-one", "stuck-mcp-two"] {
+            let mut session = live_session(id);
+            session.join = tokio::spawn(std::future::pending());
+            handles.push(session.join.abort_handle());
+            manager.add_session(session);
+        }
+        let started = tokio::time::Instant::now();
+        let result = shutdown_all_sessions(
+            &tokio::sync::Mutex::new(manager),
+            false,
+            started + std::time::Duration::from_secs(3),
+        )
+        .await
+        .unwrap();
+        assert_eq!(result, (2, 2));
+        assert_eq!(started.elapsed(), std::time::Duration::from_secs(3));
+        tokio::task::yield_now().await;
+        assert!(handles.iter().all(|handle| handle.is_finished()));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn manager_lock_wait_is_bounded_too() {
+        let manager = tokio::sync::Mutex::new(NativeAgentManager::new());
+        let _lock = manager.lock().await;
+        let started = tokio::time::Instant::now();
+        assert_eq!(
+            shutdown_all_sessions(&manager, false, started + std::time::Duration::from_secs(3))
+                .await,
+            Err("manager_lock_timed_out")
+        );
+        assert_eq!(started.elapsed(), std::time::Duration::from_secs(3));
+    }
+
+    #[tokio::test]
+    async fn late_registration_after_shutdown_is_rejected_and_aborted() {
+        let stopping = CancelFlag::new();
+        let manager = Arc::new(tokio::sync::Mutex::new(NativeAgentManager::with_shutdown(
+            stopping.clone(),
+        )));
+        let lock = manager.lock().await;
+        let session = live_session("late");
+        let cancelled = session.cancel.clone();
+        let runner = session.join.abort_handle();
+        let late_manager = manager.clone();
+        let registration =
+            tokio::spawn(async move { late_manager.lock().await.add_session(session) });
+        stopping.cancel();
+        drop(lock);
+        assert!(!registration.await.unwrap());
+        assert!(cancelled.is_cancelled());
+        assert_eq!(manager.lock().await.len(), 0);
+        assert!(manager.lock().await.require_running().is_err());
+        tokio::task::yield_now().await;
+        assert!(runner.is_finished());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn empty_shutdown_finishes_without_waiting() {
+        let manager = tokio::sync::Mutex::new(NativeAgentManager::new());
+        let started = tokio::time::Instant::now();
+        assert_eq!(
+            shutdown_all_sessions(&manager, false, started + std::time::Duration::from_secs(3))
+                .await
+                .unwrap(),
+            (0, 0)
+        );
+        assert_eq!(started.elapsed(), std::time::Duration::ZERO);
     }
 
     #[tokio::test]
@@ -1520,7 +1700,13 @@ mod tests {
         let (pending, pending_rx) = pending("r1", "Write");
         let _ = manager.enqueue_permission("sess-shutdown", pending);
         let manager = tokio::sync::Mutex::new(manager);
-        shutdown_all_sessions(&manager).await;
+        shutdown_all_sessions(
+            &manager,
+            true,
+            tokio::time::Instant::now() + std::time::Duration::from_secs(30),
+        )
+        .await
+        .unwrap();
         assert!(finished.load(std::sync::atomic::Ordering::SeqCst));
         assert_eq!(manager.lock().await.len(), 0);
         assert_eq!(

@@ -1,6 +1,7 @@
 pub(crate) mod activity_logs;
 pub(crate) mod ai_settings;
 pub(crate) mod database;
+pub(crate) mod lifecycle;
 pub(crate) mod network_settings;
 pub(crate) mod notifications;
 pub(crate) mod quick_prompts;

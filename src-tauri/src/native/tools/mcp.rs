@@ -1604,7 +1604,7 @@ pub async fn connect_mcp_servers<R: Runtime>(
             }
         }
     }
-            McpConnectResult {
+    McpConnectResult {
         session,
         warnings,
         connected,
@@ -1684,6 +1684,56 @@ mod tests {
             headers: Vec::new(),
             oauth: None,
         }
+    }
+
+    #[tokio::test]
+    async fn application_shutdown_aborts_an_unresponsive_mcp_disconnect() {
+        use crate::native::manager::{shutdown_all_sessions, NativeAgentManager};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let live = blank_server(
+            &sample_server(),
+            McpTransport::Http {
+                client: reqwest::Client::builder().no_proxy().build().unwrap(),
+                url: format!("http://{}", listener.local_addr().unwrap()),
+                headers: vec![],
+                session_id: Some("shutdown-test".into()),
+                bearer: None,
+                backlog: vec![],
+            },
+        );
+        let mcp = SharedMcp::from_session(McpSession {
+            servers: vec![live],
+            handlers: Arc::default(),
+        });
+        let shutting_down = mcp.clone();
+        let mut session = crate::native::manager::tests::live_session("stalled-mcp");
+        session.join = tokio::spawn(async move { shutting_down.shutdown().await });
+        let runner = session.join.abort_handle();
+        let mut manager = NativeAgentManager::new();
+        manager.add_session(session);
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let mut request = [0; 512];
+        let read = socket.read(&mut request).await.unwrap();
+        assert!(std::str::from_utf8(&request[..read])
+            .unwrap()
+            .starts_with("DELETE "));
+        tokio::time::pause();
+        let started = tokio::time::Instant::now();
+        assert_eq!(
+            shutdown_all_sessions(
+                &tokio::sync::Mutex::new(manager),
+                false,
+                started + Duration::from_secs(3)
+            )
+            .await
+            .unwrap(),
+            (1, 1)
+        );
+        assert!(started.elapsed() >= Duration::from_secs(3));
+        assert!(started.elapsed() <= Duration::from_secs(3) + Duration::from_millis(1));
+        tokio::task::yield_now().await;
+        assert!(runner.is_finished());
+        assert!(mcp.inner.as_ref().unwrap().try_lock().is_ok());
     }
 
     #[test]

@@ -38,6 +38,7 @@ import type {
   GetNativeUsageAnalyticsInput,
   ListNativeApiCallLogsInput,
   McpServersDocument,
+  McpServerConfig,
   McpOAuthEvent,
   McpOAuthStart,
   McpOAuthStatus,
@@ -102,6 +103,10 @@ import type {
   Workspace,
   WorkspaceHealth,
 } from "./types";
+
+export function restartApp(): Promise<void> {
+  return invoke("restart_app");
+}
 
 export function healthCheck(): Promise<AppHealthCheck> {
   return invoke("health_check");

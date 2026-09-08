@@ -34,6 +34,8 @@ pub(crate) enum SshError {
     CommandTimeout,
     #[error("SSH 连接已断开")]
     ConnectionLost,
+    #[error("应用正在退出，SSH 连接已停止")]
+    ShuttingDown,
     #[error("{0}")]
     Config(String),
 }

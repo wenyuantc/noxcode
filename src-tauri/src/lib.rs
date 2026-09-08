@@ -34,6 +34,9 @@ pub fn run() {
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
         .setup(|app| {
+            let lifecycle = app::lifecycle::Lifecycle::new(app.handle());
+            let stopping = lifecycle.stopping();
+            app.manage(lifecycle);
             tray::create_tray(app)?;
 
             let trust = Arc::new(HostTrustBroker::new(Duration::from_secs(120)));
@@ -46,9 +49,9 @@ pub fn run() {
                     let _ = handle.emit("ssh-host-key-changed", &info);
                 }
             });
-            let pool = SshPool::new(trust, Duration::from_secs(600));
+            let pool = SshPool::with_shutdown(trust, Duration::from_secs(600), stopping.clone());
             app.manage(pool.clone());
-            let manager = Arc::new(Mutex::new(NativeAgentManager::new()));
+            let manager = Arc::new(Mutex::new(NativeAgentManager::with_shutdown(stopping)));
             app.manage(manager.clone());
             pool.start_idle_reaper(Duration::from_secs(60));
             native::scheduler::spawn_scheduler(app.handle().clone(), manager);
@@ -63,6 +66,7 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            app::lifecycle::restart_app,
             app::activity_logs::list_activity_logs,
             app::database::health_check,
             app::database::backup_database,
@@ -171,7 +175,7 @@ pub fn run() {
             native::mcp_servers::get_mcp_servers,
             native::mcp_servers::update_mcp_servers,
             native::mcp_servers::reset_mcp_servers,
-                                    native::mcp_servers::export_mcp_servers_snippet,
+            native::mcp_servers::export_mcp_servers_snippet,
             native::mcp_servers::test_mcp_server,
             native::mcp_oauth::start_mcp_oauth,
             native::mcp_oauth::get_mcp_oauth_status,
@@ -213,25 +217,15 @@ pub fn run() {
                     eprintln!("显示主窗口失败: {error}");
                 }
                 git::preflight::show_fatal_dialog_if_needed(app);
+                app.state::<app::lifecycle::Lifecycle>()
+                    .record("window_ready", serde_json::json!({}));
             }
             #[cfg(target_os = "macos")]
             tauri::RunEvent::Reopen { .. } => {
                 let _ = tray::show_main_window_handle(app);
             }
-            tauri::RunEvent::ExitRequested { .. } => {
-                if let Err(error) = window_state::save_main_window_size(app) {
-                    eprintln!("保存窗口尺寸失败: {error}");
-                }
-            }
-            tauri::RunEvent::Exit => {
-                if let Some(manager) = app.try_state::<Arc<Mutex<NativeAgentManager>>>() {
-                    tauri::async_runtime::block_on(async {
-                        crate::native::manager::shutdown_all_sessions(&manager).await;
-                    });
-                }
-                if let Some(pool) = app.try_state::<SshPool>() {
-                    tauri::async_runtime::block_on(pool.shutdown());
-                }
+            tauri::RunEvent::ExitRequested { code, api, .. } => {
+                app::lifecycle::handle_exit_requested(app, code, &api);
             }
             _ => {}
         });

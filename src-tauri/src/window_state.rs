@@ -134,18 +134,28 @@ pub fn save_window_size<R: Runtime>(window: &Window<R>) -> Result<(), String> {
     persist_physical_size(window.app_handle(), size, scale)
 }
 
-pub fn save_main_window_size<R: Runtime>(app: &AppHandle<R>) -> Result<(), String> {
-    let Some(window) = app.get_webview_window(MAIN_WINDOW_LABEL) else {
-        return Ok(());
-    };
-
-    let size = window
-        .inner_size()
-        .map_err(|error| format!("读取窗口尺寸失败: {error}"))?;
-    let scale = window
-        .scale_factor()
-        .map_err(|error| format!("读取窗口缩放失败: {error}"))?;
-    persist_physical_size(app, size, scale)
+pub async fn save_main_window_size_async<R: Runtime>(app: &AppHandle<R>) -> Result<(), String> {
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    let snapshot_app = app.clone();
+    app.run_on_main_thread(move || {
+        let snapshot = (|| {
+            let Some(window) = snapshot_app.get_webview_window(MAIN_WINDOW_LABEL) else {
+                return Ok(None);
+            };
+            let size = window.inner_size().map_err(|error| error.to_string())?;
+            let scale = window.scale_factor().map_err(|error| error.to_string())?;
+            Ok::<_, String>(Some(size.to_logical(sanitize_scale(scale))))
+        })();
+        let _ = tx.send(snapshot);
+    })
+    .map_err(|error| error.to_string())?;
+    if let Some(size) = rx.await.map_err(|error| error.to_string())?? {
+        let app = app.clone();
+        tokio::task::spawn_blocking(move || persist_logical_size(&app, size))
+            .await
+            .map_err(|error| error.to_string())??;
+    }
+    Ok(())
 }
 
 #[cfg(test)]
