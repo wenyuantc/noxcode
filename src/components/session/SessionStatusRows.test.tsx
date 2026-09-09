@@ -16,6 +16,6 @@ describe("WorktreeStatusRow", () => {
     );
     expect(html).toContain("已隔离到独立工作树");
     expect(html).not.toContain("[WORKTREE]");
-    expect(html).toContain("/Users/me/.noxcode/worktrees/abc-1");
+    expect(html).toContain("lucide-git-fork");
   });
 });
