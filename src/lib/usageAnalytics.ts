@@ -154,6 +154,70 @@ export function formatUsageTokenExact(value: number): string {
   return new Intl.NumberFormat("en-US").format(count);
 }
 
+function compactChineseNumber(value: number, unit: string): string {
+  const text = value.toFixed(1).replace(/\.0$/, "");
+  return `${text}${unit}`;
+}
+
+export function formatUsageTokenCompact(value: number, locale = "zh-CN"): string {
+  if (!Number.isFinite(value)) {
+    return "0";
+  }
+  const count = Math.max(0, Math.round(value));
+  if (locale.startsWith("zh")) {
+    if (count >= 100_000_000) {
+      return compactChineseNumber(count / 100_000_000, "亿");
+    }
+    if (count >= 10_000) {
+      return compactChineseNumber(count / 10_000, "万");
+    }
+    return String(count);
+  }
+  if (count >= 1_000_000_000) {
+    return compactNumber(count / 1_000_000_000, "B");
+  }
+  if (count >= 1_000_000) {
+    return compactNumber(count / 1_000_000, "M");
+  }
+  if (count >= 1_000) {
+    return compactNumber(count / 1_000, "k");
+  }
+  return String(count);
+}
+
+export function formatUsageDateWithWeekday(date: string, locale = "zh-CN"): string {
+  const parsed = parseUtcDateKey(date);
+  if (!parsed) {
+    return date;
+  }
+  const year = parsed.getUTCFullYear();
+  const month = parsed.getUTCMonth() + 1;
+  const day = parsed.getUTCDate();
+  const weekday = parsed.getUTCDay();
+
+  if (locale.startsWith("zh")) {
+    const weekdaysZh = ["周日", "周一", "周二", "周三", "周四", "周五", "周六"];
+    return `${year}年${month}月${day}日 ${weekdaysZh[weekday]}`;
+  }
+
+  const monthsEn = [
+    "Jan",
+    "Feb",
+    "Mar",
+    "Apr",
+    "May",
+    "Jun",
+    "Jul",
+    "Aug",
+    "Sep",
+    "Oct",
+    "Nov",
+    "Dec",
+  ];
+  const weekdaysEn = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+  return `${monthsEn[month - 1]} ${day}, ${year}, ${weekdaysEn[weekday]}`;
+}
+
 export function usageTotalTokens(stats: {
   input_tokens: number;
   output_tokens: number;
@@ -306,6 +370,129 @@ export function displayUsageModelName(
   }
   const trimmed = model.trim();
   return trimmed || unknownLabel;
+}
+
+export const USAGE_MODEL_PALETTE = [
+  "#3b82f6", // Sky/Blue
+  "#10b981", // Emerald
+  "#8b5cf6", // Violet
+  "#f43f5e", // Rose
+  "#f97316", // Orange
+  "#eab308", // Yellow
+  "#06b6d4", // Cyan
+  "#6366f1", // Indigo
+  "#64748b", // Slate (for other / overflow)
+];
+
+export function getUsageModelColor(index: number, isOther = false): string {
+  if (isOther) {
+    return "#64748b";
+  }
+  const mainPalette = USAGE_MODEL_PALETTE.slice(0, USAGE_MODEL_PALETTE.length - 1);
+  return mainPalette[index % mainPalette.length];
+}
+
+export interface UsageDonutSlice {
+  model: string;
+  name: string;
+  tokens: number;
+  calls: number;
+  percentage: number;
+  color: string;
+  path: string;
+}
+
+export function buildUsageDonutSlices(
+  models: NativeUsageModelBucket[],
+  unknownLabel: string,
+  otherLabel: string,
+  cx = 80,
+  cy = 80,
+  rOuter = 68,
+  rInner = 46,
+): { slices: UsageDonutSlice[]; allTokens: number } {
+  const rows = mergeUsageModels(models);
+  const allTokens = rows.reduce((sum, item) => sum + item.total_tokens, 0);
+
+  if (allTokens <= 0) {
+    return { slices: [], allTokens: 0 };
+  }
+
+  const activeRows = rows.filter((item) => item.total_tokens > 0);
+
+  if (activeRows.length === 1) {
+    const single = activeRows[0];
+    const isOther = single.model === USAGE_OTHER_MODEL_ID;
+    const name = displayUsageModelName(single.model, unknownLabel, otherLabel);
+    const color = getUsageModelColor(0, isOther);
+    const fullRingPath = [
+      `M ${cx} ${cy - rOuter}`,
+      `A ${rOuter} ${rOuter} 0 1 0 ${cx} ${cy + rOuter}`,
+      `A ${rOuter} ${rOuter} 0 1 0 ${cx} ${cy - rOuter}`,
+      `M ${cx} ${cy - rInner}`,
+      `A ${rInner} ${rInner} 0 1 1 ${cx} ${cy + rInner}`,
+      `A ${rInner} ${rInner} 0 1 1 ${cx} ${cy - rInner}`,
+      "Z",
+    ].join(" ");
+
+    return {
+      slices: [
+        {
+          model: single.model,
+          name,
+          tokens: single.total_tokens,
+          calls: single.calls,
+          percentage: 100,
+          color,
+          path: fullRingPath,
+        },
+      ],
+      allTokens,
+    };
+  }
+
+  let currentAngle = -Math.PI / 2;
+  const slices: UsageDonutSlice[] = [];
+
+  for (let i = 0; i < rows.length; i++) {
+    const item = rows[i];
+    if (item.total_tokens <= 0) {
+      continue;
+    }
+    const isOther = item.model === USAGE_OTHER_MODEL_ID;
+    const name = displayUsageModelName(item.model, unknownLabel, otherLabel);
+    const color = getUsageModelColor(i, isOther);
+    const fraction = item.total_tokens / allTokens;
+    const sweepAngle = fraction * 2 * Math.PI;
+    const startAngle = currentAngle;
+    const endAngle = currentAngle + sweepAngle;
+    currentAngle = endAngle;
+
+    const x1 = cx + rOuter * Math.cos(startAngle);
+    const y1 = cy + rOuter * Math.sin(startAngle);
+    const x2 = cx + rOuter * Math.cos(endAngle);
+    const y2 = cy + rOuter * Math.sin(endAngle);
+
+    const x3 = cx + rInner * Math.cos(endAngle);
+    const y3 = cy + rInner * Math.sin(endAngle);
+    const x4 = cx + rInner * Math.cos(startAngle);
+    const y4 = cy + rInner * Math.sin(startAngle);
+
+    const largeArc = sweepAngle > Math.PI ? 1 : 0;
+    const path = `M ${x1.toFixed(3)} ${y1.toFixed(3)} A ${rOuter} ${rOuter} 0 ${largeArc} 1 ${x2.toFixed(3)} ${y2.toFixed(3)} L ${x3.toFixed(3)} ${y3.toFixed(3)} A ${rInner} ${rInner} 0 ${largeArc} 0 ${x4.toFixed(3)} ${y4.toFixed(3)} Z`;
+
+    slices.push({
+      model: item.model,
+      name,
+      tokens: item.total_tokens,
+      calls: item.calls,
+      percentage: fraction * 100,
+      color,
+      path,
+    });
+  }
+
+  return { slices, allTokens };
 }
 
 export function usageTrendLabelIndexes(length: number): number[] {

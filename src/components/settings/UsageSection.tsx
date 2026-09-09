@@ -20,7 +20,7 @@ import { getNativeUsageAnalytics } from "@/lib/backend";
 import {
   emptyUsageAnalytics,
   fillUsageDailyBuckets,
-  formatUsageTokenCount,
+  formatUsageTokenCompact,
   formatUsageTokenExact,
   resolveUsageDateRange,
   usageAnalyticsLoadError,
@@ -38,7 +38,7 @@ import { UsageTrendCard } from "./UsageTrendCard";
 const RANGE_PRESETS: UsageRangePreset[] = ["7d", "30d", "custom"];
 
 export function UsageSection() {
-  const { t } = useTranslation("settings");
+  const { t, i18n } = useTranslation("settings");
   const [preset, setPreset] = useState<UsageRangePreset>("7d");
   const [customStart, setCustomStart] = useState("");
   const [customEnd, setCustomEnd] = useState("");
@@ -222,16 +222,23 @@ export function UsageSection() {
           </div>
 
           <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
-            <TokenStat icon={Hash} label={t("usage.totalTokens")} value={totalTokens} />
+            <TokenStat
+              icon={Hash}
+              label={t("usage.totalTokens")}
+              value={totalTokens}
+              locale={i18n.language}
+            />
             <TokenStat
               icon={ArrowDownLeft}
               label={t("usage.inputTokens")}
               value={stats.input_tokens}
+              locale={i18n.language}
             />
             <TokenStat
               icon={ArrowUpRight}
               label={t("usage.outputTokens")}
               value={stats.output_tokens}
+              locale={i18n.language}
             />
           </div>
 
@@ -305,10 +312,12 @@ function TokenStat({
   icon: Icon,
   label,
   value,
+  locale,
 }: {
   icon: React.ComponentType<{ className?: string }>;
   label: string;
   value: number;
+  locale?: string;
 }) {
   return (
     <div className="flex items-center gap-3.5 rounded-xl border border-border/70 bg-card p-4 shadow-2xs">
@@ -321,7 +330,7 @@ function TokenStat({
           className="font-mono text-xl font-bold tracking-tight text-foreground"
           title={formatUsageTokenExact(value)}
         >
-          {formatUsageTokenCount(value)}
+          {formatUsageTokenCompact(value, locale)}
         </p>
       </div>
     </div>

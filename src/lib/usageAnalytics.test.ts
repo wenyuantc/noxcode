@@ -5,10 +5,14 @@ import {
   USAGE_CUSTOM_RANGE_MAX_DAYS,
   USAGE_OTHER_MODEL_ID,
   buildHeatmapWeeks,
+  buildUsageDonutSlices,
   displayUsageModelName,
   fillUsageDailyBuckets,
+  formatUsageDateWithWeekday,
   formatUsageDayLabel,
+  formatUsageTokenCompact,
   formatUsageTokenCount,
+  getUsageModelColor,
   heatmapLevel,
   inclusiveDayCount,
   mergeUsageModels,
@@ -216,5 +220,73 @@ describe("usageAnalyticsLoadError", () => {
       "统计使用数据失败: db locked",
     );
     expect(usageAnalyticsLoadError("nope", "加载失败")).toBe("加载失败");
+  });
+});
+
+describe("formatUsageTokenCompact and formatUsageDateWithWeekday", () => {
+  it("formats tokens in Chinese units (万, 亿) or English units (k, M, B)", () => {
+    expect(formatUsageTokenCompact(0, "zh-CN")).toBe("0");
+    expect(formatUsageTokenCompact(500, "zh-CN")).toBe("500");
+    expect(formatUsageTokenCompact(27_041_000, "zh-CN")).toBe("2704.1万");
+    expect(formatUsageTokenCompact(28_931_000, "zh-CN")).toBe("2893.1万");
+    expect(formatUsageTokenCompact(150_000_000, "zh-CN")).toBe("1.5亿");
+
+    expect(formatUsageTokenCompact(500, "en")).toBe("500");
+    expect(formatUsageTokenCompact(1_500, "en")).toBe("1.5k");
+    expect(formatUsageTokenCompact(27_041_000, "en")).toBe("27M");
+    expect(formatUsageTokenCompact(1_250_000_000, "en")).toBe("1.3B");
+  });
+
+  it("formats UTC date with weekday in Chinese and English", () => {
+    // 2026-09-05 is Saturday
+    expect(formatUsageDateWithWeekday("2026-09-05", "zh-CN")).toBe("2026年9月5日 周六");
+    expect(formatUsageDateWithWeekday("2026-09-05", "en")).toBe("Sep 5, 2026, Sat");
+    expect(formatUsageDateWithWeekday("invalid-date", "zh-CN")).toBe("invalid-date");
+  });
+});
+
+describe("buildUsageDonutSlices and getUsageModelColor", () => {
+  it("returns assigned palette colors and slate for other", () => {
+    expect(getUsageModelColor(0)).toBe("#3b82f6");
+    expect(getUsageModelColor(1)).toBe("#10b981");
+    expect(getUsageModelColor(0, true)).toBe("#64748b");
+  });
+
+  it("handles empty models or zero tokens", () => {
+    const emptyResult = buildUsageDonutSlices([], "未知", "其他");
+    expect(emptyResult.slices).toHaveLength(0);
+    expect(emptyResult.allTokens).toBe(0);
+
+    const zeroResult = buildUsageDonutSlices([model("gpt-4", { total_tokens: 0 })], "未知", "其他");
+    expect(zeroResult.slices).toHaveLength(0);
+    expect(zeroResult.allTokens).toBe(0);
+  });
+
+  it("generates a full donut ring when only 1 model has positive tokens", () => {
+    const singleResult = buildUsageDonutSlices(
+      [model("gpt-4", { total_tokens: 1000, calls: 5 })],
+      "未知",
+      "其他",
+    );
+    expect(singleResult.slices).toHaveLength(1);
+    expect(singleResult.slices[0].percentage).toBe(100);
+    expect(singleResult.slices[0].path).toContain("A 68 68");
+  });
+
+  it("generates slices with correct percentages and paths for multiple models", () => {
+    const multiResult = buildUsageDonutSlices(
+      [
+        model("gpt-4", { total_tokens: 600, calls: 10 }),
+        model("claude-3", { total_tokens: 400, calls: 8 }),
+      ],
+      "未知",
+      "其他",
+    );
+    expect(multiResult.slices).toHaveLength(2);
+    expect(multiResult.allTokens).toBe(1000);
+    expect(multiResult.slices[0].percentage).toBe(60);
+    expect(multiResult.slices[1].percentage).toBe(40);
+    expect(multiResult.slices[0].color).toBe("#3b82f6");
+    expect(multiResult.slices[1].color).toBe("#10b981");
   });
 });
