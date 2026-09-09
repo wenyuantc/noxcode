@@ -4,6 +4,7 @@ import type { NativeUsageDailyBucket, NativeUsageModelBucket } from "@/lib/types
 import {
   USAGE_CUSTOM_RANGE_MAX_DAYS,
   USAGE_OTHER_MODEL_ID,
+  buildHeatmapMonthLabels,
   buildHeatmapWeeks,
   buildUsageDonutSlices,
   displayUsageModelName,
@@ -16,6 +17,7 @@ import {
   heatmapLevel,
   inclusiveDayCount,
   mergeUsageModels,
+  resolveHeatmapYearRange,
   resolveUsageDateRange,
   shiftUtcDateKey,
   usageAnalyticsLoadError,
@@ -288,5 +290,63 @@ describe("buildUsageDonutSlices and getUsageModelColor", () => {
     expect(multiResult.slices[1].percentage).toBe(40);
     expect(multiResult.slices[0].color).toBe("#3b82f6");
     expect(multiResult.slices[1].color).toBe("#10b981");
+  });
+});
+
+describe("resolveHeatmapYearRange and buildHeatmapMonthLabels", () => {
+  const now = new Date("2026-09-09T12:00:00.000Z");
+
+  it("resolves lastYear to 52 full weeks ending on current week", () => {
+    const range = resolveHeatmapYearRange("lastYear", now);
+    expect(range.end).toBe("2026-09-09");
+    expect(range.maxDate).toBe("2026-09-09");
+    // 2026-09-09 is Wednesday, monday is 2026-09-07. 51 weeks before is 2025-09-15.
+    expect(range.start).toBe("2025-09-15");
+
+    const weeks = buildHeatmapWeeks([], range.start, range.end);
+    expect(weeks).toHaveLength(52);
+    // First week Monday
+    expect(weeks[0]?.cells[0]?.date).toBe("2025-09-15");
+    // Last week Monday is 2026-09-07, Sunday is 2026-09-13
+    expect(weeks[51]?.cells[0]?.date).toBe("2026-09-07");
+    expect(weeks[51]?.cells[6]?.date).toBe("2026-09-13");
+    // Today (Wednesday) is in range, Thursday is not in range
+    expect(weeks[51]?.cells[2]?.date).toBe("2026-09-09");
+    expect(weeks[51]?.cells[2]?.inRange).toBe(true);
+    expect(weeks[51]?.cells[3]?.date).toBe("2026-09-10");
+    expect(weeks[51]?.cells[3]?.inRange).toBe(false);
+  });
+
+  it("resolves calendar year range correctly", () => {
+    const pastYearRange = resolveHeatmapYearRange("2025", now);
+    expect(pastYearRange.start).toBe("2025-01-01");
+    expect(pastYearRange.end).toBe("2025-12-31");
+    expect(pastYearRange.maxDate).toBe("2025-12-31");
+
+    const currentYearRange = resolveHeatmapYearRange("2026", now);
+    expect(currentYearRange.start).toBe("2026-01-01");
+    expect(currentYearRange.end).toBe("2026-12-31");
+    expect(currentYearRange.maxDate).toBe("2026-09-09");
+
+    const weeks2026 = buildHeatmapWeeks([], currentYearRange.start, currentYearRange.end);
+    expect(weeks2026).toHaveLength(53);
+    const labels2026Zh = buildHeatmapMonthLabels(weeks2026, "zh-CN");
+    expect(labels2026Zh[0]?.label).toBe("1月");
+  });
+
+  it("builds non-overlapping month labels across weeks", () => {
+    const range = resolveHeatmapYearRange("lastYear", now);
+    const weeks = buildHeatmapWeeks([], range.start, range.end);
+    const labelsZh = buildHeatmapMonthLabels(weeks, "zh-CN");
+    const labelsEn = buildHeatmapMonthLabels(weeks, "en");
+
+    expect(labelsZh.length).toBeGreaterThanOrEqual(10);
+    expect(labelsZh[0]?.label).toBe("9月");
+    expect(labelsEn[0]?.label).toBe("Sep");
+
+    // Ensure all labels are at least 2 columns apart
+    for (let i = 1; i < labelsZh.length; i += 1) {
+      expect(labelsZh[i].colIndex - labelsZh[i - 1].colIndex).toBeGreaterThanOrEqual(2);
+    }
   });
 });

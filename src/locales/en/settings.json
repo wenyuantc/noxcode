@@ -332,7 +332,7 @@
     "healthValue": "{{rate}}% success",
     "cacheLabel": "Cache rate",
     "cacheValue": "{{rate}} cache hit",
-    "heatmapTitle": "Activity heatmap",
+    "heatmapTitle": "Token activity",
     "heatmapHint": "Daily token usage. Darker cells mean more tokens.",
     "trendTitle": "Daily token trend",
     "trendHint": "Input and output tokens by day.",
@@ -351,6 +351,12 @@
     "weekdayFri": "Fri",
     "weekdaySat": "Sat",
     "weekdaySun": "Sun",
+    "weekdayShortMon": "Mon",
+    "weekdayShortWed": "Wed",
+    "weekdayShortFri": "Fri",
+    "pastYear": "Past year",
+    "noActivity": "No activity",
+    "heatmapYearSummary": "{{tokens}} tokens · {{calls}} calls",
     "tooltipDay": "{{date}} · {{calls}} calls · {{tokens}} tokens"
   },
   "database": {

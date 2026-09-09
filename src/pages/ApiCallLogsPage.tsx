@@ -582,10 +582,7 @@ export default function ApiCallLogsPage() {
                     }
                   }}
                 >
-                  <SelectTrigger
-                    id="api-log-status"
-                    className="h-8 w-full bg-background text-xs"
-                  >
+                  <SelectTrigger id="api-log-status" className="h-8 w-full bg-background text-xs">
                     <SelectValue>
                       {filters.status === "all" ? t("allStatuses") : statusLabel(filters.status)}
                     </SelectValue>

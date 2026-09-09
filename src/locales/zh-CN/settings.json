@@ -332,7 +332,7 @@
     "healthValue": "{{rate}}% 成功率",
     "cacheLabel": "缓存率",
     "cacheValue": "{{rate}} 缓存命中",
-    "heatmapTitle": "活跃热力图",
+    "heatmapTitle": "Token 活动",
     "heatmapHint": "按天的 Token 用量，颜色越深表示越多。",
     "trendTitle": "按天 Token 趋势",
     "trendHint": "每日输入与输出 Token。",
@@ -351,6 +351,12 @@
     "weekdayFri": "五",
     "weekdaySat": "六",
     "weekdaySun": "日",
+    "weekdayShortMon": "周一",
+    "weekdayShortWed": "周三",
+    "weekdayShortFri": "周五",
+    "pastYear": "最近 1 年",
+    "noActivity": "无活动",
+    "heatmapYearSummary": "{{tokens}} Tokens · {{calls}} 次调用",
     "tooltipDay": "{{date}} · {{calls}} 次 · {{tokens}} tokens"
   },
   "database": {

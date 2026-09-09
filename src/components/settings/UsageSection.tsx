@@ -265,10 +265,8 @@ export function UsageSection() {
       </SettingCard>
 
       <UsageHeatmapCard
-        days={filledDays}
-        rangeStart={range.ok ? range.start : ""}
-        rangeEnd={range.ok ? range.end : ""}
-        empty={showEmptyCharts}
+        activeRangeStart={range.ok ? range.start : undefined}
+        activeRangeEnd={range.ok ? range.end : undefined}
       />
       <UsageTrendCard days={filledDays} empty={showEmptyCharts} />
       <UsageModelCard models={analytics.models} empty={showEmptyCharts} />

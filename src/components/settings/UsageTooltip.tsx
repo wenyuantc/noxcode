@@ -38,7 +38,7 @@ export function UsageTooltip({
         render={(props) => (
           <div
             {...props}
-            className={cn("inline-flex h-full w-full", triggerClassName, props.className)}
+            className={cn(triggerClassName ?? "inline-flex h-full w-full", props.className)}
           >
             {children}
           </div>

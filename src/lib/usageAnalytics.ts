@@ -324,6 +324,99 @@ export function buildHeatmapWeeks(
   return weeks;
 }
 
+export interface HeatmapYearRange {
+  start: string;
+  end: string;
+  maxDate: string;
+}
+
+export function resolveHeatmapYearRange(yearOption: string, now = new Date()): HeatmapYearRange {
+  const today = utcDateKey(now);
+  if (yearOption === "lastYear") {
+    const currentWeekMonday = mondayOf(today);
+    const start = shiftUtcDateKey(currentWeekMonday, -51 * 7);
+    return { start, end: today, maxDate: today };
+  }
+
+  const year = parseInt(yearOption, 10);
+  if (!Number.isFinite(year) || year < 2000 || year > 2100) {
+    return resolveHeatmapYearRange("lastYear", now);
+  }
+
+  const start = `${year}-01-01`;
+  const yearEnd = `${year}-12-31`;
+  return {
+    start,
+    end: yearEnd,
+    maxDate: today < yearEnd && year === now.getUTCFullYear() ? today : yearEnd,
+  };
+}
+
+export interface UsageHeatmapMonthLabel {
+  colIndex: number;
+  label: string;
+}
+
+export function buildHeatmapMonthLabels(
+  weeks: UsageHeatmapWeek[],
+  locale = "zh-CN",
+): UsageHeatmapMonthLabel[] {
+  const monthsZh = [
+    "1月",
+    "2月",
+    "3月",
+    "4月",
+    "5月",
+    "6月",
+    "7月",
+    "8月",
+    "9月",
+    "10月",
+    "11月",
+    "12月",
+  ];
+  const monthsEn = [
+    "Jan",
+    "Feb",
+    "Mar",
+    "Apr",
+    "May",
+    "Jun",
+    "Jul",
+    "Aug",
+    "Sep",
+    "Oct",
+    "Nov",
+    "Dec",
+  ];
+  const labels: UsageHeatmapMonthLabel[] = [];
+  let lastCol = -999;
+  let lastMonth = -1;
+
+  for (let i = 0; i < weeks.length; i += 1) {
+    // Check Thursday (index 3), which is ISO 8601 standard for week-month assignment
+    const thursday = weeks[i]?.cells[3]?.date ?? weeks[i]?.cells[0]?.date;
+    if (!thursday) {
+      continue;
+    }
+    const parsed = parseUtcDateKey(thursday);
+    if (!parsed) {
+      continue;
+    }
+    const m = parsed.getUTCMonth();
+    if (m !== lastMonth) {
+      if (i - lastCol >= 2 && weeks.length - i >= 2) {
+        const label = locale.startsWith("zh") ? monthsZh[m] : monthsEn[m];
+        labels.push({ colIndex: i, label });
+        lastCol = i;
+      }
+      lastMonth = m;
+    }
+  }
+
+  return labels;
+}
+
 export function mergeUsageModels(
   models: NativeUsageModelBucket[],
   limit = USAGE_MODEL_DISPLAY_LIMIT,
