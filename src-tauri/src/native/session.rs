@@ -1727,7 +1727,9 @@ async fn maybe_isolate_session_worktree(
                     notices.push(format!("创建工作树前获取上游失败，已继续创建：{error}"));
                 }
             }
-            match crate::git::worktree::add_detached(&target, &path).await {
+            match crate::git::worktree::add_session_worktree(&target, &path, session_record_id)
+                .await
+            {
                 Ok(_) => {
                     *run_cwd = path.clone();
                     if settings

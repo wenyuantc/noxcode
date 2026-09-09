@@ -9,7 +9,9 @@ use super::runner::{
     assert_safe_rel_path, git, git_with, with_repo_lock, GitError, GitRunOptions, GitTarget,
     IndexMode,
 };
-use super::worktree::{is_managed_worktree_path_with_root, list_worktrees};
+use super::worktree::{
+    default_worktree_branch_name, is_managed_worktree_path_with_root, list_worktrees,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -70,19 +72,7 @@ pub fn merge_checkpoint_label(message: Option<&str>) -> &str {
         .unwrap_or("worktree_merge")
 }
 
-pub fn default_worktree_branch_name(session_id: &str) -> String {
-    let short: String = session_id
-        .chars()
-        .filter(|item| item.is_ascii_alphanumeric())
-        .take(8)
-        .collect();
-    let short = if short.is_empty() {
-        "session".to_string()
-    } else {
-        short
-    };
-    format!("noxcode/wt-{short}")
-}
+pub use super::worktree::default_worktree_branch_name;
 
 pub fn has_conflict_markers(text: &str) -> bool {
     text.contains("<<<<<<<") || text.contains(">>>>>>>")
@@ -151,6 +141,32 @@ pub async fn abort_merge(target: &GitTarget) -> Result<(), GitError> {
         git(target, &["merge", "--abort"], &IndexMode::user())
             .await?
             .require_success(&["merge", "--abort"])?;
+        Ok(())
+    })
+    .await
+}
+
+async fn current_branch_name(target: &GitTarget) -> Result<Option<String>, GitError> {
+    let output = git(
+        target,
+        &["rev-parse", "--abbrev-ref", "HEAD"],
+        &IndexMode::ReadOnly,
+    )
+    .await?;
+    output.require_success(&["rev-parse", "--abbrev-ref", "HEAD"])?;
+    let name = output.stdout_lossy().trim().to_string();
+    if name.is_empty() || name == "HEAD" {
+        Ok(None)
+    } else {
+        Ok(Some(name))
+    }
+}
+
+async fn point_checked_out_ref(target: &GitTarget, oid: &str) -> Result<(), GitError> {
+    with_repo_lock(target, || async {
+        git(target, &["update-ref", "HEAD", oid], &IndexMode::ReadOnly)
+            .await?
+            .require_success(&["update-ref", "HEAD"])?;
         Ok(())
     })
     .await
@@ -473,7 +489,12 @@ pub async fn run_merge_session_worktree(
             message: format!("已创建分支 {branch}，主工作区未改动"),
         });
     }
-    // 合并回当前分支：只建内部指针再 merge，绝不 force-update 已检出的分支。
+    // 隔离树已检出会话分支时，在该工作树内前移分支，再合并回主工作区。
+    // 旧的 detached 工作树仍建内部指针，绝不 force-update 已检出分支。
+    if let Some(worktree_branch) = current_branch_name(worktree).await? {
+        point_checked_out_ref(worktree, &checkpoint.commit_oid).await?;
+        return merge_named_branch(main, &worktree_branch, Some(label)).await;
+    }
     let pointer = default_worktree_branch_name(session_id);
     let pointer = create_branch_at(main, &pointer, &checkpoint.commit_oid).await?;
     merge_named_branch(main, &pointer, Some(label)).await

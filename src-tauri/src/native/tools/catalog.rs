@@ -861,7 +861,7 @@ fn core_tool_specs() -> Vec<ToolSpec> {
         ),
         spec(
             "EnterWorktree",
-            "Create an isolated git worktree for this session (detached HEAD) and switch the working directory. Omit path to use the managed worktrees directory. Does not change other sessions. Git checkpoints then use the worktree.",
+            "Create an isolated git worktree for this session on a unique noxcode/wt-* branch and switch the working directory. Omit path to use the managed worktrees directory. Does not change other sessions. Git checkpoints then use the worktree.",
             json!({
                 "type": "object",
                 "properties": {

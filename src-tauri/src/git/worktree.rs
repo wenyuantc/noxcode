@@ -19,6 +19,20 @@ pub fn normalize_path_for_compare(path: &str) -> String {
         .to_string()
 }
 
+pub fn default_worktree_branch_name(session_id: &str) -> String {
+    let short: String = session_id
+        .chars()
+        .filter(|item| item.is_ascii_alphanumeric())
+        .take(8)
+        .collect();
+    let short = if short.is_empty() {
+        "session".to_string()
+    } else {
+        short
+    };
+    format!("noxcode/wt-{short}")
+}
+
 pub fn looks_like_session_id(name: &str) -> bool {
     let name = name.trim();
     !name.is_empty()
@@ -164,6 +178,68 @@ pub async fn add_detached(target: &GitTarget, path: &str) -> Result<String, GitE
     Ok(path.to_string())
 }
 
+pub async fn add_with_branch(
+    target: &GitTarget,
+    path: &str,
+    branch: &str,
+) -> Result<String, GitError> {
+    let path = path.trim();
+    let branch = branch.trim();
+    if path.is_empty() {
+        return Err(GitError::Parse("worktree 路径不能为空".to_string()));
+    }
+    if branch.is_empty() {
+        return add_detached(target, path).await;
+    }
+    git(
+        target,
+        &["check-ref-format", "--branch", branch],
+        &IndexMode::ReadOnly,
+    )
+    .await?
+    .require_success(&["check-ref-format", "--branch", branch])?;
+    match target {
+        GitTarget::Local(_) => {
+            if let Some(parent) = Path::new(path).parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+        }
+        GitTarget::Ssh { .. } => {}
+    }
+    let created = git(
+        target,
+        &["worktree", "add", "-b", branch, path],
+        &IndexMode::ReadOnly,
+    )
+    .await?;
+    if created.success() {
+        return Ok(path.to_string());
+    }
+    let attached = git(
+        target,
+        &["worktree", "add", path, branch],
+        &IndexMode::ReadOnly,
+    )
+    .await?;
+    if attached.success() {
+        return Ok(path.to_string());
+    }
+    add_detached(target, path).await
+}
+
+pub async fn add_session_worktree(
+    target: &GitTarget,
+    path: &str,
+    session_record_id: &str,
+) -> Result<String, GitError> {
+    add_with_branch(
+        target,
+        path,
+        &default_worktree_branch_name(session_record_id),
+    )
+    .await
+}
+
 pub async fn remove_worktree(target: &GitTarget, path: &str) -> Result<(), GitError> {
     let path = path.trim();
     if path.is_empty() {
@@ -290,6 +366,18 @@ mod tests {
             Some("abc-1".to_string())
         );
         assert!(session_id_from_worktree_path("/data/nox-wt/not a session").is_none());
+    }
+
+    #[test]
+    fn default_branch_uses_session_prefix() {
+        assert_eq!(
+            default_worktree_branch_name("abc-def-123"),
+            "noxcode/wt-abcdef12"
+        );
+        assert_eq!(
+            default_worktree_branch_name("sess-git"),
+            "noxcode/wt-sessgit"
+        );
     }
 
     #[test]

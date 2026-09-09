@@ -111,7 +111,7 @@ ref：`refs/noxcode/checkpoints/<session_id>/<seq>`。author / committer 固定 
 
 会话文件预览只读，不修改 index 或忽略规则。当前内容最多读取 256 KiB + 1 字节，UTF-8 截断不切断字符；非文本仅显示二进制状态。本地读取校验规范化后的物理路径，SSH 校验物理父目录且拒绝最终文件符号链接，均禁止越出工作区。托管隔离 worktree 内的绝对路径会改到对应 worktree 再预览，不再被主工作区边界挡住。Git 命令失败保留为错误，不伪装成空差异；单文件 diff 使用 literal pathspec，避免文件名中的通配符匹配其它文件。
 
-选中隔离会话时，Git 侧栏的 status / diff / stage / commit / 提交说明生成走该会话 `working_dir` 对应的 worktree；拉取 / 推送 / 分支切换仍看主工作区。本地托管工作树默认落在 `~/.noxcode/worktrees/<session_id>`（无 HOME 时回退 `$APPCONFIG/worktrees`）；设置页可改根目录，列表仍会扫到旧 `$APPCONFIG/worktrees` 残留。合并回当前分支只建内部指针再 `merge`，不会 force-update 主工作区已检出的分支。合并弹窗可手写或用侧边栏同款「生成提交说明」填写说明，再写入 checkpoint / 合并提交，避免历史里只剩 `worktree_merge`。
+选中隔离会话时，Git 侧栏的 status / diff / stage / commit / 提交说明生成走该会话 `working_dir` 对应的 worktree；拉取 / 推送 / 分支切换仍看主工作区。本地托管工作树默认落在 `~/.noxcode/worktrees/<session_id>`（无 HOME 时回退 `$APPCONFIG/worktrees`）；设置页可改根目录，列表仍会扫到旧 `$APPCONFIG/worktrees` 残留。隔离时会检出唯一会话分支 `noxcode/wt-<session>`，主工作区仍停在原来的分支；合并回当前分支时在隔离树内前移该分支再 `merge`，不会 force-update 主工作区已检出的分支。旧的 detached 工作树仍走内部指针。合并弹窗可手写或用侧边栏同款「生成提交说明」填写说明，再写入 checkpoint / 合并提交，避免历史里只剩 `worktree_merge`。
 
 ## 安全拉取
 

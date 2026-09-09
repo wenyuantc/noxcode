@@ -1958,14 +1958,14 @@ async fn call_enter_worktree(ctx: &ToolCtx, arguments: &str) -> Result<String, S
         .and_then(Value::as_str)
         .map(str::trim)
         .filter(|item| !item.is_empty());
+    let id = if ctx.session_record_id.is_empty() {
+        uuid::Uuid::new_v4().to_string()
+    } else {
+        ctx.session_record_id.clone()
+    };
     let path = if let Some(path) = requested {
         path.to_string()
     } else {
-        let id = if ctx.session_record_id.is_empty() {
-            uuid::Uuid::new_v4().to_string()
-        } else {
-            ctx.session_record_id.clone()
-        };
         match target {
             crate::git::GitTarget::Local(_) => {
                 if !ctx.worktree_root.trim().is_empty() {
@@ -2001,7 +2001,7 @@ async fn call_enter_worktree(ctx: &ToolCtx, arguments: &str) -> Result<String, S
             eprintln!("[native] 创建工作树前获取上游失败，已继续创建: {error}");
         }
     }
-    crate::git::worktree::add_detached(target, &path).await?;
+    crate::git::worktree::add_session_worktree(target, &path, &id).await?;
     let next = std::path::PathBuf::from(&path);
     if let Ok(mut root) = ctx.active_root.write() {
         *root = next;
