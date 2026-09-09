@@ -113,6 +113,12 @@ pub type PlanModeChangeHook = Arc<dyn Fn(bool) + Send + Sync>;
 /// value 是读取时的指纹（SSH 仅比较文件内容）。
 pub type ReadFileRegistry = Arc<Mutex<HashMap<String, Option<FileFingerprint>>>>;
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IsolationRestore {
+    pub path: String,
+    pub switched: bool,
+}
+
 /// 工具执行上下文。`Clone` 得到的副本共享同一份可变状态（已读文件、待办、MCP、
 /// 权限放行），因此同一轮里并行执行的工具可以各拿一份副本。
 #[derive(Clone)]
@@ -168,6 +174,8 @@ pub struct ToolCtx {
     pub active_root: std::sync::Arc<std::sync::RwLock<std::path::PathBuf>>,
     pub worktree_path: std::sync::Arc<std::sync::RwLock<Option<String>>>,
     pub app_config_dir: Option<std::path::PathBuf>,
+    pub worktree_root: String,
+    pub worktree_fetch_before_create: bool,
 }
 
 impl ToolCtx {
@@ -212,6 +220,8 @@ impl ToolCtx {
             active_root: std::sync::Arc::new(std::sync::RwLock::new(original_root)),
             worktree_path: std::sync::Arc::new(std::sync::RwLock::new(None)),
             app_config_dir: None,
+            worktree_root: String::new(),
+            worktree_fetch_before_create: false,
         }
     }
 
@@ -272,6 +282,31 @@ impl ToolCtx {
             .read()
             .map(|root| root.clone())
             .unwrap_or_else(|_| self.workspace.root.clone())
+    }
+
+    pub fn isolation_worktree_path(&self) -> Option<String> {
+        self.worktree_path
+            .read()
+            .ok()
+            .and_then(|slot| slot.clone())
+            .map(|path| path.trim().to_string())
+            .filter(|path| !path.is_empty())
+    }
+
+    /// 把活动目录切回本会话的隔离 worktree。`ExitWorktree` 只暂时回到主仓，不丢掉路径。
+    pub fn restore_isolation_worktree(&self) -> Option<IsolationRestore> {
+        let path = self.isolation_worktree_path()?;
+        let current = crate::git::worktree::normalize_path_for_compare(
+            &self.active_workspace_root().to_string_lossy(),
+        );
+        let next = crate::git::worktree::normalize_path_for_compare(&path);
+        let switched = current != next;
+        if switched {
+            if let Ok(mut root) = self.active_root.write() {
+                *root = std::path::PathBuf::from(&path);
+            }
+        }
+        Some(IsolationRestore { path, switched })
     }
 
     fn apply_active_root(&self, workspace: &mut LocalWorkspace) {
@@ -1954,35 +1989,50 @@ async fn call_enter_worktree(ctx: &ToolCtx, arguments: &str) -> Result<String, S
         .and_then(Value::as_str)
         .map(str::trim)
         .filter(|item| !item.is_empty());
+    let id = if ctx.session_record_id.is_empty() {
+        uuid::Uuid::new_v4().to_string()
+    } else {
+        ctx.session_record_id.clone()
+    };
     let path = if let Some(path) = requested {
         path.to_string()
     } else {
-        let id = if ctx.session_record_id.is_empty() {
-            uuid::Uuid::new_v4().to_string()
-        } else {
-            ctx.session_record_id.clone()
-        };
         match target {
-            crate::git::GitTarget::Local(_) => ctx
-                .app_config_dir
-                .as_ref()
-                .map(|dir| {
-                    crate::git::worktree::local_worktree_path(dir, &id)
-                        .to_string_lossy()
-                        .into_owned()
-                })
-                .unwrap_or_else(|| {
-                    ctx.original_root
-                        .join(".noxcode")
-                        .join("worktrees")
-                        .join(&id)
-                        .to_string_lossy()
-                        .into_owned()
-                }),
+            crate::git::GitTarget::Local(_) => {
+                if !ctx.worktree_root.trim().is_empty() {
+                    crate::git::worktree::local_worktree_path_in_root(
+                        std::path::Path::new(ctx.worktree_root.trim()),
+                        &id,
+                    )
+                    .to_string_lossy()
+                    .into_owned()
+                } else {
+                    ctx.app_config_dir
+                        .as_ref()
+                        .map(|dir| {
+                            crate::git::worktree::local_worktree_path(dir, &id)
+                                .to_string_lossy()
+                                .into_owned()
+                        })
+                        .unwrap_or_else(|| {
+                            ctx.original_root
+                                .join(".noxcode")
+                                .join("worktrees")
+                                .join(&id)
+                                .to_string_lossy()
+                                .into_owned()
+                        })
+                }
+            }
             crate::git::GitTarget::Ssh { .. } => crate::git::worktree::remote_worktree_path(&id),
         }
     };
-    crate::git::worktree::add_detached(target, &path).await?;
+    if ctx.worktree_fetch_before_create {
+        if let Err(error) = crate::git::worktree::fetch_all_prune(target).await {
+            eprintln!("[native] 创建工作树前获取上游失败，已继续创建: {error}");
+        }
+    }
+    crate::git::worktree::add_session_worktree(target, &path, &id).await?;
     let next = std::path::PathBuf::from(&path);
     if let Ok(mut root) = ctx.active_root.write() {
         *root = next;
@@ -1997,13 +2047,8 @@ async fn call_exit_worktree(ctx: &ToolCtx) -> Result<String, String> {
     if let Ok(mut root) = ctx.active_root.write() {
         *root = ctx.original_root.clone();
     }
-    let previous = ctx
-        .worktree_path
-        .write()
-        .ok()
-        .and_then(|mut slot| slot.take());
-    Ok(match previous {
-        Some(path) => format!("已回到主工作区。worktree 仍保留在 {path}"),
+    Ok(match ctx.isolation_worktree_path() {
+        Some(path) => format!("已回到主工作区。worktree 仍保留在 {path}，本回合结束后会切回"),
         None => "已回到主工作区。".to_string(),
     })
 }
@@ -3510,5 +3555,36 @@ mod tests {
         .await
         .expect("stop");
         assert!(stopped.contains(process_id), "{stopped}");
+    }
+
+    #[tokio::test]
+    async fn exit_worktree_keeps_isolation_path_so_restore_can_switch_back() {
+        let main = tempfile::tempdir().unwrap();
+        let worktree = main.path().join("worktrees").join("sess-1");
+        std::fs::create_dir_all(&worktree).unwrap();
+        let ctx = ctx_for(main.path());
+        if let Ok(mut root) = ctx.active_root.write() {
+            *root = worktree.clone();
+        }
+        if let Ok(mut stored) = ctx.worktree_path.write() {
+            *stored = Some(worktree.to_string_lossy().into_owned());
+        }
+
+        let text = execute_tool(&ctx, "ExitWorktree", "{}")
+            .await
+            .expect("exit");
+        assert!(text.contains("主工作区"), "{text}");
+        assert!(text.contains("会切回"), "{text}");
+        assert_eq!(ctx.active_workspace_root(), main.path());
+        assert_eq!(
+            ctx.isolation_worktree_path().as_deref(),
+            Some(worktree.to_string_lossy().as_ref())
+        );
+
+        let restored = ctx.restore_isolation_worktree().expect("restore");
+        assert!(restored.switched);
+        assert_eq!(restored.path, worktree.to_string_lossy());
+        assert_eq!(ctx.active_workspace_root(), worktree);
+        assert!(!ctx.restore_isolation_worktree().expect("again").switched);
     }
 }

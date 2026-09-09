@@ -21,6 +21,7 @@ export interface GitDiffTarget {
   path: string;
   scope: "auto" | "worktree" | "staged";
   oldPath?: string;
+  sessionId?: string | null;
 }
 
 export function GitDiffDialog({
@@ -52,7 +53,7 @@ function FilePreviewPanel({ target }: { target: GitDiffTarget }) {
   const [preview, setPreview] = useState<GitFilePreview | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [attempt, setAttempt] = useState(0);
-  const { workspaceId, path, scope, oldPath } = target;
+  const { workspaceId, path, scope, oldPath, sessionId } = target;
 
   useEffect(() => {
     let cancelled = false;
@@ -60,8 +61,8 @@ function FilePreviewPanel({ target }: { target: GitDiffTarget }) {
     setError(null);
     const request: Promise<GitFilePreview> =
       scope === "auto"
-        ? getGitFilePreview(workspaceId, path)
-        : getGitFileDiff(workspaceId, path, scope, oldPath).then((diff) => ({
+        ? getGitFilePreview(workspaceId, path, sessionId)
+        : getGitFileDiff(workspaceId, path, scope, oldPath, sessionId).then((diff) => ({
             kind: "diff",
             scope,
             diff,
@@ -77,7 +78,7 @@ function FilePreviewPanel({ target }: { target: GitDiffTarget }) {
     return () => {
       cancelled = true;
     };
-  }, [workspaceId, path, scope, oldPath, attempt]);
+  }, [workspaceId, path, scope, oldPath, sessionId, attempt]);
 
   const showDiff = preview?.kind === "diff" || (!preview && scope !== "auto");
   const resolvedScope = preview?.kind === "diff" ? preview.scope : scope;

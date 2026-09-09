@@ -28,6 +28,7 @@
   "durationHoursMinutes": "{{hours}} 小时 {{minutes}} 分",
   "durationHoursMinutesSeconds": "{{hours}} 小时 {{minutes}} 分 {{seconds}} 秒",
   "agentStarted": "内置 Agent 已启动",
+  "worktreeIsolated": "已隔离到独立工作树",
   "agentChannel": "渠道",
   "thinkingOn": "开启",
   "thinkingOff": "关闭",
@@ -328,5 +329,9 @@
   "backgroundProcessExited": "已退出",
   "backgroundProcessFailed": "失败",
   "backgroundProcessStopped": "已停止",
-  "backgroundProcessStopHint": "停止后台进程"
+  "backgroundProcessStopHint": "停止后台进程",
+  "isolateWorktree": "隔离工作树",
+  "isolateWorktreeHint": "本会话在独立工作树改代码，并检出 noxcode/wt-<会话> 分支；不选则用当前工作区",
+  "worktreeModeCurrent": "当前工作区",
+  "worktreeModeIsolate": "隔离工作树"
 }

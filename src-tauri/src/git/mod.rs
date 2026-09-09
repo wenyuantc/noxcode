@@ -5,6 +5,8 @@ mod checkpoint;
 mod commit;
 mod commit_message;
 mod diff;
+pub(crate) mod managed;
+mod merge;
 mod preview;
 mod repo;
 mod stage;
@@ -17,6 +19,7 @@ mod tests;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Manager, Runtime, State};
 use tokio::sync::Mutex;
 
@@ -49,6 +52,16 @@ pub(crate) use self::checkpoint::{
     GitCheckpointInfo, GitRestorePreview, GitRestoreResult,
 };
 pub(crate) use self::commit_message::collect_commit_message_context;
+pub(crate) use self::managed::{
+    list_managed_worktrees_for, prune_old_managed_worktrees, remove_managed_worktree_path,
+    ManagedWorktreeList,
+};
+pub(crate) use self::merge::{
+    apply_resolved_files, complete_merge_from_worktree, conflict_resolve_prompt,
+    list_unmerged_paths, merge_in_progress, read_worktree_text, run_abort_merge,
+    run_merge_session_worktree, sanitize_conflict_resolution, MergeWorktreeAction,
+    MergeWorktreeResult, MergeWorktreeStatus, ResolveWorktreeAction,
+};
 pub(crate) use self::repo::load_repo_info;
 pub(crate) use self::runner::{GitTarget, IndexMode};
 
@@ -65,6 +78,86 @@ async fn record_git_activity(
     {
         eprintln!("[git] 写入活动日志失败: {error}");
     }
+}
+
+pub(crate) async fn resolve_git_target_for_session<R: Runtime>(
+    app: &AppHandle<R>,
+    workspace_id: &str,
+    session_id: Option<&str>,
+) -> Result<GitTarget, String> {
+    if let Some(session_id) = session_id.map(str::trim).filter(|item| !item.is_empty()) {
+        let pool = sqlite_pool(app).await?;
+        let working_dir: Option<String> =
+            sqlx::query_scalar("SELECT working_dir FROM agent_sessions WHERE id = $1 LIMIT 1")
+                .bind(session_id)
+                .fetch_optional(&pool)
+                .await
+                .map_err(|error| format!("读取会话失败: {error}"))?
+                .flatten();
+        if let Some(working_dir) = working_dir
+            .as_deref()
+            .map(str::trim)
+            .filter(|item| !item.is_empty())
+        {
+            let configured_root = load_native_settings(app)
+                .ok()
+                .map(|settings| settings.worktree_root);
+            if self::worktree::is_managed_worktree_path_with_root(
+                working_dir,
+                session_id,
+                configured_root
+                    .as_deref()
+                    .and_then(self::managed::configured_root_opt),
+            ) {
+                return resolve_git_target_at(app, workspace_id, working_dir).await;
+            }
+        }
+    }
+    resolve_git_target(app, workspace_id).await
+}
+
+async fn resolve_preview_target<R: Runtime>(
+    app: &AppHandle<R>,
+    workspace_id: &str,
+    session_id: Option<&str>,
+    path: &str,
+) -> Result<(GitTarget, String), String> {
+    let configured_root = load_native_settings(app)
+        .ok()
+        .map(|settings| settings.worktree_root);
+    let configured_opt = configured_root
+        .as_deref()
+        .and_then(self::managed::configured_root_opt);
+    if let Some((root, relative)) =
+        self::worktree::split_managed_worktree_file_path_with_root(path, configured_opt)
+    {
+        let main = resolve_git_target(app, workspace_id).await?;
+        let listed = self::worktree::list_worktrees(&main)
+            .await
+            .unwrap_or_default();
+        let known = listed.iter().any(|item| {
+            let item_path = item
+                .path
+                .replace('\\', "/")
+                .trim_end_matches('/')
+                .to_string();
+            item_path == root
+        });
+        if known
+            || session_id
+                .map(|id| {
+                    self::worktree::is_managed_worktree_path_with_root(&root, id, configured_opt)
+                })
+                .unwrap_or(false)
+        {
+            let target = resolve_git_target_at(app, workspace_id, &root).await?;
+            return Ok((target, relative));
+        }
+    }
+    Ok((
+        resolve_git_target_for_session(app, workspace_id, session_id).await?,
+        path.to_string(),
+    ))
 }
 
 pub(crate) async fn resolve_git_target<R: Runtime>(
@@ -156,8 +249,9 @@ pub(crate) async fn get_git_status<R: Runtime>(
     app: AppHandle<R>,
     workspace_id: String,
     untracked_mode: Option<String>,
+    session_id: Option<String>,
 ) -> Result<GitStatus, String> {
-    let target = resolve_git_target(&app, &workspace_id).await?;
+    let target = resolve_git_target_for_session(&app, &workspace_id, session_id.as_deref()).await?;
     get_status(&target, untracked_mode.as_deref())
         .await
         .map_err(Into::into)
@@ -170,8 +264,10 @@ pub(crate) async fn get_git_file_diff<R: Runtime>(
     path: String,
     scope: GitFileDiffScope,
     old_path: Option<String>,
+    session_id: Option<String>,
 ) -> Result<GitFileDiff, String> {
-    let target = resolve_git_target(&app, &workspace_id).await?;
+    let (target, path) =
+        resolve_preview_target(&app, &workspace_id, session_id.as_deref(), &path).await?;
     get_file_diff(&target, &path, &scope, old_path.as_deref())
         .await
         .map_err(Into::into)
@@ -182,8 +278,10 @@ pub(crate) async fn get_git_file_preview<R: Runtime>(
     app: AppHandle<R>,
     workspace_id: String,
     path: String,
+    session_id: Option<String>,
 ) -> Result<GitFilePreview, String> {
-    let target = resolve_git_target(&app, &workspace_id).await?;
+    let (target, path) =
+        resolve_preview_target(&app, &workspace_id, session_id.as_deref(), &path).await?;
     get_file_preview(&target, &path).await.map_err(Into::into)
 }
 
@@ -192,8 +290,9 @@ pub(crate) async fn get_git_numstat<R: Runtime>(
     app: AppHandle<R>,
     workspace_id: String,
     scope: GitNumstatScope,
+    session_id: Option<String>,
 ) -> Result<Vec<GitNumstatEntry>, String> {
-    let target = resolve_git_target(&app, &workspace_id).await?;
+    let target = resolve_git_target_for_session(&app, &workspace_id, session_id.as_deref()).await?;
     get_numstat(&target, &scope).await.map_err(Into::into)
 }
 
@@ -202,8 +301,9 @@ pub(crate) async fn stage_git_paths<R: Runtime>(
     app: AppHandle<R>,
     workspace_id: String,
     paths: Vec<String>,
+    session_id: Option<String>,
 ) -> Result<(), String> {
-    let target = resolve_git_target(&app, &workspace_id).await?;
+    let target = resolve_git_target_for_session(&app, &workspace_id, session_id.as_deref()).await?;
     stage_paths(&target, &paths).await.map_err(Into::into)
 }
 
@@ -212,8 +312,9 @@ pub(crate) async fn unstage_git_paths<R: Runtime>(
     app: AppHandle<R>,
     workspace_id: String,
     paths: Vec<String>,
+    session_id: Option<String>,
 ) -> Result<(), String> {
-    let target = resolve_git_target(&app, &workspace_id).await?;
+    let target = resolve_git_target_for_session(&app, &workspace_id, session_id.as_deref()).await?;
     unstage_paths(&target, &paths).await.map_err(Into::into)
 }
 
@@ -222,8 +323,9 @@ pub(crate) async fn restore_git_paths<R: Runtime>(
     app: AppHandle<R>,
     workspace_id: String,
     paths: Vec<String>,
+    session_id: Option<String>,
 ) -> Result<(), String> {
-    let target = resolve_git_target(&app, &workspace_id).await?;
+    let target = resolve_git_target_for_session(&app, &workspace_id, session_id.as_deref()).await?;
     restore_paths(&target, &paths).await.map_err(Into::into)
 }
 
@@ -233,8 +335,9 @@ pub(crate) async fn commit_git_changes<R: Runtime>(
     workspace_id: String,
     message: String,
     paths: Option<Vec<String>>,
+    session_id: Option<String>,
 ) -> Result<GitCommitResult, String> {
-    let target = resolve_git_target(&app, &workspace_id).await?;
+    let target = resolve_git_target_for_session(&app, &workspace_id, session_id.as_deref()).await?;
     commit_changes(&target, &message, paths.as_deref())
         .await
         .map_err(Into::into)
@@ -275,8 +378,9 @@ pub(crate) async fn pull_git_branch<R: Runtime>(
 pub(crate) async fn list_git_branches<R: Runtime>(
     app: AppHandle<R>,
     workspace_id: String,
+    session_id: Option<String>,
 ) -> Result<Vec<GitBranch>, String> {
-    let target = resolve_git_target(&app, &workspace_id).await?;
+    let target = resolve_git_target_for_session(&app, &workspace_id, session_id.as_deref()).await?;
     list_branches(&target).await.map_err(Into::into)
 }
 
@@ -286,8 +390,9 @@ pub(crate) async fn create_git_branch<R: Runtime>(
     workspace_id: String,
     name: String,
     checkout: bool,
+    session_id: Option<String>,
 ) -> Result<GitBranch, String> {
-    let target = resolve_git_target(&app, &workspace_id).await?;
+    let target = resolve_git_target_for_session(&app, &workspace_id, session_id.as_deref()).await?;
     create_branch(&target, &name, checkout)
         .await
         .map_err(Into::into)
@@ -298,8 +403,9 @@ pub(crate) async fn checkout_git_branch<R: Runtime>(
     app: AppHandle<R>,
     workspace_id: String,
     name: String,
+    session_id: Option<String>,
 ) -> Result<GitBranch, String> {
-    let target = resolve_git_target(&app, &workspace_id).await?;
+    let target = resolve_git_target_for_session(&app, &workspace_id, session_id.as_deref()).await?;
     checkout_branch(&target, &name).await.map_err(Into::into)
 }
 
@@ -499,4 +605,136 @@ pub(crate) async fn clear_git_checkpoints<R: Runtime>(
     )
     .await;
     Ok(count)
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorktreeMergeState {
+    pub in_progress: bool,
+    pub conflicts: Vec<String>,
+}
+
+#[tauri::command]
+pub(crate) async fn merge_session_worktree<R: Runtime>(
+    app: AppHandle<R>,
+    state: State<'_, Arc<Mutex<NativeAgentManager>>>,
+    workspace_id: String,
+    session_id: String,
+    action: MergeWorktreeAction,
+    branch_name: Option<String>,
+    commit_message: Option<String>,
+) -> Result<MergeWorktreeResult, String> {
+    if action != MergeWorktreeAction::Keep
+        && state
+            .lock()
+            .await
+            .has_working_workspace_processes(&workspace_id)
+    {
+        return Err("该工作区有正在执行的会话，请等待本轮结束或停止后再合并".to_string());
+    }
+    let pool = sqlite_pool(&app).await?;
+    if action == MergeWorktreeAction::Keep {
+        record_git_activity(
+            &pool,
+            "git_worktree_merge",
+            &workspace_id,
+            Some(&session_id),
+            "已保留隔离工作树",
+            serde_json::json!({"action": "keep"}),
+        )
+        .await;
+        return Ok(MergeWorktreeResult {
+            status: MergeWorktreeStatus::Kept,
+            branch: None,
+            commit_oid: None,
+            conflicts: Vec::new(),
+            resolved: Vec::new(),
+            failed: Vec::new(),
+            message: "已保留隔离工作树，未改动主工作区".to_string(),
+        });
+    }
+    let working_dir: Option<String> =
+        sqlx::query_scalar("SELECT working_dir FROM agent_sessions WHERE id = $1 LIMIT 1")
+            .bind(&session_id)
+            .fetch_optional(&pool)
+            .await
+            .map_err(|error| format!("读取会话失败: {error}"))?
+            .flatten();
+    let working_dir = working_dir
+        .as_deref()
+        .map(str::trim)
+        .filter(|item| !item.is_empty())
+        .ok_or_else(|| "会话没有隔离工作树目录".to_string())?;
+    let main = resolve_git_target(&app, &workspace_id).await?;
+    let worktree = resolve_git_target_at(&app, &workspace_id, working_dir).await?;
+    let configured_root = load_native_settings(&app)
+        .ok()
+        .map(|settings| settings.worktree_root);
+    let result = run_merge_session_worktree(
+        &pool,
+        &main,
+        &worktree,
+        &workspace_id,
+        &session_id,
+        action,
+        branch_name.as_deref(),
+        commit_message.as_deref(),
+        configured_root
+            .as_deref()
+            .and_then(self::managed::configured_root_opt),
+    )
+    .await
+    .map_err(String::from)?;
+    record_git_activity(
+        &pool,
+        "git_worktree_merge",
+        &workspace_id,
+        Some(&session_id),
+        &result.message,
+        serde_json::json!({
+            "action": action,
+            "status": result.status,
+            "branch": result.branch,
+            "conflicts": result.conflicts,
+        }),
+    )
+    .await;
+    Ok(result)
+}
+
+#[tauri::command]
+pub(crate) async fn get_worktree_merge_state<R: Runtime>(
+    app: AppHandle<R>,
+    workspace_id: String,
+) -> Result<WorktreeMergeState, String> {
+    let target = resolve_git_target(&app, &workspace_id).await?;
+    if !merge_in_progress(&target).await.map_err(String::from)? {
+        return Ok(WorktreeMergeState {
+            in_progress: false,
+            conflicts: Vec::new(),
+        });
+    }
+    Ok(WorktreeMergeState {
+        in_progress: true,
+        conflicts: list_unmerged_paths(&target).await.map_err(String::from)?,
+    })
+}
+
+#[tauri::command]
+pub(crate) async fn list_managed_worktrees<R: Runtime>(
+    app: AppHandle<R>,
+    state: State<'_, Arc<Mutex<NativeAgentManager>>>,
+) -> Result<ManagedWorktreeList, String> {
+    let pool = sqlite_pool(&app).await?;
+    list_managed_worktrees_for(&app, &pool, &state).await
+}
+
+#[tauri::command]
+pub(crate) async fn remove_managed_worktree<R: Runtime>(
+    app: AppHandle<R>,
+    state: State<'_, Arc<Mutex<NativeAgentManager>>>,
+    path: String,
+) -> Result<ManagedWorktreeList, String> {
+    let pool = sqlite_pool(&app).await?;
+    remove_managed_worktree_path(&app, &pool, &state, &path).await?;
+    list_managed_worktrees_for(&app, &pool, &state).await
 }

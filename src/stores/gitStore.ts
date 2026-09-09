@@ -10,12 +10,16 @@ export type GitPullState =
 
 interface GitState {
   pulls: Record<string, GitPullState | undefined>;
+  revision: number;
+  bumpRevision: () => void;
   pull: (workspaceId: string) => Promise<void>;
 }
 
 // Pulls outlive the sidebar so reopening it cannot start a duplicate operation.
 export const useGitStore = create<GitState>((set, get) => ({
   pulls: {},
+  revision: 0,
+  bumpRevision: () => set((state) => ({ revision: state.revision + 1 })),
   pull: async (workspaceId) => {
     if (get().pulls[workspaceId]?.status === "pulling") return;
     const update = (value: GitPullState) =>

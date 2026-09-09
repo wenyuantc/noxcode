@@ -28,6 +28,7 @@
   "durationHoursMinutes": "{{hours}}h {{minutes}}m",
   "durationHoursMinutesSeconds": "{{hours}}h {{minutes}}m {{seconds}}s",
   "agentStarted": "Built-in agent started",
+  "worktreeIsolated": "Isolated to a worktree",
   "agentChannel": "Channel",
   "thinkingOn": "On",
   "thinkingOff": "Off",
@@ -328,5 +329,9 @@
   "backgroundProcessExited": "Exited",
   "backgroundProcessFailed": "Failed",
   "backgroundProcessStopped": "Stopped",
-  "backgroundProcessStopHint": "Stop background process"
+  "backgroundProcessStopHint": "Stop background process",
+  "isolateWorktree": "Isolate worktree",
+  "isolateWorktreeHint": "Edit this session in an isolated git worktree on noxcode/wt-<session>. Leave off to use the current workspace.",
+  "worktreeModeCurrent": "Current workspace",
+  "worktreeModeIsolate": "Isolate worktree"
 }

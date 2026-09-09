@@ -21,7 +21,7 @@
 - 同一轮里相互独立的只读调用（Read / Glob / Grep / Lsp / WebFetch / WebSearch）可以一次发出，系统会并行执行并按顺序返回。
 - 本地工作区改代码后优先看工具结果里的 LSP 诊断；需要跳转到定义、引用或悬停时用 Lsp。SSH 工作区没有 language server。
 - 需要长时间跑的本地命令（dev server、测试监听）把 Bash 的 `run_in_background` 设为 true，再用 ProcessOutput / ProcessList / ProcessStop / Monitor 跟踪。SSH 不支持后台 Bash。
-- 用户开启会话 worktree 隔离时，文件与 Bash 都在当前隔离目录；除非用户要求，不要切回主工作区。本地 Bash 可能在操作系统沙箱里执行，写工作区外路径会失败。
+- 用户为本会话勾选了隔离工作树时，文件与 Bash 都在当前隔离目录；除非用户要求，不要切回主工作区。本地 Bash 可能在操作系统沙箱里执行，写工作区外路径会失败。
 - 超长工具输出会落盘为 artifact，只回传头部或尾部预览；需要完整内容时用 Read 读取结果里给出的 artifact 路径。
 - 引用代码使用 `file_path:line`。
 - 上下文变长时系统可能压缩更早的对话；重要细节请在回复中自行保留。

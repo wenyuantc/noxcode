@@ -317,6 +317,7 @@ const SYSTEM_PREFIXES = [
   "[计划]",
   "[PERMISSION]",
   "[MCP]",
+  "[WORKTREE]",
   "[续聊]",
   "[重试]",
   "[用量]",
@@ -864,6 +865,23 @@ export function parseAgentBanner(text: string): ParsedAgentBanner | null {
 
 export function stripAgentPrefix(text: string): string {
   return text.replace(/^\[内置 Agent\]\s*/, "");
+}
+
+export type ParsedWorktreeStatus =
+  { kind: "isolated"; path: string } | { kind: "notice"; detail: string };
+
+const WORKTREE_ISOLATED_RE = /^会话工作目录已隔离到\s+(.+)$/;
+
+export function parseWorktreeStatus(text: string): ParsedWorktreeStatus | null {
+  const line = sessionLineBody(text).trim();
+  if (!line.startsWith("[WORKTREE]")) return null;
+  const detail = line.slice("[WORKTREE]".length).trim();
+  if (!detail) return null;
+  const isolated = detail.match(WORKTREE_ISOLATED_RE);
+  if (isolated) {
+    return { kind: "isolated", path: (isolated[1] ?? "").trim() };
+  }
+  return { kind: "notice", detail };
 }
 
 export type ParsedMcpStatus =
@@ -1444,6 +1462,7 @@ export function isLeadingStatusItem(item: GroupedSessionItem): boolean {
       isSessionStartLine(item.text) ||
       body.startsWith("[PERMISSION]") ||
       body.startsWith("[MCP]") ||
+      body.startsWith("[WORKTREE]") ||
       body.startsWith("[内置 Agent]")
     );
   }

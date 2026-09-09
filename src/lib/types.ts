@@ -234,6 +234,35 @@ export interface GitRestorePreview {
   wont_be_touched: string[];
 }
 
+export type MergeWorktreeAction = "merge_current" | "create_branch" | "keep";
+export type ResolveWorktreeAction = "ai" | "abort" | "complete";
+export type MergeWorktreeStatus =
+  "merged" | "branched" | "kept" | "conflicted" | "aborted" | "resolved" | "partial";
+
+export interface MergeWorktreeResult {
+  status: MergeWorktreeStatus;
+  branch?: string | null;
+  commit_oid?: string | null;
+  conflicts: string[];
+  resolved: string[];
+  failed: string[];
+  message: string;
+}
+
+export interface WorktreeMergeState {
+  in_progress: boolean;
+  conflicts: string[];
+}
+
+export interface WorktreeMergePrompt {
+  sessionId: string;
+  workspaceId: string;
+  phase: "choose" | "conflict";
+  conflicts: string[];
+  branch?: string | null;
+  message?: string | null;
+}
+
 export interface GitRestoreResult {
   pre_restore_checkpoint: GitCheckpoint;
   restored: string[];
@@ -702,6 +731,7 @@ export interface AgentSessionExit {
   session_kind: string;
   session_record_id: string;
   code: number;
+  worktree_path?: string | null;
 }
 
 export interface NativeTextDelta {
@@ -1010,13 +1040,16 @@ export interface NativeSettings {
   rg_sidecar_enabled: boolean;
   lsp_enabled: boolean;
   bash_sandbox_enabled: boolean;
-  isolate_session_worktree: boolean;
   auto_compact_threshold_percent: number;
   microcompact_enabled: boolean;
   memory_enabled: boolean;
   memory_dream_interval: number;
   hooks: NativeHook[];
   global_prompt_template: string;
+  worktree_root: string;
+  worktree_fetch_before_create: boolean;
+  worktree_auto_prune: boolean;
+  worktree_auto_prune_limit: number;
 }
 
 export interface UpdateNativeSettingsInput {
@@ -1044,13 +1077,35 @@ export interface UpdateNativeSettingsInput {
   rg_sidecar_enabled?: boolean;
   lsp_enabled?: boolean;
   bash_sandbox_enabled?: boolean;
-  isolate_session_worktree?: boolean;
   auto_compact_threshold_percent?: number;
   microcompact_enabled?: boolean;
   memory_enabled?: boolean;
   memory_dream_interval?: number;
   hooks?: NativeHook[];
   global_prompt_template?: string;
+  worktree_root?: string;
+  worktree_fetch_before_create?: boolean;
+  worktree_auto_prune?: boolean;
+  worktree_auto_prune_limit?: number;
+}
+
+export interface ManagedWorktreeItem {
+  session_id: string;
+  title: string;
+  workspace_id: string | null;
+  workspace_name: string | null;
+  status: string;
+  path: string;
+  exists: boolean;
+  remote: boolean;
+  in_use: boolean;
+  created_at: string;
+}
+
+export interface ManagedWorktreeList {
+  root: string;
+  default_root: string;
+  items: ManagedWorktreeItem[];
 }
 
 export type NativeSkillSource =
