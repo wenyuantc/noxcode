@@ -9,9 +9,7 @@ use super::runner::{
     assert_safe_rel_path, git, git_with, with_repo_lock, GitError, GitRunOptions, GitTarget,
     IndexMode,
 };
-use super::worktree::{
-    default_worktree_branch_name, is_managed_worktree_path_with_root, list_worktrees,
-};
+use super::worktree::{is_managed_worktree_path_with_root, list_worktrees};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
