@@ -18,7 +18,7 @@ import {
   onNativeRequestResolved,
   onNativeInputQueue,
 } from "@/lib/backend";
-import { maybeOpenWorktreeMerge } from "@/lib/worktreeMergePrompt";
+import { maybeFinishAiMergeResolve, maybeOpenWorktreeMerge } from "@/lib/worktreeMergePrompt";
 import { useChannelStore } from "@/stores/channelStore";
 import { useSessionStore } from "@/stores/sessionStore";
 import { useUiStore } from "@/stores/uiStore";
@@ -87,11 +87,17 @@ export function useNativeEvents() {
             .sessions.find((item) => item.id === payload.session_record_id);
           const runtime =
             useSessionStore.getState().configurationBySession[payload.session_record_id];
-          void maybeOpenWorktreeMerge({
+          void maybeFinishAiMergeResolve({
             sessionId: payload.session_record_id,
             workspaceId: session?.workspace_id,
-            worktreePath: runtime?.worktree_path ?? session?.working_dir,
-            reason: "turn",
+          }).then((finished) => {
+            if (finished) return;
+            void maybeOpenWorktreeMerge({
+              sessionId: payload.session_record_id,
+              workspaceId: session?.workspace_id,
+              worktreePath: runtime?.worktree_path ?? session?.working_dir,
+              reason: "turn",
+            });
           });
         }
       }),
@@ -107,11 +113,17 @@ export function useNativeEvents() {
       onNativeExit((exit) => {
         useSessionStore.getState().onExit(exit);
         void useWorkspaceStore.getState().refreshSessions();
-        void maybeOpenWorktreeMerge({
+        void maybeFinishAiMergeResolve({
           sessionId: exit.session_record_id,
           workspaceId: exit.workspace_id,
-          worktreePath: exit.worktree_path,
-          reason: "exit",
+        }).then((finished) => {
+          if (finished) return;
+          void maybeOpenWorktreeMerge({
+            sessionId: exit.session_record_id,
+            workspaceId: exit.workspace_id,
+            worktreePath: exit.worktree_path,
+            reason: "exit",
+          });
         });
       }),
     );

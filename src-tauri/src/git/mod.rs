@@ -57,9 +57,10 @@ pub(crate) use self::managed::{
     ManagedWorktreeList,
 };
 pub(crate) use self::merge::{
-    apply_resolved_files, conflict_resolve_prompt, list_unmerged_paths, merge_in_progress,
-    read_worktree_text, run_abort_merge, run_merge_session_worktree, sanitize_conflict_resolution,
-    MergeWorktreeAction, MergeWorktreeResult, MergeWorktreeStatus, ResolveWorktreeAction,
+    apply_resolved_files, complete_merge_from_worktree, conflict_resolve_prompt,
+    list_unmerged_paths, merge_in_progress, read_worktree_text, run_abort_merge,
+    run_merge_session_worktree, sanitize_conflict_resolution, MergeWorktreeAction,
+    MergeWorktreeResult, MergeWorktreeStatus, ResolveWorktreeAction,
 };
 pub(crate) use self::repo::load_repo_info;
 pub(crate) use self::runner::{GitTarget, IndexMode};

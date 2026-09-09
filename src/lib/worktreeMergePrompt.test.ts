@@ -2,23 +2,32 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("@/lib/backend", () => ({
   getWorktreeMergeState: vi.fn(async () => ({ in_progress: false, conflicts: [] })),
+  resolveSessionWorktreeMerge: vi.fn(),
 }));
 
-import { getWorktreeMergeState } from "@/lib/backend";
+import { getWorktreeMergeState, resolveSessionWorktreeMerge } from "@/lib/backend";
 import { useSessionStore } from "@/stores/sessionStore";
 import { useWorkspaceStore } from "@/stores/workspaceStore";
-import { maybeOpenWorktreeMerge, mergeWorktreeDialogKey } from "./worktreeMergePrompt";
+import {
+  maybeFinishAiMergeResolve,
+  maybeOpenWorktreeMerge,
+  mergeConflictResolvePrompt,
+  mergeWorktreeDialogKey,
+} from "./worktreeMergePrompt";
 
 const getState = vi.mocked(getWorktreeMergeState);
+const completeMerge = vi.mocked(resolveSessionWorktreeMerge);
 
 describe("maybeOpenWorktreeMerge", () => {
   beforeEach(() => {
     getState.mockReset();
     getState.mockResolvedValue({ in_progress: false, conflicts: [] });
+    completeMerge.mockReset();
     useSessionStore.setState({
       worktreeMergePrompt: null,
       mergedWorktreeBySession: {},
       autoPromptedWorktreeBySession: {},
+      pendingAiMergeResolveBySession: {},
       configurationBySession: {
         s1: {
           ai_channel_id: "c",
@@ -72,6 +81,56 @@ describe("maybeOpenWorktreeMerge", () => {
     expect(mergeWorktreeDialogKey({ sessionId: "s1" })).not.toBe(
       mergeWorktreeDialogKey({ sessionId: "s2" }),
     );
+  });
+
+  it("builds a visible session prompt for conflict files", () => {
+    const text = mergeConflictResolvePrompt(["README.md", "src/main.rs"]);
+    expect(text).toContain("- README.md");
+    expect(text).toContain("- src/main.rs");
+    expect(text).toContain("ExitWorktree");
+    expect(text).toContain("Write");
+  });
+
+  it("does not finish an AI merge when none is pending", async () => {
+    await expect(maybeFinishAiMergeResolve({ sessionId: "s1", workspaceId: "ws-1" })).resolves.toBe(
+      false,
+    );
+    expect(completeMerge).not.toHaveBeenCalled();
+  });
+
+  it("completes a pending AI merge after the session turn", async () => {
+    completeMerge.mockResolvedValue({
+      status: "resolved",
+      conflicts: [],
+      resolved: ["README.md"],
+      failed: [],
+      message: "done",
+    });
+    useSessionStore.getState().markPendingAiMergeResolve("s1");
+    await expect(maybeFinishAiMergeResolve({ sessionId: "s1", workspaceId: "ws-1" })).resolves.toBe(
+      true,
+    );
+    expect(completeMerge).toHaveBeenCalledWith("ws-1", "s1", "complete");
+    expect(useSessionStore.getState().mergedWorktreeBySession.s1).toBe(true);
+    expect(useSessionStore.getState().pendingAiMergeResolveBySession.s1).toBeUndefined();
+  });
+
+  it("reopens the conflict dialog when the session did not clear markers", async () => {
+    completeMerge.mockResolvedValue({
+      status: "partial",
+      conflicts: ["README.md"],
+      resolved: [],
+      failed: ["README.md: 模型输出仍含冲突标记"],
+      message: "still",
+    });
+    useSessionStore.getState().markPendingAiMergeResolve("s1");
+    await maybeFinishAiMergeResolve({ sessionId: "s1", workspaceId: "ws-1" });
+    expect(useSessionStore.getState().worktreeMergePrompt).toMatchObject({
+      sessionId: "s1",
+      workspaceId: "ws-1",
+      phase: "conflict",
+      conflicts: ["README.md"],
+    });
   });
 
   it("still opens on process exit after a dismissed turn prompt", async () => {

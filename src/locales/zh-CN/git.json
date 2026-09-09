@@ -79,7 +79,7 @@
   "mergeWorktreeBranchNameHint": "仅用于「建成新分支」。默认名是当前隔离分支时会提交并清空工作区；新分支会在隔离树里检出。主工作区分支不变。",
   "mergeWorktreeCommitHint": "合并或建分支前，会用这条说明提交隔离树上的改动。",
   "mergeWorktreeConflictsTitle": "合并存在冲突",
-  "mergeWorktreeConflictsHint": "主工作区停在合并中间态。可让 AI 自动解决，或打开 Git 面板手动处理。",
+  "mergeWorktreeConflictsHint": "主工作区停在合并中间态。AI 自动解决会发到当前会话里处理，也可以打开 Git 面板手动处理。",
   "mergeWorktreeAi": "AI 自动解决",
   "mergeWorktreeManual": "手动解决",
   "mergeWorktreeAbort": "中止合并",

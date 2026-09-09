@@ -24,6 +24,7 @@ pub enum MergeWorktreeAction {
 pub enum ResolveWorktreeAction {
     Ai,
     Abort,
+    Complete,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -415,6 +416,36 @@ pub async fn apply_resolved_files(
         failed: Vec::new(),
         message: "已用自动解决完成合并".to_string(),
     })
+}
+
+pub async fn complete_merge_from_worktree(
+    target: &GitTarget,
+) -> Result<MergeWorktreeResult, GitError> {
+    if !merge_in_progress(target).await? {
+        return Err(GitError::Parse("当前没有进行中的合并".to_string()));
+    }
+    let conflicts = list_unmerged_paths(target).await?;
+    if conflicts.is_empty() {
+        let oid = commit_merge(target).await?;
+        return Ok(MergeWorktreeResult {
+            status: MergeWorktreeStatus::Resolved,
+            branch: None,
+            commit_oid: Some(oid),
+            conflicts: Vec::new(),
+            resolved: Vec::new(),
+            failed: Vec::new(),
+            message: "已用自动解决完成合并".to_string(),
+        });
+    }
+    let mut resolutions = Vec::new();
+    for path in conflicts {
+        let outcome = match read_worktree_text(target, &path).await {
+            Ok(content) => sanitize_conflict_resolution(&content),
+            Err(error) => Err(error.to_string()),
+        };
+        resolutions.push((path, outcome));
+    }
+    apply_resolved_files(target, &resolutions).await
 }
 
 async fn require_managed_worktree(
