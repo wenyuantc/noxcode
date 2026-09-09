@@ -1,13 +1,26 @@
+use std::sync::Arc;
+
 use serde::Serialize;
 use sqlx::SqlitePool;
-use tauri::{AppHandle, Emitter};
+use tauri::{AppHandle, Emitter, State};
+use tokio::sync::Mutex;
 
+use crate::app::activity_logs::insert_activity_log;
 use crate::app::ai_settings::{load_ai_settings, AiFeatureOverride, CommitMessageStyle};
 use crate::app::sessions::rename_agent_session_with;
 use crate::app::shared::{normalize_optional_text, sqlite_pool};
-use crate::git::{collect_commit_message_context, resolve_git_target};
+use crate::db::models::AgentSessionRecord;
+use crate::git::{
+    apply_resolved_files, collect_commit_message_context, complete_merge_from_worktree,
+    conflict_resolve_prompt, list_unmerged_paths, merge_in_progress, read_worktree_text,
+    resolve_git_target, resolve_git_target_for_session, run_abort_merge,
+    sanitize_conflict_resolution, MergeWorktreeResult, ResolveWorktreeAction,
+};
 use crate::native::channels::fetch_channel_record;
-use crate::native::model::call_log::{OPERATION_COMMIT_MESSAGE, OPERATION_SESSION_TITLE};
+use crate::native::manager::NativeAgentManager;
+use crate::native::model::call_log::{
+    OPERATION_COMMIT_MESSAGE, OPERATION_MERGE_RESOLVE, OPERATION_SESSION_TITLE,
+};
 use crate::native::protocol::record_to_channel;
 use crate::native::session::{
     run_native_one_shot, session_title, NativeOneShotArgs, NativeOneShotResult,
@@ -158,12 +171,13 @@ async fn run_feature_one_shot(
 pub async fn generate_git_commit_message(
     app: AppHandle,
     workspace_id: String,
+    session_id: Option<String>,
 ) -> Result<String, String> {
     let settings = load_ai_settings(&app)?;
     if !settings.commit_message.enabled {
         return Err("未开启 Git 提交信息自动生成".to_string());
     }
-    let target = resolve_git_target(&app, &workspace_id).await?;
+    let target = resolve_git_target_for_session(&app, &workspace_id, session_id.as_deref()).await?;
     let context = collect_commit_message_context(&target).await?;
     let pool = sqlite_pool(&app).await?;
     let result = run_feature_one_shot(
@@ -177,6 +191,131 @@ pub async fn generate_git_commit_message(
     )
     .await?;
     sanitize_generated_commit_message(&result.text, settings.commit_message.style)
+}
+
+async fn resolve_merge_ai_target(
+    pool: &SqlitePool,
+    session: &AgentSessionRecord,
+) -> Result<(String, String, Option<String>), String> {
+    if let Some(channel_id) = session
+        .ai_channel_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|item| !item.is_empty())
+    {
+        let record = fetch_channel_record(pool, channel_id).await?;
+        let channel = record_to_channel(record)?;
+        let model = session
+            .model
+            .as_deref()
+            .map(str::trim)
+            .filter(|item| !item.is_empty())
+            .map(ToOwned::to_owned)
+            .or_else(|| channel.models.first().map(|item| item.id.clone()))
+            .ok_or_else(|| format!("渠道「{}」未配置模型", channel.name))?;
+        return Ok((channel.id, model, None));
+    }
+    resolve_ai_feature_target(
+        pool,
+        &AiFeatureOverride {
+            enabled: true,
+            channel_id: None,
+            model: None,
+            reasoning_effort: None,
+        },
+    )
+    .await
+}
+
+#[tauri::command]
+pub async fn resolve_session_worktree_merge(
+    app: AppHandle,
+    state: State<'_, Arc<Mutex<NativeAgentManager>>>,
+    workspace_id: String,
+    session_id: String,
+    action: ResolveWorktreeAction,
+) -> Result<MergeWorktreeResult, String> {
+    if state
+        .lock()
+        .await
+        .has_working_workspace_processes(&workspace_id)
+    {
+        return Err("该工作区有正在执行的会话，请等待本轮结束或停止后再处理合并".to_string());
+    }
+    let target = resolve_git_target(&app, &workspace_id).await?;
+    let pool = sqlite_pool(&app).await?;
+    let result = match action {
+        ResolveWorktreeAction::Abort => run_abort_merge(&target).await.map_err(String::from)?,
+        ResolveWorktreeAction::Complete => complete_merge_from_worktree(&target)
+            .await
+            .map_err(String::from)?,
+        ResolveWorktreeAction::Ai => {
+            if !merge_in_progress(&target).await.map_err(String::from)? {
+                return Err("当前没有进行中的合并".to_string());
+            }
+            let conflicts = list_unmerged_paths(&target).await.map_err(String::from)?;
+            if conflicts.is_empty() {
+                return Err("没有未合并的冲突文件".to_string());
+            }
+            let session = sqlx::query_as::<_, AgentSessionRecord>(
+                "SELECT * FROM agent_sessions WHERE id = $1 LIMIT 1",
+            )
+            .bind(&session_id)
+            .fetch_optional(&pool)
+            .await
+            .map_err(|error| format!("读取会话失败: {error}"))?
+            .ok_or_else(|| format!("会话不存在: {session_id}"))?;
+            let (channel_id, model, reasoning_effort) =
+                resolve_merge_ai_target(&pool, &session).await?;
+            let mut resolutions = Vec::new();
+            for path in conflicts {
+                let content = match read_worktree_text(&target, &path).await {
+                    Ok(text) => text,
+                    Err(error) => {
+                        resolutions.push((path, Err(error.to_string())));
+                        continue;
+                    }
+                };
+                let one_shot = run_native_one_shot(
+                    &app,
+                    NativeOneShotArgs {
+                        channel_id: &channel_id,
+                        workspace_id: Some(&workspace_id),
+                        session_id: Some(&session_id),
+                        prompt: conflict_resolve_prompt(&path, &content),
+                        image_paths: None,
+                        model: Some(&model),
+                        reasoning_effort: reasoning_effort.as_deref(),
+                        operation: Some(OPERATION_MERGE_RESOLVE),
+                    },
+                )
+                .await;
+                let resolved = match one_shot {
+                    Ok(result) => sanitize_conflict_resolution(&result.text),
+                    Err(error) => Err(error),
+                };
+                resolutions.push((path, resolved));
+            }
+            apply_resolved_files(&target, &resolutions)
+                .await
+                .map_err(String::from)?
+        }
+    };
+    let _ = insert_activity_log(
+        &pool,
+        "git_worktree_merge_resolve",
+        Some(&workspace_id),
+        Some(&session_id),
+        &result.message,
+        serde_json::json!({
+            "action": action,
+            "status": result.status,
+            "conflicts": result.conflicts,
+            "failed": result.failed,
+        }),
+    )
+    .await;
+    Ok(result)
 }
 
 pub(crate) fn spawn_session_title_generation(

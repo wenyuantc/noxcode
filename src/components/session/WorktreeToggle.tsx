@@ -1,4 +1,4 @@
-import { GitFork, X } from "lucide-react";
+import { FolderGit2, GitFork } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
 import { cn } from "@/lib/utils";
@@ -15,40 +15,39 @@ export function WorktreeToggle() {
 
   return (
     <div
-      className={cn(
-        "group/wt inline-flex h-7 items-center rounded-lg border border-border/70 px-2 text-xs font-medium shadow-2xs transition-all duration-150",
-        enabled
-          ? "border-accent/60 bg-accent/60 text-accent-foreground"
-          : "bg-background/80 text-foreground/90 hover:bg-muted/40",
-      )}
+      className="inline-flex h-8 items-stretch overflow-hidden rounded-lg border-2 border-border bg-background/90 text-xs font-medium shadow-2xs"
+      title={t("isolateWorktreeHint")}
+      role="group"
+      aria-label={t("isolateWorktreeHint")}
     >
       <button
         type="button"
         className={cn(
-          "flex cursor-pointer items-center gap-1.5 outline-none",
-          enabled && "text-accent-foreground",
+          "inline-flex cursor-pointer items-center gap-1.5 px-2.5 outline-none transition-colors",
+          !enabled
+            ? "bg-accent font-semibold text-accent-foreground"
+            : "text-foreground/80 hover:bg-muted/60",
         )}
-        title={t("isolateWorktreeHint")}
-        aria-pressed={enabled}
-        onClick={() => setEnabled(!enabled)}
+        aria-pressed={!enabled}
+        onClick={() => setEnabled(false)}
       >
-        <GitFork className="size-3.5 shrink-0 text-muted-foreground" />
-        <span className="max-w-32 truncate">{t("isolateWorktree")}</span>
+        <FolderGit2 className="size-3.5 shrink-0" />
+        <span className="whitespace-nowrap">{t("worktreeModeCurrent")}</span>
       </button>
-      {enabled ? (
-        <button
-          type="button"
-          className="ml-1.5 -mr-0.5 cursor-pointer rounded p-0.5 text-muted-foreground/70 transition-colors hover:bg-muted hover:text-foreground"
-          title={t("isolateWorktreeClear")}
-          aria-label={t("isolateWorktreeClear")}
-          onClick={(event) => {
-            event.stopPropagation();
-            setEnabled(false);
-          }}
-        >
-          <X className="size-3" />
-        </button>
-      ) : null}
+      <button
+        type="button"
+        className={cn(
+          "inline-flex cursor-pointer items-center gap-1.5 border-l-2 border-border px-2.5 outline-none transition-colors",
+          enabled
+            ? "bg-accent font-semibold text-accent-foreground"
+            : "text-foreground/80 hover:bg-muted/60",
+        )}
+        aria-pressed={enabled}
+        onClick={() => setEnabled(true)}
+      >
+        <GitFork className="size-3.5 shrink-0" />
+        <span className="whitespace-nowrap">{t("worktreeModeIsolate")}</span>
+      </button>
     </div>
   );
 }

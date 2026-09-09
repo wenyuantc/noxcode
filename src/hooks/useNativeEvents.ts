@@ -18,6 +18,7 @@ import {
   onNativeRequestResolved,
   onNativeInputQueue,
 } from "@/lib/backend";
+import { maybeFinishAiMergeResolve, maybeOpenWorktreeMerge } from "@/lib/worktreeMergePrompt";
 import { useChannelStore } from "@/stores/channelStore";
 import { useSessionStore } from "@/stores/sessionStore";
 import { useUiStore } from "@/stores/uiStore";
@@ -77,9 +78,29 @@ export function useNativeEvents() {
     track(onNativeTextDelta((delta) => useSessionStore.getState().onDelta(delta)));
     track(onNativeContextUsage((usage) => useSessionStore.getState().onUsage(usage)));
     track(
-      onNativeTurnState((payload) =>
-        useSessionStore.getState().onTurnState(payload.session_record_id, payload.state),
-      ),
+      onNativeTurnState((payload) => {
+        const previous = useSessionStore.getState().turnState[payload.session_record_id];
+        useSessionStore.getState().onTurnState(payload.session_record_id, payload.state);
+        if (payload.state === "waiting_input" && previous === "working") {
+          const session = useWorkspaceStore
+            .getState()
+            .sessions.find((item) => item.id === payload.session_record_id);
+          const runtime =
+            useSessionStore.getState().configurationBySession[payload.session_record_id];
+          void maybeFinishAiMergeResolve({
+            sessionId: payload.session_record_id,
+            workspaceId: session?.workspace_id,
+          }).then((finished) => {
+            if (finished) return;
+            void maybeOpenWorktreeMerge({
+              sessionId: payload.session_record_id,
+              workspaceId: session?.workspace_id,
+              worktreePath: runtime?.worktree_path ?? session?.working_dir,
+              reason: "turn",
+            });
+          });
+        }
+      }),
     );
     track(
       onNativePlanMode((payload) =>
@@ -92,6 +113,18 @@ export function useNativeEvents() {
       onNativeExit((exit) => {
         useSessionStore.getState().onExit(exit);
         void useWorkspaceStore.getState().refreshSessions();
+        void maybeFinishAiMergeResolve({
+          sessionId: exit.session_record_id,
+          workspaceId: exit.workspace_id,
+        }).then((finished) => {
+          if (finished) return;
+          void maybeOpenWorktreeMerge({
+            sessionId: exit.session_record_id,
+            workspaceId: exit.workspace_id,
+            worktreePath: exit.worktree_path,
+            reason: "exit",
+          });
+        });
       }),
     );
     track(
