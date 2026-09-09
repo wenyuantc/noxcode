@@ -64,7 +64,7 @@ export function SessionHeader() {
   const showMerge = Boolean(session && workspaceId && (isolated || conflicted));
 
   return (
-    <div className="flex h-11 items-center justify-between gap-2 border-b border-border/60 bg-background/60 px-4 py-1.5 backdrop-blur-xs">
+    <div className="relative z-40 flex h-11 items-center justify-between gap-2 border-b border-border/60 bg-background/80 px-4 py-1.5 backdrop-blur-xs">
       <div className="flex items-center gap-1.5">
         <Button
           size="icon-sm"
