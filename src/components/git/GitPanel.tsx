@@ -73,8 +73,10 @@ function GitWorkspacePanel({ workspaceId }: { workspaceId: string | null }) {
   const runtime = useSessionStore((state) =>
     sessionId ? state.configurationBySession[sessionId] : undefined,
   );
+  const worktreeRoot = useSettingsStore((state) => state.native?.worktree_root);
   const isolated = Boolean(
-    session && isManagedWorktreePath(runtime?.worktree_path ?? session.working_dir, session.id),
+    session &&
+    isManagedWorktreePath(runtime?.worktree_path ?? session.working_dir, session.id, worktreeRoot),
   );
   const gitFocusPath = useUiStore((state) => state.gitFocusPath);
   const [status, setStatus] = useState<GitStatus | null>(null);
@@ -92,6 +94,7 @@ function GitWorkspacePanel({ workspaceId }: { workspaceId: string | null }) {
   const reloadId = useRef(0);
   const [refreshError, setRefreshError] = useState<string | null>(null);
   const pullState = useGitStore((state) => (workspaceId ? state.pulls[workspaceId] : undefined));
+  const revision = useGitStore((state) => state.revision);
   const pulling = pullState?.status === "pulling";
   const busy = localBusy || pulling;
   const setBusy = (value: boolean) => {
@@ -149,7 +152,7 @@ function GitWorkspacePanel({ workspaceId }: { workspaceId: string | null }) {
 
   useEffect(() => {
     if (pullState?.status !== "pulling") void reload();
-  }, [reload, pullState]);
+  }, [reload, pullState, revision]);
 
   useEffect(() => {
     if (!workspaceId || !gitFocusPath) return;

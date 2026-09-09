@@ -5,6 +5,7 @@ mod checkpoint;
 mod commit;
 mod commit_message;
 mod diff;
+pub(crate) mod managed;
 mod merge;
 mod preview;
 mod repo;
@@ -51,10 +52,15 @@ pub(crate) use self::checkpoint::{
     GitCheckpointInfo, GitRestorePreview, GitRestoreResult,
 };
 pub(crate) use self::commit_message::collect_commit_message_context;
+pub(crate) use self::managed::{
+    list_managed_worktrees_for, prune_old_managed_worktrees, remove_managed_worktree_path,
+    ManagedWorktreeList,
+};
 pub(crate) use self::merge::{
-    apply_resolved_files, conflict_resolve_prompt, list_unmerged_paths, merge_in_progress,
-    read_worktree_text, run_abort_merge, run_merge_session_worktree, sanitize_conflict_resolution,
-    MergeWorktreeAction, MergeWorktreeResult, MergeWorktreeStatus, ResolveWorktreeAction,
+    apply_resolved_files, complete_merge_from_worktree, conflict_resolve_prompt,
+    list_unmerged_paths, merge_in_progress, read_worktree_text, run_abort_merge,
+    run_merge_session_worktree, sanitize_conflict_resolution, MergeWorktreeAction,
+    MergeWorktreeResult, MergeWorktreeStatus, ResolveWorktreeAction,
 };
 pub(crate) use self::repo::load_repo_info;
 pub(crate) use self::runner::{GitTarget, IndexMode};
@@ -93,7 +99,16 @@ pub(crate) async fn resolve_git_target_for_session<R: Runtime>(
             .map(str::trim)
             .filter(|item| !item.is_empty())
         {
-            if self::worktree::is_managed_worktree_path(working_dir, session_id) {
+            let configured_root = load_native_settings(app)
+                .ok()
+                .map(|settings| settings.worktree_root);
+            if self::worktree::is_managed_worktree_path_with_root(
+                working_dir,
+                session_id,
+                configured_root
+                    .as_deref()
+                    .and_then(self::managed::configured_root_opt),
+            ) {
                 return resolve_git_target_at(app, workspace_id, working_dir).await;
             }
         }
@@ -107,7 +122,15 @@ async fn resolve_preview_target<R: Runtime>(
     session_id: Option<&str>,
     path: &str,
 ) -> Result<(GitTarget, String), String> {
-    if let Some((root, relative)) = self::worktree::split_managed_worktree_file_path(path) {
+    let configured_root = load_native_settings(app)
+        .ok()
+        .map(|settings| settings.worktree_root);
+    let configured_opt = configured_root
+        .as_deref()
+        .and_then(self::managed::configured_root_opt);
+    if let Some((root, relative)) =
+        self::worktree::split_managed_worktree_file_path_with_root(path, configured_opt)
+    {
         let main = resolve_git_target(app, workspace_id).await?;
         let listed = self::worktree::list_worktrees(&main)
             .await
@@ -122,7 +145,9 @@ async fn resolve_preview_target<R: Runtime>(
         });
         if known
             || session_id
-                .map(|id| self::worktree::is_managed_worktree_path(&root, id))
+                .map(|id| {
+                    self::worktree::is_managed_worktree_path_with_root(&root, id, configured_opt)
+                })
                 .unwrap_or(false)
         {
             let target = resolve_git_target_at(app, workspace_id, &root).await?;
@@ -353,8 +378,9 @@ pub(crate) async fn pull_git_branch<R: Runtime>(
 pub(crate) async fn list_git_branches<R: Runtime>(
     app: AppHandle<R>,
     workspace_id: String,
+    session_id: Option<String>,
 ) -> Result<Vec<GitBranch>, String> {
-    let target = resolve_git_target(&app, &workspace_id).await?;
+    let target = resolve_git_target_for_session(&app, &workspace_id, session_id.as_deref()).await?;
     list_branches(&target).await.map_err(Into::into)
 }
 
@@ -364,8 +390,9 @@ pub(crate) async fn create_git_branch<R: Runtime>(
     workspace_id: String,
     name: String,
     checkout: bool,
+    session_id: Option<String>,
 ) -> Result<GitBranch, String> {
-    let target = resolve_git_target(&app, &workspace_id).await?;
+    let target = resolve_git_target_for_session(&app, &workspace_id, session_id.as_deref()).await?;
     create_branch(&target, &name, checkout)
         .await
         .map_err(Into::into)
@@ -376,8 +403,9 @@ pub(crate) async fn checkout_git_branch<R: Runtime>(
     app: AppHandle<R>,
     workspace_id: String,
     name: String,
+    session_id: Option<String>,
 ) -> Result<GitBranch, String> {
-    let target = resolve_git_target(&app, &workspace_id).await?;
+    let target = resolve_git_target_for_session(&app, &workspace_id, session_id.as_deref()).await?;
     checkout_branch(&target, &name).await.map_err(Into::into)
 }
 
@@ -593,6 +621,7 @@ pub(crate) async fn merge_session_worktree<R: Runtime>(
     session_id: String,
     action: MergeWorktreeAction,
     branch_name: Option<String>,
+    commit_message: Option<String>,
 ) -> Result<MergeWorktreeResult, String> {
     if action != MergeWorktreeAction::Keep
         && state
@@ -637,6 +666,9 @@ pub(crate) async fn merge_session_worktree<R: Runtime>(
         .ok_or_else(|| "会话没有隔离工作树目录".to_string())?;
     let main = resolve_git_target(&app, &workspace_id).await?;
     let worktree = resolve_git_target_at(&app, &workspace_id, working_dir).await?;
+    let configured_root = load_native_settings(&app)
+        .ok()
+        .map(|settings| settings.worktree_root);
     let result = run_merge_session_worktree(
         &pool,
         &main,
@@ -645,6 +677,10 @@ pub(crate) async fn merge_session_worktree<R: Runtime>(
         &session_id,
         action,
         branch_name.as_deref(),
+        commit_message.as_deref(),
+        configured_root
+            .as_deref()
+            .and_then(self::managed::configured_root_opt),
     )
     .await
     .map_err(String::from)?;
@@ -681,4 +717,24 @@ pub(crate) async fn get_worktree_merge_state<R: Runtime>(
         in_progress: true,
         conflicts: list_unmerged_paths(&target).await.map_err(String::from)?,
     })
+}
+
+#[tauri::command]
+pub(crate) async fn list_managed_worktrees<R: Runtime>(
+    app: AppHandle<R>,
+    state: State<'_, Arc<Mutex<NativeAgentManager>>>,
+) -> Result<ManagedWorktreeList, String> {
+    let pool = sqlite_pool(&app).await?;
+    list_managed_worktrees_for(&app, &pool, &state).await
+}
+
+#[tauri::command]
+pub(crate) async fn remove_managed_worktree<R: Runtime>(
+    app: AppHandle<R>,
+    state: State<'_, Arc<Mutex<NativeAgentManager>>>,
+    path: String,
+) -> Result<ManagedWorktreeList, String> {
+    let pool = sqlite_pool(&app).await?;
+    remove_managed_worktree_path(&app, &pool, &state, &path).await?;
+    list_managed_worktrees_for(&app, &pool, &state).await
 }

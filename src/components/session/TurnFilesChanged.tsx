@@ -5,6 +5,7 @@ import { useTranslation } from "react-i18next";
 import { getGitNumstat } from "@/lib/backend";
 import { relativeWorktreeFilePath } from "@/lib/worktreePath";
 import { useSessionStore } from "@/stores/sessionStore";
+import { useSettingsStore } from "@/stores/settingsStore";
 import { useUiStore } from "@/stores/uiStore";
 import { useWorkspaceStore } from "@/stores/workspaceStore";
 
@@ -12,6 +13,7 @@ export function TurnFilesChanged({ paths }: { paths: string[] }) {
   const { t } = useTranslation("sessions");
   const workspaceId = useWorkspaceStore((state) => state.activeWorkspaceId);
   const sessionId = useSessionStore((state) => state.selectedSessionId);
+  const worktreeRoot = useSettingsStore((state) => state.native?.worktree_root);
   const openGitPreview = useUiStore((state) => state.openGitPreview);
   const [stats, setStats] = useState<
     Record<string, { added: number | null; deleted: number | null }>
@@ -20,7 +22,7 @@ export function TurnFilesChanged({ paths }: { paths: string[] }) {
   const pathKey = paths.join("\n");
   useEffect(() => {
     const listed = pathKey
-      ? pathKey.split("\n").map((item) => relativeWorktreeFilePath(item, sessionId))
+      ? pathKey.split("\n").map((item) => relativeWorktreeFilePath(item, sessionId, worktreeRoot))
       : [];
     if (!workspaceId || listed.length === 0) {
       setStats({});
@@ -44,7 +46,7 @@ export function TurnFilesChanged({ paths }: { paths: string[] }) {
     return () => {
       cancelled = true;
     };
-  }, [pathKey, workspaceId, sessionId]);
+  }, [pathKey, workspaceId, sessionId, worktreeRoot]);
 
   if (paths.length === 0) return null;
 
@@ -56,7 +58,9 @@ export function TurnFilesChanged({ paths }: { paths: string[] }) {
           type="button"
           className="cursor-pointer rounded-md border border-border/40 bg-background/50 px-2 py-0.5 text-[11px] font-medium text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
           onClick={() =>
-            openGitPreview(relativeWorktreeFilePath(paths[0] ?? "", sessionId) || null)
+            openGitPreview(
+              relativeWorktreeFilePath(paths[0] ?? "", sessionId, worktreeRoot) || null,
+            )
           }
         >
           {t("review")}
@@ -70,7 +74,9 @@ export function TurnFilesChanged({ paths }: { paths: string[] }) {
               <button
                 type="button"
                 className="flex w-full cursor-pointer items-center gap-2 px-3.5 py-1.5 text-left text-xs transition-colors hover:bg-muted/40"
-                onClick={() => openGitPreview(relativeWorktreeFilePath(path, sessionId))}
+                onClick={() =>
+                  openGitPreview(relativeWorktreeFilePath(path, sessionId, worktreeRoot))
+                }
               >
                 <File className="size-3.5 shrink-0 text-muted-foreground" />
                 <span className="min-w-0 flex-1 truncate font-mono text-[11.5px] text-foreground/80">

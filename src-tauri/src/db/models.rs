@@ -431,6 +431,14 @@ pub struct NativeSettings {
     pub hooks: Vec<NativeHook>,
     #[serde(default)]
     pub global_prompt_template: String,
+    #[serde(default)]
+    pub worktree_root: String,
+    #[serde(default)]
+    pub worktree_fetch_before_create: bool,
+    #[serde(default = "default_true")]
+    pub worktree_auto_prune: bool,
+    #[serde(default = "default_worktree_auto_prune_limit")]
+    pub worktree_auto_prune_limit: i32,
 }
 
 fn default_auto_compact_threshold_percent() -> i32 {
@@ -467,6 +475,10 @@ fn default_model_retry_backoff_factor() -> f64 {
 
 fn default_bash_default_timeout_secs() -> i32 {
     crate::native::settings::DEFAULT_NATIVE_BASH_DEFAULT_TIMEOUT_SECS
+}
+
+fn default_worktree_auto_prune_limit() -> i32 {
+    crate::native::settings::DEFAULT_NATIVE_WORKTREE_AUTO_PRUNE_LIMIT
 }
 
 fn default_hook_handler_type() -> String {
@@ -575,6 +587,14 @@ pub struct UpdateNativeSettings {
     pub memory_dream_interval: Option<i32>,
     pub hooks: Option<Vec<NativeHook>>,
     pub global_prompt_template: Option<String>,
+    #[serde(default)]
+    pub worktree_root: Option<String>,
+    #[serde(default)]
+    pub worktree_fetch_before_create: Option<bool>,
+    #[serde(default)]
+    pub worktree_auto_prune: Option<bool>,
+    #[serde(default)]
+    pub worktree_auto_prune_limit: Option<i32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

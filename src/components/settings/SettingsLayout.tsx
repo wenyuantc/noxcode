@@ -19,6 +19,7 @@ import {
   WandSparkles,
   Wrench,
   Zap,
+  GitFork,
 } from "lucide-react";
 
 import { formatAppVersionLabel, getAppVersion, packageAppVersion } from "@/lib/appUpdate";
@@ -41,6 +42,7 @@ import { PermissionRulesSection } from "./PermissionRulesSection";
 import { SshSettingsSection } from "./SshSettingsSection";
 import { SubagentsSettingsTab } from "./SubagentsSettingsTab";
 import { UsageSection } from "./UsageSection";
+import { WorktreesSection } from "./WorktreesSection";
 
 interface SectionMeta {
   icon: ComponentType<{ className?: string }>;
@@ -61,6 +63,7 @@ const SECTION_META: Record<string, SectionMeta> = {
   mcp: { icon: Blocks, descriptionKey: "mcp.description" },
   skills: { icon: Wrench, descriptionKey: "skills.hint" },
   hooks: { icon: Workflow, descriptionKey: "hooks.description" },
+  worktrees: { icon: GitFork, descriptionKey: "worktrees.hint" },
   usage: { icon: BarChart3, descriptionKey: "usage.hint" },
   database: { icon: Database, descriptionKey: "database.maintenance.description" },
   about: { icon: Info, descriptionKey: "about.description" },
@@ -82,6 +85,7 @@ const GROUPS = [
       "mcp",
       "skills",
       "hooks",
+      "worktrees",
     ],
   },
   {
@@ -241,6 +245,7 @@ export function SettingsLayout() {
             {current === "mcp" ? <McpSettingsTab /> : null}
             {current === "skills" ? <NativeSkillsSettingsCard /> : null}
             {current === "hooks" ? <NativeHooksSettingsCard /> : null}
+            {current === "worktrees" ? <WorktreesSection /> : null}
             {current === "usage" ? <UsageSection /> : null}
             {current === "database" ? <DatabaseSection /> : null}
             {current === "about" ? <AboutSection /> : null}

@@ -19,6 +19,7 @@ import {
   parseAgentBanner,
   parseCompactBoundary,
   parseMcpStatus,
+  parseWorktreeStatus,
   parseReadResultLines,
   parseStdoutEnvelope,
   parseTodoList,
@@ -77,6 +78,9 @@ describe("sessionLines", () => {
     expect(classifyLine("[子 Agent 1(general) - 改文件] [思考] 3秒\n想")).toBe("system");
     expect(classifyLine("[子 Agent 1(general) - 改文件] 最终汇报")).toBe("assistant");
     expect(classifyLine("[MCP工具] context7 / query-docs foo")).toBe("tool");
+    expect(classifyLine("[WORKTREE] 会话工作目录已隔离到 /Users/me/.noxcode/worktrees/abc-1")).toBe(
+      "system",
+    );
   });
 
   it("strips only the first complete bracket pair in toolTitle", () => {
@@ -625,6 +629,20 @@ describe("sessionLines", () => {
       detail: "SSH 会话将在远端拉起 MCP，失败不回退本机",
     });
     expect(parseMcpStatus("[PERMISSION] 确认超时，已按拒绝处理")).toBeNull();
+  });
+
+  it("parses worktree isolation lines", () => {
+    expect(
+      parseWorktreeStatus("[WORKTREE] 会话工作目录已隔离到 /Users/me/.noxcode/worktrees/abc-1"),
+    ).toEqual({
+      kind: "isolated",
+      path: "/Users/me/.noxcode/worktrees/abc-1",
+    });
+    expect(parseWorktreeStatus("[WORKTREE] 工作区不是 git 仓库，已跳过 worktree 隔离")).toEqual({
+      kind: "notice",
+      detail: "工作区不是 git 仓库，已跳过 worktree 隔离",
+    });
+    expect(parseWorktreeStatus("[MCP] 未启用服务器")).toBeNull();
   });
 
   it("parses usage lines into chips", () => {
