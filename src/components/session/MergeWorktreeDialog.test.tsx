@@ -11,6 +11,8 @@ vi.mock("@/lib/backend", () => ({
   resolveSessionWorktreeMerge: vi.fn(),
   generateGitCommitMessage: vi.fn(),
   listGitBranches: vi.fn(async () => [{ name: "dev", is_current: true }]),
+  startNativeSession: vi.fn(),
+  resumeNativeSession: vi.fn(),
 }));
 
 vi.mock("@/components/ui/dialog", () => {

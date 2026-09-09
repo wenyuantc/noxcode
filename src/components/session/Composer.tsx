@@ -832,7 +832,7 @@ export function Composer({ compact = false }: { compact?: boolean }) {
   return (
     <div className="mx-auto w-full max-w-3xl">
       {!compact ? (
-        <div className="mb-2 flex items-center gap-2">
+        <div className="relative z-20 mb-2 flex items-center gap-2">
           <WorkspacePicker />
           <BranchPicker />
           <WorktreeToggle />
