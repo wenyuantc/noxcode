@@ -28,6 +28,7 @@
   "durationHoursMinutes": "{{hours}} 小时 {{minutes}} 分",
   "durationHoursMinutesSeconds": "{{hours}} 小时 {{minutes}} 分 {{seconds}} 秒",
   "agentStarted": "内置 Agent 已启动",
+  "worktreeIsolated": "已隔离到独立工作树",
   "agentChannel": "渠道",
   "thinkingOn": "开启",
   "thinkingOff": "关闭",

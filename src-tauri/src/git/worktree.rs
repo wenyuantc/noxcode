@@ -27,8 +27,16 @@ pub fn looks_like_session_id(name: &str) -> bool {
         && name.chars().all(|ch| ch.is_ascii_hexdigit() || ch == '-')
 }
 
+pub fn user_home_dir() -> Option<PathBuf> {
+    std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .map(PathBuf::from)
+}
+
 pub fn default_local_worktree_root(app_config: &Path) -> PathBuf {
-    app_config.join("worktrees")
+    user_home_dir()
+        .map(|home| home.join(".noxcode").join("worktrees"))
+        .unwrap_or_else(|| app_config.join("worktrees"))
 }
 
 pub fn resolve_local_worktree_root(app_config: &Path, configured_root: &str) -> PathBuf {
@@ -282,6 +290,22 @@ mod tests {
             Some("abc-1".to_string())
         );
         assert!(session_id_from_worktree_path("/data/nox-wt/not a session").is_none());
+    }
+
+    #[test]
+    fn default_root_uses_home_noxcode() {
+        let app_config = Path::new("/cfg");
+        if let Some(home) = user_home_dir() {
+            assert_eq!(
+                default_local_worktree_root(app_config),
+                home.join(".noxcode").join("worktrees")
+            );
+        } else {
+            assert_eq!(
+                default_local_worktree_root(app_config),
+                PathBuf::from("/cfg/worktrees")
+            );
+        }
     }
 
     #[test]

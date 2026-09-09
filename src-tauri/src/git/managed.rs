@@ -93,6 +93,19 @@ pub fn select_prune_candidates(
         .collect()
 }
 
+fn unique_scan_roots(primary: &Path, extra: &[PathBuf]) -> Vec<PathBuf> {
+    let mut seen = HashSet::new();
+    let mut roots = Vec::new();
+    for path in std::iter::once(primary.to_path_buf()).chain(extra.iter().cloned()) {
+        let key = normalize_path_for_compare(&path.to_string_lossy());
+        if key.is_empty() || !seen.insert(key) {
+            continue;
+        }
+        roots.push(path);
+    }
+    roots
+}
+
 fn scan_local_root(root: &Path) -> Vec<(String, String)> {
     let Ok(entries) = std::fs::read_dir(root) else {
         return Vec::new();
@@ -110,6 +123,20 @@ fn scan_local_root(root: &Path) -> Vec<(String, String)> {
             continue;
         }
         found.push((name.to_string(), path.to_string_lossy().into_owned()));
+    }
+    found
+}
+
+fn scan_local_roots(roots: &[PathBuf]) -> Vec<(String, String)> {
+    let mut found = Vec::new();
+    let mut seen = HashSet::new();
+    for root in roots {
+        for (id, path) in scan_local_root(root) {
+            let key = normalize_path_for_compare(&path);
+            if seen.insert(key) {
+                found.push((id, path));
+            }
+        }
     }
     found
 }
@@ -197,6 +224,14 @@ pub async fn list_managed_worktrees_for<R: Runtime>(
     let settings = load_native_settings(app)?;
     let configured_opt = configured_root_opt(&settings.worktree_root);
     let (root, default_root) = default_and_effective_roots(app, &settings.worktree_root)?;
+    let config_dir = app
+        .path()
+        .app_config_dir()
+        .map_err(|error| format!("无法读取应用配置目录: {error}"))?;
+    let scan_roots = unique_scan_roots(
+        Path::new(&root),
+        &[PathBuf::from(&default_root), config_dir.join("worktrees")],
+    );
     let names = load_workspace_names(pool).await;
     let sessions = sqlx::query_as::<_, AgentSessionRecord>(
         "SELECT * FROM agent_sessions WHERE working_dir IS NOT NULL AND TRIM(working_dir) != ''",
@@ -207,7 +242,7 @@ pub async fn list_managed_worktrees_for<R: Runtime>(
 
     let candidate_ids: Vec<String> = {
         let mut ids: HashSet<String> = sessions.iter().map(|item| item.id.clone()).collect();
-        for (session_id, _) in scan_local_root(Path::new(&root)) {
+        for (session_id, _) in scan_local_roots(&scan_roots) {
             ids.insert(session_id);
         }
         ids.into_iter().collect()
@@ -244,7 +279,7 @@ pub async fn list_managed_worktrees_for<R: Runtime>(
         ));
     }
 
-    for (session_id, path) in scan_local_root(Path::new(&root)) {
+    for (session_id, path) in scan_local_roots(&scan_roots) {
         let key = normalize_path_for_compare(&path);
         if seen_paths.contains(&key) {
             continue;
@@ -476,5 +511,24 @@ mod tests {
             item("b", "2026-02-01", false),
         ];
         assert!(select_prune_candidates(&items, None, 2).is_empty());
+    }
+
+    #[test]
+    fn unique_scan_roots_keeps_legacy_appconfig() {
+        let primary = PathBuf::from("/home/u/.noxcode/worktrees");
+        let roots = unique_scan_roots(
+            &primary,
+            &[
+                PathBuf::from("/home/u/.noxcode/worktrees/"),
+                PathBuf::from("/cfg/worktrees"),
+            ],
+        );
+        assert_eq!(
+            roots,
+            vec![
+                PathBuf::from("/home/u/.noxcode/worktrees"),
+                PathBuf::from("/cfg/worktrees"),
+            ]
+        );
     }
 }

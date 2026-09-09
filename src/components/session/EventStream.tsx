@@ -31,7 +31,12 @@ import { CompactBoundaryRow } from "./CompactBoundaryRow";
 import { FileChangeRow } from "./FileChangeRow";
 import { GoalRow } from "./GoalRow";
 import { RetryRow } from "./RetryRow";
-import { AgentStatusRow, McpStatusRow, PermissionStatusRow } from "./SessionStatusRows";
+import {
+  AgentStatusRow,
+  McpStatusRow,
+  PermissionStatusRow,
+  WorktreeStatusRow,
+} from "./SessionStatusRows";
 import { PlanAskCard } from "./PlanAskCard";
 import { BackgroundProcesses } from "./BackgroundProcesses";
 import { BackgroundTasks } from "./BackgroundTasks";
@@ -116,6 +121,9 @@ function renderSegment(
             }
             if (body.startsWith("[MCP]")) {
               return <McpStatusRow key={item.id} text={item.text} />;
+            }
+            if (body.startsWith("[WORKTREE]")) {
+              return <WorktreeStatusRow key={item.id} text={item.text} />;
             }
             return (
               <p

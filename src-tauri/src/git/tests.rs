@@ -1258,6 +1258,80 @@ async fn merge_worktree_into_current_branch() {
 }
 
 #[tokio::test]
+async fn merge_current_ignores_checked_out_branch_name() {
+    let env = local_env().await;
+    let (pool, workspace_id, session_id) = seed_session().await;
+    let wt = env.dir.path().join("worktrees").join(&session_id);
+    let wt_text = wt.to_string_lossy().into_owned();
+    super::worktree::add_detached(&env.target, &wt_text)
+        .await
+        .expect("add");
+    sqlx::query("UPDATE agent_sessions SET working_dir = $1 WHERE id = $2")
+        .bind(&wt_text)
+        .bind(&session_id)
+        .execute(&pool)
+        .await
+        .expect("working_dir");
+    std::fs::write(wt.join("README.md"), "from worktree again\n").unwrap();
+    let result = super::merge::run_merge_session_worktree(
+        &pool,
+        &env.target,
+        &GitTarget::Local(wt.clone()),
+        &workspace_id,
+        &session_id,
+        super::merge::MergeWorktreeAction::MergeCurrent,
+        Some("main"),
+        None,
+    )
+    .await
+    .expect("merge");
+    assert_eq!(result.status, super::merge::MergeWorktreeStatus::Merged);
+    assert_eq!(
+        std::fs::read_to_string(env.dir.path().join("README.md")).unwrap(),
+        "from worktree again\n"
+    );
+    let current = fixture_git(&env.target, &["rev-parse", "--abbrev-ref", "HEAD"])
+        .await
+        .expect("branch")
+        .stdout_lossy();
+    assert_eq!(current.trim(), "main");
+}
+
+#[tokio::test]
+async fn create_branch_rejects_checked_out_name() {
+    let env = local_env().await;
+    let (pool, workspace_id, session_id) = seed_session().await;
+    let wt = env.dir.path().join("worktrees").join(&session_id);
+    let wt_text = wt.to_string_lossy().into_owned();
+    super::worktree::add_detached(&env.target, &wt_text)
+        .await
+        .expect("add");
+    sqlx::query("UPDATE agent_sessions SET working_dir = $1 WHERE id = $2")
+        .bind(&wt_text)
+        .bind(&session_id)
+        .execute(&pool)
+        .await
+        .expect("working_dir");
+    std::fs::write(wt.join("README.md"), "keep aside\n").unwrap();
+    let error = super::merge::run_merge_session_worktree(
+        &pool,
+        &env.target,
+        &GitTarget::Local(wt.clone()),
+        &workspace_id,
+        &session_id,
+        super::merge::MergeWorktreeAction::CreateBranch,
+        Some("main"),
+        None,
+    )
+    .await
+    .expect_err("checked out");
+    assert!(
+        error.to_string().contains("已在工作区检出"),
+        "unexpected error: {error}"
+    );
+}
+
+#[tokio::test]
 async fn merge_worktree_conflict_stays_and_abort_cleans() {
     let env = local_env().await;
     let (pool, workspace_id, session_id) = seed_session().await;

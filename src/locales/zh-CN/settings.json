@@ -867,7 +867,7 @@
   "worktrees": {
     "hint": "管理隔离工作树的存放位置、创建前拉取和自动清理。",
     "root": "工作树根目录",
-    "rootHint": "noxcode 创建托管工作树的目录。留空则使用默认位置。仅本机工作区生效；SSH 仍使用 $HOME/.noxcode/worktrees。",
+    "rootHint": "noxcode 创建托管工作树的目录。留空则使用 ~/.noxcode/worktrees。仅本机工作区生效；SSH 仍使用 $HOME/.noxcode/worktrees。",
     "browse": "选择目录",
     "fetchBeforeCreate": "创建工作树前始终获取上游更新",
     "fetchBeforeCreateHint": "noxcode 通常会在常规 Git 操作中获取分支更新。此设置还会在创建每个新工作树前获取上游更新。获取失败时仍会继续创建。",

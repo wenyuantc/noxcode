@@ -28,6 +28,7 @@
   "durationHoursMinutes": "{{hours}}h {{minutes}}m",
   "durationHoursMinutesSeconds": "{{hours}}h {{minutes}}m {{seconds}}s",
   "agentStarted": "Built-in agent started",
+  "worktreeIsolated": "Isolated to a worktree",
   "agentChannel": "Channel",
   "thinkingOn": "On",
   "thinkingOff": "Off",

@@ -9,7 +9,7 @@ use super::runner::{
     assert_safe_rel_path, git, git_with, with_repo_lock, GitError, GitRunOptions, GitTarget,
     IndexMode,
 };
-use super::worktree::is_managed_worktree_path_with_root;
+use super::worktree::{is_managed_worktree_path_with_root, list_worktrees};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -149,6 +149,14 @@ pub async fn abort_merge(target: &GitTarget) -> Result<(), GitError> {
     .await
 }
 
+async fn branch_is_checked_out(target: &GitTarget, name: &str) -> Result<bool, GitError> {
+    let expected = format!("refs/heads/{name}");
+    let items = list_worktrees(target).await?;
+    Ok(items
+        .iter()
+        .any(|item| item.branch == expected || item.branch == name))
+}
+
 async fn create_branch_at(target: &GitTarget, name: &str, oid: &str) -> Result<String, GitError> {
     let name = name.trim();
     if name.is_empty() {
@@ -174,6 +182,11 @@ async fn create_branch_at(target: &GitTarget, name: &str, oid: &str) -> Result<S
     )
     .await?;
     if exists.success() {
+        if branch_is_checked_out(target, name).await? {
+            return Err(GitError::Blocked(format!(
+                "分支 {name} 已在工作区检出，无法改写。请换一个新分支名，或使用「合并回当前分支」。"
+            )));
+        }
         git(target, &["branch", "-f", name, oid], &IndexMode::ReadOnly)
             .await?
             .require_success(&["branch", "-f", name, oid])?;
@@ -427,13 +440,13 @@ pub async fn run_merge_session_worktree(
         Some("manual"),
     )
     .await?;
-    let branch = branch_name
-        .map(str::trim)
-        .filter(|item| !item.is_empty())
-        .map(ToOwned::to_owned)
-        .unwrap_or_else(|| default_worktree_branch_name(session_id));
-    let branch = create_branch_at(main, &branch, &checkpoint.commit_oid).await?;
     if action == MergeWorktreeAction::CreateBranch {
+        let branch = branch_name
+            .map(str::trim)
+            .filter(|item| !item.is_empty())
+            .map(ToOwned::to_owned)
+            .unwrap_or_else(|| default_worktree_branch_name(session_id));
+        let branch = create_branch_at(main, &branch, &checkpoint.commit_oid).await?;
         return Ok(MergeWorktreeResult {
             status: MergeWorktreeStatus::Branched,
             branch: Some(branch.clone()),
@@ -444,7 +457,10 @@ pub async fn run_merge_session_worktree(
             message: format!("已创建分支 {branch}，主工作区未改动"),
         });
     }
-    merge_named_branch(main, &branch).await
+    // 合并回当前分支：只建内部指针再 merge，绝不 force-update 已检出的分支。
+    let pointer = default_worktree_branch_name(session_id);
+    let pointer = create_branch_at(main, &pointer, &checkpoint.commit_oid).await?;
+    merge_named_branch(main, &pointer).await
 }
 
 pub async fn run_abort_merge(target: &GitTarget) -> Result<MergeWorktreeResult, GitError> {

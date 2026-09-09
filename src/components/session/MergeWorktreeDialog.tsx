@@ -228,13 +228,18 @@ export function MergeWorktreeDialog() {
           </>
         ) : (
           <>
-            <BranchNameField
-              workspaceId={prompt.workspaceId}
-              value={branchName}
-              onChange={setBranchName}
-              placeholder={t("git:mergeWorktreeBranchName")}
-              disabled={busy}
-            />
+            <div className="space-y-1.5">
+              <BranchNameField
+                workspaceId={prompt.workspaceId}
+                value={branchName}
+                onChange={setBranchName}
+                placeholder={t("git:mergeWorktreeBranchName")}
+                disabled={busy}
+              />
+              <p className="text-[11px] text-muted-foreground">
+                {t("git:mergeWorktreeBranchNameHint")}
+              </p>
+            </div>
             <DialogFooter className="flex-col gap-2 sm:flex-col">
               <Button
                 disabled={busy}
@@ -244,7 +249,7 @@ export function MergeWorktreeDialog() {
                       prompt.workspaceId,
                       prompt.sessionId,
                       "merge_current",
-                      branchName.trim() || null,
+                      null,
                     ),
                   )
                 }

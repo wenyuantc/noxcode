@@ -73,6 +73,7 @@ describe("MergeWorktreeDialog", () => {
     expect(html).toContain("git:mergeWorktreeBranch");
     expect(html).toContain("git:mergeWorktreeKeep");
     expect(html).toContain("git:mergeWorktreeBranchName");
+    expect(html).toContain("git:mergeWorktreeBranchNameHint");
     expect(html).toContain('role="combobox"');
   });
 
