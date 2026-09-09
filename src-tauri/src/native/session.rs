@@ -1863,12 +1863,7 @@ async fn start_native_session_locked(
         None
     };
     let native_settings = crate::native::settings::load_native_settings(&app).ok();
-    let isolate = payload.isolate_worktree.unwrap_or_else(|| {
-        native_settings
-            .as_ref()
-            .map(|settings| settings.isolate_session_worktree)
-            .unwrap_or(false)
-    });
+    let isolate = payload.isolate_worktree.unwrap_or(false);
     let existing_working_dir = if let Some(resume_id) = resume_id.as_deref() {
         sqlx::query_scalar::<_, Option<String>>(
             "SELECT working_dir FROM agent_sessions WHERE id = $1",

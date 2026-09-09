@@ -343,17 +343,6 @@ export function NativeRuntimeSection() {
             onCheckedChange={(checked) => setDraft({ ...draft, bash_sandbox_enabled: checked })}
           />
         </SettingRow>
-
-        <SettingRow
-          title={t("settings:runtime.isolateWorktree")}
-          description={t("settings:runtime.isolateWorktreeHint")}
-        >
-          <Switch
-            id="native-isolate-worktree"
-            checked={draft.isolate_session_worktree}
-            onCheckedChange={(checked) => setDraft({ ...draft, isolate_session_worktree: checked })}
-          />
-        </SettingRow>
       </SettingCard>
 
       {/* 3. 上下文窗口与 Token 预算 */}

@@ -419,8 +419,6 @@ pub struct NativeSettings {
     pub lsp_enabled: bool,
     #[serde(default)]
     pub bash_sandbox_enabled: bool,
-    #[serde(default)]
-    pub isolate_session_worktree: bool,
     #[serde(default = "default_auto_compact_threshold_percent")]
     pub auto_compact_threshold_percent: i32,
     #[serde(default = "default_true")]
@@ -567,8 +565,6 @@ pub struct UpdateNativeSettings {
     pub lsp_enabled: Option<bool>,
     #[serde(default)]
     pub bash_sandbox_enabled: Option<bool>,
-    #[serde(default)]
-    pub isolate_session_worktree: Option<bool>,
     #[serde(default)]
     pub auto_compact_threshold_percent: Option<i32>,
     #[serde(default)]

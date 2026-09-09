@@ -47,6 +47,7 @@ interface UiState extends CodeAppearance {
   gitFocusPath: string | null;
   composerDraft: string;
   composerPlanMode: boolean;
+  composerIsolateWorktree: boolean;
   composerThinkingLevel: string | null;
   theme: ThemeMode;
   isDark: boolean;
@@ -59,6 +60,7 @@ interface UiState extends CodeAppearance {
   openGitPreview: (path: string | null) => void;
   setComposerDraft: (value: string) => void;
   setComposerPlanMode: (value: boolean) => void;
+  setComposerIsolateWorktree: (value: boolean) => void;
   setComposerThinkingLevel: (value: string | null) => void;
   setTheme: (mode: ThemeMode) => void;
   cycleTheme: () => void;
@@ -100,6 +102,7 @@ export const useUiStore = create<UiState>((set, get) => ({
   gitFocusPath: null,
   composerDraft: "",
   composerPlanMode: typeof window !== "undefined" && localStorage.getItem(PLAN_MODE_KEY) === "1",
+  composerIsolateWorktree: false,
   composerThinkingLevel: readThinkingLevel(),
   theme: getThemePreference(),
   isDark: isDarkThemeMode(getThemePreference()),
@@ -131,6 +134,7 @@ export const useUiStore = create<UiState>((set, get) => ({
     localStorage.setItem(PLAN_MODE_KEY, value ? "1" : "0");
     set({ composerPlanMode: value });
   },
+  setComposerIsolateWorktree: (value) => set({ composerIsolateWorktree: value }),
   setComposerThinkingLevel: (value) => {
     const next = value?.trim() || null;
     if (typeof localStorage !== "undefined") {

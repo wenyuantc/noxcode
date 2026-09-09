@@ -295,8 +295,6 @@
     "lspEnabledHint": "本地会话可调用 Lsp 工具，Write / Edit / ApplyPatch 成功后附带诊断。需要已安装对应 language server。SSH 工作区不启动。",
     "bashSandbox": "本地 Bash 操作系统沙箱",
     "bashSandboxHint": "Linux 使用 bwrap、macOS 使用 sandbox-exec。找不到实现时回退为普通执行。默认关闭。SSH 远端不套沙箱。",
-    "isolateWorktree": "新会话隔离 git worktree",
-    "isolateWorktreeHint": "新会话在独立 detached worktree 里改代码，避免并行会话互相覆盖。非 git 仓库会跳过。改完对之后新开的会话生效。",
     "modelRetry": "模型请求重试",
     "modelRetryHint": "对限流、过载与流中断做指数退避并加抖动；服务端 Retry-After 会被采纳，但不超过最大延迟。",
     "modelRetryMax": "最大重试次数",

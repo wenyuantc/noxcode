@@ -328,5 +328,8 @@
   "backgroundProcessExited": "已退出",
   "backgroundProcessFailed": "失败",
   "backgroundProcessStopped": "已停止",
-  "backgroundProcessStopHint": "停止后台进程"
+  "backgroundProcessStopHint": "停止后台进程",
+  "isolateWorktree": "隔离工作树",
+  "isolateWorktreeHint": "本会话在独立 detached worktree 改代码；不选则用当前工作区",
+  "isolateWorktreeClear": "取消隔离工作树"
 }

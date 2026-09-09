@@ -93,6 +93,7 @@ import { ContextCapacity } from "./ContextCapacity";
 import { PermissionModePicker } from "./PermissionModePicker";
 import { ThinkingLevelPicker } from "./ThinkingLevelPicker";
 import { WorkspacePicker } from "./WorkspacePicker";
+import { WorktreeToggle } from "./WorktreeToggle";
 import { QueuedInputs } from "./QueuedInputs";
 
 const IMAGE_DIALOG_FILTERS = [
@@ -122,6 +123,7 @@ export function Composer({ compact = false }: { compact?: boolean }) {
   const channelId = useChannelStore((state) => state.activeChannelId);
   const activeModelId = useChannelStore((state) => state.activeModelId);
   const defaultPlanMode = useUiStore((state) => state.composerPlanMode);
+  const isolateWorktree = useUiStore((state) => state.composerIsolateWorktree);
   const effort = useUiStore((state) => state.composerThinkingLevel);
   const setEffort = useUiStore((state) => state.setComposerThinkingLevel);
   const native = useSettingsStore((state) => state.native);
@@ -768,6 +770,7 @@ export function Composer({ compact = false }: { compact?: boolean }) {
         planMode: composerPlanMode || intent.type === "plan",
         permissionMode: runtime?.permission_mode,
         imagePaths,
+        isolateWorktree: selectedSessionId ? false : isolateWorktree,
       });
       if (started) {
         useSessionStore.getState().onStarted(started);
@@ -832,6 +835,7 @@ export function Composer({ compact = false }: { compact?: boolean }) {
         <div className="mb-2 flex items-center gap-2">
           <WorkspacePicker />
           <BranchPicker />
+          <WorktreeToggle />
         </div>
       ) : null}
       {helpOpen ? (

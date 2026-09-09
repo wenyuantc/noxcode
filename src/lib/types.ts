@@ -1010,7 +1010,6 @@ export interface NativeSettings {
   rg_sidecar_enabled: boolean;
   lsp_enabled: boolean;
   bash_sandbox_enabled: boolean;
-  isolate_session_worktree: boolean;
   auto_compact_threshold_percent: number;
   microcompact_enabled: boolean;
   memory_enabled: boolean;
@@ -1044,7 +1043,6 @@ export interface UpdateNativeSettingsInput {
   rg_sidecar_enabled?: boolean;
   lsp_enabled?: boolean;
   bash_sandbox_enabled?: boolean;
-  isolate_session_worktree?: boolean;
   auto_compact_threshold_percent?: number;
   microcompact_enabled?: boolean;
   memory_enabled?: boolean;

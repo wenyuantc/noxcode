@@ -45,6 +45,28 @@ describe("submitSessionPrompt", () => {
     expect(backend.resumeNativeSession).not.toHaveBeenCalled();
   });
 
+  it("defaults isolate_worktree to false for a new session", () => {
+    expect(sessionSubmissionPayload(base).isolate_worktree).toBe(false);
+  });
+
+  it("forwards isolate_worktree only for new sessions", async () => {
+    const backend = api();
+    await submitSessionPrompt({ ...base, isolateWorktree: true }, backend);
+    expect(backend.startNativeSession).toHaveBeenCalledWith({
+      ...sessionSubmissionPayload(base),
+      isolate_worktree: true,
+    });
+
+    await submitSessionPrompt({ ...base, sessionId: "sess-1", isolateWorktree: true }, backend);
+    expect(backend.resumeNativeSession).toHaveBeenCalledWith(
+      {
+        ...sessionSubmissionPayload({ ...base, sessionId: "sess-1" }),
+        isolate_worktree: false,
+      },
+      "sess-1",
+    );
+  });
+
   it("forwards image paths on start and resume", async () => {
     const backend = api();
     const imagePaths = ["/tmp/a.png", "  /tmp/b.webp  ", ""];
