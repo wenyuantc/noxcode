@@ -34,6 +34,10 @@ import type {
   GitRestorePreview,
   GitRestoreResult,
   GitStatus,
+  MergeWorktreeAction,
+  MergeWorktreeResult,
+  ResolveWorktreeAction,
+  WorktreeMergeState,
   ListAiChannelModelsResult,
   GetNativeUsageAnalyticsInput,
   ListNativeApiCallLogsInput,
@@ -313,6 +317,32 @@ export function restoreGitCheckpoint(
 
 export function clearGitCheckpoints(workspaceId: string): Promise<number> {
   return invoke("clear_git_checkpoints", { workspaceId });
+}
+
+export function mergeSessionWorktree(
+  workspaceId: string,
+  sessionId: string,
+  action: MergeWorktreeAction,
+  branchName?: string | null,
+): Promise<MergeWorktreeResult> {
+  return invoke("merge_session_worktree", {
+    workspaceId,
+    sessionId,
+    action,
+    branchName: branchName ?? null,
+  });
+}
+
+export function resolveSessionWorktreeMerge(
+  workspaceId: string,
+  sessionId: string,
+  action: ResolveWorktreeAction,
+): Promise<MergeWorktreeResult> {
+  return invoke("resolve_session_worktree_merge", { workspaceId, sessionId, action });
+}
+
+export function getWorktreeMergeState(workspaceId: string): Promise<WorktreeMergeState> {
+  return invoke("get_worktree_merge_state", { workspaceId });
 }
 
 export function listActivityLogs(workspaceId?: string, limit?: number): Promise<ActivityLog[]> {

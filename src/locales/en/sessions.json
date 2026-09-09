@@ -331,5 +331,6 @@
   "backgroundProcessStopHint": "Stop background process",
   "isolateWorktree": "Isolate worktree",
   "isolateWorktreeHint": "Edit this session in a detached git worktree. Leave off to use the current workspace.",
-  "isolateWorktreeClear": "Stop isolating this session"
+  "worktreeModeCurrent": "Current workspace",
+  "worktreeModeIsolate": "Isolate worktree"
 }

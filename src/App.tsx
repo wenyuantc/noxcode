@@ -1,6 +1,7 @@
 import { lazy, Suspense, useEffect } from "react";
 import { BrowserRouter, Navigate, Route, Routes } from "react-router-dom";
 
+import { MergeWorktreeDialog } from "@/components/session/MergeWorktreeDialog";
 import { NativePermissionDialog } from "@/components/session/NativePermissionDialog";
 import { SshHostTrustDialog } from "@/components/ssh/SshHostTrustDialog";
 import { useNativeEvents } from "@/hooks/useNativeEvents";
@@ -26,6 +27,7 @@ function AppEffects() {
   return (
     <>
       <NativePermissionDialog />
+      <MergeWorktreeDialog />
       <SshHostTrustDialog />
     </>
   );

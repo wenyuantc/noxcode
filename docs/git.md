@@ -32,7 +32,7 @@ flowchart LR
 
 | 路径 | 职责 |
 | --- | --- |
-| [`src-tauri/src/git/mod.rs`](../src-tauri/src/git/mod.rs) | 19 个 Tauri 命令、`workspace_id` → `GitTarget`、运行会话拦截与活动审计 |
+| [`src-tauri/src/git/mod.rs`](../src-tauri/src/git/mod.rs) | 21 个 Tauri 命令、`workspace_id` → `GitTarget`、运行会话拦截与活动审计 |
 | [`runner.rs`](../src-tauri/src/git/runner.rs) | `GitTarget` / `IndexMode` / `ScratchIndex` / 守卫 / per-repo 锁 |
 | [`repo.rs`](../src-tauri/src/git/repo.rs) | rev-parse 四参数、版本、中间态 |
 | [`status.rs`](../src-tauri/src/git/status.rs) | `status --porcelain=v2 --branch -z` |
@@ -41,6 +41,7 @@ flowchart LR
 | [`stage.rs`](../src-tauri/src/git/stage.rs) | 用户暂存 / 取消暂存 / 丢弃工作区 |
 | [`commit.rs`](../src-tauri/src/git/commit.rs) | commit / push / pull / 分支 |
 | [`checkpoint.rs`](../src-tauri/src/git/checkpoint.rs) | 快照、预览、回滚、清扫 |
+| [`merge.rs`](../src-tauri/src/git/merge.rs) | 会话隔离 worktree 合并回主工作区、冲突中止 / 写回 |
 | [`preflight.rs`](../src-tauri/src/git/preflight.rs) | 启动时本地 git ≥ 2.23 |
 
 ## IndexMode 三类
@@ -97,8 +98,11 @@ ref：`refs/noxcode/checkpoints/<session_id>/<seq>`。author / committer 固定 
 | `create_git_checkpoint` / `list_git_checkpoints` | 打点；列表带 `ref_valid` |
 | `preview_git_checkpoint_restore` / `restore_git_checkpoint` | 预览 / 回滚 |
 | `clear_git_checkpoints` | 清本仓库全部检查点并写活动审计 |
+| `merge_session_worktree` | 会话隔离 worktree：合并回当前分支 / 建分支 / 保留；冲突保留 MERGE_HEAD |
+| `get_worktree_merge_state` | 主工作区是否在 merge 中间态及冲突文件 |
+| `resolve_session_worktree_merge` | 冲突后续：AI 写回并完成提交，或 `merge --abort` |
 
-前端对应函数在 `backend.ts`：`getGitRepoInfo`、`getGitStatus`、`getGitFileDiff`、`getGitNumstat`、`stageGitPaths`、`unstageGitPaths`、`restoreGitPaths`、`commitGitChanges`、`pushGitBranch`、`listGitBranches`、`createGitBranch`、`checkoutGitBranch`、`listGitFiles`、`createGitCheckpoint`、`listGitCheckpoints`、`previewGitCheckpointRestore`、`restoreGitCheckpoint`、`clearGitCheckpoints`；恢复历史另通过 `listActivityLogs` 读取。
+前端对应函数在 `backend.ts`：`getGitRepoInfo`、`getGitStatus`、`getGitFileDiff`、`getGitNumstat`、`stageGitPaths`、`unstageGitPaths`、`restoreGitPaths`、`commitGitChanges`、`pushGitBranch`、`listGitBranches`、`createGitBranch`、`checkoutGitBranch`、`listGitFiles`、`createGitCheckpoint`、`listGitCheckpoints`、`previewGitCheckpointRestore`、`restoreGitCheckpoint`、`clearGitCheckpoints`、`mergeSessionWorktree`、`getWorktreeMergeState`、`resolveSessionWorktreeMerge`；恢复历史另通过 `listActivityLogs` 读取。
 
 ## 文件预览
 
@@ -116,7 +120,7 @@ ref：`refs/noxcode/checkpoints/<session_id>/<seq>`。author / committer 固定 
 
 `cargo test --manifest-path src-tauri/Cargo.toml`。本地 temp 仓库与进程内 russh `real_shell` 各跑一遍。
 
-覆盖：status / stage / commit / push、index 字节级不变、`ScratchIndex::from_head` 的 HEAD / unborn 初始化、空格 / 中文 / 换行文件名、rename numstat、回滚三类影响面、gitignore 不删、merge 中间态拒绝、ref 失效、过期 `after_tool_call` 清理、只读部分失败、删会话后 gc 无残留。
+覆盖：status / stage / commit / push、index 字节级不变、`ScratchIndex::from_head` 的 HEAD / unborn 初始化、空格 / 中文 / 换行文件名、rename numstat、回滚三类影响面、gitignore 不删、merge 中间态拒绝、隔离 worktree 无冲突合并与冲突 abort、ref 失效、过期 `after_tool_call` 清理、只读部分失败、删会话后 gc 无残留。
 
 ## Native 自动打点（P4.4）
 

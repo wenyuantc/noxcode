@@ -41,20 +41,22 @@ describe("WorktreeToggle", () => {
     expect(renderToStaticMarkup(<WorktreeToggle />)).toBe("");
   });
 
-  it("renders the off pill when a workspace is selected", () => {
+  it("selects the current workspace segment by default", () => {
     useWorkspaceStore.setState({ activeWorkspaceId: "ws-1" });
     const html = renderToStaticMarkup(<WorktreeToggle />);
-    expect(html).toContain("isolateWorktree");
+    expect(html).toContain("worktreeModeCurrent");
+    expect(html).toContain("worktreeModeIsolate");
     expect(html).toContain("isolateWorktreeHint");
-    expect(html).toContain('aria-pressed="false"');
+    expect(html).toMatch(/aria-pressed="true"[\s\S]*worktreeModeCurrent/);
+    expect(html).toMatch(/aria-pressed="false"[\s\S]*worktreeModeIsolate/);
     expect(html).not.toContain("isolateWorktreeClear");
   });
 
-  it("shows the clear button when isolation is on", () => {
+  it("marks the isolate segment as pressed when isolation is on", () => {
     useWorkspaceStore.setState({ activeWorkspaceId: "ws-1" });
     useUiStore.setState({ composerIsolateWorktree: true });
     const html = renderToStaticMarkup(<WorktreeToggle />);
-    expect(html).toContain("isolateWorktreeClear");
-    expect(html).toContain('aria-pressed="true"');
+    expect(html).toMatch(/aria-pressed="false"[\s\S]*worktreeModeCurrent/);
+    expect(html).toMatch(/aria-pressed="true"[\s\S]*worktreeModeIsolate/);
   });
 });

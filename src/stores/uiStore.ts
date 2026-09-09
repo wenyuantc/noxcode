@@ -55,6 +55,7 @@ interface UiState extends CodeAppearance {
   toggleSidebar: () => void;
   setCommandOpen: (open: boolean) => void;
   toggleGit: () => void;
+  setGitOpen: (open: boolean) => void;
   setGitPanelWidth: (width: number) => void;
   clearGitPreview: () => void;
   openGitPreview: (path: string | null) => void;
@@ -122,6 +123,7 @@ export const useUiStore = create<UiState>((set, get) => ({
     const gitOpen = !get().gitOpen;
     set({ gitOpen, gitFocusPath: gitOpen ? get().gitFocusPath : null });
   },
+  setGitOpen: (open) => set({ gitOpen: open, gitFocusPath: open ? get().gitFocusPath : null }),
   setGitPanelWidth: (width) => {
     const next = clampGitPanelWidth(width);
     localStorage.setItem(GIT_WIDTH_KEY, String(next));

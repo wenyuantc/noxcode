@@ -234,6 +234,35 @@ export interface GitRestorePreview {
   wont_be_touched: string[];
 }
 
+export type MergeWorktreeAction = "merge_current" | "create_branch" | "keep";
+export type ResolveWorktreeAction = "ai" | "abort";
+export type MergeWorktreeStatus =
+  "merged" | "branched" | "kept" | "conflicted" | "aborted" | "resolved" | "partial";
+
+export interface MergeWorktreeResult {
+  status: MergeWorktreeStatus;
+  branch?: string | null;
+  commit_oid?: string | null;
+  conflicts: string[];
+  resolved: string[];
+  failed: string[];
+  message: string;
+}
+
+export interface WorktreeMergeState {
+  in_progress: boolean;
+  conflicts: string[];
+}
+
+export interface WorktreeMergePrompt {
+  sessionId: string;
+  workspaceId: string;
+  phase: "choose" | "conflict";
+  conflicts: string[];
+  branch?: string | null;
+  message?: string | null;
+}
+
 export interface GitRestoreResult {
   pre_restore_checkpoint: GitCheckpoint;
   restored: string[];

@@ -5,6 +5,7 @@ mod checkpoint;
 mod commit;
 mod commit_message;
 mod diff;
+mod merge;
 mod preview;
 mod repo;
 mod stage;
@@ -17,6 +18,7 @@ mod tests;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Manager, Runtime, State};
 use tokio::sync::Mutex;
 
@@ -49,6 +51,11 @@ pub(crate) use self::checkpoint::{
     GitCheckpointInfo, GitRestorePreview, GitRestoreResult,
 };
 pub(crate) use self::commit_message::collect_commit_message_context;
+pub(crate) use self::merge::{
+    apply_resolved_files, conflict_resolve_prompt, list_unmerged_paths, merge_in_progress,
+    read_worktree_text, run_abort_merge, run_merge_session_worktree, sanitize_conflict_resolution,
+    MergeWorktreeAction, MergeWorktreeResult, MergeWorktreeStatus, ResolveWorktreeAction,
+};
 pub(crate) use self::repo::load_repo_info;
 pub(crate) use self::runner::{GitTarget, IndexMode};
 
@@ -499,4 +506,108 @@ pub(crate) async fn clear_git_checkpoints<R: Runtime>(
     )
     .await;
     Ok(count)
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorktreeMergeState {
+    pub in_progress: bool,
+    pub conflicts: Vec<String>,
+}
+
+#[tauri::command]
+pub(crate) async fn merge_session_worktree<R: Runtime>(
+    app: AppHandle<R>,
+    state: State<'_, Arc<Mutex<NativeAgentManager>>>,
+    workspace_id: String,
+    session_id: String,
+    action: MergeWorktreeAction,
+    branch_name: Option<String>,
+) -> Result<MergeWorktreeResult, String> {
+    if action != MergeWorktreeAction::Keep
+        && state
+            .lock()
+            .await
+            .has_working_workspace_processes(&workspace_id)
+    {
+        return Err("该工作区有正在执行的会话，请等待本轮结束或停止后再合并".to_string());
+    }
+    let pool = sqlite_pool(&app).await?;
+    if action == MergeWorktreeAction::Keep {
+        record_git_activity(
+            &pool,
+            "git_worktree_merge",
+            &workspace_id,
+            Some(&session_id),
+            "已保留隔离工作树",
+            serde_json::json!({"action": "keep"}),
+        )
+        .await;
+        return Ok(MergeWorktreeResult {
+            status: MergeWorktreeStatus::Kept,
+            branch: None,
+            commit_oid: None,
+            conflicts: Vec::new(),
+            resolved: Vec::new(),
+            failed: Vec::new(),
+            message: "已保留隔离工作树，未改动主工作区".to_string(),
+        });
+    }
+    let working_dir: Option<String> =
+        sqlx::query_scalar("SELECT working_dir FROM agent_sessions WHERE id = $1 LIMIT 1")
+            .bind(&session_id)
+            .fetch_optional(&pool)
+            .await
+            .map_err(|error| format!("读取会话失败: {error}"))?
+            .flatten();
+    let working_dir = working_dir
+        .as_deref()
+        .map(str::trim)
+        .filter(|item| !item.is_empty())
+        .ok_or_else(|| "会话没有隔离工作树目录".to_string())?;
+    let main = resolve_git_target(&app, &workspace_id).await?;
+    let worktree = resolve_git_target_at(&app, &workspace_id, working_dir).await?;
+    let result = run_merge_session_worktree(
+        &pool,
+        &main,
+        &worktree,
+        &workspace_id,
+        &session_id,
+        action,
+        branch_name.as_deref(),
+    )
+    .await
+    .map_err(String::from)?;
+    record_git_activity(
+        &pool,
+        "git_worktree_merge",
+        &workspace_id,
+        Some(&session_id),
+        &result.message,
+        serde_json::json!({
+            "action": action,
+            "status": result.status,
+            "branch": result.branch,
+            "conflicts": result.conflicts,
+        }),
+    )
+    .await;
+    Ok(result)
+}
+
+#[tauri::command]
+pub(crate) async fn get_worktree_merge_state<R: Runtime>(
+    app: AppHandle<R>,
+    workspace_id: String,
+) -> Result<WorktreeMergeState, String> {
+    let target = resolve_git_target(&app, &workspace_id).await?;
+    if !merge_in_progress(&target).await.map_err(String::from)? {
+        return Ok(WorktreeMergeState {
+            in_progress: false,
+            conflicts: Vec::new(),
+        });
+    }
+    Ok(WorktreeMergeState {
+        in_progress: true,
+        conflicts: list_unmerged_paths(&target).await.map_err(String::from)?,
+    })
 }
