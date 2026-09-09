@@ -4,10 +4,13 @@ import { useTranslation } from "react-i18next";
 
 import { checkoutGitBranch, createGitBranch, listGitBranches } from "@/lib/backend";
 import type { GitBranch as GitBranchType } from "@/lib/types";
+import { isManagedWorktreePath } from "@/lib/worktreePath";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { useDismissible } from "@/hooks/useDismissible";
 import { useGitStore } from "@/stores/gitStore";
+import { useSessionStore } from "@/stores/sessionStore";
+import { useSettingsStore } from "@/stores/settingsStore";
 import { useWorkspaceStore } from "@/stores/workspaceStore";
 
 function errorMessage(error: unknown): string {
@@ -17,6 +20,19 @@ function errorMessage(error: unknown): string {
 export function BranchPicker() {
   const { t } = useTranslation(["git", "common"]);
   const workspaceId = useWorkspaceStore((state) => state.activeWorkspaceId);
+  const sessionId = useSessionStore((state) => state.selectedSessionId);
+  const session = useWorkspaceStore((state) =>
+    sessionId ? state.sessions.find((item) => item.id === sessionId) : undefined,
+  );
+  const runtime = useSessionStore((state) =>
+    sessionId ? state.configurationBySession[sessionId] : undefined,
+  );
+  const worktreeRoot = useSettingsStore((state) => state.native?.worktree_root);
+  const isolated = Boolean(
+    session &&
+    isManagedWorktreePath(runtime?.worktree_path ?? session.working_dir, session.id, worktreeRoot),
+  );
+  const revision = useGitStore((state) => state.revision);
   const [branches, setBranches] = useState<GitBranchType[]>([]);
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState("");
@@ -39,14 +55,14 @@ export function BranchPicker() {
       setBranches([]);
       return;
     }
-    void listGitBranches(workspaceId)
+    void listGitBranches(workspaceId, sessionId)
       .then(setBranches)
       .catch(() => setBranches([]));
-  }, [workspaceId]);
+  }, [sessionId, workspaceId]);
 
   useEffect(() => {
     loadBranches();
-  }, [loadBranches]);
+  }, [loadBranches, revision]);
 
   const filtered = useMemo(
     () => branches.filter((item) => item.name.toLowerCase().includes(query.trim().toLowerCase())),
@@ -73,9 +89,12 @@ export function BranchPicker() {
     }
     setError(null);
     setBusy(true);
-    void checkoutGitBranch(workspaceId, branch.name)
-      .then(() => listGitBranches(workspaceId).then(setBranches))
-      .then(() => setOpen(false))
+    void checkoutGitBranch(workspaceId, branch.name, sessionId)
+      .then(() => listGitBranches(workspaceId, sessionId).then(setBranches))
+      .then(() => {
+        useGitStore.getState().bumpRevision();
+        setOpen(false);
+      })
       .catch((err: unknown) => setError(errorMessage(err)))
       .finally(() => setBusy(false));
   };
@@ -104,7 +123,9 @@ export function BranchPicker() {
               className="h-7"
             />
           </div>
-          <p className="px-2 pb-1 text-[11px] text-muted-foreground">{t("git:switchHint")}</p>
+          <p className="px-2 pb-1 text-[11px] text-muted-foreground">
+            {isolated ? t("git:switchHintIsolated") : t("git:switchHint")}
+          </p>
           {error ? <p className="px-2 pb-1 text-[11px] text-destructive">{error}</p> : null}
           <div className="max-h-48 overflow-y-auto">
             {filtered.map((branch) => (
@@ -136,9 +157,10 @@ export function BranchPicker() {
                     if (busy) return;
                     setError(null);
                     setBusy(true);
-                    void createGitBranch(workspaceId, name.trim(), true)
-                      .then(() => listGitBranches(workspaceId).then(setBranches))
+                    void createGitBranch(workspaceId, name.trim(), true, sessionId)
+                      .then(() => listGitBranches(workspaceId, sessionId).then(setBranches))
                       .then(() => {
+                        useGitStore.getState().bumpRevision();
                         setCreating(false);
                         setName("");
                         setOpen(false);

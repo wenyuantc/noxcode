@@ -81,7 +81,7 @@ Composer / 编辑重发 / 重试走 `submitSessionPrompt`：有选中会话则 `
 
 侧栏工作区行悬停显示操作菜单，可重命名或删除。删除先弹不可撤销确认；后端发现该工作区仍有运行中的会话时拒绝删除并把错误展示给用户。
 
-分支选择器：`listGitBranches` 搜索切换已有分支（`checkoutGitBranch` / `git switch`），以及「创建并检出」。点外或 Escape 关闭菜单。
+分支选择器：`listGitBranches(workspaceId, sessionId)` 搜索切换已有分支（`checkoutGitBranch` / `git switch`），以及「创建并检出」。隔离会话显示该 worktree 的当前分支，不再固定主工作区的 `dev`。点外或 Escape 关闭菜单。合并工作树成功后 `gitStore.revision` 递增，选择器与 Git 侧栏一起刷新。
 
 命令面板：`Dialog` + 键盘导航，三类过滤（操作 / 最近会话 / `list_git_files`）。
 

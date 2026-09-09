@@ -291,8 +291,11 @@ export function pushGitBranch(
   return invoke("push_git_branch", { workspaceId, remote, branch, setUpstream });
 }
 
-export function listGitBranches(workspaceId: string): Promise<GitBranch[]> {
-  return invoke("list_git_branches", { workspaceId });
+export function listGitBranches(
+  workspaceId: string,
+  sessionId?: string | null,
+): Promise<GitBranch[]> {
+  return invoke("list_git_branches", { workspaceId, sessionId: sessionId ?? null });
 }
 
 export function pullGitBranch(workspaceId: string): Promise<GitPullResult> {
@@ -303,12 +306,22 @@ export function createGitBranch(
   workspaceId: string,
   name: string,
   checkout: boolean,
+  sessionId?: string | null,
 ): Promise<GitBranch> {
-  return invoke("create_git_branch", { workspaceId, name, checkout });
+  return invoke("create_git_branch", {
+    workspaceId,
+    name,
+    checkout,
+    sessionId: sessionId ?? null,
+  });
 }
 
-export function checkoutGitBranch(workspaceId: string, name: string): Promise<GitBranch> {
-  return invoke("checkout_git_branch", { workspaceId, name });
+export function checkoutGitBranch(
+  workspaceId: string,
+  name: string,
+  sessionId?: string | null,
+): Promise<GitBranch> {
+  return invoke("checkout_git_branch", { workspaceId, name, sessionId: sessionId ?? null });
 }
 
 export function listGitFiles(

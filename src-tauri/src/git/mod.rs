@@ -377,8 +377,9 @@ pub(crate) async fn pull_git_branch<R: Runtime>(
 pub(crate) async fn list_git_branches<R: Runtime>(
     app: AppHandle<R>,
     workspace_id: String,
+    session_id: Option<String>,
 ) -> Result<Vec<GitBranch>, String> {
-    let target = resolve_git_target(&app, &workspace_id).await?;
+    let target = resolve_git_target_for_session(&app, &workspace_id, session_id.as_deref()).await?;
     list_branches(&target).await.map_err(Into::into)
 }
 
@@ -388,8 +389,9 @@ pub(crate) async fn create_git_branch<R: Runtime>(
     workspace_id: String,
     name: String,
     checkout: bool,
+    session_id: Option<String>,
 ) -> Result<GitBranch, String> {
-    let target = resolve_git_target(&app, &workspace_id).await?;
+    let target = resolve_git_target_for_session(&app, &workspace_id, session_id.as_deref()).await?;
     create_branch(&target, &name, checkout)
         .await
         .map_err(Into::into)
@@ -400,8 +402,9 @@ pub(crate) async fn checkout_git_branch<R: Runtime>(
     app: AppHandle<R>,
     workspace_id: String,
     name: String,
+    session_id: Option<String>,
 ) -> Result<GitBranch, String> {
-    let target = resolve_git_target(&app, &workspace_id).await?;
+    let target = resolve_git_target_for_session(&app, &workspace_id, session_id.as_deref()).await?;
     checkout_branch(&target, &name).await.map_err(Into::into)
 }
 

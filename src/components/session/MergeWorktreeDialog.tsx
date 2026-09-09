@@ -22,6 +22,7 @@ import {
 } from "@/lib/backend";
 import type { MergeWorktreeResult } from "@/lib/types";
 import { cn } from "@/lib/utils";
+import { useGitStore } from "@/stores/gitStore";
 import { useSessionStore } from "@/stores/sessionStore";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { useUiStore } from "@/stores/uiStore";
@@ -160,6 +161,7 @@ export function MergeWorktreeDialog() {
       result.status === "resolved" ||
       result.status === "branched"
     ) {
+      useGitStore.getState().bumpRevision();
       markMerged(prompt.sessionId);
       return;
     }

@@ -94,6 +94,7 @@ function GitWorkspacePanel({ workspaceId }: { workspaceId: string | null }) {
   const reloadId = useRef(0);
   const [refreshError, setRefreshError] = useState<string | null>(null);
   const pullState = useGitStore((state) => (workspaceId ? state.pulls[workspaceId] : undefined));
+  const revision = useGitStore((state) => state.revision);
   const pulling = pullState?.status === "pulling";
   const busy = localBusy || pulling;
   const setBusy = (value: boolean) => {
@@ -151,7 +152,7 @@ function GitWorkspacePanel({ workspaceId }: { workspaceId: string | null }) {
 
   useEffect(() => {
     if (pullState?.status !== "pulling") void reload();
-  }, [reload, pullState]);
+  }, [reload, pullState, revision]);
 
   useEffect(() => {
     if (!workspaceId || !gitFocusPath) return;

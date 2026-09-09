@@ -94,12 +94,12 @@ ref：`refs/noxcode/checkpoints/<session_id>/<seq>`。author / committer 固定 
 | `commit_git_changes` | `commit -m [-- paths]` |
 | `push_git_branch` | 含 `--set-upstream`，超时 300s |
 | `pull_git_branch` | 当前分支上游的 `pull --ff-only --no-rebase --no-autostash`，超时 300s |
-| `list_git_branches` / `create_git_branch` / `checkout_git_branch` | `for-each-ref` / `check-ref-format` + `switch -c` / `switch` |
+| `list_git_branches` / `create_git_branch` / `checkout_git_branch` | 可选 `session_id`：隔离会话看该 worktree 的当前分支；`for-each-ref` / `check-ref-format` + `switch -c` / `switch` |
 | `list_git_files` | `ls-files --cached --others --exclude-standard -z`，供 ⌘K / `@` |
 | `create_git_checkpoint` / `list_git_checkpoints` | 打点；列表带 `ref_valid` |
 | `preview_git_checkpoint_restore` / `restore_git_checkpoint` | 预览 / 回滚 |
 | `clear_git_checkpoints` | 清本仓库全部检查点并写活动审计 |
-| `merge_session_worktree` | 会话隔离 worktree：合并回当前分支（内部 `noxcode/wt-*` 指针，不 `branch -f` 已检出分支）/ 建分支 / 保留；可选 `commit_message` 作为打点与合并说明；冲突保留 MERGE_HEAD |
+| `merge_session_worktree` | 会话隔离 worktree：合并回当前分支（隔离树 `reset --hard` 到打点，不 `branch -f` 已检出分支）/ 建分支（隔离树切到新分支并清空）/ 保留；可选 `commit_message` 作为打点与合并说明；冲突保留 MERGE_HEAD |
 | `get_worktree_merge_state` | 主工作区是否在 merge 中间态及冲突文件 |
 | `resolve_session_worktree_merge` | 冲突后续：AI 写回并完成提交，或 `merge --abort` |
 | `list_managed_worktrees` | 列出托管隔离工作树（会话记录 + 根目录残留） |
@@ -111,7 +111,7 @@ ref：`refs/noxcode/checkpoints/<session_id>/<seq>`。author / committer 固定 
 
 会话文件预览只读，不修改 index 或忽略规则。当前内容最多读取 256 KiB + 1 字节，UTF-8 截断不切断字符；非文本仅显示二进制状态。本地读取校验规范化后的物理路径，SSH 校验物理父目录且拒绝最终文件符号链接，均禁止越出工作区。托管隔离 worktree 内的绝对路径会改到对应 worktree 再预览，不再被主工作区边界挡住。Git 命令失败保留为错误，不伪装成空差异；单文件 diff 使用 literal pathspec，避免文件名中的通配符匹配其它文件。
 
-选中隔离会话时，Git 侧栏的 status / diff / stage / commit / 提交说明生成走该会话 `working_dir` 对应的 worktree；拉取 / 推送 / 分支切换仍看主工作区。本地托管工作树默认落在 `~/.noxcode/worktrees/<session_id>`（无 HOME 时回退 `$APPCONFIG/worktrees`）；设置页可改根目录，列表仍会扫到旧 `$APPCONFIG/worktrees` 残留。隔离时会检出唯一会话分支 `noxcode/wt-<session>`，主工作区仍停在原来的分支；合并回当前分支时在隔离树内前移该分支再 `merge`，不会 force-update 主工作区已检出的分支。旧的 detached 工作树仍走内部指针。合并弹窗可手写或用侧边栏同款「生成提交说明」填写说明，再写入 checkpoint / 合并提交，避免历史里只剩 `worktree_merge`。
+选中隔离会话时，Git 侧栏的 status / diff / stage / commit / 提交说明生成走该会话 `working_dir` 对应的 worktree；标题栏分支选择器同样看该 worktree 的当前分支（`list` / `switch` / `switch -c` 带 `session_id`）。拉取 / 推送仍看主工作区。本地托管工作树默认落在 `~/.noxcode/worktrees/<session_id>`（无 HOME 时回退 `$APPCONFIG/worktrees`）；设置页可改根目录，列表仍会扫到旧 `$APPCONFIG/worktrees` 残留。隔离时会检出唯一会话分支 `noxcode/wt-<session>`，主工作区仍停在原来的分支；合并回当前分支时在隔离树内 `reset --hard` 到打点提交再 `merge`，同步 index / 工作区，避免同一文件同时出现在已暂存和未暂存。建成新分支时若名字已是隔离树当前分支则只提交并清空；否则创建后在隔离树 `switch --discard-changes`。不会 force-update 主工作区已检出的分支。旧的 detached 工作树仍走内部指针，合并后同样 reset 干净。合并弹窗可手写或用侧边栏同款「生成提交说明」填写说明，再写入 checkpoint / 合并提交，避免历史里只剩 `worktree_merge`。成功后前端 `gitStore.revision` 递增，标题栏与侧栏一起刷新。
 
 ## 安全拉取
 
