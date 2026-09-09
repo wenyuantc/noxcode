@@ -79,7 +79,7 @@
   "mergeWorktreeBranchNameHint": "Used only when creating a new branch. The default name updates and cleans the isolated worktree; a new name is checked out there. The main workspace branch stays put.",
   "mergeWorktreeCommitHint": "This message is used to commit the isolated worktree changes before merging or creating a branch.",
   "mergeWorktreeConflictsTitle": "Merge has conflicts",
-  "mergeWorktreeConflictsHint": "The main workspace is mid-merge. Let AI resolve the files, or open the Git panel to fix them yourself.",
+  "mergeWorktreeConflictsHint": "The main workspace is mid-merge. Resolve with AI in this session, or open the Git panel to fix the files yourself.",
   "mergeWorktreeAi": "Resolve with AI",
   "mergeWorktreeManual": "Resolve manually",
   "mergeWorktreeAbort": "Abort merge",

@@ -1655,6 +1655,61 @@ async fn merge_worktree_conflict_stays_and_abort_cleans() {
 }
 
 #[tokio::test]
+async fn complete_merge_commits_resolved_worktree_files() {
+    let env = local_env().await;
+    let (pool, workspace_id, session_id) = seed_session().await;
+    let wt = env.dir.path().join("worktrees").join(&session_id);
+    let wt_text = wt.to_string_lossy().into_owned();
+    super::worktree::add_detached(&env.target, &wt_text)
+        .await
+        .expect("add");
+    sqlx::query("UPDATE agent_sessions SET working_dir = $1 WHERE id = $2")
+        .bind(&wt_text)
+        .bind(&session_id)
+        .execute(&pool)
+        .await
+        .expect("working_dir");
+    std::fs::write(wt.join("README.md"), "from worktree\n").unwrap();
+    std::fs::write(env.dir.path().join("README.md"), "from main\n").unwrap();
+    fixture_git(&env.target, &["add", "README.md"])
+        .await
+        .expect("add main");
+    fixture_git(&env.target, &["commit", "-m", "main change"])
+        .await
+        .expect("commit main");
+    let conflicted = super::merge::run_merge_session_worktree(
+        &pool,
+        &env.target,
+        &GitTarget::Local(wt.clone()),
+        &workspace_id,
+        &session_id,
+        super::merge::MergeWorktreeAction::MergeCurrent,
+        None,
+        None,
+        None,
+    )
+    .await
+    .expect("merge");
+    assert_eq!(
+        conflicted.status,
+        super::merge::MergeWorktreeStatus::Conflicted
+    );
+    std::fs::write(env.dir.path().join("README.md"), "resolved by session\n").unwrap();
+    let completed = super::merge::complete_merge_from_worktree(&env.target)
+        .await
+        .expect("complete");
+    assert_eq!(
+        completed.status,
+        super::merge::MergeWorktreeStatus::Resolved
+    );
+    assert!(!super::merge::merge_in_progress(&env.target).await.unwrap());
+    assert_eq!(
+        std::fs::read_to_string(env.dir.path().join("README.md")).unwrap(),
+        "resolved by session\n"
+    );
+}
+
+#[tokio::test]
 async fn git_status_on_session_worktree_sees_isolated_edits() {
     let env = local_env().await;
     let (pool, _workspace_id, session_id) = seed_session().await;
