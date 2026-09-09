@@ -8,6 +8,7 @@ import {
   Bot,
   Brain,
   Clock,
+  Code2,
   Database,
   Info,
   Palette,
@@ -34,6 +35,7 @@ import { DatabaseSection } from "./DatabaseSection";
 import { GeneralSection } from "./GeneralSection";
 import { AiChannelsSettingsTab } from "./AiChannelsSettingsTab";
 import { McpSettingsTab } from "./McpSettingsTab";
+import { LspSection } from "./LspSection";
 import { MemorySection } from "./MemorySection";
 import { NativeHooksSettingsCard } from "./NativeHooksSettingsCard";
 import { NativeRuntimeSection } from "./NativeRuntimeSection";
@@ -56,6 +58,7 @@ const SECTION_META: Record<string, SectionMeta> = {
   ai: { icon: WandSparkles, descriptionKey: "ai.description" },
   ssh: { icon: Terminal, descriptionKey: "ssh.description" },
   runtime: { icon: Zap, descriptionKey: "runtime.hint" },
+  lsp: { icon: Code2, descriptionKey: "lsp.hint" },
   permissions: { icon: ShieldCheck, descriptionKey: "permissions.description" },
   memory: { icon: Brain, descriptionKey: "memory.description" },
   automations: { icon: Clock, descriptionKey: "automations.hint" },
@@ -78,6 +81,7 @@ const GROUPS = [
     id: "agent",
     items: [
       "runtime",
+      "lsp",
       "permissions",
       "memory",
       "automations",
@@ -238,6 +242,7 @@ export function SettingsLayout() {
             {current === "ai" ? <AiFeaturesSection /> : null}
             {current === "ssh" ? <SshSettingsSection /> : null}
             {current === "runtime" ? <NativeRuntimeSection /> : null}
+            {current === "lsp" ? <LspSection /> : null}
             {current === "permissions" ? <PermissionRulesSection /> : null}
             {current === "memory" ? <MemorySection /> : null}
             {current === "automations" ? <AutomationsSection /> : null}
