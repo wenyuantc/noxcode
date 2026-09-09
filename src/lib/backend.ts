@@ -391,6 +391,10 @@ export function resolveSessionWorktreeMerge(
   return invoke("resolve_session_worktree_merge", { workspaceId, sessionId, action });
 }
 
+export function restoreSessionWorktree(sessionId: string): Promise<string | null> {
+  return invoke("restore_session_worktree", { sessionId });
+}
+
 export function getWorktreeMergeState(workspaceId: string): Promise<WorktreeMergeState> {
   return invoke("get_worktree_merge_state", { workspaceId });
 }
