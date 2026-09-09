@@ -12,7 +12,7 @@ use crate::app::shared::{normalize_optional_text, sqlite_pool};
 use crate::db::models::AgentSessionRecord;
 use crate::git::{
     apply_resolved_files, collect_commit_message_context, complete_merge_from_worktree,
-    conflict_resolve_prompt, list_unmerged_paths, merge_in_progress, read_worktree_text,
+    conflict_resolve_prompt_for_locale, list_unmerged_paths, merge_in_progress, read_worktree_text,
     resolve_git_target, resolve_git_target_for_session, run_abort_merge,
     sanitize_conflict_resolution, MergeWorktreeResult, ResolveWorktreeAction,
 };
@@ -113,7 +113,26 @@ pub(crate) async fn resolve_ai_feature_target(
     ))
 }
 
-fn commit_message_prompt(style: CommitMessageStyle, context: &str) -> String {
+fn commit_message_prompt(style: CommitMessageStyle, context: &str, locale: Option<&str>) -> String {
+    if locale == Some("en") {
+        return match style {
+            CommitMessageStyle::Concise => format!(
+                "Generate a concise Conventional Commit message from the following Git changes.\n\\
+Output one line only; no body, explanation, or code fences.\n\\
+Format: type(scope): subject\n\\
+Keep the entire line under 72 characters. Use an imperative subject that summarizes the main change.\n\n\\
+Changes:\n{context}"
+            ),
+            CommitMessageStyle::Detailed => format!(
+                "Generate a detailed Conventional Commit message from the following Git changes.\n\\
+Output only the commit message itself; no explanation or code fences.\n\\
+First line: type(scope): subject (under 72 characters).\n\\
+After a blank line, use bullet points to explain what changed, why, and which modules or files are affected.\n\\
+Every item must come from the actual diff below; do not invent details. Even small changes need a concrete explanation, not only a title.\n\n\\
+Changes:\n{context}"
+            ),
+        };
+    }
     match style {
         CommitMessageStyle::Concise => format!(
             "根据以下 Git 变更生成一条简约的 Conventional Commit 提交说明。\n\
@@ -133,7 +152,14 @@ fn commit_message_prompt(style: CommitMessageStyle, context: &str) -> String {
     }
 }
 
-fn session_title_prompt(prompt: &str) -> String {
+fn session_title_prompt(prompt: &str, locale: Option<&str>) -> String {
+    if locale == Some("en") {
+        return format!(
+            "Summarize the topic of the following user request in no more than 30 Chinese characters or English words as the session title.\n\\
+Output the title only; do not add quotes, decorative punctuation, or an explanation.\n\n\\
+User request:\n{prompt}"
+        );
+    }
     format!(
         "用不超过 30 个汉字或英文词概括下面用户请求的主题，作为会话标题。\n\
 只输出标题，不要引号、标点装饰或解释。\n\n\
@@ -172,6 +198,7 @@ pub async fn generate_git_commit_message(
     app: AppHandle,
     workspace_id: String,
     session_id: Option<String>,
+    locale: Option<String>,
 ) -> Result<String, String> {
     let settings = load_ai_settings(&app)?;
     if !settings.commit_message.enabled {
@@ -186,7 +213,7 @@ pub async fn generate_git_commit_message(
         settings.commit_message.as_override(),
         Some(&workspace_id),
         None,
-        commit_message_prompt(settings.commit_message.style, &context),
+        commit_message_prompt(settings.commit_message.style, &context, locale.as_deref()),
         OPERATION_COMMIT_MESSAGE,
     )
     .await?;
@@ -234,6 +261,7 @@ pub async fn resolve_session_worktree_merge(
     workspace_id: String,
     session_id: String,
     action: ResolveWorktreeAction,
+    locale: Option<String>,
 ) -> Result<MergeWorktreeResult, String> {
     if state
         .lock()
@@ -282,7 +310,11 @@ pub async fn resolve_session_worktree_merge(
                         channel_id: &channel_id,
                         workspace_id: Some(&workspace_id),
                         session_id: Some(&session_id),
-                        prompt: conflict_resolve_prompt(&path, &content),
+                        prompt: conflict_resolve_prompt_for_locale(
+                            &path,
+                            &content,
+                            locale.as_deref(),
+                        ),
                         image_paths: None,
                         model: Some(&model),
                         reasoning_effort: reasoning_effort.as_deref(),
@@ -323,12 +355,15 @@ pub(crate) fn spawn_session_title_generation(
     session_id: String,
     workspace_id: String,
     prompt: String,
+    locale: Option<String>,
 ) {
     if session_title(&prompt).is_none() {
         return;
     }
     tauri::async_runtime::spawn(async move {
-        if let Err(error) = generate_session_title(&app, &session_id, &workspace_id, &prompt).await
+        if let Err(error) =
+            generate_session_title(&app, &session_id, &workspace_id, &prompt, locale.as_deref())
+                .await
         {
             eprintln!("[ai] 生成会话标题失败: {error}");
         }
@@ -340,6 +375,7 @@ async fn generate_session_title(
     session_id: &str,
     workspace_id: &str,
     prompt: &str,
+    locale: Option<&str>,
 ) -> Result<(), String> {
     let settings = load_ai_settings(app)?;
     if !settings.session_title.enabled {
@@ -352,7 +388,7 @@ async fn generate_session_title(
         &settings.session_title,
         Some(workspace_id),
         Some(session_id),
-        session_title_prompt(prompt),
+        session_title_prompt(prompt, locale),
         OPERATION_SESSION_TITLE,
     )
     .await?;
@@ -418,13 +454,23 @@ mod tests {
 
     #[test]
     fn commit_message_prompt_differs_by_style() {
-        let concise = commit_message_prompt(CommitMessageStyle::Concise, "diff a");
-        let detailed = commit_message_prompt(CommitMessageStyle::Detailed, "diff a");
+        let concise = commit_message_prompt(CommitMessageStyle::Concise, "diff a", None);
+        let detailed = commit_message_prompt(CommitMessageStyle::Detailed, "diff a", None);
         assert!(concise.contains("简约"));
         assert!(concise.contains("不要正文"));
         assert!(detailed.contains("明细"));
         assert!(detailed.contains("项目符号"));
         assert_ne!(concise, detailed);
+    }
+
+    #[test]
+    fn english_prompts_use_english_instructions() {
+        let commit = commit_message_prompt(CommitMessageStyle::Concise, "diff a", Some("en"));
+        assert!(commit.contains("Generate a concise"));
+        assert!(!commit.contains("根据以下"));
+        let title = session_title_prompt("fix login", Some("en"));
+        assert!(title.contains("Summarize the topic"));
+        assert!(!title.contains("用不超过"));
     }
 
     #[tokio::test]

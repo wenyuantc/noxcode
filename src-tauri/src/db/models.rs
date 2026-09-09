@@ -716,6 +716,8 @@ pub struct StartNativeSessionInput {
     pub permission_mode: Option<String>,
     #[serde(default)]
     pub isolate_worktree: Option<bool>,
+    #[serde(default)]
+    pub locale: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

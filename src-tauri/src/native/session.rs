@@ -2073,6 +2073,7 @@ async fn start_native_session_locked(
             session_record_id.clone(),
             workspace_id.clone(),
             payload.prompt.clone(),
+            payload.locale.clone(),
         );
     }
 

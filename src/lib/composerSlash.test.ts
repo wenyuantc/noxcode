@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import {
   builtinSlashCommands,
@@ -128,6 +128,15 @@ describe("prompt builders", () => {
     expect(buildCreateSkillPrompt("code-review")).toContain("when-to-use");
     expect(buildCreateSubagentPrompt("explore", "只读")).toContain(".noxcode/agents/explore.md");
     expect(buildCreateSubagentPrompt("explore")).toContain("injectAgentsMd");
+  });
+
+  it("follows the active locale for generated prompts", () => {
+    vi.stubGlobal("window", { localStorage: { getItem: () => "en" } });
+    expect(buildInitPrompt("extra")).toContain("Generate or update AGENTS.md");
+    expect(skillInvocationPrompt("review", "pr 12")).toContain("Please call the Skill tool");
+    expect(buildGoalPrompt("修登录")).toContain("Goal:");
+    expect(buildReviewPrompt("src/lib")).toContain("Review the uncommitted changes");
+    vi.unstubAllGlobals();
   });
 
   it("parses goal args", () => {

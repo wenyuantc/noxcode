@@ -17,7 +17,31 @@ fn settings_path(config_dir: &Path) -> PathBuf {
     config_dir.join(SETTINGS_FILE_NAME)
 }
 
-pub(crate) fn default_quick_prompts() -> Vec<QuickPrompt> {
+pub(crate) fn default_quick_prompts_for_locale(locale: Option<&str>) -> Vec<QuickPrompt> {
+    if locale == Some("en") {
+        return vec![
+            QuickPrompt {
+                id: "explore".to_string(),
+                label: "Understand codebase".to_string(),
+                prompt: "Analyze the current workspace architecture and module responsibilities, then output a structured report".to_string(),
+            },
+            QuickPrompt {
+                id: "fix".to_string(),
+                label: "Fix error".to_string(),
+                prompt: "I encountered this error: (paste it here). Identify the cause and fix it".to_string(),
+            },
+            QuickPrompt {
+                id: "test".to_string(),
+                label: "Add tests".to_string(),
+                prompt: "Add and run tests for (file/function)".to_string(),
+            },
+            QuickPrompt {
+                id: "commit".to_string(),
+                label: "Write commit message".to_string(),
+                prompt: "Review the current Git changes and generate a Conventional Commit message".to_string(),
+            },
+        ];
+    }
     vec![
         QuickPrompt {
             id: "explore".to_string(),
@@ -73,10 +97,13 @@ fn normalize_quick_prompts(prompts: Vec<QuickPrompt>) -> Result<Vec<QuickPrompt>
     Ok(normalized)
 }
 
-pub(crate) fn load_quick_prompts_from(config_dir: &Path) -> Result<Vec<QuickPrompt>, String> {
+pub(crate) fn load_quick_prompts_from(
+    config_dir: &Path,
+    locale: Option<&str>,
+) -> Result<Vec<QuickPrompt>, String> {
     let path = settings_path(config_dir);
     if !path.exists() {
-        return Ok(default_quick_prompts());
+        return Ok(default_quick_prompts_for_locale(locale));
     }
     let raw = fs::read_to_string(&path).map_err(|error| format!("读取快捷提示失败: {error}"))?;
     let parsed: Vec<QuickPrompt> =
@@ -104,12 +131,15 @@ pub(crate) fn save_quick_prompts_to(
 }
 
 #[tauri::command]
-pub async fn get_quick_prompts<R: Runtime>(app: AppHandle<R>) -> Result<Vec<QuickPrompt>, String> {
+pub async fn get_quick_prompts<R: Runtime>(
+    app: AppHandle<R>,
+    locale: Option<String>,
+) -> Result<Vec<QuickPrompt>, String> {
     let config_dir = app
         .path()
         .app_config_dir()
         .map_err(|error| format!("无法读取应用配置目录: {error}"))?;
-    load_quick_prompts_from(&config_dir)
+    load_quick_prompts_from(&config_dir, locale.as_deref())
 }
 
 #[tauri::command]
@@ -143,9 +173,20 @@ mod tests {
     #[test]
     fn missing_file_returns_defaults() {
         let dir = temp_dir();
-        let loaded = load_quick_prompts_from(&dir).expect("load");
-        assert_eq!(loaded, default_quick_prompts());
+        let loaded = load_quick_prompts_from(&dir, None).expect("load");
+        assert_eq!(loaded, default_quick_prompts_for_locale(None));
         cleanup(&dir);
+    }
+
+    #[test]
+    fn english_defaults_are_localized() {
+        let prompts = default_quick_prompts_for_locale(Some("en"));
+        assert_eq!(prompts[0].label, "Understand codebase");
+        assert!(prompts[0].prompt.starts_with("Analyze"));
+        assert!(prompts.iter().all(|item| !item
+            .label
+            .chars()
+            .any(|c| ('\u{4e00}'..='\u{9fff}').contains(&c))));
     }
 
     #[test]
@@ -157,7 +198,7 @@ mod tests {
             prompt: "做一件事".to_string(),
         }];
         save_quick_prompts_to(&dir, &prompts).expect("save");
-        let loaded = load_quick_prompts_from(&dir).expect("load");
+        let loaded = load_quick_prompts_from(&dir, None).expect("load");
         assert_eq!(loaded, prompts);
         cleanup(&dir);
     }

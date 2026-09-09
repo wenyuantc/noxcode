@@ -102,6 +102,15 @@ describe("maybeOpenWorktreeMerge", () => {
     expect(text).toContain("自动回到隔离工作树");
   });
 
+  it("uses English instructions when the app is in English", () => {
+    vi.stubGlobal("window", { localStorage: { getItem: () => "en" } });
+    const text = mergeConflictResolvePrompt([]);
+    expect(text).toContain("The main workspace is in the middle of a merge");
+    expect(text).toContain("ExitWorktree");
+    expect(text).not.toContain("主工作区");
+    vi.unstubAllGlobals();
+  });
+
   it("does not finish an AI merge when none is pending", async () => {
     await expect(maybeFinishAiMergeResolve({ sessionId: "s1", workspaceId: "ws-1" })).resolves.toBe(
       false,

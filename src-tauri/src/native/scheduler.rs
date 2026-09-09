@@ -453,6 +453,7 @@ pub async fn run_automation_now(
             plan_mode: Some(false),
             permission_mode: None,
             isolate_worktree: None,
+            locale: None,
         },
     )
     .await?;

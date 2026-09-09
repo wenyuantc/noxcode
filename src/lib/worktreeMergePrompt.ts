@@ -4,6 +4,7 @@ import {
   restoreSessionWorktree,
 } from "@/lib/backend";
 import type { WorktreeMergePrompt } from "@/lib/types";
+import { promptT } from "@/lib/promptI18n";
 import { isManagedWorktreePath } from "@/lib/worktreePath";
 import { useGitStore } from "@/stores/gitStore";
 import { useSessionStore } from "@/stores/sessionStore";
@@ -24,15 +25,15 @@ export function mergeConflictResolvePrompt(conflicts: string[]): string {
     .map((path) => `- ${path}`)
     .join("\n");
   return [
-    "主工作区正在合并中间态，请在本会话解决下列冲突文件。不要用 Bash 执行 git merge、git add 或 git commit。",
+    promptT("worktree.intro"),
     "",
-    list || "- （未列出路径，请先查看主工作区未合并文件）",
+    list || `- ${promptT("worktree.missing")}`,
     "",
-    "请按顺序：",
-    "1. 若当前在隔离工作树，先调用 ExitWorktree 回到主工作区（只为读写冲突文件）。",
-    "2. 用 Read 读取每个冲突文件，根据 <<<<<<< / ======= / >>>>>>> 标记给出正确的完整内容。",
-    "3. 用 Write 或 Edit 写回主工作区，不要留下冲突标记。",
-    "4. 写完后用简短中文说明每个文件如何取舍。不要调用 EnterWorktree；本回合结束后会话会自动回到隔离工作树。",
+    promptT("worktree.steps"),
+    promptT("worktree.step1"),
+    promptT("worktree.step2"),
+    promptT("worktree.step3"),
+    promptT("worktree.step4"),
   ].join("\n");
 }
 

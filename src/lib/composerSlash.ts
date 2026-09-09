@@ -1,3 +1,5 @@
+import { promptT } from "@/lib/promptI18n";
+
 export type ComposerSlashGroup = "commands" | "skills" | "subagents";
 
 export interface ComposerSlashItem {
@@ -89,8 +91,8 @@ export function builtinSlashCommands(
 }
 
 export function skillInvocationPrompt(name: string, args?: string): string {
-  const lines = [`请先调用 Skill 工具加载 \`${name}\`，再按该技能执行。`];
-  if (args?.trim()) lines.push(`参数：${args.trim()}`);
+  const lines = [promptT("skillInvocation", { name })];
+  if (args?.trim()) lines.push(promptT("arguments", { args: args.trim() }));
   return lines.join("\n");
 }
 
@@ -114,18 +116,18 @@ export function isBuiltinSlashName(name: string): boolean {
 }
 
 export function subagentDelegationPrompt(name: string, id: string): string {
-  return `请用 Agent 工具委派给子智能体「${name}」（subagent_type=${id}）：`;
+  return promptT("subagentDelegation", { name, id });
 }
 
 /** `/init [补充要求]`：摸底仓库后生成或补充 AGENTS.md。 */
 export function buildInitPrompt(extra?: string): string {
   const lines = [
-    "请为当前仓库生成或补充 AGENTS.md（若已有 AGENTS.md / CLAUDE.md 则在其基础上补充，不要重复已有内容）。",
-    "先用 Glob / Read / Grep 摸底：项目结构与模块职责、构建 / 测试 / lint 命令、编码约定、关键架构约束、常见陷阱。",
-    "输出要求：简洁、面向编程 Agent、只写能从仓库验证的事实；每条命令都注明来源文件；不超过 150 行。",
-    "完成后用 Write 写入仓库根目录的 AGENTS.md，并在回复里列出你新增或修改的段落。",
+    promptT("init.intro"),
+    promptT("init.inspect"),
+    promptT("init.output"),
+    promptT("init.write"),
   ];
-  if (extra?.trim()) lines.push(`补充要求：${extra.trim()}`);
+  if (extra?.trim()) lines.push(promptT("init.extra", { extra: extra.trim() }));
   return lines.join("\n");
 }
 
@@ -137,49 +139,45 @@ export function parseNamedSlashArgs(args: string): { name: string; rest: string 
 
 export function buildCreateSkillPrompt(name: string, description?: string): string {
   const lines = [
-    `请为当前仓库编写技能「${name}」，用 Write 写入 \`.noxcode/skills/${name}/SKILL.md\`。`,
-    "先用 Glob / Grep 确认是否已有同名技能；已有则在其基础上补充，不要覆盖无关内容。",
-    "frontmatter 必须包含：name、description、argument-hint、allowed-tools、when-to-use。",
-    "正文写可执行工作流、约束和输出格式，不要只复述描述。",
-    "完成后在回复里说明如何用 `$" + name + "` 或 `/skill " + name + "` 调用。",
+    promptT("createSkill.intro", { name }),
+    promptT("createSkill.inspect"),
+    promptT("createSkill.frontmatter"),
+    promptT("createSkill.body"),
+    promptT("createSkill.finish", { name }),
   ];
-  if (description?.trim()) lines.push(`技能说明：${description.trim()}`);
+  if (description?.trim()) {
+    lines.push(promptT("createSkill.description", { description: description.trim() }));
+  }
   return lines.join("\n");
 }
 
 export function buildCreateSubagentPrompt(name: string, description?: string): string {
   const lines = [
-    `请为当前仓库编写子智能体「${name}」，用 Write 写入 \`.noxcode/agents/${name}.md\`。`,
-    "这是 source=file 的档案（设置页只读），不要改 native-subagents.json。",
-    "frontmatter 对齐现有解析：name、description、tools、disallowedTools、permissionMode、maxTurns、skills、injectAgentsMd。",
-    "正文即系统提示：单一职责、何时委派、输出格式。",
-    "写完后说明可在输入框 `/` 菜单的「子智能体」分组里选到。",
+    promptT("createSubagent.intro", { name }),
+    promptT("createSubagent.source"),
+    promptT("createSubagent.frontmatter"),
+    promptT("createSubagent.body"),
+    promptT("createSubagent.finish"),
   ];
-  if (description?.trim()) lines.push(`子智能体说明：${description.trim()}`);
+  if (description?.trim()) {
+    lines.push(promptT("createSubagent.description", { description: description.trim() }));
+  }
   return lines.join("\n");
 }
 
 export function buildGoalPrompt(args?: string): string {
   const parsed = parseGoalSlashArgs(args ?? "");
   if (parsed.action === "clear") {
-    return "请调用 Goal 工具清除当前会话目标：Goal(action=clear)。不要改业务代码。";
+    return promptT("goalClear");
   }
-  const lines = [
-    "请调用 Goal 工具维护当前会话目标。可先 GoalRead 查看是否已有目标。",
-    "设置或替换时用 Goal(action=set, title=..., checklist?, note?)。",
-    "不要改业务代码，只维护目标与进度清单。",
-  ];
-  if (parsed.title) lines.push(`目标：${parsed.title}`);
+  const lines = [promptT("goal.intro"), promptT("goal.set"), promptT("goal.guard")];
+  if (parsed.title) lines.push(promptT("goal.title", { title: parsed.title }));
   return lines.join("\n");
 }
 
 export function buildReviewPrompt(scope?: string): string {
-  const lines = [
-    "请审查当前工作区未提交改动（已暂存、未暂存、未跟踪）。",
-    "先看 git 状态与 diff，再列出正确性、测试缺口和风险。",
-    "不要直接改代码，除非我明确要求修复。",
-  ];
-  if (scope?.trim()) lines.push(`审查范围：${scope.trim()}`);
+  const lines = [promptT("review.status"), promptT("review.inspect"), promptT("review.guard")];
+  if (scope?.trim()) lines.push(promptT("review.scope", { scope: scope.trim() }));
   return lines.join("\n");
 }
 

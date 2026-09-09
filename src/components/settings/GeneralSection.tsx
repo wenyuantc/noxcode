@@ -106,7 +106,11 @@ export function GeneralSection() {
           <div className="flex items-center rounded-lg border border-border/80 bg-muted/40 p-0.5">
             <button
               type="button"
-              onClick={() => void changeAppLocale("zh-CN")}
+              onClick={() =>
+                void changeAppLocale("zh-CN").then(() =>
+                  useSettingsStore.getState().refreshQuickPrompts(),
+                )
+              }
               className={`rounded-md px-3 py-1 text-xs font-medium transition-all ${
                 locale === "zh-CN"
                   ? "bg-background text-foreground shadow-2xs"
@@ -117,7 +121,11 @@ export function GeneralSection() {
             </button>
             <button
               type="button"
-              onClick={() => void changeAppLocale("en")}
+              onClick={() =>
+                void changeAppLocale("en").then(() =>
+                  useSettingsStore.getState().refreshQuickPrompts(),
+                )
+              }
               className={`rounded-md px-3 py-1 text-xs font-medium transition-all ${
                 locale === "en"
                   ? "bg-background text-foreground shadow-2xs"

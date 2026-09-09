@@ -333,5 +333,55 @@
   "isolateWorktree": "隔离工作树",
   "isolateWorktreeHint": "本会话在独立工作树改代码，并检出 noxcode/wt-<会话> 分支；不选则用当前工作区",
   "worktreeModeCurrent": "当前工作区",
-  "worktreeModeIsolate": "隔离工作树"
+  "worktreeModeIsolate": "隔离工作树",
+  "prompts": {
+    "skillInvocation": "请先调用 Skill 工具加载 `{{name}}`，再按该技能执行。",
+    "arguments": "参数：{{args}}",
+    "subagentDelegation": "请用 Agent 工具委派给子智能体「{{name}}」（subagent_type={{id}}）：",
+    "init": {
+      "intro": "请为当前仓库生成或补充 AGENTS.md（若已有 AGENTS.md / CLAUDE.md 则在其基础上补充，不要重复已有内容）。",
+      "inspect": "先用 Glob / Read / Grep 摸底：项目结构与模块职责、构建 / 测试 / lint 命令、编码约定、关键架构约束、常见陷阱。",
+      "output": "输出要求：简洁、面向编程 Agent、只写能从仓库验证的事实；每条命令都注明来源文件；不超过 150 行。",
+      "write": "完成后用 Write 写入仓库根目录的 AGENTS.md，并在回复里列出你新增或修改的段落。",
+      "extra": "补充要求：{{extra}}"
+    },
+    "createSkill": {
+      "intro": "请为当前仓库编写技能「{{name}}」，用 Write 写入 `.noxcode/skills/{{name}}/SKILL.md`。",
+      "inspect": "先用 Glob / Grep 确认是否已有同名技能；已有则在其基础上补充，不要覆盖无关内容。",
+      "frontmatter": "frontmatter 必须包含：name、description、argument-hint、allowed-tools、when-to-use。",
+      "body": "正文写可执行工作流、约束和输出格式，不要只复述描述。",
+      "finish": "完成后在回复里说明如何用 `$` 加技能名 `{{name}}`，或用 `/skill {{name}}` 调用。",
+      "description": "技能说明：{{description}}"
+    },
+    "createSubagent": {
+      "intro": "请为当前仓库编写子智能体「{{name}}」，用 Write 写入 `.noxcode/agents/{{name}}.md`。",
+      "source": "这是 source=file 的档案（设置页只读），不要改 native-subagents.json。",
+      "frontmatter": "frontmatter 对齐现有解析：name、description、tools、disallowedTools、permissionMode、maxTurns、skills、injectAgentsMd。",
+      "body": "正文即系统提示：单一职责、何时委派、输出格式。",
+      "finish": "写完后说明可在输入框 `/` 菜单的「子智能体」分组里选到。",
+      "description": "子智能体说明：{{description}}"
+    },
+    "goalClear": "请调用 Goal 工具清除当前会话目标：Goal(action=clear)。不要改业务代码。",
+    "goal": {
+      "intro": "请调用 Goal 工具维护当前会话目标。可先 GoalRead 查看是否已有目标。",
+      "set": "设置或替换时用 Goal(action=set, title=..., checklist?, note?)。",
+      "guard": "不要改业务代码，只维护目标与进度清单。",
+      "title": "目标：{{title}}"
+    },
+    "review": {
+      "status": "请审查当前工作区未提交改动（已暂存、未暂存、未跟踪）。",
+      "inspect": "先看 git 状态与 diff，再列出正确性、测试缺口和风险。",
+      "guard": "不要直接改代码，除非我明确要求修复。",
+      "scope": "审查范围：{{scope}}"
+    },
+    "worktree": {
+      "intro": "主工作区正在合并中间态，请在本会话解决下列冲突文件。不要用 Bash 执行 git merge、git add 或 git commit。",
+      "missing": "（未列出路径，请先查看主工作区未合并文件）",
+      "steps": "请按顺序：",
+      "step1": "1. 若当前在隔离工作树，先调用 ExitWorktree 回到主工作区（只为读写冲突文件）。",
+      "step2": "2. 用 Read 读取每个冲突文件，根据 <<<<<<< / ======= / >>>>>>> 标记给出正确的完整内容。",
+      "step3": "3. 用 Write 或 Edit 写回主工作区，不要留下冲突标记。",
+      "step4": "4. 写完后用简短中文说明每个文件如何取舍。不要调用 EnterWorktree；本回合结束后会话会自动回到隔离工作树。"
+    }
+  }
 }

@@ -333,5 +333,55 @@
   "isolateWorktree": "Isolate worktree",
   "isolateWorktreeHint": "Edit this session in an isolated git worktree on noxcode/wt-<session>. Leave off to use the current workspace.",
   "worktreeModeCurrent": "Current workspace",
-  "worktreeModeIsolate": "Isolate worktree"
+  "worktreeModeIsolate": "Isolate worktree",
+  "prompts": {
+    "skillInvocation": "Please call the Skill tool to load `{{name}}`, then follow that skill.",
+    "arguments": "Arguments: {{args}}",
+    "subagentDelegation": "Use the Agent tool to delegate to subagent `{{name}}` (subagent_type={{id}}):",
+    "init": {
+      "intro": "Generate or update AGENTS.md for the current repository. If AGENTS.md / CLAUDE.md already exists, add to it without repeating existing content.",
+      "inspect": "First use Glob / Read / Grep to inspect the project structure and module responsibilities, build / test / lint commands, coding conventions, key architecture constraints, and common pitfalls.",
+      "output": "Output requirements: stay concise and aimed at coding agents; include only facts verifiable from the repository; cite the source file for every command; keep it under 150 lines.",
+      "write": "Then use Write to save AGENTS.md at the repository root and list the paragraphs you added or changed in your reply.",
+      "extra": "Additional requirements: {{extra}}"
+    },
+    "createSkill": {
+      "intro": "Write the `{{name}}` skill for the current repository with Write to `.noxcode/skills/{{name}}/SKILL.md`.",
+      "inspect": "First use Glob / Grep to check whether a skill with the same name already exists; if it does, add to it without overwriting unrelated content.",
+      "frontmatter": "The frontmatter must include: name, description, argument-hint, allowed-tools, and when-to-use.",
+      "body": "Write an executable workflow, constraints, and output format in the body; do not merely repeat the description.",
+      "finish": "When finished, explain how to invoke it with `$` followed by `{{name}}`, or with `/skill {{name}}`.",
+      "description": "Skill description: {{description}}"
+    },
+    "createSubagent": {
+      "intro": "Write the `{{name}}` subagent profile for the current repository with Write to `.noxcode/agents/{{name}}.md`.",
+      "source": "This is a source=file profile (read-only in Settings); do not edit native-subagents.json.",
+      "frontmatter": "Match the existing parser: name, description, tools, disallowedTools, permissionMode, maxTurns, skills, and injectAgentsMd.",
+      "body": "The body is the system prompt: single responsibility, when to delegate, and output format.",
+      "finish": "When finished, explain that it can be selected from the “Subagents” group in the input `/` menu.",
+      "description": "Subagent description: {{description}}"
+    },
+    "goalClear": "Use the Goal tool to clear the current session goal: Goal(action=clear). Do not modify business code.",
+    "goal": {
+      "intro": "Use the Goal tool to maintain the current session goal. You can call GoalRead first to check whether a goal already exists.",
+      "set": "When setting or replacing it, use Goal(action=set, title=..., checklist?, note?).",
+      "guard": "Do not modify business code; maintain only the goal and its checklist.",
+      "title": "Goal: {{title}}"
+    },
+    "review": {
+      "status": "Review the uncommitted changes in the current workspace (staged, unstaged, and untracked).",
+      "inspect": "First inspect Git status and the diff, then list correctness issues, missing tests, and risks.",
+      "guard": "Do not modify code unless I explicitly ask you to fix it.",
+      "scope": "Review scope: {{scope}}"
+    },
+    "worktree": {
+      "intro": "The main workspace is in the middle of a merge. Resolve the following conflict files in this session. Do not use Bash to run git merge, git add, or git commit.",
+      "missing": "(No paths were listed; inspect the main workspace's unmerged files first)",
+      "steps": "Follow these steps:",
+      "step1": "1. If you are currently in an isolated worktree, call ExitWorktree to return to the main workspace (only to read and write the conflict files).",
+      "step2": "2. Use Read on each conflict file and provide the correct complete contents based on the <<<<<<< / ======= / >>>>>>> markers.",
+      "step3": "3. Use Write or Edit to write the files back to the main workspace, without leaving conflict markers.",
+      "step4": "4. Briefly explain the tradeoffs for each file in English. Do not call EnterWorktree; the session returns to the isolated worktree automatically at the end of this turn."
+    }
+  }
 }

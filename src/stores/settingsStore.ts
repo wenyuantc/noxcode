@@ -19,6 +19,7 @@ interface SettingsState {
   setNetwork: (network: NetworkSettings) => void;
   setAi: (ai: AiSettings) => void;
   setQuickPrompts: (prompts: QuickPrompt[]) => void;
+  refreshQuickPrompts: () => Promise<void>;
 }
 
 export const useSettingsStore = create<SettingsState>((set) => ({
@@ -39,4 +40,8 @@ export const useSettingsStore = create<SettingsState>((set) => ({
   setNetwork: (network) => set({ network }),
   setAi: (ai) => set({ ai: normalizeAiSettings(ai) }),
   setQuickPrompts: (quickPrompts) => set({ quickPrompts }),
+  refreshQuickPrompts: async () => {
+    const quickPrompts = await getQuickPrompts();
+    set({ quickPrompts });
+  },
 }));

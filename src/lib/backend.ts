@@ -1,5 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import { getLocalePreference } from "@/lib/i18n/locale";
 
 import type {
   ActivityLog,
@@ -388,7 +389,12 @@ export function resolveSessionWorktreeMerge(
   sessionId: string,
   action: ResolveWorktreeAction,
 ): Promise<MergeWorktreeResult> {
-  return invoke("resolve_session_worktree_merge", { workspaceId, sessionId, action });
+  return invoke("resolve_session_worktree_merge", {
+    workspaceId,
+    sessionId,
+    action,
+    locale: getLocalePreference(),
+  });
 }
 
 export function restoreSessionWorktree(sessionId: string): Promise<string | null> {
@@ -461,11 +467,15 @@ export function generateGitCommitMessage(
   workspaceId: string,
   sessionId?: string | null,
 ): Promise<string> {
-  return invoke("generate_git_commit_message", { workspaceId, sessionId: sessionId ?? null });
+  return invoke("generate_git_commit_message", {
+    workspaceId,
+    sessionId: sessionId ?? null,
+    locale: getLocalePreference(),
+  });
 }
 
 export function getQuickPrompts(): Promise<QuickPrompt[]> {
-  return invoke("get_quick_prompts");
+  return invoke("get_quick_prompts", { locale: getLocalePreference() });
 }
 
 export function updateQuickPrompts(payload: QuickPrompt[]): Promise<QuickPrompt[]> {

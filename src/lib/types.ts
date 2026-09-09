@@ -595,6 +595,7 @@ export interface StartNativeSessionInput {
   plan_mode?: boolean | null;
   permission_mode?: string | null;
   isolate_worktree?: boolean | null;
+  locale?: "zh-CN" | "en" | null;
 }
 
 export interface AgentSessionStarted {

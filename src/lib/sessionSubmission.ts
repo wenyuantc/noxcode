@@ -1,4 +1,5 @@
 import { resumeNativeSession, startNativeSession } from "@/lib/backend";
+import { getLocalePreference } from "@/lib/i18n/locale";
 import type { AgentSessionStarted, StartNativeSessionInput } from "@/lib/types";
 
 export interface SessionSubmissionInput {
@@ -45,6 +46,7 @@ export function sessionSubmissionPayload(input: SessionSubmissionInput): StartNa
     resume_session_id: sessionId,
     image_paths: imagePaths.length > 0 ? imagePaths : null,
     isolate_worktree: sessionId ? false : Boolean(input.isolateWorktree),
+    locale: getLocalePreference(),
   };
 }
 

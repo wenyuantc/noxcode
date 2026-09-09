@@ -105,7 +105,19 @@ pub fn sanitize_conflict_resolution(raw: &str) -> Result<String, String> {
     })
 }
 
-pub fn conflict_resolve_prompt(path: &str, content: &str) -> String {
+pub fn conflict_resolve_prompt_for_locale(
+    path: &str,
+    content: &str,
+    locale: Option<&str>,
+) -> String {
+    if locale == Some("en") {
+        return format!(
+            "The complete contents of the Git merge-conflict file `{path}` are below, including <<<<<<< / ======= / >>>>>>> markers.\n\
+Output the complete file contents with the conflicts resolved.\n\
+Output only the file body; do not explain, use Markdown code fences, or leave conflict markers.\n\n\
+{content}"
+        );
+    }
     format!(
         "下面是 Git 合并冲突文件 `{path}` 的完整内容，含 <<<<<<< / ======= / >>>>>>> 标记。\n\
 请输出解决冲突后的完整文件内容。\n\
