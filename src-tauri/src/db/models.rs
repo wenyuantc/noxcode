@@ -806,6 +806,8 @@ pub struct AgentSessionExit {
     pub session_kind: String,
     pub session_record_id: String,
     pub code: i32,
+    #[serde(default)]
+    pub worktree_path: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

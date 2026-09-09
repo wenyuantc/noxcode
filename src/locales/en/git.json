@@ -80,6 +80,7 @@
   "mergeWorktreeAi": "Resolve with AI",
   "mergeWorktreeManual": "Resolve manually",
   "mergeWorktreeAbort": "Abort merge",
+  "isolatedWorktreeLabel": "Isolated worktree",
   "previewReason": {
     "ignored": "This file is ignored by Git; no diff is available",
     "unchanged": "No uncommitted Git differences",

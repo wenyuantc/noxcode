@@ -731,6 +731,7 @@ export interface AgentSessionExit {
   session_kind: string;
   session_record_id: string;
   code: number;
+  worktree_path?: string | null;
 }
 
 export interface NativeTextDelta {

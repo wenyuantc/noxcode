@@ -203,8 +203,12 @@ export function getGitRepoInfo(workspaceId: string): Promise<GitRepoInfo> {
   return invoke("get_git_repo_info", { workspaceId });
 }
 
-export function getGitStatus(workspaceId: string, untrackedMode?: string): Promise<GitStatus> {
-  return invoke("get_git_status", { workspaceId, untrackedMode });
+export function getGitStatus(
+  workspaceId: string,
+  untrackedMode?: string,
+  sessionId?: string | null,
+): Promise<GitStatus> {
+  return invoke("get_git_status", { workspaceId, untrackedMode, sessionId: sessionId ?? null });
 }
 
 export function getGitFileDiff(
@@ -212,39 +216,69 @@ export function getGitFileDiff(
   path: string,
   scope: GitFileDiffScope,
   oldPath?: string,
+  sessionId?: string | null,
 ): Promise<GitFileDiff> {
-  return invoke("get_git_file_diff", { workspaceId, path, scope, oldPath });
+  return invoke("get_git_file_diff", {
+    workspaceId,
+    path,
+    scope,
+    oldPath,
+    sessionId: sessionId ?? null,
+  });
 }
 
 export function getGitNumstat(
   workspaceId: string,
   scope: GitNumstatScope,
+  sessionId?: string | null,
 ): Promise<GitNumstatEntry[]> {
-  return invoke("get_git_numstat", { workspaceId, scope });
+  return invoke("get_git_numstat", { workspaceId, scope, sessionId: sessionId ?? null });
 }
 
-export function getGitFilePreview(workspaceId: string, path: string): Promise<GitFilePreview> {
-  return invoke("get_git_file_preview", { workspaceId, path });
+export function getGitFilePreview(
+  workspaceId: string,
+  path: string,
+  sessionId?: string | null,
+): Promise<GitFilePreview> {
+  return invoke("get_git_file_preview", { workspaceId, path, sessionId: sessionId ?? null });
 }
 
-export function stageGitPaths(workspaceId: string, paths: string[]): Promise<void> {
-  return invoke("stage_git_paths", { workspaceId, paths });
+export function stageGitPaths(
+  workspaceId: string,
+  paths: string[],
+  sessionId?: string | null,
+): Promise<void> {
+  return invoke("stage_git_paths", { workspaceId, paths, sessionId: sessionId ?? null });
 }
 
-export function unstageGitPaths(workspaceId: string, paths: string[]): Promise<void> {
-  return invoke("unstage_git_paths", { workspaceId, paths });
+export function unstageGitPaths(
+  workspaceId: string,
+  paths: string[],
+  sessionId?: string | null,
+): Promise<void> {
+  return invoke("unstage_git_paths", { workspaceId, paths, sessionId: sessionId ?? null });
 }
 
-export function restoreGitPaths(workspaceId: string, paths: string[]): Promise<void> {
-  return invoke("restore_git_paths", { workspaceId, paths });
+export function restoreGitPaths(
+  workspaceId: string,
+  paths: string[],
+  sessionId?: string | null,
+): Promise<void> {
+  return invoke("restore_git_paths", { workspaceId, paths, sessionId: sessionId ?? null });
 }
 
 export function commitGitChanges(
   workspaceId: string,
   message: string,
   paths?: string[],
+  sessionId?: string | null,
 ): Promise<GitCommitResult> {
-  return invoke("commit_git_changes", { workspaceId, message, paths });
+  return invoke("commit_git_changes", {
+    workspaceId,
+    message,
+    paths,
+    sessionId: sessionId ?? null,
+  });
 }
 
 export function pushGitBranch(
@@ -395,8 +429,11 @@ export function updateAiSettings(payload: AiSettings): Promise<AiSettings> {
   return invoke("update_ai_settings", { payload });
 }
 
-export function generateGitCommitMessage(workspaceId: string): Promise<string> {
-  return invoke("generate_git_commit_message", { workspaceId });
+export function generateGitCommitMessage(
+  workspaceId: string,
+  sessionId?: string | null,
+): Promise<string> {
+  return invoke("generate_git_commit_message", { workspaceId, sessionId: sessionId ?? null });
 }
 
 export function getQuickPrompts(): Promise<QuickPrompt[]> {

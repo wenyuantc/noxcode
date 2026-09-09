@@ -1,5 +1,6 @@
-import { useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
+import { ChevronDown } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import {
@@ -11,10 +12,109 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
-import { mergeSessionWorktree, resolveSessionWorktreeMerge } from "@/lib/backend";
+import { useDismissible } from "@/hooks/useDismissible";
+import { listGitBranches, mergeSessionWorktree, resolveSessionWorktreeMerge } from "@/lib/backend";
 import type { MergeWorktreeResult } from "@/lib/types";
+import { cn } from "@/lib/utils";
 import { useSessionStore } from "@/stores/sessionStore";
 import { useUiStore } from "@/stores/uiStore";
+
+function BranchNameField({
+  workspaceId,
+  value,
+  onChange,
+  placeholder,
+  disabled,
+}: {
+  workspaceId: string;
+  value: string;
+  onChange: (value: string) => void;
+  placeholder: string;
+  disabled?: boolean;
+}) {
+  const { t } = useTranslation("git");
+  const [open, setOpen] = useState(false);
+  const [names, setNames] = useState<string[]>([]);
+  const rootRef = useRef<HTMLDivElement>(null);
+  useDismissible(open, () => setOpen(false), rootRef);
+
+  useEffect(() => {
+    let cancelled = false;
+    void listGitBranches(workspaceId)
+      .then((branches) => {
+        if (!cancelled) setNames(branches.map((item) => item.name));
+      })
+      .catch(() => {
+        if (!cancelled) setNames([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [workspaceId]);
+
+  const filtered = useMemo(() => {
+    const query = value.trim().toLowerCase();
+    return names.filter((name) => !query || name.toLowerCase().includes(query));
+  }, [names, value]);
+
+  return (
+    <div ref={rootRef} className="relative">
+      <div className="flex items-center gap-1">
+        <Input
+          value={value}
+          disabled={disabled}
+          onChange={(event) => {
+            onChange(event.target.value);
+            setOpen(true);
+          }}
+          onFocus={() => setOpen(true)}
+          placeholder={placeholder}
+          className="h-8"
+          role="combobox"
+          aria-expanded={open}
+          aria-autocomplete="list"
+        />
+        <Button
+          type="button"
+          size="icon-sm"
+          variant="outline"
+          disabled={disabled}
+          className="h-8 w-8 shrink-0"
+          aria-label={t("searchBranch")}
+          onClick={() => setOpen((current) => !current)}
+        >
+          <ChevronDown className="size-3.5" />
+        </Button>
+      </div>
+      {open && filtered.length > 0 ? (
+        <ul
+          role="listbox"
+          className="absolute z-20 mt-1 max-h-40 w-full overflow-auto rounded-md border bg-popover p-1 text-xs shadow-md"
+        >
+          {filtered.map((name) => (
+            <li key={name}>
+              <button
+                type="button"
+                role="option"
+                aria-selected={name === value}
+                className={cn(
+                  "flex w-full cursor-pointer rounded-sm px-2 py-1.5 text-left hover:bg-accent",
+                  name === value && "bg-accent",
+                )}
+                onClick={() => {
+                  onChange(name);
+                  setOpen(false);
+                }}
+              >
+                {name}
+              </button>
+            </li>
+          ))}
+        </ul>
+      ) : null}
+    </div>
+  );
+}
 
 export function MergeWorktreeDialog() {
   const { t } = useTranslation(["git", "common"]);
@@ -128,11 +228,12 @@ export function MergeWorktreeDialog() {
           </>
         ) : (
           <>
-            <Input
+            <BranchNameField
+              workspaceId={prompt.workspaceId}
               value={branchName}
-              onChange={(event) => setBranchName(event.target.value)}
+              onChange={setBranchName}
               placeholder={t("git:mergeWorktreeBranchName")}
-              className="h-8"
+              disabled={busy}
             />
             <DialogFooter className="flex-col gap-2 sm:flex-col">
               <Button

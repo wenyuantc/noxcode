@@ -1305,6 +1305,48 @@ async fn merge_worktree_conflict_stays_and_abort_cleans() {
 }
 
 #[tokio::test]
+async fn git_status_on_session_worktree_sees_isolated_edits() {
+    let env = local_env().await;
+    let (pool, _workspace_id, session_id) = seed_session().await;
+    let wt = env.dir.path().join("worktrees").join(&session_id);
+    let wt_text = wt.to_string_lossy().into_owned();
+    super::worktree::add_detached(&env.target, &wt_text)
+        .await
+        .expect("add");
+    sqlx::query("UPDATE agent_sessions SET working_dir = $1 WHERE id = $2")
+        .bind(&wt_text)
+        .bind(&session_id)
+        .execute(&pool)
+        .await
+        .expect("working_dir");
+    std::fs::write(wt.join("README.md"), "isolated edit\n").unwrap();
+    let main_status = super::status::get_status(&env.target, None)
+        .await
+        .expect("main");
+    assert!(main_status
+        .entries
+        .iter()
+        .all(|entry| entry.path != "README.md"));
+    let wt_status = super::status::get_status(&GitTarget::Local(wt.clone()), None)
+        .await
+        .expect("worktree");
+    assert!(
+        wt_status
+            .entries
+            .iter()
+            .any(|entry| entry.path == "README.md"),
+        "{wt_status:?}"
+    );
+    let preview = super::preview::get_file_preview(&GitTarget::Local(wt.clone()), "README.md")
+        .await
+        .expect("preview");
+    assert!(matches!(
+        preview,
+        super::preview::GitFilePreview::Diff { .. }
+    ));
+}
+
+#[tokio::test]
 async fn apply_resolved_file_rejects_conflict_markers() {
     assert!(super::merge::sanitize_conflict_resolution("<<<<<<< HEAD\nkeep\n>>>>>>>\n").is_err());
     let cleaned = super::merge::sanitize_conflict_resolution("resolved\n").expect("ok");

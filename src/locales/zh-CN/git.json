@@ -80,6 +80,7 @@
   "mergeWorktreeAi": "AI 自动解决",
   "mergeWorktreeManual": "手动解决",
   "mergeWorktreeAbort": "中止合并",
+  "isolatedWorktreeLabel": "隔离工作树",
   "previewReason": {
     "ignored": "此文件被 Git 忽略，无可用差异",
     "unchanged": "当前没有未提交的 Git 差异",

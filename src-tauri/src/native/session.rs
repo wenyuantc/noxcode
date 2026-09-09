@@ -3434,6 +3434,12 @@ async fn run_native_loop(
         },
         &notification_body,
     );
+    let worktree_path = runner
+        .ctx
+        .worktree_path
+        .read()
+        .ok()
+        .and_then(|slot| slot.clone());
     let _ = app.emit(
         "native-exit",
         AgentSessionExit {
@@ -3442,6 +3448,7 @@ async fn run_native_loop(
             session_kind: kind,
             session_record_id: session_record_id.clone(),
             code,
+            worktree_path,
         },
     );
     if let Some(lsp) = runner.ctx.lsp.take() {

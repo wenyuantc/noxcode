@@ -79,6 +79,7 @@ interface SessionState {
   planApprovals: Record<string, Record<string, NativePlanApprovalRequest>>;
   worktreeMergePrompt: WorktreeMergePrompt | null;
   mergedWorktreeBySession: Record<string, boolean>;
+  autoPromptedWorktreeBySession: Record<string, boolean>;
   hasMoreEarlier: Record<string, boolean>;
   loadingEarlier: Record<string, boolean>;
   selectSession: (id: string | null) => void;
@@ -106,6 +107,7 @@ interface SessionState {
   openWorktreeMergePrompt: (prompt: WorktreeMergePrompt) => void;
   closeWorktreeMergePrompt: () => void;
   markWorktreeMerged: (sessionId: string) => void;
+  markWorktreeAutoPrompted: (sessionId: string) => void;
 }
 
 const historyRequests = new Map<string, Promise<void>>();
@@ -133,6 +135,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
   planApprovals: {},
   worktreeMergePrompt: null,
   mergedWorktreeBySession: {},
+  autoPromptedWorktreeBySession: {},
   selectSession: (id) => {
     const session = id
       ? useWorkspaceStore.getState().sessions.find((item) => item.id === id)
@@ -531,5 +534,12 @@ export const useSessionStore = create<SessionState>((set, get) => ({
       mergedWorktreeBySession: { ...state.mergedWorktreeBySession, [sessionId]: true },
       worktreeMergePrompt:
         state.worktreeMergePrompt?.sessionId === sessionId ? null : state.worktreeMergePrompt,
+    })),
+  markWorktreeAutoPrompted: (sessionId) =>
+    set((state) => ({
+      autoPromptedWorktreeBySession: {
+        ...state.autoPromptedWorktreeBySession,
+        [sessionId]: true,
+      },
     })),
 }));

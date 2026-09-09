@@ -49,6 +49,7 @@ import type {
   GitStatusEntry,
 } from "@/lib/types";
 import { cn, formatRelativeTime } from "@/lib/utils";
+import { isManagedWorktreePath } from "@/lib/worktreePath";
 import { useGitStore } from "@/stores/gitStore";
 import { useSessionStore } from "@/stores/sessionStore";
 import { useSettingsStore } from "@/stores/settingsStore";
@@ -66,6 +67,15 @@ export function GitPanel() {
 function GitWorkspacePanel({ workspaceId }: { workspaceId: string | null }) {
   const { t, i18n } = useTranslation("git");
   const sessionId = useSessionStore((state) => state.selectedSessionId);
+  const session = useWorkspaceStore((state) =>
+    sessionId ? state.sessions.find((item) => item.id === sessionId) : undefined,
+  );
+  const runtime = useSessionStore((state) =>
+    sessionId ? state.configurationBySession[sessionId] : undefined,
+  );
+  const isolated = Boolean(
+    session && isManagedWorktreePath(runtime?.worktree_path ?? session.working_dir, session.id),
+  );
   const gitFocusPath = useUiStore((state) => state.gitFocusPath);
   const [status, setStatus] = useState<GitStatus | null>(null);
   const [checkpoints, setCheckpoints] = useState<GitCheckpoint[]>([]);
@@ -118,7 +128,7 @@ function GitWorkspacePanel({ workspaceId }: { workspaceId: string | null }) {
       workspaceId === useWorkspaceStore.getState().activeWorkspaceId &&
       sessionId === useSessionStore.getState().selectedSessionId;
     const results = await Promise.allSettled([
-      getGitStatus(workspaceId).then((next) => {
+      getGitStatus(workspaceId, undefined, sessionId).then((next) => {
         if (isCurrent()) setStatus(next);
       }),
       (sessionId ? listGitCheckpoints(workspaceId, sessionId) : Promise.resolve([])).then(
@@ -143,9 +153,9 @@ function GitWorkspacePanel({ workspaceId }: { workspaceId: string | null }) {
 
   useEffect(() => {
     if (!workspaceId || !gitFocusPath) return;
-    setDiff({ workspaceId, path: gitFocusPath, scope: "auto" });
+    setDiff({ workspaceId, path: gitFocusPath, scope: "auto", sessionId });
     useUiStore.getState().clearGitPreview();
-  }, [gitFocusPath, workspaceId]);
+  }, [gitFocusPath, workspaceId, sessionId]);
 
   const groups = groupGitStatus(status);
   const totalChanges = groups.staged.length + groups.unstaged.length + groups.untracked.length;
@@ -186,14 +196,20 @@ function GitWorkspacePanel({ workspaceId }: { workspaceId: string | null }) {
 
   const showDiff = (entry: GitStatusEntry, scope: "worktree" | "staged") => {
     if (!workspaceId) return;
-    setDiff({ workspaceId, path: entry.path, scope, oldPath: entry.orig_path ?? undefined });
+    setDiff({
+      workspaceId,
+      path: entry.path,
+      scope,
+      oldPath: entry.orig_path ?? undefined,
+      sessionId,
+    });
   };
 
   const handleStageAll = async () => {
     if (!workspaceId || allUnstagedPaths.length === 0 || isBusy()) return;
     setBusy(true);
     try {
-      await stageGitPaths(workspaceId, allUnstagedPaths);
+      await stageGitPaths(workspaceId, allUnstagedPaths, sessionId);
       await reload();
     } finally {
       setBusy(false);
@@ -204,7 +220,7 @@ function GitWorkspacePanel({ workspaceId }: { workspaceId: string | null }) {
     if (!workspaceId || selectedUnstagedPaths.length === 0 || isBusy()) return;
     setBusy(true);
     try {
-      await stageGitPaths(workspaceId, selectedUnstagedPaths);
+      await stageGitPaths(workspaceId, selectedUnstagedPaths, sessionId);
       setSelected((curr) => {
         const next = new Set(curr);
         selectedUnstagedPaths.forEach((p) => next.delete(p));
@@ -220,7 +236,7 @@ function GitWorkspacePanel({ workspaceId }: { workspaceId: string | null }) {
     if (!workspaceId || selectedStagedPaths.length === 0 || isBusy()) return;
     setBusy(true);
     try {
-      await unstageGitPaths(workspaceId, selectedStagedPaths);
+      await unstageGitPaths(workspaceId, selectedStagedPaths, sessionId);
       setSelected((curr) => {
         const next = new Set(curr);
         selectedStagedPaths.forEach((p) => next.delete(p));
@@ -241,7 +257,7 @@ function GitWorkspacePanel({ workspaceId }: { workspaceId: string | null }) {
     if (!accepted || isBusy()) return;
     setBusy(true);
     try {
-      await restoreGitPaths(workspaceId, selectedUnstagedPaths);
+      await restoreGitPaths(workspaceId, selectedUnstagedPaths, sessionId);
       setSelected((curr) => {
         const next = new Set(curr);
         selectedUnstagedPaths.forEach((p) => next.delete(p));
@@ -260,7 +276,7 @@ function GitWorkspacePanel({ workspaceId }: { workspaceId: string | null }) {
     if (!workspaceId || isBusy()) return;
     setBusy(true);
     try {
-      await stageGitPaths(workspaceId, [path]);
+      await stageGitPaths(workspaceId, [path], sessionId);
       setSelected((curr) => {
         const next = new Set(curr);
         next.delete(path);
@@ -276,7 +292,7 @@ function GitWorkspacePanel({ workspaceId }: { workspaceId: string | null }) {
     if (!workspaceId || isBusy()) return;
     setBusy(true);
     try {
-      await unstageGitPaths(workspaceId, [path]);
+      await unstageGitPaths(workspaceId, [path], sessionId);
       setSelected((curr) => {
         const next = new Set(curr);
         next.delete(path);
@@ -297,7 +313,7 @@ function GitWorkspacePanel({ workspaceId }: { workspaceId: string | null }) {
     if (!accepted || isBusy()) return;
     setBusy(true);
     try {
-      await restoreGitPaths(workspaceId, [path]);
+      await restoreGitPaths(workspaceId, [path], sessionId);
       setSelected((curr) => {
         const next = new Set(curr);
         next.delete(path);
@@ -316,7 +332,7 @@ function GitWorkspacePanel({ workspaceId }: { workspaceId: string | null }) {
     if (!workspaceId || !message.trim() || isBusy()) return;
     setBusy(true);
     try {
-      await commitGitChanges(workspaceId, message.trim());
+      await commitGitChanges(workspaceId, message.trim(), undefined, sessionId);
       setMessage("");
       if (diff) closeDiff();
       await reload();
@@ -366,6 +382,11 @@ function GitWorkspacePanel({ workspaceId }: { workspaceId: string | null }) {
         <div className="flex min-w-0 items-center gap-2">
           <FolderGit2 className="size-3.5 shrink-0 text-muted-foreground" />
           <span className="text-xs font-semibold text-foreground">{t("panel")}</span>
+          {isolated ? (
+            <span className="truncate rounded-md bg-accent px-1.5 py-0.5 text-[10px] font-medium text-accent-foreground">
+              {t("isolatedWorktreeLabel")}
+            </span>
+          ) : null}
           {status?.branch?.head ? (
             <div className="flex min-w-0 max-w-[140px] items-center gap-1 truncate rounded-md bg-accent/60 px-1.5 py-0.5 text-[11px] font-medium text-muted-foreground">
               <GitBranch className="size-3 shrink-0" />
@@ -517,7 +538,7 @@ function GitWorkspacePanel({ workspaceId }: { workspaceId: string | null }) {
                       if (!workspaceId || isBusy() || generatingCommit) return;
                       setGeneratingCommit(true);
                       setGenerateError(null);
-                      void generateGitCommitMessage(workspaceId)
+                      void generateGitCommitMessage(workspaceId, sessionId)
                         .then((next) => {
                           if (mounted.current) setMessage(next);
                         })
@@ -646,6 +667,7 @@ function GitWorkspacePanel({ workspaceId }: { workspaceId: string | null }) {
                   void unstageGitPaths(
                     workspaceId,
                     groups.staged.map((e) => e.path),
+                    sessionId,
                   )
                     .then(reload)
                     .finally(() => setBusy(false));
@@ -671,6 +693,7 @@ function GitWorkspacePanel({ workspaceId }: { workspaceId: string | null }) {
                   void stageGitPaths(
                     workspaceId,
                     groups.unstaged.map((e) => e.path),
+                    sessionId,
                   )
                     .then(reload)
                     .finally(() => setBusy(false));
@@ -696,6 +719,7 @@ function GitWorkspacePanel({ workspaceId }: { workspaceId: string | null }) {
                   void stageGitPaths(
                     workspaceId,
                     groups.untracked.map((e) => e.path),
+                    sessionId,
                   )
                     .then(reload)
                     .finally(() => setBusy(false));

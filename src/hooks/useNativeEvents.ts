@@ -1,7 +1,6 @@
 import { useEffect } from "react";
 
 import {
-  getWorktreeMergeState,
   onNativeContextUsage,
   onNativeExit,
   onNativePermissionRequest,
@@ -19,41 +18,11 @@ import {
   onNativeRequestResolved,
   onNativeInputQueue,
 } from "@/lib/backend";
-import { isManagedWorktreePath } from "@/lib/worktreePath";
-import type { AgentSessionExit } from "@/lib/types";
+import { maybeOpenWorktreeMerge } from "@/lib/worktreeMergePrompt";
 import { useChannelStore } from "@/stores/channelStore";
 import { useSessionStore } from "@/stores/sessionStore";
 import { useUiStore } from "@/stores/uiStore";
 import { useWorkspaceStore } from "@/stores/workspaceStore";
-
-async function maybeOpenWorktreeMerge(exit: AgentSessionExit) {
-  const store = useSessionStore.getState();
-  if (store.mergedWorktreeBySession[exit.session_record_id]) return;
-  const session = useWorkspaceStore
-    .getState()
-    .sessions.find((item) => item.id === exit.session_record_id);
-  const runtime = store.configurationBySession[exit.session_record_id];
-  const workspaceId = exit.workspace_id ?? session?.workspace_id ?? null;
-  const path = runtime?.worktree_path ?? session?.working_dir;
-  if (!workspaceId || !isManagedWorktreePath(path, exit.session_record_id)) return;
-  let phase: "choose" | "conflict" = "choose";
-  let conflicts: string[] = [];
-  try {
-    const state = await getWorktreeMergeState(workspaceId);
-    if (state.in_progress) {
-      phase = "conflict";
-      conflicts = state.conflicts;
-    }
-  } catch {
-    // 查不到合并状态时仍弹出选择，避免结束时漏掉 worktree。
-  }
-  useSessionStore.getState().openWorktreeMergePrompt({
-    sessionId: exit.session_record_id,
-    workspaceId,
-    phase,
-    conflicts,
-  });
-}
 
 export function useNativeEvents() {
   useEffect(() => {
@@ -109,9 +78,23 @@ export function useNativeEvents() {
     track(onNativeTextDelta((delta) => useSessionStore.getState().onDelta(delta)));
     track(onNativeContextUsage((usage) => useSessionStore.getState().onUsage(usage)));
     track(
-      onNativeTurnState((payload) =>
-        useSessionStore.getState().onTurnState(payload.session_record_id, payload.state),
-      ),
+      onNativeTurnState((payload) => {
+        const previous = useSessionStore.getState().turnState[payload.session_record_id];
+        useSessionStore.getState().onTurnState(payload.session_record_id, payload.state);
+        if (payload.state === "waiting_input" && previous === "working") {
+          const session = useWorkspaceStore
+            .getState()
+            .sessions.find((item) => item.id === payload.session_record_id);
+          const runtime =
+            useSessionStore.getState().configurationBySession[payload.session_record_id];
+          void maybeOpenWorktreeMerge({
+            sessionId: payload.session_record_id,
+            workspaceId: session?.workspace_id,
+            worktreePath: runtime?.worktree_path ?? session?.working_dir,
+            reason: "turn",
+          });
+        }
+      }),
     );
     track(
       onNativePlanMode((payload) =>
@@ -124,7 +107,12 @@ export function useNativeEvents() {
       onNativeExit((exit) => {
         useSessionStore.getState().onExit(exit);
         void useWorkspaceStore.getState().refreshSessions();
-        void maybeOpenWorktreeMerge(exit);
+        void maybeOpenWorktreeMerge({
+          sessionId: exit.session_record_id,
+          workspaceId: exit.workspace_id,
+          worktreePath: exit.worktree_path,
+          reason: "exit",
+        });
       }),
     );
     track(

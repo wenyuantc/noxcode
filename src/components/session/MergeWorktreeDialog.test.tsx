@@ -8,6 +8,7 @@ import { MergeWorktreeDialog } from "./MergeWorktreeDialog";
 vi.mock("@/lib/backend", () => ({
   mergeSessionWorktree: vi.fn(),
   resolveSessionWorktreeMerge: vi.fn(),
+  listGitBranches: vi.fn(async () => [{ name: "dev", is_current: true }]),
 }));
 
 vi.mock("@/components/ui/dialog", () => {
@@ -71,6 +72,8 @@ describe("MergeWorktreeDialog", () => {
     expect(html).toContain("git:mergeWorktreeCurrent");
     expect(html).toContain("git:mergeWorktreeBranch");
     expect(html).toContain("git:mergeWorktreeKeep");
+    expect(html).toContain("git:mergeWorktreeBranchName");
+    expect(html).toContain('role="combobox"');
   });
 
   it("renders conflict files and resolve actions", () => {

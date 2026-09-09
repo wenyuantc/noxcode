@@ -28,6 +28,20 @@ pub fn is_managed_worktree_path(path: &str, session_record_id: &str) -> bool {
         && (path.ends_with(id) || path.contains(&format!("worktrees/{id}")))
 }
 
+/// 从托管 worktree 内的绝对文件路径拆出 worktree 根目录和相对路径。
+pub fn split_managed_worktree_file_path(path: &str) -> Option<(String, String)> {
+    let normalized = path.trim().replace('\\', "/");
+    let marker = "/worktrees/";
+    let start = normalized.find(marker)?;
+    let after = &normalized[start + marker.len()..];
+    let (id, rest) = after.split_once('/')?;
+    if id.is_empty() || rest.is_empty() {
+        return None;
+    }
+    let root = normalized[..start + marker.len() + id.len()].to_string();
+    Some((root, rest.to_string()))
+}
+
 pub async fn add_detached(target: &GitTarget, path: &str) -> Result<String, GitError> {
     let path = path.trim();
     if path.is_empty() {
@@ -69,7 +83,6 @@ pub async fn remove_worktree(target: &GitTarget, path: &str) -> Result<(), GitEr
     Ok(())
 }
 
-#[allow(dead_code)]
 pub async fn list_worktrees(target: &GitTarget) -> Result<Vec<WorktreeInfo>, GitError> {
     let output = git(
         target,
@@ -127,6 +140,20 @@ mod tests {
         ));
         assert!(!is_managed_worktree_path("/repo", "abc-1"));
         assert!(!is_managed_worktree_path("/cfg/worktrees/other", "abc-1"));
+    }
+
+    #[test]
+    fn split_worktree_file_keeps_relative_path() {
+        let (root, rel) = split_managed_worktree_file_path(
+            "/Users/me/Library/Application Support/app/worktrees/abc-1/oms/Test.java",
+        )
+        .expect("split");
+        assert_eq!(
+            root,
+            "/Users/me/Library/Application Support/app/worktrees/abc-1"
+        );
+        assert_eq!(rel, "oms/Test.java");
+        assert!(split_managed_worktree_file_path("/repo/README.md").is_none());
     }
 
     #[test]

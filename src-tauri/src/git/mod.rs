@@ -74,6 +74,67 @@ async fn record_git_activity(
     }
 }
 
+pub(crate) async fn resolve_git_target_for_session<R: Runtime>(
+    app: &AppHandle<R>,
+    workspace_id: &str,
+    session_id: Option<&str>,
+) -> Result<GitTarget, String> {
+    if let Some(session_id) = session_id.map(str::trim).filter(|item| !item.is_empty()) {
+        let pool = sqlite_pool(app).await?;
+        let working_dir: Option<String> =
+            sqlx::query_scalar("SELECT working_dir FROM agent_sessions WHERE id = $1 LIMIT 1")
+                .bind(session_id)
+                .fetch_optional(&pool)
+                .await
+                .map_err(|error| format!("读取会话失败: {error}"))?
+                .flatten();
+        if let Some(working_dir) = working_dir
+            .as_deref()
+            .map(str::trim)
+            .filter(|item| !item.is_empty())
+        {
+            if self::worktree::is_managed_worktree_path(working_dir, session_id) {
+                return resolve_git_target_at(app, workspace_id, working_dir).await;
+            }
+        }
+    }
+    resolve_git_target(app, workspace_id).await
+}
+
+async fn resolve_preview_target<R: Runtime>(
+    app: &AppHandle<R>,
+    workspace_id: &str,
+    session_id: Option<&str>,
+    path: &str,
+) -> Result<(GitTarget, String), String> {
+    if let Some((root, relative)) = self::worktree::split_managed_worktree_file_path(path) {
+        let main = resolve_git_target(app, workspace_id).await?;
+        let listed = self::worktree::list_worktrees(&main)
+            .await
+            .unwrap_or_default();
+        let known = listed.iter().any(|item| {
+            let item_path = item
+                .path
+                .replace('\\', "/")
+                .trim_end_matches('/')
+                .to_string();
+            item_path == root
+        });
+        if known
+            || session_id
+                .map(|id| self::worktree::is_managed_worktree_path(&root, id))
+                .unwrap_or(false)
+        {
+            let target = resolve_git_target_at(app, workspace_id, &root).await?;
+            return Ok((target, relative));
+        }
+    }
+    Ok((
+        resolve_git_target_for_session(app, workspace_id, session_id).await?,
+        path.to_string(),
+    ))
+}
+
 pub(crate) async fn resolve_git_target<R: Runtime>(
     app: &AppHandle<R>,
     workspace_id: &str,
@@ -163,8 +224,9 @@ pub(crate) async fn get_git_status<R: Runtime>(
     app: AppHandle<R>,
     workspace_id: String,
     untracked_mode: Option<String>,
+    session_id: Option<String>,
 ) -> Result<GitStatus, String> {
-    let target = resolve_git_target(&app, &workspace_id).await?;
+    let target = resolve_git_target_for_session(&app, &workspace_id, session_id.as_deref()).await?;
     get_status(&target, untracked_mode.as_deref())
         .await
         .map_err(Into::into)
@@ -177,8 +239,10 @@ pub(crate) async fn get_git_file_diff<R: Runtime>(
     path: String,
     scope: GitFileDiffScope,
     old_path: Option<String>,
+    session_id: Option<String>,
 ) -> Result<GitFileDiff, String> {
-    let target = resolve_git_target(&app, &workspace_id).await?;
+    let (target, path) =
+        resolve_preview_target(&app, &workspace_id, session_id.as_deref(), &path).await?;
     get_file_diff(&target, &path, &scope, old_path.as_deref())
         .await
         .map_err(Into::into)
@@ -189,8 +253,10 @@ pub(crate) async fn get_git_file_preview<R: Runtime>(
     app: AppHandle<R>,
     workspace_id: String,
     path: String,
+    session_id: Option<String>,
 ) -> Result<GitFilePreview, String> {
-    let target = resolve_git_target(&app, &workspace_id).await?;
+    let (target, path) =
+        resolve_preview_target(&app, &workspace_id, session_id.as_deref(), &path).await?;
     get_file_preview(&target, &path).await.map_err(Into::into)
 }
 
@@ -199,8 +265,9 @@ pub(crate) async fn get_git_numstat<R: Runtime>(
     app: AppHandle<R>,
     workspace_id: String,
     scope: GitNumstatScope,
+    session_id: Option<String>,
 ) -> Result<Vec<GitNumstatEntry>, String> {
-    let target = resolve_git_target(&app, &workspace_id).await?;
+    let target = resolve_git_target_for_session(&app, &workspace_id, session_id.as_deref()).await?;
     get_numstat(&target, &scope).await.map_err(Into::into)
 }
 
@@ -209,8 +276,9 @@ pub(crate) async fn stage_git_paths<R: Runtime>(
     app: AppHandle<R>,
     workspace_id: String,
     paths: Vec<String>,
+    session_id: Option<String>,
 ) -> Result<(), String> {
-    let target = resolve_git_target(&app, &workspace_id).await?;
+    let target = resolve_git_target_for_session(&app, &workspace_id, session_id.as_deref()).await?;
     stage_paths(&target, &paths).await.map_err(Into::into)
 }
 
@@ -219,8 +287,9 @@ pub(crate) async fn unstage_git_paths<R: Runtime>(
     app: AppHandle<R>,
     workspace_id: String,
     paths: Vec<String>,
+    session_id: Option<String>,
 ) -> Result<(), String> {
-    let target = resolve_git_target(&app, &workspace_id).await?;
+    let target = resolve_git_target_for_session(&app, &workspace_id, session_id.as_deref()).await?;
     unstage_paths(&target, &paths).await.map_err(Into::into)
 }
 
@@ -229,8 +298,9 @@ pub(crate) async fn restore_git_paths<R: Runtime>(
     app: AppHandle<R>,
     workspace_id: String,
     paths: Vec<String>,
+    session_id: Option<String>,
 ) -> Result<(), String> {
-    let target = resolve_git_target(&app, &workspace_id).await?;
+    let target = resolve_git_target_for_session(&app, &workspace_id, session_id.as_deref()).await?;
     restore_paths(&target, &paths).await.map_err(Into::into)
 }
 
@@ -240,8 +310,9 @@ pub(crate) async fn commit_git_changes<R: Runtime>(
     workspace_id: String,
     message: String,
     paths: Option<Vec<String>>,
+    session_id: Option<String>,
 ) -> Result<GitCommitResult, String> {
-    let target = resolve_git_target(&app, &workspace_id).await?;
+    let target = resolve_git_target_for_session(&app, &workspace_id, session_id.as_deref()).await?;
     commit_changes(&target, &message, paths.as_deref())
         .await
         .map_err(Into::into)

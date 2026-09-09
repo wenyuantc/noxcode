@@ -13,7 +13,8 @@ use crate::db::models::AgentSessionRecord;
 use crate::git::{
     apply_resolved_files, collect_commit_message_context, conflict_resolve_prompt,
     list_unmerged_paths, merge_in_progress, read_worktree_text, resolve_git_target,
-    run_abort_merge, sanitize_conflict_resolution, MergeWorktreeResult, ResolveWorktreeAction,
+    resolve_git_target_for_session, run_abort_merge, sanitize_conflict_resolution,
+    MergeWorktreeResult, ResolveWorktreeAction,
 };
 use crate::native::channels::fetch_channel_record;
 use crate::native::manager::NativeAgentManager;
@@ -170,12 +171,13 @@ async fn run_feature_one_shot(
 pub async fn generate_git_commit_message(
     app: AppHandle,
     workspace_id: String,
+    session_id: Option<String>,
 ) -> Result<String, String> {
     let settings = load_ai_settings(&app)?;
     if !settings.commit_message.enabled {
         return Err("未开启 Git 提交信息自动生成".to_string());
     }
-    let target = resolve_git_target(&app, &workspace_id).await?;
+    let target = resolve_git_target_for_session(&app, &workspace_id, session_id.as_deref()).await?;
     let context = collect_commit_message_context(&target).await?;
     let pool = sqlite_pool(&app).await?;
     let result = run_feature_one_shot(
