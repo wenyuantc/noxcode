@@ -23,6 +23,13 @@ import { ApiCallLogDetailDialog } from "@/components/apiLogs/ApiCallLogDetailDia
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+import {
   API_CALL_LOG_PAGE_SIZE,
   API_CALL_LOG_STATUSES,
   emptyApiCallLogStats,
@@ -49,7 +56,7 @@ interface ApiCallLogFilterState {
 }
 
 const EMPTY_FILTERS: ApiCallLogFilterState = {
-  workspaceId: "",
+  workspaceId: "all",
   channelName: "",
   model: "",
   status: "all",
@@ -158,7 +165,7 @@ export default function ApiCallLogsPage() {
     debouncedFilters.startDate > debouncedFilters.endDate,
   );
   const hasActiveFilters =
-    Boolean(filters.workspaceId) ||
+    (Boolean(filters.workspaceId) && filters.workspaceId !== "all") ||
     Boolean(filters.channelName.trim()) ||
     Boolean(filters.model.trim()) ||
     filters.status !== "all" ||
@@ -175,7 +182,10 @@ export default function ApiCallLogsPage() {
 
   const currentQuery = useMemo(
     () => ({
-      workspaceId: debouncedFilters.workspaceId || null,
+      workspaceId:
+        debouncedFilters.workspaceId && debouncedFilters.workspaceId !== "all"
+          ? debouncedFilters.workspaceId
+          : null,
       channelName: debouncedFilters.channelName.trim() || null,
       model: debouncedFilters.model.trim() || null,
       status: debouncedFilters.status === "all" ? null : debouncedFilters.status,
@@ -486,21 +496,36 @@ export default function ApiCallLogsPage() {
                 >
                   {t("workspace")}
                 </label>
-                <select
-                  id="api-log-workspace"
-                  className="h-8 w-full rounded-lg border border-input bg-background px-2.5 text-xs text-foreground transition-colors hover:bg-muted/40 focus:border-ring focus:outline-none"
+                <Select
                   value={filters.workspaceId}
-                  onChange={(event) =>
-                    setFilters((current) => ({ ...current, workspaceId: event.target.value }))
-                  }
+                  onValueChange={(value) => {
+                    if (typeof value === "string") {
+                      setFilters((current) => ({ ...current, workspaceId: value }));
+                    }
+                  }}
                 >
-                  <option value="">{t("allWorkspaces")}</option>
-                  {workspaces.map((item) => (
-                    <option key={item.id} value={item.id}>
-                      {item.name}
-                    </option>
-                  ))}
-                </select>
+                  <SelectTrigger
+                    id="api-log-workspace"
+                    className="h-8 w-full bg-background text-xs"
+                  >
+                    <SelectValue>
+                      {filters.workspaceId === "all"
+                        ? t("allWorkspaces")
+                        : (workspaces.find((item) => item.id === filters.workspaceId)?.name ??
+                          t("allWorkspaces"))}
+                    </SelectValue>
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="all" className="text-xs">
+                      {t("allWorkspaces")}
+                    </SelectItem>
+                    {workspaces.map((item) => (
+                      <SelectItem key={item.id} value={item.id} className="text-xs">
+                        {item.name}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
               </div>
 
               {/* Channel */}
@@ -549,21 +574,33 @@ export default function ApiCallLogsPage() {
                 >
                   {t("status")}
                 </label>
-                <select
-                  id="api-log-status"
-                  className="h-8 w-full rounded-lg border border-input bg-background px-2.5 text-xs text-foreground transition-colors hover:bg-muted/40 focus:border-ring focus:outline-none"
+                <Select
                   value={filters.status}
-                  onChange={(event) =>
-                    setFilters((current) => ({ ...current, status: event.target.value }))
-                  }
+                  onValueChange={(value) => {
+                    if (typeof value === "string") {
+                      setFilters((current) => ({ ...current, status: value }));
+                    }
+                  }}
                 >
-                  <option value="all">{t("allStatuses")}</option>
-                  {API_CALL_LOG_STATUSES.map((status) => (
-                    <option key={status} value={status}>
-                      {statusLabel(status)}
-                    </option>
-                  ))}
-                </select>
+                  <SelectTrigger
+                    id="api-log-status"
+                    className="h-8 w-full bg-background text-xs"
+                  >
+                    <SelectValue>
+                      {filters.status === "all" ? t("allStatuses") : statusLabel(filters.status)}
+                    </SelectValue>
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="all" className="text-xs">
+                      {t("allStatuses")}
+                    </SelectItem>
+                    {API_CALL_LOG_STATUSES.map((status) => (
+                      <SelectItem key={status} value={status} className="text-xs">
+                        {statusLabel(status)}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
               </div>
 
               {/* Session ID */}
