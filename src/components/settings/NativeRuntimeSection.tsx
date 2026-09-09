@@ -78,7 +78,8 @@ export function NativeRuntimeSection() {
   const [draft, setDraft] = useState(native);
   const [lspServers, setLspServers] = useState<LspServerStatus[]>([]);
   const [lspLoading, setLspLoading] = useState(true);
-  const [lspInstalling, setLspInstalling] = useState<string | null>(null);
+  const [lspInstalling, setLspInstalling] = useState<Set<string>>(() => new Set());
+  const [lspErrors, setLspErrors] = useState<Record<string, string>>({});
   const [lspFeedback, setLspFeedback] = useState<{
     variant: "success" | "error";
     message: string;
@@ -87,9 +88,10 @@ export function NativeRuntimeSection() {
   const initializedRef = useRef(false);
   const draftRef = useRef(draft);
   draftRef.current = draft;
+  const lspInstallingRef = useRef(new Set<string>());
 
-  const refreshLspServers = useCallback(async () => {
-    setLspLoading(true);
+  const refreshLspServers = useCallback(async (silent = false) => {
+    if (!silent) setLspLoading(true);
     try {
       setLspServers(await listLspServers());
     } catch (error) {
@@ -98,7 +100,7 @@ export function NativeRuntimeSection() {
         message: error instanceof Error ? error.message : String(error),
       });
     } finally {
-      setLspLoading(false);
+      if (!silent) setLspLoading(false);
     }
   }, []);
 
@@ -108,23 +110,42 @@ export function NativeRuntimeSection() {
 
   const handleInstallLsp = useCallback(
     async (language: string) => {
-      setLspInstalling(language);
-      setLspFeedback(null);
+      if (lspInstallingRef.current.has(language)) return;
+      lspInstallingRef.current.add(language);
+      setLspInstalling(new Set(lspInstallingRef.current));
+      setLspErrors((prev) => {
+        if (!(language in prev)) return prev;
+        const next = { ...prev };
+        delete next[language];
+        return next;
+      });
       try {
-        const message = await installLspServer(language);
-        setLspFeedback({ variant: "success", message });
-        await refreshLspServers();
+        await installLspServer(language);
+        await refreshLspServers(true);
       } catch (error) {
-        setLspFeedback({
-          variant: "error",
-          message: error instanceof Error ? error.message : String(error),
-        });
+        setLspErrors((prev) => ({
+          ...prev,
+          [language]: error instanceof Error ? error.message : String(error),
+        }));
       } finally {
-        setLspInstalling(null);
+        lspInstallingRef.current.delete(language);
+        setLspInstalling(new Set(lspInstallingRef.current));
       }
     },
     [refreshLspServers],
   );
+
+  const pendingLspCount = lspServers.filter(
+    (server) => !server.installed_command && server.installable && !lspInstalling.has(server.id),
+  ).length;
+
+  const handleInstallMissing = useCallback(() => {
+    for (const server of lspServers) {
+      if (!server.installed_command && server.installable) {
+        void handleInstallLsp(server.id);
+      }
+    }
+  }, [handleInstallLsp, lspServers]);
 
   // 仅首次加载时用 native 初始化 draft；自动保存回写不再重置草稿，避免丢失正在编辑的输入
   useEffect(() => {
@@ -407,6 +428,24 @@ export function NativeRuntimeSection() {
         icon={Download}
         title={t("settings:runtime.lspInstallTitle")}
         description={t("settings:runtime.lspInstallHint")}
+        headerAction={
+          !lspLoading && pendingLspCount > 0 ? (
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              className="h-7 gap-1.5 text-xs"
+              onClick={handleInstallMissing}
+            >
+              {lspInstalling.size > 0 ? (
+                <Loader2 className="size-3 animate-spin" />
+              ) : (
+                <Download className="size-3" />
+              )}
+              {t("settings:runtime.lspInstallMissing", { count: pendingLspCount })}
+            </Button>
+          ) : null
+        }
         divided
       >
         {lspFeedback ? (
@@ -424,53 +463,61 @@ export function NativeRuntimeSection() {
             {t("settings:runtime.lspLoading")}
           </div>
         ) : (
-          lspServers.map((server) => (
-            <SettingRow
-              key={server.id}
-              title={
-                <span className="flex items-center gap-2">
-                  {server.label}
-                  {server.installed_command ? (
-                    <span className="inline-flex items-center gap-1 rounded-full bg-emerald-500/10 px-1.5 py-0.5 text-[10px] text-emerald-600 dark:text-emerald-400">
-                      <Check className="size-3" />
-                      {t("settings:runtime.lspInstalled")}
-                    </span>
-                  ) : null}
-                </span>
-              }
-              description={
-                server.installed_command
-                  ? `${t("settings:runtime.lspCommand")}: ${server.installed_command}`
-                  : `${t("settings:runtime.lspInstallCommand")}: ${server.install_command ?? server.commands.join(" / ")}`
-              }
-            >
-              {server.installed_command ? (
-                <span className="text-[11px] text-muted-foreground">
-                  {t("settings:runtime.lspReady")}
-                </span>
-              ) : server.installable ? (
-                <Button
-                  type="button"
-                  variant="outline"
-                  size="sm"
-                  className="h-7 text-xs"
-                  disabled={lspInstalling !== null}
-                  onClick={() => void handleInstallLsp(server.id)}
-                >
-                  {lspInstalling === server.id ? (
-                    <Loader2 className="mr-1.5 size-3 animate-spin" />
+          lspServers.map((server) => {
+            const installing = lspInstalling.has(server.id);
+            const error = lspErrors[server.id];
+            return (
+              <SettingRow
+                key={server.id}
+                title={
+                  <span className="flex items-center gap-2">
+                    {server.label}
+                    {server.installed_command ? (
+                      <span className="inline-flex items-center gap-1 rounded-full bg-emerald-500/10 px-1.5 py-0.5 text-[10px] text-emerald-600 dark:text-emerald-400">
+                        <Check className="size-3" />
+                        {t("settings:runtime.lspInstalled")}
+                      </span>
+                    ) : null}
+                  </span>
+                }
+                description={
+                  error ? (
+                    <span className="text-destructive">{error}</span>
+                  ) : server.installed_command ? (
+                    `${t("settings:runtime.lspCommand")}: ${server.installed_command}`
                   ) : (
-                    <Download className="mr-1.5 size-3" />
-                  )}
-                  {t("settings:runtime.lspInstall")}
-                </Button>
-              ) : (
-                <span className="text-[11px] text-muted-foreground">
-                  {t("settings:runtime.lspManual")}
-                </span>
-              )}
-            </SettingRow>
-          ))
+                    `${t("settings:runtime.lspInstallCommand")}: ${server.install_command ?? server.commands.join(" / ")}`
+                  )
+                }
+              >
+                {server.installed_command ? (
+                  <span className="text-[11px] text-muted-foreground">
+                    {t("settings:runtime.lspReady")}
+                  </span>
+                ) : server.installable ? (
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    className="h-7 text-xs"
+                    disabled={installing}
+                    onClick={() => void handleInstallLsp(server.id)}
+                  >
+                    {installing ? (
+                      <Loader2 className="mr-1.5 size-3 animate-spin" />
+                    ) : (
+                      <Download className="mr-1.5 size-3" />
+                    )}
+                    {t("settings:runtime.lspInstall")}
+                  </Button>
+                ) : (
+                  <span className="text-[11px] text-muted-foreground">
+                    {t("settings:runtime.lspManual")}
+                  </span>
+                )}
+              </SettingRow>
+            );
+          })
         )}
       </SettingCard>
 

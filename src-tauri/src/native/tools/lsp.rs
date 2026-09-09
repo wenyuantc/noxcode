@@ -16,8 +16,10 @@ use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStdin};
 use tokio::sync::{oneshot, Mutex};
 
-use crate::native::tools::command_path::resolve_program;
-use crate::process_spawn::tokio_command;
+use crate::native::tools::command_path::{
+    apply_augmented_path, resolve_program, resolve_program_with_extra_dirs,
+};
+use crate::process_spawn::{std_command, tokio_command};
 
 use super::paths::resolve_under_workspace;
 
@@ -569,11 +571,7 @@ pub async fn list_lsp_servers() -> Result<Vec<LspServerStatus>, String> {
     let mut servers = Vec::with_capacity(SUPPORTED_LANGUAGES.len());
     for language in SUPPORTED_LANGUAGES {
         let spec = server_spec(language).ok_or_else(|| format!("没有为 {language} 配置 LSP"))?;
-        let installed_command = spec.commands.iter().find_map(|candidate| {
-            resolve_program(candidate.command)
-                .ok()
-                .map(|_| candidate.command.to_string())
-        });
+        let installed_command = installed_server_command(language);
         let commands = spec
             .commands
             .iter()
@@ -612,10 +610,12 @@ pub async fn install_lsp_server(language: String) -> Result<String, String> {
                 continue;
             }
         };
-        let output = tokio::time::timeout(
-            Duration::from_secs(600),
-            tokio_command(&program).args(install.args).output(),
-        )
+        let output = tokio::time::timeout(Duration::from_secs(600), async {
+            let mut cmd = tokio_command(&program);
+            cmd.args(install.args);
+            apply_augmented_path(&mut cmd);
+            cmd.output().await
+        })
         .await
         .map_err(|_| {
             let label = language_label(language);
@@ -623,14 +623,11 @@ pub async fn install_lsp_server(language: String) -> Result<String, String> {
         })?
         .map_err(|error| format!("执行 {} 失败：{error}", install.display))?;
         if output.status.success() {
-            let detected = server_spec(language).is_some_and(|spec| {
-                spec.commands
-                    .iter()
-                    .any(|candidate| resolve_program(candidate.command).is_ok())
-            });
+            let extra_dirs = extra_bins_after_install(install.program, &program);
+            let detected = installed_server_command_with_extra(language, &extra_dirs).is_some();
             if !detected {
                 return Err(format!(
-                    "安装命令已完成，但仍未在 PATH 中找到 {}。请重启应用或手动检查：{}",
+                    "安装命令已完成，但仍未找到 {} language server。请手动检查：{}",
                     language_label(language),
                     install.display
                 ));
@@ -656,6 +653,79 @@ pub async fn install_lsp_server(language: String) -> Result<String, String> {
         missing.join("、"),
         install_command_text(language).unwrap_or_default()
     ))
+}
+
+fn installed_server_command(language: &str) -> Option<String> {
+    installed_server_command_with_extra(language, &[])
+}
+
+fn installed_server_command_with_extra(language: &str, extra_dirs: &[PathBuf]) -> Option<String> {
+    let spec = server_spec(language)?;
+    spec.commands.iter().find_map(|candidate| {
+        let found = if extra_dirs.is_empty() {
+            resolve_program(candidate.command)
+        } else {
+            resolve_program_with_extra_dirs(candidate.command, extra_dirs)
+        };
+        found.ok().map(|_| candidate.command.to_string())
+    })
+}
+
+/// 安装器刚写入的 bin：命令所在目录，以及 pip --user / go install / npm -g 的目标目录。
+fn extra_bins_after_install(program: &str, program_path: &Path) -> Vec<PathBuf> {
+    let mut dirs = Vec::new();
+    if let Some(parent) = program_path.parent() {
+        dirs.push(parent.to_path_buf());
+    }
+    match program {
+        "rustup" => {
+            if let Some(home) = crate::app::ssh::shell::user_home_dir() {
+                dirs.push(home.join(".cargo/bin"));
+            }
+        }
+        "npm" => {
+            if let Some(prefix) = probe_command_stdout(program_path, &["prefix", "-g"]) {
+                dirs.push(PathBuf::from(prefix).join("bin"));
+            }
+        }
+        "python" | "python3" => {
+            if let Some(user_base) =
+                probe_command_stdout(program_path, &["-m", "site", "--user-base"])
+            {
+                dirs.push(PathBuf::from(user_base).join("bin"));
+            }
+        }
+        "go" => {
+            if let Some(gobin) = probe_command_stdout(program_path, &["env", "GOBIN"]) {
+                if !gobin.is_empty() {
+                    dirs.push(PathBuf::from(gobin));
+                }
+            }
+            if let Some(gopath) = probe_command_stdout(program_path, &["env", "GOPATH"]) {
+                if !gopath.is_empty() {
+                    dirs.push(PathBuf::from(gopath).join("bin"));
+                }
+            }
+        }
+        _ => {}
+    }
+    dirs
+}
+
+fn probe_command_stdout(program: &Path, args: &[&str]) -> Option<String> {
+    let mut cmd = std_command(program);
+    cmd.args(args);
+    cmd.env("PATH", crate::native::tools::command_path::augmented_path());
+    let output = cmd.output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if text.is_empty() {
+        None
+    } else {
+        Some(text)
+    }
 }
 
 const fn command(command: &'static str, args: &'static [&'static str]) -> ServerCommand {
@@ -833,6 +903,7 @@ impl LanguageServer {
         args: &[String],
     ) -> Result<Arc<Self>, String> {
         let mut cmd = tokio_command(program);
+        apply_augmented_path(&mut cmd);
         cmd.args(args)
             .current_dir(root)
             .stdin(Stdio::piped())
@@ -1269,6 +1340,65 @@ mod tests {
         let text = String::from_utf8_lossy(&bytes);
         assert!(text.starts_with("Content-Length:"));
         assert!(text.contains("\r\n\r\n{"));
+    }
+
+    #[test]
+    fn detects_language_server_from_extra_install_dir() {
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("time")
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("noxcode-lsp-detect-{stamp}"));
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        let bin = dir.join("pyright-langserver");
+        std::fs::write(&bin, b"#!/bin/sh\nexit 0\n").expect("write");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = std::fs::metadata(&bin).expect("meta").permissions();
+            perms.set_mode(0o755);
+            std::fs::set_permissions(&bin, perms).expect("chmod");
+        }
+        assert_eq!(
+            installed_server_command_with_extra("python", std::slice::from_ref(&dir)).as_deref(),
+            Some("pyright-langserver")
+        );
+        let rust_bin = dir.join("rust-analyzer");
+        std::fs::write(&rust_bin, b"#!/bin/sh\nexit 0\n").expect("write ra");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = std::fs::metadata(&rust_bin).expect("meta").permissions();
+            perms.set_mode(0o755);
+            std::fs::set_permissions(&rust_bin, perms).expect("chmod");
+        }
+        assert_eq!(
+            installed_server_command_with_extra("rust", std::slice::from_ref(&dir)).as_deref(),
+            Some("rust-analyzer")
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn extra_bins_after_install_includes_command_dir_and_cargo() {
+        let program = Path::new("/opt/example/bin/rustup");
+        let dirs = extra_bins_after_install("rustup", program);
+        assert!(
+            dirs.iter().any(|dir| dir == Path::new("/opt/example/bin")),
+            "missing installer dir in {dirs:?}"
+        );
+        assert!(
+            dirs.iter().any(|dir| dir.ends_with(".cargo/bin")),
+            "missing cargo bin in {dirs:?}"
+        );
+    }
+
+    #[test]
+    fn extra_bins_after_python_and_go_include_parent() {
+        let python = extra_bins_after_install("python3", Path::new("/usr/bin/python3"));
+        assert!(python.iter().any(|dir| dir == Path::new("/usr/bin")));
+        let go = extra_bins_after_install("go", Path::new("/opt/homebrew/bin/go"));
+        assert!(go.iter().any(|dir| dir == Path::new("/opt/homebrew/bin")));
     }
 
     #[test]

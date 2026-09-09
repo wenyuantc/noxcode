@@ -1341,7 +1341,7 @@ async fn spawn_local(
     for (key, value) in extra_env {
         command.env(key, value);
     }
-    command.env("PATH", super::command_path::augmented_path());
+    super::command_path::apply_augmented_path(&mut command);
     let mut seen = HashMap::new();
     for env in &server.env {
         let key = env.key.trim();
