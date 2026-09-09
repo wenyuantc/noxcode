@@ -349,7 +349,7 @@ pub fn tool_contracts() -> Vec<ToolContract> {
         ),
         contract(
             "ExitWorktree",
-            "离开隔离 worktree，回到仓库主工作区",
+            "暂时离开隔离 worktree，回到仓库主工作区（本回合结束后会切回）",
             true,
             false,
             false,
@@ -861,7 +861,7 @@ fn core_tool_specs() -> Vec<ToolSpec> {
         ),
         spec(
             "EnterWorktree",
-            "Create an isolated git worktree for this session (detached HEAD) and switch the working directory. Omit path to use the managed worktrees directory. Does not change other sessions. Git checkpoints then use the worktree.",
+            "Create an isolated git worktree for this session on a unique noxcode/wt-* branch and switch the working directory. Omit path to use the managed worktrees directory. Does not change other sessions. Git checkpoints then use the worktree.",
             json!({
                 "type": "object",
                 "properties": {
@@ -871,7 +871,7 @@ fn core_tool_specs() -> Vec<ToolSpec> {
         ),
         spec(
             "ExitWorktree",
-            "Leave the isolated worktree and switch back to the original repository directory. Does not delete the worktree.",
+            "Temporarily leave the isolated worktree and switch to the original repository directory for this turn. Does not delete the worktree. The session returns to the isolation worktree when the turn ends.",
             json!({"type": "object", "properties": {}}),
         ),
         spec(

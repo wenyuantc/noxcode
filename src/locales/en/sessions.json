@@ -331,7 +331,7 @@
   "backgroundProcessStopped": "Stopped",
   "backgroundProcessStopHint": "Stop background process",
   "isolateWorktree": "Isolate worktree",
-  "isolateWorktreeHint": "Edit this session in a detached git worktree. Leave off to use the current workspace.",
+  "isolateWorktreeHint": "Edit this session in an isolated git worktree on noxcode/wt-<session>. Leave off to use the current workspace.",
   "worktreeModeCurrent": "Current workspace",
   "worktreeModeIsolate": "Isolate worktree"
 }

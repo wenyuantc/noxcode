@@ -24,6 +24,7 @@ pub enum MergeWorktreeAction {
 pub enum ResolveWorktreeAction {
     Ai,
     Abort,
+    Complete,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -63,19 +64,14 @@ impl MergeWorktreeResult {
     }
 }
 
-pub fn default_worktree_branch_name(session_id: &str) -> String {
-    let short: String = session_id
-        .chars()
-        .filter(|item| item.is_ascii_alphanumeric())
-        .take(8)
-        .collect();
-    let short = if short.is_empty() {
-        "session".to_string()
-    } else {
-        short
-    };
-    format!("noxcode/wt-{short}")
+pub fn merge_checkpoint_label(message: Option<&str>) -> &str {
+    message
+        .map(str::trim)
+        .filter(|item| !item.is_empty())
+        .unwrap_or("worktree_merge")
 }
+
+pub use super::worktree::default_worktree_branch_name;
 
 pub fn has_conflict_markers(text: &str) -> bool {
     text.contains("<<<<<<<") || text.contains(">>>>>>>")
@@ -149,6 +145,46 @@ pub async fn abort_merge(target: &GitTarget) -> Result<(), GitError> {
     .await
 }
 
+async fn current_branch_name(target: &GitTarget) -> Result<Option<String>, GitError> {
+    let output = git(
+        target,
+        &["rev-parse", "--abbrev-ref", "HEAD"],
+        &IndexMode::ReadOnly,
+    )
+    .await?;
+    output.require_success(&["rev-parse", "--abbrev-ref", "HEAD"])?;
+    let name = output.stdout_lossy().trim().to_string();
+    if name.is_empty() || name == "HEAD" {
+        Ok(None)
+    } else {
+        Ok(Some(name))
+    }
+}
+
+async fn reset_hard_to(target: &GitTarget, oid: &str) -> Result<(), GitError> {
+    with_repo_lock(target, || async {
+        git(target, &["reset", "--hard", oid], &IndexMode::user())
+            .await?
+            .require_success(&["reset", "--hard"])?;
+        Ok(())
+    })
+    .await
+}
+
+async fn switch_discard_changes(target: &GitTarget, name: &str) -> Result<(), GitError> {
+    with_repo_lock(target, || async {
+        git(
+            target,
+            &["switch", "--discard-changes", name],
+            &IndexMode::user(),
+        )
+        .await?
+        .require_success(&["switch", "--discard-changes", name])?;
+        Ok(())
+    })
+    .await
+}
+
 async fn branch_is_checked_out(target: &GitTarget, name: &str) -> Result<bool, GitError> {
     let expected = format!("refs/heads/{name}");
     let items = list_worktrees(target).await?;
@@ -201,9 +237,16 @@ async fn create_branch_at(target: &GitTarget, name: &str, oid: &str) -> Result<S
 async fn merge_named_branch(
     target: &GitTarget,
     branch: &str,
+    commit_message: Option<&str>,
 ) -> Result<MergeWorktreeResult, GitError> {
+    let label = merge_checkpoint_label(commit_message);
     let output = with_repo_lock(target, || async {
-        git(target, &["merge", "--no-edit", branch], &IndexMode::user()).await
+        git(
+            target,
+            &["merge", "--no-edit", "-m", label, branch],
+            &IndexMode::user(),
+        )
+        .await
     })
     .await?;
     if output.success() {
@@ -375,6 +418,36 @@ pub async fn apply_resolved_files(
     })
 }
 
+pub async fn complete_merge_from_worktree(
+    target: &GitTarget,
+) -> Result<MergeWorktreeResult, GitError> {
+    if !merge_in_progress(target).await? {
+        return Err(GitError::Parse("当前没有进行中的合并".to_string()));
+    }
+    let conflicts = list_unmerged_paths(target).await?;
+    if conflicts.is_empty() {
+        let oid = commit_merge(target).await?;
+        return Ok(MergeWorktreeResult {
+            status: MergeWorktreeStatus::Resolved,
+            branch: None,
+            commit_oid: Some(oid),
+            conflicts: Vec::new(),
+            resolved: Vec::new(),
+            failed: Vec::new(),
+            message: "已用自动解决完成合并".to_string(),
+        });
+    }
+    let mut resolutions = Vec::new();
+    for path in conflicts {
+        let outcome = match read_worktree_text(target, &path).await {
+            Ok(content) => sanitize_conflict_resolution(&content),
+            Err(error) => Err(error.to_string()),
+        };
+        resolutions.push((path, outcome));
+    }
+    apply_resolved_files(target, &resolutions).await
+}
+
 async fn require_managed_worktree(
     pool: &SqlitePool,
     workspace_id: &str,
@@ -419,6 +492,7 @@ pub async fn run_merge_session_worktree(
     session_id: &str,
     action: MergeWorktreeAction,
     branch_name: Option<&str>,
+    commit_message: Option<&str>,
     configured_root: Option<&str>,
 ) -> Result<MergeWorktreeResult, GitError> {
     if action == MergeWorktreeAction::Keep {
@@ -431,12 +505,13 @@ pub async fn run_merge_session_worktree(
     }
     let _working_dir =
         require_managed_worktree(pool, workspace_id, session_id, configured_root).await?;
+    let label = merge_checkpoint_label(commit_message);
     let checkpoint = create_checkpoint(
         pool,
         worktree,
         workspace_id,
         session_id,
-        Some("worktree_merge"),
+        Some(label),
         Some("manual"),
     )
     .await?;
@@ -446,7 +521,20 @@ pub async fn run_merge_session_worktree(
             .filter(|item| !item.is_empty())
             .map(ToOwned::to_owned)
             .unwrap_or_else(|| default_worktree_branch_name(session_id));
+        if current_branch_name(worktree).await?.as_deref() == Some(branch.as_str()) {
+            reset_hard_to(worktree, &checkpoint.commit_oid).await?;
+            return Ok(MergeWorktreeResult {
+                status: MergeWorktreeStatus::Branched,
+                branch: Some(branch.clone()),
+                commit_oid: Some(checkpoint.commit_oid),
+                conflicts: Vec::new(),
+                resolved: Vec::new(),
+                failed: Vec::new(),
+                message: format!("已更新分支 {branch}，隔离工作树已提交并清空，主工作区未改动"),
+            });
+        }
         let branch = create_branch_at(main, &branch, &checkpoint.commit_oid).await?;
+        switch_discard_changes(worktree, &branch).await?;
         return Ok(MergeWorktreeResult {
             status: MergeWorktreeStatus::Branched,
             branch: Some(branch.clone()),
@@ -454,13 +542,19 @@ pub async fn run_merge_session_worktree(
             conflicts: Vec::new(),
             resolved: Vec::new(),
             failed: Vec::new(),
-            message: format!("已创建分支 {branch}，主工作区未改动"),
+            message: format!("已创建分支 {branch}，隔离工作树已切换到该分支，主工作区未改动"),
         });
     }
-    // 合并回当前分支：只建内部指针再 merge，绝不 force-update 已检出的分支。
+    // 隔离树已检出会话分支时，在该工作树内 reset 到打点提交（同步 index），再合并回主工作区。
+    // 旧的 detached 工作树仍建内部指针，绝不 force-update 已检出分支。
+    if let Some(worktree_branch) = current_branch_name(worktree).await? {
+        reset_hard_to(worktree, &checkpoint.commit_oid).await?;
+        return merge_named_branch(main, &worktree_branch, Some(label)).await;
+    }
     let pointer = default_worktree_branch_name(session_id);
     let pointer = create_branch_at(main, &pointer, &checkpoint.commit_oid).await?;
-    merge_named_branch(main, &pointer).await
+    reset_hard_to(worktree, &checkpoint.commit_oid).await?;
+    merge_named_branch(main, &pointer, Some(label)).await
 }
 
 pub async fn run_abort_merge(target: &GitTarget) -> Result<MergeWorktreeResult, GitError> {
@@ -497,6 +591,16 @@ mod tests {
             default_worktree_branch_name("abc-def-123"),
             "noxcode/wt-abcdef12"
         );
+    }
+
+    #[test]
+    fn merge_label_uses_message_or_fallback() {
+        assert_eq!(
+            merge_checkpoint_label(Some(" feat: add status ")),
+            "feat: add status"
+        );
+        assert_eq!(merge_checkpoint_label(Some("   ")), "worktree_merge");
+        assert_eq!(merge_checkpoint_label(None), "worktree_merge");
     }
 
     #[test]

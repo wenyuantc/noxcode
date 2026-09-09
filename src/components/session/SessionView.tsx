@@ -50,7 +50,7 @@ export function SessionView() {
     <div ref={containerRef} className="relative flex h-full min-h-0 min-w-0">
       <div className="flex min-h-0 min-w-0 flex-1 flex-col">
         <SessionHeader />
-        <div ref={streamRef} className="relative min-h-0 flex-1">
+        <div ref={streamRef} className="relative z-0 min-h-0 flex-1">
           {historyReady ? (
             mountedIds.map((id) => (
               <div key={id} className={cn("h-full min-h-0", id !== viewedId && "hidden")}>
