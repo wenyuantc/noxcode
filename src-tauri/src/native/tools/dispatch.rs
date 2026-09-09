@@ -113,6 +113,12 @@ pub type PlanModeChangeHook = Arc<dyn Fn(bool) + Send + Sync>;
 /// value 是读取时的指纹（SSH 仅比较文件内容）。
 pub type ReadFileRegistry = Arc<Mutex<HashMap<String, Option<FileFingerprint>>>>;
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IsolationRestore {
+    pub path: String,
+    pub switched: bool,
+}
+
 /// 工具执行上下文。`Clone` 得到的副本共享同一份可变状态（已读文件、待办、MCP、
 /// 权限放行），因此同一轮里并行执行的工具可以各拿一份副本。
 #[derive(Clone)]
@@ -161,10 +167,20 @@ pub struct ToolCtx {
     )>,
     /// 数据库作用域（自动化 / 目标 / ReadSessionContext）；测试与子 Agent 可为空。
     pub session_scope: Option<SessionScope>,
+    pub lsp: Option<std::sync::Arc<super::lsp::LspHub>>,
+    pub processes: Option<std::sync::Arc<super::processes::ProcessRegistry>>,
+    pub git_target: Option<crate::git::GitTarget>,
+    pub original_root: std::path::PathBuf,
+    pub active_root: std::sync::Arc<std::sync::RwLock<std::path::PathBuf>>,
+    pub worktree_path: std::sync::Arc<std::sync::RwLock<Option<String>>>,
+    pub app_config_dir: Option<std::path::PathBuf>,
+    pub worktree_root: String,
+    pub worktree_fetch_before_create: bool,
 }
 
 impl ToolCtx {
     pub fn new(workspace: LocalWorkspace) -> Self {
+        let original_root = workspace.root.clone();
         Self {
             workspace,
             ssh: None,
@@ -197,6 +213,15 @@ impl ToolCtx {
             background: None,
             coordinator: None,
             session_scope: None,
+            lsp: None,
+            processes: None,
+            git_target: None,
+            original_root: original_root.clone(),
+            active_root: std::sync::Arc::new(std::sync::RwLock::new(original_root)),
+            worktree_path: std::sync::Arc::new(std::sync::RwLock::new(None)),
+            app_config_dir: None,
+            worktree_root: String::new(),
+            worktree_fetch_before_create: false,
         }
     }
 
@@ -239,9 +264,9 @@ impl ToolCtx {
 
     /// 规则匹配用的工作区根：SSH 用远端路径，本地用工作区目录。
     pub fn rules_workspace_root(&self) -> PathBuf {
-        match self.ssh.as_ref() {
+        match self.ssh_for_exec() {
             Some(ssh) => PathBuf::from(&ssh.root),
-            None => self.workspace.root.clone(),
+            None => self.active_workspace_root(),
         }
     }
 
@@ -252,9 +277,62 @@ impl ToolCtx {
             .unwrap_or_default()
     }
 
+    pub fn active_workspace_root(&self) -> std::path::PathBuf {
+        self.active_root
+            .read()
+            .map(|root| root.clone())
+            .unwrap_or_else(|_| self.workspace.root.clone())
+    }
+
+    pub fn isolation_worktree_path(&self) -> Option<String> {
+        self.worktree_path
+            .read()
+            .ok()
+            .and_then(|slot| slot.clone())
+            .map(|path| path.trim().to_string())
+            .filter(|path| !path.is_empty())
+    }
+
+    /// 把活动目录切回本会话的隔离 worktree。`ExitWorktree` 只暂时回到主仓，不丢掉路径。
+    pub fn restore_isolation_worktree(&self) -> Option<IsolationRestore> {
+        let path = self.isolation_worktree_path()?;
+        let current = crate::git::worktree::normalize_path_for_compare(
+            &self.active_workspace_root().to_string_lossy(),
+        );
+        let next = crate::git::worktree::normalize_path_for_compare(&path);
+        let switched = current != next;
+        if switched {
+            if let Ok(mut root) = self.active_root.write() {
+                *root = std::path::PathBuf::from(&path);
+            }
+        }
+        Some(IsolationRestore { path, switched })
+    }
+
+    fn apply_active_root(&self, workspace: &mut LocalWorkspace) {
+        workspace.root = self.active_workspace_root();
+    }
+
+    pub fn workspace_for_exec(&self) -> LocalWorkspace {
+        let mut workspace = self.workspace.clone();
+        self.apply_active_root(&mut workspace);
+        workspace
+    }
+
+    pub fn ssh_for_exec(&self) -> Option<super::ssh::SshToolRuntime> {
+        let mut ssh = self.ssh.clone()?;
+        let root = self.active_workspace_root();
+        let text = root.to_string_lossy();
+        if !text.is_empty() {
+            ssh.root = text.into_owned();
+        }
+        Some(ssh)
+    }
+
     /// 技能只读根按当前列表派生，不写回工作区，避免子 Agent 继承已筛除技能的权限。
     pub(super) fn workspace_for_read(&self) -> LocalWorkspace {
         let mut workspace = self.workspace.clone();
+        self.apply_active_root(&mut workspace);
         if self.ssh.is_none() {
             workspace.extra_read_roots.extend(
                 self.skills
@@ -470,6 +548,13 @@ pub(crate) async fn finalize_tool(
                 if let Some(on_mutation) = &ctx.on_mutation {
                     on_mutation(name);
                 }
+                if let Some(lsp) = ctx.lsp.clone() {
+                    let paths = super::lsp::mutation_paths(name, arguments);
+                    let extra = lsp.diagnostics_for_paths(&paths).await;
+                    if !extra.is_empty() {
+                        output.text.push_str(&extra);
+                    }
+                }
             }
             let post =
                 run_post_tool_hooks(&ctx.hook_runtime(), name, arguments, &output.text).await;
@@ -566,6 +651,17 @@ async fn dispatch(ctx: &ToolCtx, name: &str, arguments: &str) -> Result<ToolOutp
             .await
             .map(ToolOutput::text),
         "Skill" => call_skill(ctx, arguments).map(ToolOutput::text),
+        "Lsp" => call_lsp(ctx, arguments).await.map(ToolOutput::text),
+        "ProcessList" => call_process_list(ctx).map(ToolOutput::text),
+        "ProcessOutput" => call_process_output(ctx, arguments)
+            .await
+            .map(ToolOutput::text),
+        "ProcessStop" => call_process_stop(ctx, arguments).map(ToolOutput::text),
+        "Monitor" => call_monitor(ctx, arguments).await.map(ToolOutput::text),
+        "EnterWorktree" => call_enter_worktree(ctx, arguments)
+            .await
+            .map(ToolOutput::text),
+        "ExitWorktree" => call_exit_worktree(ctx).await.map(ToolOutput::text),
         other if ctx.mcp.has_tool(other).await => {
             ctx.mcp.call(other, arguments).await.map(ToolOutput::text)
         }
@@ -1420,11 +1516,11 @@ async fn call_apply_patch(ctx: &ToolCtx, arguments: &str) -> Result<String, Stri
         let path = match mutation {
             FileMutation::Write { path, .. } | FileMutation::Delete { path } => path,
         };
-        if let Some(ssh) = &ctx.ssh {
+        if let Some(ssh) = ctx.ssh_for_exec() {
             ssh.resolve_for_write(path)?;
             ssh.validate_path(path).await?;
         } else {
-            ctx.workspace.resolve_for_write(path)?;
+            ctx.workspace_for_exec().resolve_for_write(path)?;
         }
     }
     let mut notes = Vec::new();
@@ -1434,15 +1530,16 @@ async fn call_apply_patch(ctx: &ToolCtx, arguments: &str) -> Result<String, Stri
         }
         match mutation {
             FileMutation::Write { path, content } => {
-                if let Some(ssh) = ctx.ssh.as_ref() {
+                if let Some(ssh) = ctx.ssh_for_exec() {
                     ssh.write(&path, &content).await?;
                     ctx.mark_read(
                         ssh.resolve(&path)?,
                         Some(FileFingerprint::of_bytes(content.as_bytes())),
                     );
                 } else {
-                    let resolved = ctx.workspace.resolve_for_write(&path)?;
-                    ctx.workspace.write_file(&path, &content)?;
+                    let workspace = ctx.workspace_for_exec();
+                    let resolved = workspace.resolve_for_write(&path)?;
+                    workspace.write_file(&path, &content)?;
                     ctx.mark_read(
                         resolved.to_string_lossy().into_owned(),
                         Some(FileFingerprint::of_content(&resolved, content.as_bytes())),
@@ -1451,12 +1548,13 @@ async fn call_apply_patch(ctx: &ToolCtx, arguments: &str) -> Result<String, Stri
                 notes.push(format!("wrote {path}"));
             }
             FileMutation::Delete { path } => {
-                if let Some(ssh) = ctx.ssh.as_ref() {
+                if let Some(ssh) = ctx.ssh_for_exec() {
                     ssh.delete(&path).await?;
                     ctx.mark_read(ssh.resolve(&path)?, None);
                 } else {
-                    let resolved = ctx.workspace.resolve_for_write(&path)?;
-                    ctx.workspace.delete_file(&path)?;
+                    let workspace = ctx.workspace_for_exec();
+                    let resolved = workspace.resolve_for_write(&path)?;
+                    workspace.delete_file(&path)?;
                     ctx.mark_read(resolved.to_string_lossy().into_owned(), None);
                 }
                 notes.push(format!("deleted {path}"));
@@ -1471,7 +1569,7 @@ async fn call_apply_patch(ctx: &ToolCtx, arguments: &str) -> Result<String, Stri
 }
 
 async fn load_patch_file(ctx: &ToolCtx, path: &str) -> Result<Option<String>, String> {
-    if let Some(ssh) = ctx.ssh.as_ref() {
+    if let Some(ssh) = ctx.ssh_for_exec() {
         if !ssh.exists(path).await? {
             return Ok(None);
         }
@@ -1483,7 +1581,7 @@ async fn load_patch_file(ctx: &ToolCtx, path: &str) -> Result<Option<String>, St
             })
         });
     }
-    let resolved = match ctx.workspace.resolve_for_write(path) {
+    let resolved = match ctx.workspace_for_exec().resolve_for_write(path) {
         Ok(path) => path,
         Err(error) => return Err(error),
     };
@@ -1507,7 +1605,7 @@ async fn call_read(ctx: &ToolCtx, arguments: &str) -> Result<ToolOutput, String>
     let path = string_arg(&args, "file_path")?;
     let offset = args.get("offset").and_then(Value::as_i64);
     let limit = args.get("limit").and_then(Value::as_i64);
-    if let Some(ssh) = ctx.ssh.as_ref() {
+    if let Some(ssh) = ctx.ssh_for_exec() {
         let raw = ssh.read(&path).await?;
         ctx.mark_read(
             ssh.resolve(&path)?,
@@ -1613,9 +1711,9 @@ async fn call_write(ctx: &ToolCtx, arguments: &str) -> Result<String, String> {
     let args = parse_args(arguments)?;
     let path = string_arg(&args, "file_path")?;
     let content = string_arg(&args, "content")?;
-    if let Some(ssh) = ctx.ssh.as_ref() {
+    if let Some(ssh) = ctx.ssh_for_exec() {
         let exists = ssh.exists(&path).await?;
-        ensure_ssh_fresh_for_mutation(ctx, ssh, &path, exists).await?;
+        ensure_ssh_fresh_for_mutation(ctx, &ssh, &path, exists).await?;
         let output = ssh.write_checked(&path, &content, !exists).await?;
         ctx.mark_read(
             ssh.resolve(&path)?,
@@ -1623,9 +1721,10 @@ async fn call_write(ctx: &ToolCtx, arguments: &str) -> Result<String, String> {
         );
         return Ok(output);
     }
-    let resolved = ctx.workspace.resolve_for_write(&path)?;
+    let workspace = ctx.workspace_for_exec();
+    let resolved = workspace.resolve_for_write(&path)?;
     ensure_fresh_for_mutation(ctx, &resolved, "writing to it")?;
-    let output = ctx.workspace.write_file(&path, &content)?;
+    let output = workspace.write_file(&path, &content)?;
     ctx.mark_read(
         resolved.to_string_lossy().into_owned(),
         Some(FileFingerprint::of_content(&resolved, content.as_bytes())),
@@ -1646,7 +1745,7 @@ async fn call_edit(ctx: &ToolCtx, arguments: &str) -> Result<String, String> {
         .get("replace_all")
         .and_then(Value::as_bool)
         .unwrap_or(false);
-    if let Some(ssh) = ctx.ssh.as_ref() {
+    if let Some(ssh) = ctx.ssh_for_exec() {
         let original = ssh.read(&path).await?;
         ensure_remote_snapshot(ctx, &ssh.resolve(&path)?, Some(&original))?;
         let outcome = apply_edit_fuzzy(&original, &old, &new, replace_all)?;
@@ -1657,7 +1756,8 @@ async fn call_edit(ctx: &ToolCtx, arguments: &str) -> Result<String, String> {
         );
         return Ok(edit_summary(&path, outcome.strategy, outcome.replacements));
     }
-    let resolved = ctx.workspace.resolve_for_write(&path)?;
+    let workspace = ctx.workspace_for_exec();
+    let resolved = workspace.resolve_for_write(&path)?;
     if !resolved.exists() {
         return Err(match super::local::similar_filename_hint(&resolved) {
             Some(hint) => format!("文件不存在: {path}（{hint}）"),
@@ -1668,7 +1768,7 @@ async fn call_edit(ctx: &ToolCtx, arguments: &str) -> Result<String, String> {
     let original =
         std::fs::read_to_string(&resolved).map_err(|error| format!("读取失败: {error}"))?;
     let outcome = apply_edit_fuzzy(&original, &old, &new, replace_all)?;
-    ctx.workspace.write_file(&path, &outcome.content)?;
+    workspace.write_file(&path, &outcome.content)?;
     ctx.mark_read(
         resolved.to_string_lossy().into_owned(),
         Some(FileFingerprint::of_content(
@@ -1703,7 +1803,7 @@ async fn call_glob(ctx: &ToolCtx, arguments: &str) -> Result<String, String> {
         .and_then(Value::as_str)
         .map(str::trim)
         .filter(|path| !path.is_empty());
-    if let Some(ssh) = ctx.ssh.as_ref() {
+    if let Some(ssh) = ctx.ssh_for_exec() {
         let listing = ssh.glob(path).await?;
         let search_root = path.map(|path| ssh.resolve(path)).transpose()?;
         let hits: Vec<_> = listing
@@ -1734,7 +1834,7 @@ async fn call_grep(ctx: &ToolCtx, arguments: &str) -> Result<String, String> {
         .filter(|path| !path.is_empty());
     let glob = args.get("glob").and_then(Value::as_str);
     let head_limit = args.get("head_limit").and_then(Value::as_i64);
-    if let Some(ssh) = ctx.ssh.as_ref() {
+    if let Some(ssh) = ctx.ssh_for_exec() {
         return ssh.grep(&pattern, path).await;
     }
     ctx.workspace_for_read()
@@ -1745,7 +1845,21 @@ async fn call_bash(ctx: &ToolCtx, arguments: &str) -> Result<String, String> {
     let args = parse_args(arguments)?;
     let command = string_arg(&args, "command")?;
     let timeout = args.get("timeout").and_then(Value::as_i64);
-    if let Some(ssh) = ctx.ssh.as_ref() {
+    let description = args
+        .get("description")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|item| !item.is_empty())
+        .unwrap_or("后台命令")
+        .to_string();
+    let background = args
+        .get("run_in_background")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    if background {
+        return start_background_command(ctx, &command, &description).await;
+    }
+    if let Some(ssh) = ctx.ssh_for_exec() {
         return ssh
             .bash_controlled(
                 &command,
@@ -1755,9 +1869,188 @@ async fn call_bash(ctx: &ToolCtx, arguments: &str) -> Result<String, String> {
             )
             .await;
     }
-    ctx.workspace
+    ctx.workspace_for_exec()
         .bash(&command, timeout, &ctx.cancel, &ctx.extra_env)
         .await
+}
+
+async fn start_background_command(
+    ctx: &ToolCtx,
+    command: &str,
+    description: &str,
+) -> Result<String, String> {
+    let registry = ctx
+        .processes
+        .clone()
+        .ok_or_else(|| "当前会话没有进程表".to_string())?;
+    if ctx.ssh.is_some() {
+        return Err(
+            "SSH 工作区暂不支持后台 Bash。请去掉 run_in_background，或在本地工作区运行长任务。"
+                .into(),
+        );
+    }
+    let workspace = ctx.workspace_for_exec();
+    let (child, note) = workspace.spawn_bash(command, &ctx.extra_env)?;
+    let snap = registry.start(
+        command.to_string(),
+        description.to_string(),
+        child,
+        ctx.cancel.clone(),
+    )?;
+    let extra = note.map(|note| format!("\n{note}")).unwrap_or_default();
+    Ok(format!(
+        "已在后台启动 process_id={} pid={:?}。用 ProcessOutput 读取输出，ProcessStop 停止。{extra}",
+        snap.process_id, snap.pid
+    ))
+}
+
+async fn call_lsp(ctx: &ToolCtx, arguments: &str) -> Result<String, String> {
+    if ctx.ssh.is_some() {
+        return Err("LSP 仅支持本地工作区".to_string());
+    }
+    let hub = ctx
+        .lsp
+        .as_ref()
+        .ok_or_else(|| "当前会话未启用 LSP".to_string())?;
+    hub.query(arguments).await
+}
+
+fn call_process_list(ctx: &ToolCtx) -> Result<String, String> {
+    let registry = ctx
+        .processes
+        .as_ref()
+        .ok_or_else(|| "当前会话没有进程表".to_string())?;
+    let items = registry.snapshots();
+    if items.is_empty() {
+        return Ok("没有后台进程。".to_string());
+    }
+    Ok(items
+        .into_iter()
+        .map(|item| {
+            format!(
+                "{} [{}] {} — {}",
+                item.process_id,
+                format!("{:?}", item.status).to_ascii_lowercase(),
+                item.description,
+                item.command
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n"))
+}
+
+async fn call_process_output(ctx: &ToolCtx, arguments: &str) -> Result<String, String> {
+    let args = parse_args(arguments)?;
+    let process_id = string_arg(&args, "process_id")?;
+    let wait = args.get("wait").and_then(Value::as_bool).unwrap_or(true);
+    let timeout_ms = args.get("timeout_ms").and_then(Value::as_u64);
+    let registry = ctx
+        .processes
+        .as_ref()
+        .ok_or_else(|| "当前会话没有进程表".to_string())?;
+    registry.output(&process_id, wait, timeout_ms).await
+}
+
+fn call_process_stop(ctx: &ToolCtx, arguments: &str) -> Result<String, String> {
+    let args = parse_args(arguments)?;
+    let process_id = string_arg(&args, "process_id")?;
+    let registry = ctx
+        .processes
+        .as_ref()
+        .ok_or_else(|| "当前会话没有进程表".to_string())?;
+    let snap = registry.stop(&process_id)?;
+    Ok(format!(
+        "已请求停止 process_id={} status={:?}",
+        snap.process_id, snap.status
+    ))
+}
+
+async fn call_monitor(ctx: &ToolCtx, arguments: &str) -> Result<String, String> {
+    let args = parse_args(arguments)?;
+    let command = string_arg(&args, "command")?;
+    let description = args
+        .get("description")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|item| !item.is_empty())
+        .unwrap_or("monitor")
+        .to_string();
+    start_background_command(ctx, &command, &description).await
+}
+
+async fn call_enter_worktree(ctx: &ToolCtx, arguments: &str) -> Result<String, String> {
+    let args = parse_args(arguments)?;
+    let target = ctx
+        .git_target
+        .as_ref()
+        .ok_or_else(|| "当前工作区不是 git 仓库，无法创建 worktree".to_string())?;
+    let requested = args
+        .get("path")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|item| !item.is_empty());
+    let id = if ctx.session_record_id.is_empty() {
+        uuid::Uuid::new_v4().to_string()
+    } else {
+        ctx.session_record_id.clone()
+    };
+    let path = if let Some(path) = requested {
+        path.to_string()
+    } else {
+        match target {
+            crate::git::GitTarget::Local(_) => {
+                if !ctx.worktree_root.trim().is_empty() {
+                    crate::git::worktree::local_worktree_path_in_root(
+                        std::path::Path::new(ctx.worktree_root.trim()),
+                        &id,
+                    )
+                    .to_string_lossy()
+                    .into_owned()
+                } else {
+                    ctx.app_config_dir
+                        .as_ref()
+                        .map(|dir| {
+                            crate::git::worktree::local_worktree_path(dir, &id)
+                                .to_string_lossy()
+                                .into_owned()
+                        })
+                        .unwrap_or_else(|| {
+                            ctx.original_root
+                                .join(".noxcode")
+                                .join("worktrees")
+                                .join(&id)
+                                .to_string_lossy()
+                                .into_owned()
+                        })
+                }
+            }
+            crate::git::GitTarget::Ssh { .. } => crate::git::worktree::remote_worktree_path(&id),
+        }
+    };
+    if ctx.worktree_fetch_before_create {
+        if let Err(error) = crate::git::worktree::fetch_all_prune(target).await {
+            eprintln!("[native] 创建工作树前获取上游失败，已继续创建: {error}");
+        }
+    }
+    crate::git::worktree::add_session_worktree(target, &path, &id).await?;
+    let next = std::path::PathBuf::from(&path);
+    if let Ok(mut root) = ctx.active_root.write() {
+        *root = next;
+    }
+    if let Ok(mut stored) = ctx.worktree_path.write() {
+        *stored = Some(path.clone());
+    }
+    Ok(format!("已切换到隔离 worktree：{path}"))
+}
+
+async fn call_exit_worktree(ctx: &ToolCtx) -> Result<String, String> {
+    if let Ok(mut root) = ctx.active_root.write() {
+        *root = ctx.original_root.clone();
+    }
+    Ok(match ctx.isolation_worktree_path() {
+        Some(path) => format!("已回到主工作区。worktree 仍保留在 {path}，本回合结束后会切回"),
+        None => "已回到主工作区。".to_string(),
+    })
 }
 
 fn call_todo_write(ctx: &ToolCtx, arguments: &str) -> Result<String, String> {
@@ -3209,5 +3502,89 @@ mod tests {
         .unwrap();
         assert_eq!(with_model.ai_channel_id.as_deref(), Some("ch-1"));
         assert_eq!(with_model.model.as_deref(), Some("deepseek-v4-flash"));
+    }
+
+    #[tokio::test]
+    async fn plan_mode_allows_lsp_without_a_running_server() {
+        let root = tempfile::tempdir().unwrap();
+        let mut ctx = ctx_for(root.path());
+        ctx.set_plan_mode(true);
+        ctx.lsp = Some(std::sync::Arc::new(super::super::lsp::LspHub::new(
+            root.path().to_path_buf(),
+            false,
+        )));
+        let error = execute_tool(
+            &ctx,
+            "Lsp",
+            r#"{"operation":"diagnostics","file_path":"lib.rs"}"#,
+        )
+        .await
+        .unwrap_err();
+        assert!(error.contains("LSP 已在设置中关闭"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn background_bash_registers_and_stops() {
+        let root = tempfile::tempdir().unwrap();
+        let mut ctx = ctx_for(root.path());
+        ctx.allow_all_high_risk
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        ctx.processes = Some(std::sync::Arc::new(
+            super::super::processes::ProcessRegistry::new(),
+        ));
+        let text = execute_tool(
+            &ctx,
+            "Bash",
+            r#"{"command":"while true; do sleep 1; done","run_in_background":true,"description":"loop"}"#,
+        )
+        .await
+        .expect("background");
+        assert!(text.contains("process_id="), "{text}");
+        let listed = execute_tool(&ctx, "ProcessList", "{}").await.expect("list");
+        assert!(listed.contains("loop"), "{listed}");
+        let process_id = text
+            .split("process_id=")
+            .nth(1)
+            .and_then(|part| part.split_whitespace().next())
+            .expect("id");
+        let stopped = execute_tool(
+            &ctx,
+            "ProcessStop",
+            &format!(r#"{{"process_id":"{process_id}"}}"#),
+        )
+        .await
+        .expect("stop");
+        assert!(stopped.contains(process_id), "{stopped}");
+    }
+
+    #[tokio::test]
+    async fn exit_worktree_keeps_isolation_path_so_restore_can_switch_back() {
+        let main = tempfile::tempdir().unwrap();
+        let worktree = main.path().join("worktrees").join("sess-1");
+        std::fs::create_dir_all(&worktree).unwrap();
+        let ctx = ctx_for(main.path());
+        if let Ok(mut root) = ctx.active_root.write() {
+            *root = worktree.clone();
+        }
+        if let Ok(mut stored) = ctx.worktree_path.write() {
+            *stored = Some(worktree.to_string_lossy().into_owned());
+        }
+
+        let text = execute_tool(&ctx, "ExitWorktree", "{}")
+            .await
+            .expect("exit");
+        assert!(text.contains("主工作区"), "{text}");
+        assert!(text.contains("会切回"), "{text}");
+        assert_eq!(ctx.active_workspace_root(), main.path());
+        assert_eq!(
+            ctx.isolation_worktree_path().as_deref(),
+            Some(worktree.to_string_lossy().as_ref())
+        );
+
+        let restored = ctx.restore_isolation_worktree().expect("restore");
+        assert!(restored.switched);
+        assert_eq!(restored.path, worktree.to_string_lossy());
+        assert_eq!(ctx.active_workspace_root(), worktree);
+        assert!(!ctx.restore_isolation_worktree().expect("again").switched);
     }
 }

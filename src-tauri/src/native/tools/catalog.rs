@@ -258,6 +258,111 @@ pub fn tool_contracts() -> Vec<ToolContract> {
             ToolTimeout::fixed(45_000),
         ),
         contract(
+            "Lsp",
+            "通过 language server 查询定义、引用、悬停、符号与诊断；仅本地工作区",
+            true,
+            false,
+            true,
+            SideEffectScope::None,
+            RiskLevel::Low,
+            false,
+            true,
+            PermissionCapability::Lsp,
+            &[Path, Input],
+            budget(60_000, ResultStrategy::Artifact, PreviewDirection::Head),
+            ToolTimeout::fixed(20_000),
+        ),
+        contract(
+            "ProcessList",
+            "列出当前会话的后台 Bash / Monitor 进程",
+            true,
+            false,
+            true,
+            SideEffectScope::Session,
+            RiskLevel::Low,
+            false,
+            true,
+            PermissionCapability::Process,
+            &[ToolName],
+            budget(20_000, ResultStrategy::Truncate, PreviewDirection::Head),
+            ToolTimeout::fixed(10_000),
+        ),
+        contract(
+            "ProcessOutput",
+            "读取或等待后台进程输出",
+            true,
+            false,
+            false,
+            SideEffectScope::Session,
+            RiskLevel::Low,
+            false,
+            true,
+            PermissionCapability::Process,
+            &[Input],
+            budget(40_000, ResultStrategy::Artifact, PreviewDirection::Tail),
+            ToolTimeout::none(),
+        ),
+        contract(
+            "ProcessStop",
+            "停止后台 Bash / Monitor 进程",
+            false,
+            true,
+            false,
+            SideEffectScope::System,
+            RiskLevel::Medium,
+            true,
+            false,
+            PermissionCapability::Process,
+            &[Input],
+            budget(8_000, ResultStrategy::Truncate, PreviewDirection::Head),
+            ToolTimeout::fixed(10_000),
+        ),
+        contract(
+            "Monitor",
+            "在后台运行命令并持续收集输出，随后用 ProcessOutput 读取",
+            false,
+            true,
+            false,
+            SideEffectScope::System,
+            RiskLevel::High,
+            true,
+            false,
+            PermissionCapability::Bash,
+            &[Command],
+            budget(20_000, ResultStrategy::Truncate, PreviewDirection::Head),
+            ToolTimeout::fixed(15_000),
+        ),
+        contract(
+            "EnterWorktree",
+            "为当前会话创建或切换到隔离 git worktree",
+            false,
+            false,
+            false,
+            SideEffectScope::Workspace,
+            RiskLevel::Medium,
+            true,
+            false,
+            PermissionCapability::Worktree,
+            &[Path, Input],
+            budget(8_000, ResultStrategy::Truncate, PreviewDirection::Head),
+            ToolTimeout::fixed(60_000),
+        ),
+        contract(
+            "ExitWorktree",
+            "暂时离开隔离 worktree，回到仓库主工作区（本回合结束后会切回）",
+            true,
+            false,
+            false,
+            SideEffectScope::Session,
+            RiskLevel::Low,
+            false,
+            true,
+            PermissionCapability::Worktree,
+            &[ToolName],
+            budget(8_000, ResultStrategy::Truncate, PreviewDirection::Head),
+            ToolTimeout::fixed(30_000),
+        ),
+        contract(
             "Skill",
             "把本地技能说明加载进当前会话",
             true,
@@ -686,16 +791,88 @@ fn core_tool_specs() -> Vec<ToolSpec> {
         ),
         spec(
             "Bash",
-            "Run a shell command in the workspace. Prefer Read/Glob/Grep for file inspection.",
+            "Run a shell command in the workspace. Prefer Read/Glob/Grep for file inspection. Set run_in_background=true for long-running processes such as dev servers; then use ProcessOutput / ProcessList / ProcessStop.",
             json!({
                 "type": "object",
                 "properties": {
                     "command": {"type": "string"},
                     "timeout": {"type": "integer"},
+                    "description": {"type": "string"},
+                    "run_in_background": {"type": "boolean"}
+                },
+                "required": ["command"]
+            }),
+        ),
+        spec(
+            "Lsp",
+            "Code intelligence via a language server in local workspaces only. After Write/Edit/ApplyPatch, diagnostics are attached automatically when a server is installed. Operations: goToDefinition, findReferences, hover, documentSymbol, workspaceSymbol, goToImplementation, diagnostics. line/character are 1-based. SSH workspaces are not supported.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "operation": {"type": "string"},
+                    "file_path": {"type": "string"},
+                    "line": {"type": "integer"},
+                    "character": {"type": "integer"},
+                    "query": {"type": "string"}
+                },
+                "required": ["operation"]
+            }),
+        ),
+        spec(
+            "ProcessList",
+            "List background Bash/Monitor processes started in this session.",
+            json!({"type": "object", "properties": {}}),
+        ),
+        spec(
+            "ProcessOutput",
+            "Read output from a background process. wait=true blocks until it exits or timeout_ms elapses.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "process_id": {"type": "string"},
+                    "wait": {"type": "boolean"},
+                    "timeout_ms": {"type": "integer"}
+                },
+                "required": ["process_id"]
+            }),
+        ),
+        spec(
+            "ProcessStop",
+            "Stop a background Bash/Monitor process by process_id.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "process_id": {"type": "string"}
+                },
+                "required": ["process_id"]
+            }),
+        ),
+        spec(
+            "Monitor",
+            "Start a command in the background and keep collecting output. Use ProcessOutput to read new lines. Same permission rules as Bash. Local sessions only for OS sandbox wrapping.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "command": {"type": "string"},
                     "description": {"type": "string"}
                 },
                 "required": ["command"]
             }),
+        ),
+        spec(
+            "EnterWorktree",
+            "Create an isolated git worktree for this session on a unique noxcode/wt-* branch and switch the working directory. Omit path to use the managed worktrees directory. Does not change other sessions. Git checkpoints then use the worktree.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string"}
+                }
+            }),
+        ),
+        spec(
+            "ExitWorktree",
+            "Temporarily leave the isolated worktree and switch to the original repository directory for this turn. Does not delete the worktree. The session returns to the isolation worktree when the turn ends.",
+            json!({"type": "object", "properties": {}}),
         ),
         spec(
             "Glob",
@@ -834,6 +1011,10 @@ mod tests {
         assert!(is_read_only_native_tool("TodoWrite"));
         assert!(is_read_only_native_tool("AskQuestion"));
         assert!(is_read_only_native_tool("Skill"));
+        assert!(is_read_only_native_tool("Lsp"));
+        assert!(is_read_only_native_tool("ProcessList"));
+        assert!(!is_read_only_native_tool("ProcessStop"));
+        assert!(!is_read_only_native_tool("EnterWorktree"));
         assert!(!is_read_only_native_tool("Write"));
         assert!(!is_read_only_native_tool("Edit"));
         assert!(!is_read_only_native_tool("Bash"));
@@ -845,6 +1026,10 @@ mod tests {
             vec![
                 "Read",
                 "SQLiteQuery",
+                "Lsp",
+                "ProcessList",
+                "ProcessOutput",
+                "ExitWorktree",
                 "Glob",
                 "Grep",
                 "TodoRead",
@@ -905,6 +1090,13 @@ mod tests {
             "ApplyPatch",
             "Skill",
             "Agent",
+            "Lsp",
+            "ProcessList",
+            "ProcessOutput",
+            "ProcessStop",
+            "Monitor",
+            "EnterWorktree",
+            "ExitWorktree",
         ] {
             assert!(names.contains(&expected.to_string()), "missing {expected}");
         }

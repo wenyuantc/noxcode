@@ -18,7 +18,7 @@ function deferred() {
 
 beforeEach(() => {
   vi.mocked(pullGitBranch).mockReset();
-  useGitStore.setState({ pulls: {} });
+  useGitStore.setState({ pulls: {}, revision: 0 });
 });
 
 describe("Git pulls", () => {
@@ -71,5 +71,14 @@ describe("Git pulls", () => {
     await useGitStore.getState().pull("workspace-a");
     expect(pullGitBranch).toHaveBeenCalledTimes(2);
     expect(useGitStore.getState().pulls["workspace-a"]?.status).toBe("success");
+  });
+});
+
+describe("git revision", () => {
+  it("bumps revision so branch and status views can refresh together", () => {
+    expect(useGitStore.getState().revision).toBe(0);
+    useGitStore.getState().bumpRevision();
+    useGitStore.getState().bumpRevision();
+    expect(useGitStore.getState().revision).toBe(2);
   });
 });

@@ -17,6 +17,7 @@ use super::cancel::CancelFlag;
 use super::file_access::AuthorizedPath;
 use super::glob::glob_match;
 use super::paths::{resolve_local_path, resolve_under_workspace};
+use super::sandbox::{apply_sandbox, SandboxPolicy};
 use super::shell_snapshot::{COMMAND_ENV, SNAPSHOT_ENV};
 
 const READ_DEFAULT_LIMIT: usize = 2000;
@@ -42,6 +43,7 @@ pub struct CommandStatus {
     pub exit_code: i32,
     pub output: String,
     pub timed_out: bool,
+    pub sandbox_note: Option<String>,
 }
 
 /// 读取时记录的文件指纹，Write / Edit 前用它判断文件是否被别人改过。
@@ -96,6 +98,7 @@ pub struct LocalWorkspace {
     /// 工作区之外允许 Write / Edit 的目录（记忆目录）。
     pub extra_write_roots: Vec<PathBuf>,
     pub authorized_paths: Vec<AuthorizedPath>,
+    pub sandbox: SandboxPolicy,
 }
 
 impl LocalWorkspace {
@@ -108,6 +111,7 @@ impl LocalWorkspace {
             extra_read_roots: Vec::new(),
             extra_write_roots: Vec::new(),
             authorized_paths: Vec::new(),
+            sandbox: SandboxPolicy::disabled(),
         }
     }
 
@@ -371,32 +375,7 @@ impl LocalWorkspace {
             return Err("已取消".to_string());
         }
         let timeout = bash_timeout(timeout_ms, self.bash_default_timeout);
-        let mut cmd = tokio_command("bash");
-        match self.shell_snapshot.as_ref().filter(|path| path.is_file()) {
-            Some(snapshot) => {
-                cmd.arg("-c")
-                    .arg(format!(
-                        "source \"${SNAPSHOT_ENV}\" >/dev/null 2>&1 || true; eval \"${COMMAND_ENV}\""
-                    ))
-                    .env(SNAPSHOT_ENV, snapshot)
-                    .env(COMMAND_ENV, command);
-            }
-            None => {
-                cmd.arg("-lc").arg(command);
-            }
-        }
-        cmd.current_dir(&self.root)
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .kill_on_drop(true);
-        #[cfg(unix)]
-        cmd.process_group(0);
-        for (key, value) in extra_env {
-            cmd.env(key, value);
-        }
-        let mut child = cmd
-            .spawn()
-            .map_err(|error| format!("启动 Bash 失败: {error}"))?;
+        let (mut child, sandbox_note) = self.spawn_bash(command, extra_env)?;
         let stdout = child
             .stdout
             .take()
@@ -420,6 +399,7 @@ impl LocalWorkspace {
                     exit_code: -1,
                     output: "Bash 超时".to_string(),
                     timed_out: true,
+                    sandbox_note,
                 });
             }
             _ = wait_cancel(cancel) => {
@@ -438,9 +418,61 @@ impl LocalWorkspace {
         let text = cap_bytes_tail(&text, BASH_OUTPUT_HARD_LIMIT);
         Ok(CommandStatus {
             exit_code: status.code().unwrap_or(-1),
-            output: text,
+            output: prepend_sandbox_note(text, sandbox_note.as_deref()),
             timed_out: false,
+            sandbox_note,
         })
+    }
+
+    pub fn spawn_bash(
+        &self,
+        command: &str,
+        extra_env: &[(String, String)],
+    ) -> Result<(tokio::process::Child, Option<String>), String> {
+        if command.trim().is_empty() {
+            return Err("command 不能为空".to_string());
+        }
+        let mut cmd = tokio_command("bash");
+        match self.shell_snapshot.as_ref().filter(|path| path.is_file()) {
+            Some(snapshot) => {
+                cmd.arg("-c")
+                    .arg(format!(
+                        "source \"${SNAPSHOT_ENV}\" >/dev/null 2>&1 || true; eval \"${COMMAND_ENV}\""
+                    ))
+                    .env(SNAPSHOT_ENV, snapshot)
+                    .env(COMMAND_ENV, command);
+            }
+            None => {
+                cmd.arg("-lc").arg(command);
+            }
+        }
+        cmd.current_dir(&self.root)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true);
+        #[cfg(unix)]
+        cmd.process_group(0);
+        for (key, value) in extra_env {
+            cmd.env(key, value);
+        }
+        let applied = apply_sandbox(&self.sandbox, &self.root, &mut cmd);
+        let child = cmd
+            .spawn()
+            .map_err(|error| format!("启动 Bash 失败: {error}"))?;
+        Ok((child, applied.note))
+    }
+}
+
+fn prepend_sandbox_note(output: String, note: Option<&str>) -> String {
+    match note {
+        Some(note) if !note.is_empty() => {
+            if output.is_empty() {
+                format!("[{note}]")
+            } else {
+                format!("[{note}]\n{output}")
+            }
+        }
+        _ => output,
     }
 }
 
@@ -479,8 +511,8 @@ impl BoundedOutput {
         self.bytes.extend(&bytes[overflow - remove..]);
     }
 
-    pub(super) fn into_text(self) -> String {
-        let bytes: Vec<u8> = self.bytes.into();
+    pub(super) fn snapshot_text(&self) -> String {
+        let bytes: Vec<u8> = self.bytes.iter().copied().collect();
         let text = String::from_utf8_lossy(&bytes);
         if self.discarded == 0 {
             text.into_owned()
@@ -488,9 +520,13 @@ impl BoundedOutput {
             format!("[输出过长，已丢弃前 {} 字节]\n{text}", self.discarded)
         }
     }
+
+    pub(super) fn into_text(self) -> String {
+        self.snapshot_text()
+    }
 }
 
-async fn read_bounded(
+pub(super) async fn read_bounded(
     mut reader: impl AsyncRead + Unpin,
     limit: usize,
 ) -> std::io::Result<BoundedOutput> {
@@ -505,7 +541,7 @@ async fn read_bounded(
     }
 }
 
-async fn terminate_bash(child: &mut tokio::process::Child, process_id: Option<u32>) {
+pub(super) async fn terminate_bash(child: &mut tokio::process::Child, process_id: Option<u32>) {
     #[cfg(unix)]
     if let Some(pid) = process_id {
         // Bash 使用独立进程组，避免子进程继续持有管道或写文件。

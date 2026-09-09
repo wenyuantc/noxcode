@@ -11,6 +11,7 @@ export interface SessionSubmissionInput {
   planMode?: boolean | null;
   permissionMode?: string | null;
   imagePaths?: string[] | null;
+  isolateWorktree?: boolean | null;
 }
 
 export interface SessionSubmissionApi {
@@ -43,6 +44,7 @@ export function sessionSubmissionPayload(input: SessionSubmissionInput): StartNa
     permission_mode: input.permissionMode ?? null,
     resume_session_id: sessionId,
     image_paths: imagePaths.length > 0 ? imagePaths : null,
+    isolate_worktree: sessionId ? false : Boolean(input.isolateWorktree),
   };
 }
 

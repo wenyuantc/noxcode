@@ -415,6 +415,10 @@ pub struct NativeSettings {
     pub shell_snapshot_enabled: bool,
     #[serde(default = "default_true")]
     pub rg_sidecar_enabled: bool,
+    #[serde(default = "default_true")]
+    pub lsp_enabled: bool,
+    #[serde(default)]
+    pub bash_sandbox_enabled: bool,
     #[serde(default = "default_auto_compact_threshold_percent")]
     pub auto_compact_threshold_percent: i32,
     #[serde(default = "default_true")]
@@ -427,6 +431,14 @@ pub struct NativeSettings {
     pub hooks: Vec<NativeHook>,
     #[serde(default)]
     pub global_prompt_template: String,
+    #[serde(default)]
+    pub worktree_root: String,
+    #[serde(default)]
+    pub worktree_fetch_before_create: bool,
+    #[serde(default = "default_true")]
+    pub worktree_auto_prune: bool,
+    #[serde(default = "default_worktree_auto_prune_limit")]
+    pub worktree_auto_prune_limit: i32,
 }
 
 fn default_auto_compact_threshold_percent() -> i32 {
@@ -463,6 +475,10 @@ fn default_model_retry_backoff_factor() -> f64 {
 
 fn default_bash_default_timeout_secs() -> i32 {
     crate::native::settings::DEFAULT_NATIVE_BASH_DEFAULT_TIMEOUT_SECS
+}
+
+fn default_worktree_auto_prune_limit() -> i32 {
+    crate::native::settings::DEFAULT_NATIVE_WORKTREE_AUTO_PRUNE_LIMIT
 }
 
 fn default_hook_handler_type() -> String {
@@ -558,6 +574,10 @@ pub struct UpdateNativeSettings {
     #[serde(default)]
     pub rg_sidecar_enabled: Option<bool>,
     #[serde(default)]
+    pub lsp_enabled: Option<bool>,
+    #[serde(default)]
+    pub bash_sandbox_enabled: Option<bool>,
+    #[serde(default)]
     pub auto_compact_threshold_percent: Option<i32>,
     #[serde(default)]
     pub microcompact_enabled: Option<bool>,
@@ -567,6 +587,14 @@ pub struct UpdateNativeSettings {
     pub memory_dream_interval: Option<i32>,
     pub hooks: Option<Vec<NativeHook>>,
     pub global_prompt_template: Option<String>,
+    #[serde(default)]
+    pub worktree_root: Option<String>,
+    #[serde(default)]
+    pub worktree_fetch_before_create: Option<bool>,
+    #[serde(default)]
+    pub worktree_auto_prune: Option<bool>,
+    #[serde(default)]
+    pub worktree_auto_prune_limit: Option<i32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -686,6 +714,8 @@ pub struct StartNativeSessionInput {
     pub image_paths: Option<Vec<String>>,
     pub plan_mode: Option<bool>,
     pub permission_mode: Option<String>,
+    #[serde(default)]
+    pub isolate_worktree: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -707,6 +737,10 @@ pub struct NativeSessionRuntime {
     pub reasoning_effort: Option<String>,
     pub permission_mode: String,
     pub plan_mode: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worktree_path: Option<String>,
+    #[serde(default)]
+    pub sandbox_active: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -792,6 +826,8 @@ pub struct AgentSessionExit {
     pub session_kind: String,
     pub session_record_id: String,
     pub code: i32,
+    #[serde(default)]
+    pub worktree_path: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

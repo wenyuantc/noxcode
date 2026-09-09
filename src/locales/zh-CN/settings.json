@@ -21,7 +21,8 @@
     "about": "关于",
     "permissions": "权限规则",
     "memory": "记忆",
-    "automations": "自动化"
+    "automations": "自动化",
+    "worktrees": "工作树"
   },
   "general": {
     "language": "界面语言",
@@ -291,6 +292,10 @@
     "artifactRetention": "Artifact 保留天数（0 = 永不清理）",
     "shellSnapshot": "Bash 复用 login shell 快照",
     "rgSidecar": "有 ripgrep 时 Grep 优先使用",
+    "lspEnabled": "启用 LSP 代码智能",
+    "lspEnabledHint": "本地会话可调用 Lsp 工具，Write / Edit / ApplyPatch 成功后附带诊断。需要已安装对应 language server。SSH 工作区不启动。",
+    "bashSandbox": "本地 Bash 操作系统沙箱",
+    "bashSandboxHint": "Linux 使用 bwrap、macOS 使用 sandbox-exec。找不到实现时回退为普通执行。默认关闭。SSH 远端不套沙箱。",
     "modelRetry": "模型请求重试",
     "modelRetryHint": "对限流、过载与流中断做指数退避并加抖动；服务端 Retry-After 会被采纳，但不超过最大延迟。",
     "modelRetryMax": "最大重试次数",
@@ -858,5 +863,27 @@
       "model": "标题模型",
       "effort": "标题推理强度"
     }
+  },
+  "worktrees": {
+    "hint": "管理隔离工作树的存放位置、创建前拉取和自动清理。",
+    "root": "工作树根目录",
+    "rootHint": "noxcode 创建托管工作树的目录。留空则使用 ~/.noxcode/worktrees。仅本机工作区生效；SSH 仍使用 $HOME/.noxcode/worktrees。",
+    "browse": "选择目录",
+    "fetchBeforeCreate": "创建工作树前始终获取上游更新",
+    "fetchBeforeCreateHint": "noxcode 通常会在常规 Git 操作中获取分支更新。此设置还会在创建每个新工作树前获取上游更新。获取失败时仍会继续创建。",
+    "autoPrune": "自动删除旧工作树",
+    "autoPruneHint": "推荐大多数用户启用。仅当你需要手动管理旧工作树和磁盘空间时，再关闭此功能。",
+    "autoPruneLimit": "自动删除限制",
+    "autoPruneLimitHint": "要保留的托管工作树数量；超过后，较旧且未在使用的工作树会自动被清理。删除前会创建检查点，因此被清理的工作树可以恢复。",
+    "listTitle": "工作树",
+    "listEmptyTitle": "尚无工作树",
+    "listEmpty": "noxcode 创建的工作树将显示在此处",
+    "refresh": "刷新",
+    "inUse": "使用中",
+    "missing": "目录已不存在",
+    "remote": "远程",
+    "delete": "删除",
+    "untitled": "会话",
+    "orphaned": "未关联会话"
   }
 }

@@ -31,8 +31,14 @@ import { CompactBoundaryRow } from "./CompactBoundaryRow";
 import { FileChangeRow } from "./FileChangeRow";
 import { GoalRow } from "./GoalRow";
 import { RetryRow } from "./RetryRow";
-import { AgentStatusRow, McpStatusRow, PermissionStatusRow } from "./SessionStatusRows";
+import {
+  AgentStatusRow,
+  McpStatusRow,
+  PermissionStatusRow,
+  WorktreeStatusRow,
+} from "./SessionStatusRows";
 import { PlanAskCard } from "./PlanAskCard";
+import { BackgroundProcesses } from "./BackgroundProcesses";
 import { BackgroundTasks } from "./BackgroundTasks";
 import { PendingPlanApproval, PlanRow } from "./PlanRow";
 import { SubagentRow } from "./SubagentRow";
@@ -115,6 +121,9 @@ function renderSegment(
             }
             if (body.startsWith("[MCP]")) {
               return <McpStatusRow key={item.id} text={item.text} />;
+            }
+            if (body.startsWith("[WORKTREE]")) {
+              return <WorktreeStatusRow key={item.id} text={item.text} />;
             }
             return (
               <p
@@ -435,6 +444,7 @@ export const EventStream = memo(function EventStream({
           <div className="mx-auto mt-4 max-w-3xl space-y-4">
             <PendingPlanApproval sessionId={sessionId} />
             <BackgroundTasks sessionId={sessionId} />
+            <BackgroundProcesses sessionId={sessionId} />
           </div>
         </div>
       </div>

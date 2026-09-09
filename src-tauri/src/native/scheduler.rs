@@ -452,6 +452,7 @@ pub async fn run_automation_now(
             image_paths: None,
             plan_mode: Some(false),
             permission_mode: None,
+            isolate_worktree: None,
         },
     )
     .await?;

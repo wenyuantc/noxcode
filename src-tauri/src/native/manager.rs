@@ -159,6 +159,7 @@ pub struct NativeLiveSession {
     pub runtime: Option<crate::db::models::NativeSessionRuntime>,
     pub plan_mode: Arc<AtomicBool>,
     pub background: Option<Arc<crate::native::agent::background::BackgroundTaskRegistry>>,
+    pub processes: Option<Arc<crate::native::tools::processes::ProcessRegistry>>,
     pub closing: bool,
     pub cancel: CancelFlag,
     pub followup_tx: mpsc::Sender<NativeFollowup>,
@@ -189,9 +190,16 @@ impl NativeLiveSession {
     }
 }
 
+#[derive(Clone)]
+pub struct SessionWorkspaceRoots {
+    pub active_root: Arc<std::sync::RwLock<std::path::PathBuf>>,
+    pub worktree_path: Arc<std::sync::RwLock<Option<String>>>,
+}
+
 #[derive(Default)]
 pub struct NativeAgentManager {
     sessions: HashMap<String, NativeLiveSession>,
+    workspace_roots: HashMap<String, SessionWorkspaceRoots>,
     operation_locks: HashMap<String, Weak<tokio::sync::Mutex<()>>>,
     stopping: CancelFlag,
 }
@@ -252,6 +260,47 @@ impl NativeAgentManager {
         })
     }
 
+    pub fn attach_workspace_roots(&mut self, session_id: &str, roots: SessionWorkspaceRoots) {
+        if self.sessions.contains_key(session_id) {
+            self.workspace_roots.insert(session_id.to_string(), roots);
+        }
+    }
+
+    pub fn isolation_worktree_path(&self, session_id: &str) -> Option<String> {
+        self.workspace_roots
+            .get(session_id)
+            .and_then(|roots| {
+                roots
+                    .worktree_path
+                    .read()
+                    .ok()
+                    .and_then(|slot| slot.clone())
+            })
+            .map(|path| path.trim().to_string())
+            .filter(|path| !path.is_empty())
+    }
+
+    pub fn restore_isolation_worktree_to(&self, session_id: &str, path: &str) -> Option<String> {
+        let path = path.trim();
+        if path.is_empty() {
+            return None;
+        }
+        if let Some(roots) = self.workspace_roots.get(session_id) {
+            if let Ok(mut stored) = roots.worktree_path.write() {
+                *stored = Some(path.to_string());
+            }
+            if let Ok(mut root) = roots.active_root.write() {
+                *root = std::path::PathBuf::from(path);
+            }
+        }
+        Some(path.to_string())
+    }
+
+    pub fn restore_isolation_worktree(&self, session_id: &str) -> Option<String> {
+        let path = self.isolation_worktree_path(session_id)?;
+        self.restore_isolation_worktree_to(session_id, &path)
+    }
+
     pub fn add_session(&mut self, session: NativeLiveSession) -> bool {
         if self.stopping.is_cancelled() {
             session.cancel.cancel();
@@ -268,6 +317,7 @@ impl NativeAgentManager {
     }
 
     pub fn remove_session(&mut self, session_record_id: &str) -> Option<NativeLiveSession> {
+        self.workspace_roots.remove(session_record_id);
         self.sessions.remove(session_record_id)
     }
 
@@ -820,6 +870,8 @@ pub(super) mod tests {
             reasoning_effort: None,
             permission_mode: "yolo".into(),
             plan_mode: false,
+            worktree_path: None,
+            sandbox_active: false,
         });
         let root = tempfile::tempdir().unwrap();
         let mut ctx = crate::native::tools::dispatch::ToolCtx::new(
@@ -1144,6 +1196,7 @@ pub(super) mod tests {
             plan_mode: std::sync::Arc::default(),
             allow_session_commands: std::sync::Arc::default(),
             background: None,
+            processes: None,
             closing: false,
             cancel: CancelFlag::new(),
             followup_tx: tx,
@@ -1189,6 +1242,7 @@ pub(super) mod tests {
             plan_mode: std::sync::Arc::default(),
             allow_session_commands: std::sync::Arc::default(),
             background: None,
+            processes: None,
             closing: false,
             cancel: CancelFlag::new(),
             followup_tx: tx,
@@ -1206,6 +1260,38 @@ pub(super) mod tests {
             live_model: None,
             transcript_model: None,
         }
+    }
+
+    #[tokio::test]
+    async fn restore_isolation_worktree_switches_shared_active_root() {
+        let mut manager = NativeAgentManager::new();
+        manager.add_session(live_session("sess-wt"));
+        let main = std::path::PathBuf::from("/repo");
+        let worktree = "/cfg/worktrees/sess-wt".to_string();
+        let active_root = Arc::new(std::sync::RwLock::new(std::path::PathBuf::from(&worktree)));
+        let worktree_path = Arc::new(std::sync::RwLock::new(Some(worktree.clone())));
+        manager.attach_workspace_roots(
+            "sess-wt",
+            SessionWorkspaceRoots {
+                active_root: active_root.clone(),
+                worktree_path: worktree_path.clone(),
+            },
+        );
+        *active_root.write().expect("exit") = main;
+        assert_eq!(
+            manager.restore_isolation_worktree("sess-wt").as_deref(),
+            Some(worktree.as_str())
+        );
+        assert_eq!(
+            active_root.read().expect("restored").as_path(),
+            std::path::Path::new(&worktree)
+        );
+        assert_eq!(
+            worktree_path.read().expect("kept").as_deref(),
+            Some(worktree.as_str())
+        );
+        manager.remove_session("sess-wt");
+        assert!(manager.restore_isolation_worktree("sess-wt").is_none());
     }
 
     #[tokio::test]
@@ -1746,6 +1832,7 @@ pub(super) mod tests {
             plan_mode: std::sync::Arc::default(),
             allow_session_commands: std::sync::Arc::default(),
             background: None,
+            processes: None,
             closing: false,
             cancel: CancelFlag::new(),
             followup_tx: tx,

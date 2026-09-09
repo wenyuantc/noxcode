@@ -234,6 +234,35 @@ export interface GitRestorePreview {
   wont_be_touched: string[];
 }
 
+export type MergeWorktreeAction = "merge_current" | "create_branch" | "keep";
+export type ResolveWorktreeAction = "ai" | "abort" | "complete";
+export type MergeWorktreeStatus =
+  "merged" | "branched" | "kept" | "conflicted" | "aborted" | "resolved" | "partial";
+
+export interface MergeWorktreeResult {
+  status: MergeWorktreeStatus;
+  branch?: string | null;
+  commit_oid?: string | null;
+  conflicts: string[];
+  resolved: string[];
+  failed: string[];
+  message: string;
+}
+
+export interface WorktreeMergeState {
+  in_progress: boolean;
+  conflicts: string[];
+}
+
+export interface WorktreeMergePrompt {
+  sessionId: string;
+  workspaceId: string;
+  phase: "choose" | "conflict";
+  conflicts: string[];
+  branch?: string | null;
+  message?: string | null;
+}
+
 export interface GitRestoreResult {
   pre_restore_checkpoint: GitCheckpoint;
   restored: string[];
@@ -565,6 +594,7 @@ export interface StartNativeSessionInput {
   image_paths?: string[] | null;
   plan_mode?: boolean | null;
   permission_mode?: string | null;
+  isolate_worktree?: boolean | null;
 }
 
 export interface AgentSessionStarted {
@@ -596,6 +626,8 @@ export interface NativeSessionRuntime {
   reasoning_effort: string | null;
   permission_mode: string;
   plan_mode: boolean;
+  worktree_path?: string | null;
+  sandbox_active?: boolean;
 }
 
 export interface PendingSessionConfiguration {
@@ -641,6 +673,24 @@ export interface NativeBackgroundTasks {
   tasks: NativeBackgroundTask[];
 }
 
+export type NativeBackgroundProcessStatus = "running" | "exited" | "stopped" | "failed";
+
+export interface NativeBackgroundProcess {
+  process_id: string;
+  command: string;
+  description: string;
+  status: NativeBackgroundProcessStatus;
+  pid?: number | null;
+  started_at_ms: number;
+  exit_code?: number | null;
+  output_preview: string;
+}
+
+export interface NativeBackgroundProcesses {
+  session_record_id: string;
+  processes: NativeBackgroundProcess[];
+}
+
 export type NativeToolPhase = "start" | "result";
 
 export interface NativeToolEvent {
@@ -681,6 +731,7 @@ export interface AgentSessionExit {
   session_kind: string;
   session_record_id: string;
   code: number;
+  worktree_path?: string | null;
 }
 
 export interface NativeTextDelta {
@@ -987,12 +1038,18 @@ export interface NativeSettings {
   bash_default_timeout_secs: number;
   shell_snapshot_enabled: boolean;
   rg_sidecar_enabled: boolean;
+  lsp_enabled: boolean;
+  bash_sandbox_enabled: boolean;
   auto_compact_threshold_percent: number;
   microcompact_enabled: boolean;
   memory_enabled: boolean;
   memory_dream_interval: number;
   hooks: NativeHook[];
   global_prompt_template: string;
+  worktree_root: string;
+  worktree_fetch_before_create: boolean;
+  worktree_auto_prune: boolean;
+  worktree_auto_prune_limit: number;
 }
 
 export interface UpdateNativeSettingsInput {
@@ -1018,12 +1075,37 @@ export interface UpdateNativeSettingsInput {
   bash_default_timeout_secs?: number;
   shell_snapshot_enabled?: boolean;
   rg_sidecar_enabled?: boolean;
+  lsp_enabled?: boolean;
+  bash_sandbox_enabled?: boolean;
   auto_compact_threshold_percent?: number;
   microcompact_enabled?: boolean;
   memory_enabled?: boolean;
   memory_dream_interval?: number;
   hooks?: NativeHook[];
   global_prompt_template?: string;
+  worktree_root?: string;
+  worktree_fetch_before_create?: boolean;
+  worktree_auto_prune?: boolean;
+  worktree_auto_prune_limit?: number;
+}
+
+export interface ManagedWorktreeItem {
+  session_id: string;
+  title: string;
+  workspace_id: string | null;
+  workspace_name: string | null;
+  status: string;
+  path: string;
+  exists: boolean;
+  remote: boolean;
+  in_use: boolean;
+  created_at: string;
+}
+
+export interface ManagedWorktreeList {
+  root: string;
+  default_root: string;
+  items: ManagedWorktreeItem[];
 }
 
 export type NativeSkillSource =

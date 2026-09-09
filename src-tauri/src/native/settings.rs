@@ -125,6 +125,9 @@ pub const DEFAULT_NATIVE_MEMORY_DREAM_INTERVAL: i32 = 10;
 const MAX_NATIVE_MEMORY_DREAM_INTERVAL: i32 = 1000;
 const MIN_NATIVE_AUTO_COMPACT_THRESHOLD_PERCENT: i32 = 30;
 const MAX_NATIVE_AUTO_COMPACT_THRESHOLD_PERCENT: i32 = 99;
+pub const DEFAULT_NATIVE_WORKTREE_AUTO_PRUNE_LIMIT: i32 = 15;
+const MIN_NATIVE_WORKTREE_AUTO_PRUNE_LIMIT: i32 = 1;
+const MAX_NATIVE_WORKTREE_AUTO_PRUNE_LIMIT: i32 = 200;
 
 #[derive(Debug, Default, Deserialize, Serialize)]
 struct RawNativeSettings {
@@ -144,6 +147,10 @@ struct RawNativeSettings {
     shell_snapshot_enabled: Option<bool>,
     #[serde(default)]
     rg_sidecar_enabled: Option<bool>,
+    #[serde(default)]
+    lsp_enabled: Option<bool>,
+    #[serde(default)]
+    bash_sandbox_enabled: Option<bool>,
     #[serde(default)]
     auto_compact_threshold_percent: Option<i32>,
     #[serde(default)]
@@ -186,6 +193,36 @@ struct RawNativeSettings {
     hooks: Option<Vec<NativeHook>>,
     #[serde(default)]
     global_prompt_template: Option<String>,
+    #[serde(default)]
+    worktree_root: Option<String>,
+    #[serde(default)]
+    worktree_fetch_before_create: Option<bool>,
+    #[serde(default)]
+    worktree_auto_prune: Option<bool>,
+    #[serde(default)]
+    worktree_auto_prune_limit: Option<i32>,
+}
+
+pub fn normalize_native_worktree_root(value: Option<String>) -> String {
+    let trimmed = value.unwrap_or_default();
+    let trimmed = trimmed.trim();
+    if trimmed.is_empty() || trimmed.chars().any(|ch| ch.is_control() && ch != '\t') {
+        String::new()
+    } else {
+        trimmed.to_string()
+    }
+}
+
+pub fn normalize_native_worktree_auto_prune_limit(value: Option<i32>) -> i32 {
+    match value {
+        Some(value)
+            if (MIN_NATIVE_WORKTREE_AUTO_PRUNE_LIMIT..=MAX_NATIVE_WORKTREE_AUTO_PRUNE_LIMIT)
+                .contains(&value) =>
+        {
+            value
+        }
+        _ => DEFAULT_NATIVE_WORKTREE_AUTO_PRUNE_LIMIT,
+    }
 }
 
 pub fn normalize_native_max_turns(value: Option<i32>) -> i32 {
@@ -459,12 +496,18 @@ fn default_settings() -> NativeSettings {
         bash_default_timeout_secs: DEFAULT_NATIVE_BASH_DEFAULT_TIMEOUT_SECS,
         shell_snapshot_enabled: true,
         rg_sidecar_enabled: true,
+        lsp_enabled: true,
+        bash_sandbox_enabled: false,
         auto_compact_threshold_percent: DEFAULT_NATIVE_AUTO_COMPACT_THRESHOLD_PERCENT,
         microcompact_enabled: true,
         memory_enabled: true,
         memory_dream_interval: DEFAULT_NATIVE_MEMORY_DREAM_INTERVAL,
         hooks: Vec::new(),
         global_prompt_template: String::new(),
+        worktree_root: String::new(),
+        worktree_fetch_before_create: false,
+        worktree_auto_prune: true,
+        worktree_auto_prune_limit: DEFAULT_NATIVE_WORKTREE_AUTO_PRUNE_LIMIT,
     }
 }
 
@@ -491,6 +534,8 @@ fn normalize_settings(raw: RawNativeSettings) -> NativeSettings {
         ),
         shell_snapshot_enabled: raw.shell_snapshot_enabled.unwrap_or(true),
         rg_sidecar_enabled: raw.rg_sidecar_enabled.unwrap_or(true),
+        lsp_enabled: raw.lsp_enabled.unwrap_or(true),
+        bash_sandbox_enabled: raw.bash_sandbox_enabled.unwrap_or(false),
         auto_compact_threshold_percent: normalize_native_auto_compact_threshold_percent(
             raw.auto_compact_threshold_percent,
         ),
@@ -525,6 +570,12 @@ fn normalize_settings(raw: RawNativeSettings) -> NativeSettings {
             .unwrap_or_default()
             .trim()
             .to_string(),
+        worktree_root: normalize_native_worktree_root(raw.worktree_root),
+        worktree_fetch_before_create: raw.worktree_fetch_before_create.unwrap_or(false),
+        worktree_auto_prune: raw.worktree_auto_prune.unwrap_or(true),
+        worktree_auto_prune_limit: normalize_native_worktree_auto_prune_limit(
+            raw.worktree_auto_prune_limit,
+        ),
     }
 }
 
@@ -582,6 +633,8 @@ fn save_native_settings<R: Runtime>(
         ))),
         shell_snapshot_enabled: Some(settings.shell_snapshot_enabled),
         rg_sidecar_enabled: Some(settings.rg_sidecar_enabled),
+        lsp_enabled: Some(settings.lsp_enabled),
+        bash_sandbox_enabled: Some(settings.bash_sandbox_enabled),
         auto_compact_threshold_percent: Some(normalize_native_auto_compact_threshold_percent(
             Some(settings.auto_compact_threshold_percent),
         )),
@@ -627,6 +680,14 @@ fn save_native_settings<R: Runtime>(
         desktop_notifications: Some(settings.desktop_notifications),
         hooks: Some(settings.hooks.clone()),
         global_prompt_template: Some(settings.global_prompt_template.clone()),
+        worktree_root: Some(normalize_native_worktree_root(Some(
+            settings.worktree_root.clone(),
+        ))),
+        worktree_fetch_before_create: Some(settings.worktree_fetch_before_create),
+        worktree_auto_prune: Some(settings.worktree_auto_prune),
+        worktree_auto_prune_limit: Some(normalize_native_worktree_auto_prune_limit(Some(
+            settings.worktree_auto_prune_limit,
+        ))),
     };
     let json = serde_json::to_string_pretty(&raw)
         .map_err(|error| format!("序列化内置 Agent 设置失败: {error}"))?;
@@ -740,6 +801,12 @@ async fn merge_native_settings<R: Runtime>(
     if let Some(rg_sidecar_enabled) = updates.rg_sidecar_enabled {
         next.rg_sidecar_enabled = rg_sidecar_enabled;
     }
+    if let Some(lsp_enabled) = updates.lsp_enabled {
+        next.lsp_enabled = lsp_enabled;
+    }
+    if let Some(bash_sandbox_enabled) = updates.bash_sandbox_enabled {
+        next.bash_sandbox_enabled = bash_sandbox_enabled;
+    }
     if let Some(auto_compact_threshold_percent) = updates.auto_compact_threshold_percent {
         next.auto_compact_threshold_percent =
             normalize_native_auto_compact_threshold_percent(Some(auto_compact_threshold_percent));
@@ -759,6 +826,19 @@ async fn merge_native_settings<R: Runtime>(
     }
     if let Some(global_prompt_template) = updates.global_prompt_template {
         next.global_prompt_template = global_prompt_template.trim().to_string();
+    }
+    if let Some(worktree_root) = updates.worktree_root {
+        next.worktree_root = normalize_native_worktree_root(Some(worktree_root));
+    }
+    if let Some(worktree_fetch_before_create) = updates.worktree_fetch_before_create {
+        next.worktree_fetch_before_create = worktree_fetch_before_create;
+    }
+    if let Some(worktree_auto_prune) = updates.worktree_auto_prune {
+        next.worktree_auto_prune = worktree_auto_prune;
+    }
+    if let Some(worktree_auto_prune_limit) = updates.worktree_auto_prune_limit {
+        next.worktree_auto_prune_limit =
+            normalize_native_worktree_auto_prune_limit(Some(worktree_auto_prune_limit));
     }
     save_native_settings(app, &next)?;
     Ok(next)
@@ -1065,6 +1145,8 @@ mod tests {
         );
         assert!(settings.shell_snapshot_enabled);
         assert!(settings.rg_sidecar_enabled);
+        assert!(settings.lsp_enabled);
+        assert!(!settings.bash_sandbox_enabled);
         assert!(settings.hooks.is_empty());
         assert!(settings.global_prompt_template.is_empty());
         assert_eq!(
@@ -1103,6 +1185,37 @@ mod tests {
         );
         assert!(settings.desktop_notifications);
         assert!(!settings.use_custom_context_window);
+        assert!(settings.worktree_root.is_empty());
+        assert!(!settings.worktree_fetch_before_create);
+        assert!(settings.worktree_auto_prune);
+        assert_eq!(
+            settings.worktree_auto_prune_limit,
+            DEFAULT_NATIVE_WORKTREE_AUTO_PRUNE_LIMIT
+        );
+    }
+
+    #[test]
+    fn worktree_settings_trim_and_clamp() {
+        let settings = normalize_settings(RawNativeSettings {
+            worktree_root: Some("  /data/nox-wt  ".to_string()),
+            worktree_fetch_before_create: Some(true),
+            worktree_auto_prune: Some(false),
+            worktree_auto_prune_limit: Some(0),
+            ..RawNativeSettings::default()
+        });
+        assert_eq!(settings.worktree_root, "/data/nox-wt");
+        assert!(settings.worktree_fetch_before_create);
+        assert!(!settings.worktree_auto_prune);
+        assert_eq!(
+            settings.worktree_auto_prune_limit,
+            DEFAULT_NATIVE_WORKTREE_AUTO_PRUNE_LIMIT
+        );
+        assert_eq!(normalize_native_worktree_auto_prune_limit(Some(200)), 200);
+        assert_eq!(
+            normalize_native_worktree_auto_prune_limit(Some(201)),
+            DEFAULT_NATIVE_WORKTREE_AUTO_PRUNE_LIMIT
+        );
+        assert!(normalize_native_worktree_root(Some(" /tmp/\u{0007}bad ".to_string())).is_empty());
     }
 
     #[test]

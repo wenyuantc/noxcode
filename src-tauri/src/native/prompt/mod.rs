@@ -203,7 +203,7 @@ pub fn agent_tool_description(
     lines.extend([
         "Available agent types:".to_string(),
         "- general: full tools including MCP; can edit files. (Tools: *)".to_string(),
-        "- explore: read-only research. (Tools: Read, SQLiteQuery in local sessions, Glob, Grep, TodoRead, TodoWrite, WebFetch, WebSearch, Skill)".to_string(),
+        "- explore: read-only research. (Tools: Read, SQLiteQuery in local sessions, Glob, Grep, Lsp, TodoRead, TodoWrite, WebFetch, WebSearch, Skill)".to_string(),
     ]);
     for item in custom {
         let tools = if item.tool_mode == TOOL_MODE_ALL {

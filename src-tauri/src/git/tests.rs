@@ -1203,6 +1203,630 @@ async fn commit_message_context_prefers_staged_diff() {
     assert!(!context.contains("worktree change"), "{context}");
 }
 
+#[tokio::test]
+async fn add_list_and_remove_detached_worktree() {
+    let env = local_env().await;
+    let path = env.dir.path().join("isolated-wt");
+    let path_text = path.to_string_lossy().into_owned();
+    super::worktree::add_detached(&env.target, &path_text)
+        .await
+        .expect("add worktree");
+    assert!(path.join("README.md").is_file());
+    let items = super::worktree::list_worktrees(&env.target)
+        .await
+        .expect("list");
+    assert!(items.iter().any(|item| item.path == path_text), "{items:?}");
+    super::worktree::remove_worktree(&env.target, &path_text)
+        .await
+        .expect("remove");
+    assert!(!path.exists());
+}
+
+#[tokio::test]
+async fn add_session_worktree_checks_out_unique_branch() {
+    let env = local_env().await;
+    let session_id = "sess-git";
+    let path = env.dir.path().join("worktrees").join(session_id);
+    let path_text = path.to_string_lossy().into_owned();
+    super::worktree::add_session_worktree(&env.target, &path_text, session_id)
+        .await
+        .expect("add");
+    let wt = GitTarget::Local(path);
+    let worktree_branch = fixture_git(&wt, &["rev-parse", "--abbrev-ref", "HEAD"])
+        .await
+        .expect("wt branch")
+        .stdout_lossy();
+    assert_eq!(
+        worktree_branch.trim(),
+        super::worktree::default_worktree_branch_name(session_id)
+    );
+    let main_branch = fixture_git(&env.target, &["rev-parse", "--abbrev-ref", "HEAD"])
+        .await
+        .expect("main branch")
+        .stdout_lossy();
+    assert_eq!(main_branch.trim(), "main");
+}
+
+#[tokio::test]
+async fn merge_worktree_into_current_branch() {
+    let env = local_env().await;
+    let (pool, workspace_id, session_id) = seed_session().await;
+    let wt = env.dir.path().join("worktrees").join(&session_id);
+    let wt_text = wt.to_string_lossy().into_owned();
+    super::worktree::add_detached(&env.target, &wt_text)
+        .await
+        .expect("add");
+    sqlx::query("UPDATE agent_sessions SET working_dir = $1 WHERE id = $2")
+        .bind(&wt_text)
+        .bind(&session_id)
+        .execute(&pool)
+        .await
+        .expect("working_dir");
+    std::fs::write(wt.join("README.md"), "from worktree\n").unwrap();
+    let result = super::merge::run_merge_session_worktree(
+        &pool,
+        &env.target,
+        &GitTarget::Local(wt.clone()),
+        &workspace_id,
+        &session_id,
+        super::merge::MergeWorktreeAction::MergeCurrent,
+        None,
+        None,
+        None,
+    )
+    .await
+    .expect("merge");
+    assert_eq!(result.status, super::merge::MergeWorktreeStatus::Merged);
+    assert_eq!(
+        std::fs::read_to_string(env.dir.path().join("README.md")).unwrap(),
+        "from worktree\n"
+    );
+    let wt_status = get_status(&GitTarget::Local(wt), None)
+        .await
+        .expect("wt status");
+    assert!(
+        wt_status.entries.is_empty(),
+        "detached merge should also reset the worktree: {wt_status:?}"
+    );
+}
+
+#[tokio::test]
+async fn merge_uses_provided_commit_message() {
+    let env = local_env().await;
+    let (pool, workspace_id, session_id) = seed_session().await;
+    let wt = env.dir.path().join("worktrees").join(&session_id);
+    let wt_text = wt.to_string_lossy().into_owned();
+    super::worktree::add_detached(&env.target, &wt_text)
+        .await
+        .expect("add");
+    sqlx::query("UPDATE agent_sessions SET working_dir = $1 WHERE id = $2")
+        .bind(&wt_text)
+        .bind(&session_id)
+        .execute(&pool)
+        .await
+        .expect("working_dir");
+    std::fs::write(wt.join("README.md"), "status ok\n").unwrap();
+    let result = super::merge::run_merge_session_worktree(
+        &pool,
+        &env.target,
+        &GitTarget::Local(wt.clone()),
+        &workspace_id,
+        &session_id,
+        super::merge::MergeWorktreeAction::MergeCurrent,
+        None,
+        Some("feat: add status endpoint"),
+        None,
+    )
+    .await
+    .expect("merge");
+    assert_eq!(result.status, super::merge::MergeWorktreeStatus::Merged);
+    let subject = fixture_git(&env.target, &["log", "-1", "--format=%s"])
+        .await
+        .expect("log")
+        .stdout_lossy();
+    assert_eq!(subject.trim(), "feat: add status endpoint");
+}
+
+#[tokio::test]
+async fn merge_branched_worktree_keeps_session_branch() {
+    let env = local_env().await;
+    let (pool, workspace_id, session_id) = seed_session().await;
+    let wt = env.dir.path().join("worktrees").join(&session_id);
+    let wt_text = wt.to_string_lossy().into_owned();
+    super::worktree::add_session_worktree(&env.target, &wt_text, &session_id)
+        .await
+        .expect("add");
+    sqlx::query("UPDATE agent_sessions SET working_dir = $1 WHERE id = $2")
+        .bind(&wt_text)
+        .bind(&session_id)
+        .execute(&pool)
+        .await
+        .expect("working_dir");
+    std::fs::write(wt.join("README.md"), "from session branch\n").unwrap();
+    let result = super::merge::run_merge_session_worktree(
+        &pool,
+        &env.target,
+        &GitTarget::Local(wt.clone()),
+        &workspace_id,
+        &session_id,
+        super::merge::MergeWorktreeAction::MergeCurrent,
+        None,
+        Some("feat: session branch merge"),
+        None,
+    )
+    .await
+    .expect("merge");
+    assert_eq!(result.status, super::merge::MergeWorktreeStatus::Merged);
+    let main_branch = fixture_git(&env.target, &["rev-parse", "--abbrev-ref", "HEAD"])
+        .await
+        .expect("main")
+        .stdout_lossy();
+    assert_eq!(main_branch.trim(), "main");
+    let wt_target = GitTarget::Local(wt);
+    let worktree_branch = fixture_git(&wt_target, &["rev-parse", "--abbrev-ref", "HEAD"])
+        .await
+        .expect("wt")
+        .stdout_lossy();
+    assert_eq!(
+        worktree_branch.trim(),
+        super::worktree::default_worktree_branch_name(&session_id)
+    );
+    let wt_status = get_status(&wt_target, None).await.expect("wt status");
+    assert!(
+        wt_status.entries.is_empty(),
+        "merge should leave the worktree clean: {wt_status:?}"
+    );
+    let subject = fixture_git(&env.target, &["log", "-1", "--format=%s"])
+        .await
+        .expect("log")
+        .stdout_lossy();
+    assert_eq!(subject.trim(), "feat: session branch merge");
+}
+
+#[tokio::test]
+async fn list_branches_in_session_worktree_marks_session_branch() {
+    let env = local_env().await;
+    let (_pool, _workspace_id, session_id) = seed_session().await;
+    let wt = env.dir.path().join("worktrees").join(&session_id);
+    let wt_text = wt.to_string_lossy().into_owned();
+    super::worktree::add_session_worktree(&env.target, &wt_text, &session_id)
+        .await
+        .expect("add");
+    let session_branch = super::worktree::default_worktree_branch_name(&session_id);
+    let main_branches = list_branches(&env.target).await.expect("main branches");
+    assert!(
+        main_branches
+            .iter()
+            .any(|branch| branch.name == "main" && branch.is_current),
+        "{main_branches:?}"
+    );
+    let wt_branches = list_branches(&GitTarget::Local(wt))
+        .await
+        .expect("wt branches");
+    assert!(
+        wt_branches
+            .iter()
+            .any(|branch| branch.name == session_branch && branch.is_current),
+        "{wt_branches:?}"
+    );
+    assert!(
+        wt_branches
+            .iter()
+            .any(|branch| branch.name == "main" && !branch.is_current),
+        "{wt_branches:?}"
+    );
+}
+
+#[tokio::test]
+async fn create_branch_switches_isolated_worktree_and_cleans() {
+    let env = local_env().await;
+    let (pool, workspace_id, session_id) = seed_session().await;
+    let wt = env.dir.path().join("worktrees").join(&session_id);
+    let wt_text = wt.to_string_lossy().into_owned();
+    super::worktree::add_session_worktree(&env.target, &wt_text, &session_id)
+        .await
+        .expect("add");
+    sqlx::query("UPDATE agent_sessions SET working_dir = $1 WHERE id = $2")
+        .bind(&wt_text)
+        .bind(&session_id)
+        .execute(&pool)
+        .await
+        .expect("working_dir");
+    std::fs::write(wt.join("README.md"), "status ok\n").unwrap();
+    let result = super::merge::run_merge_session_worktree(
+        &pool,
+        &env.target,
+        &GitTarget::Local(wt.clone()),
+        &workspace_id,
+        &session_id,
+        super::merge::MergeWorktreeAction::CreateBranch,
+        Some("feature/status"),
+        Some("feat: add status"),
+        None,
+    )
+    .await
+    .expect("create branch");
+    assert_eq!(result.status, super::merge::MergeWorktreeStatus::Branched);
+    assert_eq!(result.branch.as_deref(), Some("feature/status"));
+    let main_branch = fixture_git(&env.target, &["rev-parse", "--abbrev-ref", "HEAD"])
+        .await
+        .expect("main")
+        .stdout_lossy();
+    assert_eq!(main_branch.trim(), "main");
+    assert_eq!(
+        std::fs::read_to_string(env.dir.path().join("README.md")).unwrap(),
+        "hello\n"
+    );
+    let wt_target = GitTarget::Local(wt.clone());
+    let worktree_branch = fixture_git(&wt_target, &["rev-parse", "--abbrev-ref", "HEAD"])
+        .await
+        .expect("wt")
+        .stdout_lossy();
+    assert_eq!(worktree_branch.trim(), "feature/status");
+    assert_eq!(
+        std::fs::read_to_string(wt.join("README.md")).unwrap(),
+        "status ok\n"
+    );
+    let wt_status = get_status(&wt_target, None).await.expect("wt status");
+    assert!(
+        wt_status.entries.is_empty(),
+        "create branch should leave the worktree clean: {wt_status:?}"
+    );
+}
+
+#[tokio::test]
+async fn create_branch_updates_current_session_branch() {
+    let env = local_env().await;
+    let (pool, workspace_id, session_id) = seed_session().await;
+    let wt = env.dir.path().join("worktrees").join(&session_id);
+    let wt_text = wt.to_string_lossy().into_owned();
+    super::worktree::add_session_worktree(&env.target, &wt_text, &session_id)
+        .await
+        .expect("add");
+    sqlx::query("UPDATE agent_sessions SET working_dir = $1 WHERE id = $2")
+        .bind(&wt_text)
+        .bind(&session_id)
+        .execute(&pool)
+        .await
+        .expect("working_dir");
+    std::fs::write(wt.join("README.md"), "keep on session branch\n").unwrap();
+    let session_branch = super::worktree::default_worktree_branch_name(&session_id);
+    let result = super::merge::run_merge_session_worktree(
+        &pool,
+        &env.target,
+        &GitTarget::Local(wt.clone()),
+        &workspace_id,
+        &session_id,
+        super::merge::MergeWorktreeAction::CreateBranch,
+        None,
+        Some("feat: keep isolated branch"),
+        None,
+    )
+    .await
+    .expect("update session branch");
+    assert_eq!(result.status, super::merge::MergeWorktreeStatus::Branched);
+    assert_eq!(result.branch.as_deref(), Some(session_branch.as_str()));
+    let main_branch = fixture_git(&env.target, &["rev-parse", "--abbrev-ref", "HEAD"])
+        .await
+        .expect("main")
+        .stdout_lossy();
+    assert_eq!(main_branch.trim(), "main");
+    assert_eq!(
+        std::fs::read_to_string(env.dir.path().join("README.md")).unwrap(),
+        "hello\n"
+    );
+    let wt_target = GitTarget::Local(wt);
+    let worktree_branch = fixture_git(&wt_target, &["rev-parse", "--abbrev-ref", "HEAD"])
+        .await
+        .expect("wt")
+        .stdout_lossy();
+    assert_eq!(worktree_branch.trim(), session_branch);
+    let wt_status = get_status(&wt_target, None).await.expect("wt status");
+    assert!(
+        wt_status.entries.is_empty(),
+        "updating the session branch should leave the worktree clean: {wt_status:?}"
+    );
+}
+
+#[tokio::test]
+async fn merge_current_ignores_checked_out_branch_name() {
+    let env = local_env().await;
+    let (pool, workspace_id, session_id) = seed_session().await;
+    let wt = env.dir.path().join("worktrees").join(&session_id);
+    let wt_text = wt.to_string_lossy().into_owned();
+    super::worktree::add_detached(&env.target, &wt_text)
+        .await
+        .expect("add");
+    sqlx::query("UPDATE agent_sessions SET working_dir = $1 WHERE id = $2")
+        .bind(&wt_text)
+        .bind(&session_id)
+        .execute(&pool)
+        .await
+        .expect("working_dir");
+    std::fs::write(wt.join("README.md"), "from worktree again\n").unwrap();
+    let result = super::merge::run_merge_session_worktree(
+        &pool,
+        &env.target,
+        &GitTarget::Local(wt.clone()),
+        &workspace_id,
+        &session_id,
+        super::merge::MergeWorktreeAction::MergeCurrent,
+        Some("main"),
+        None,
+        None,
+    )
+    .await
+    .expect("merge");
+    assert_eq!(result.status, super::merge::MergeWorktreeStatus::Merged);
+    assert_eq!(
+        std::fs::read_to_string(env.dir.path().join("README.md")).unwrap(),
+        "from worktree again\n"
+    );
+    let current = fixture_git(&env.target, &["rev-parse", "--abbrev-ref", "HEAD"])
+        .await
+        .expect("branch")
+        .stdout_lossy();
+    assert_eq!(current.trim(), "main");
+}
+
+#[tokio::test]
+async fn create_branch_rejects_checked_out_name() {
+    let env = local_env().await;
+    let (pool, workspace_id, session_id) = seed_session().await;
+    let wt = env.dir.path().join("worktrees").join(&session_id);
+    let wt_text = wt.to_string_lossy().into_owned();
+    super::worktree::add_detached(&env.target, &wt_text)
+        .await
+        .expect("add");
+    sqlx::query("UPDATE agent_sessions SET working_dir = $1 WHERE id = $2")
+        .bind(&wt_text)
+        .bind(&session_id)
+        .execute(&pool)
+        .await
+        .expect("working_dir");
+    std::fs::write(wt.join("README.md"), "keep aside\n").unwrap();
+    let error = super::merge::run_merge_session_worktree(
+        &pool,
+        &env.target,
+        &GitTarget::Local(wt.clone()),
+        &workspace_id,
+        &session_id,
+        super::merge::MergeWorktreeAction::CreateBranch,
+        Some("main"),
+        None,
+        None,
+    )
+    .await
+    .expect_err("checked out");
+    assert!(
+        error.to_string().contains("已在工作区检出"),
+        "unexpected error: {error}"
+    );
+}
+
+#[tokio::test]
+async fn merge_worktree_conflict_stays_and_abort_cleans() {
+    let env = local_env().await;
+    let (pool, workspace_id, session_id) = seed_session().await;
+    let wt = env.dir.path().join("worktrees").join(&session_id);
+    let wt_text = wt.to_string_lossy().into_owned();
+    super::worktree::add_detached(&env.target, &wt_text)
+        .await
+        .expect("add");
+    sqlx::query("UPDATE agent_sessions SET working_dir = $1 WHERE id = $2")
+        .bind(&wt_text)
+        .bind(&session_id)
+        .execute(&pool)
+        .await
+        .expect("working_dir");
+    std::fs::write(wt.join("README.md"), "from worktree\n").unwrap();
+    std::fs::write(env.dir.path().join("README.md"), "from main\n").unwrap();
+    fixture_git(&env.target, &["add", "README.md"])
+        .await
+        .expect("add main");
+    fixture_git(&env.target, &["commit", "-m", "main change"])
+        .await
+        .expect("commit main");
+    let result = super::merge::run_merge_session_worktree(
+        &pool,
+        &env.target,
+        &GitTarget::Local(wt.clone()),
+        &workspace_id,
+        &session_id,
+        super::merge::MergeWorktreeAction::MergeCurrent,
+        None,
+        None,
+        None,
+    )
+    .await
+    .expect("merge");
+    assert_eq!(result.status, super::merge::MergeWorktreeStatus::Conflicted);
+    assert!(result.conflicts.iter().any(|path| path == "README.md"));
+    assert!(super::merge::merge_in_progress(&env.target).await.unwrap());
+    let aborted = super::merge::run_abort_merge(&env.target)
+        .await
+        .expect("abort");
+    assert_eq!(aborted.status, super::merge::MergeWorktreeStatus::Aborted);
+    assert!(!super::merge::merge_in_progress(&env.target).await.unwrap());
+    assert_eq!(
+        std::fs::read_to_string(env.dir.path().join("README.md")).unwrap(),
+        "from main\n"
+    );
+}
+
+#[tokio::test]
+async fn complete_merge_commits_resolved_worktree_files() {
+    let env = local_env().await;
+    let (pool, workspace_id, session_id) = seed_session().await;
+    let wt = env.dir.path().join("worktrees").join(&session_id);
+    let wt_text = wt.to_string_lossy().into_owned();
+    super::worktree::add_detached(&env.target, &wt_text)
+        .await
+        .expect("add");
+    sqlx::query("UPDATE agent_sessions SET working_dir = $1 WHERE id = $2")
+        .bind(&wt_text)
+        .bind(&session_id)
+        .execute(&pool)
+        .await
+        .expect("working_dir");
+    std::fs::write(wt.join("README.md"), "from worktree\n").unwrap();
+    std::fs::write(env.dir.path().join("README.md"), "from main\n").unwrap();
+    fixture_git(&env.target, &["add", "README.md"])
+        .await
+        .expect("add main");
+    fixture_git(&env.target, &["commit", "-m", "main change"])
+        .await
+        .expect("commit main");
+    let conflicted = super::merge::run_merge_session_worktree(
+        &pool,
+        &env.target,
+        &GitTarget::Local(wt.clone()),
+        &workspace_id,
+        &session_id,
+        super::merge::MergeWorktreeAction::MergeCurrent,
+        None,
+        None,
+        None,
+    )
+    .await
+    .expect("merge");
+    assert_eq!(
+        conflicted.status,
+        super::merge::MergeWorktreeStatus::Conflicted
+    );
+    std::fs::write(env.dir.path().join("README.md"), "resolved by session\n").unwrap();
+    let completed = super::merge::complete_merge_from_worktree(&env.target)
+        .await
+        .expect("complete");
+    assert_eq!(
+        completed.status,
+        super::merge::MergeWorktreeStatus::Resolved
+    );
+    assert!(!super::merge::merge_in_progress(&env.target).await.unwrap());
+    assert_eq!(
+        std::fs::read_to_string(env.dir.path().join("README.md")).unwrap(),
+        "resolved by session\n"
+    );
+}
+
+#[tokio::test]
+async fn git_status_on_session_worktree_sees_isolated_edits() {
+    let env = local_env().await;
+    let (pool, _workspace_id, session_id) = seed_session().await;
+    let wt = env.dir.path().join("worktrees").join(&session_id);
+    let wt_text = wt.to_string_lossy().into_owned();
+    super::worktree::add_detached(&env.target, &wt_text)
+        .await
+        .expect("add");
+    sqlx::query("UPDATE agent_sessions SET working_dir = $1 WHERE id = $2")
+        .bind(&wt_text)
+        .bind(&session_id)
+        .execute(&pool)
+        .await
+        .expect("working_dir");
+    std::fs::write(wt.join("README.md"), "isolated edit\n").unwrap();
+    let main_status = super::status::get_status(&env.target, None)
+        .await
+        .expect("main");
+    assert!(main_status
+        .entries
+        .iter()
+        .all(|entry| entry.path != "README.md"));
+    let wt_status = super::status::get_status(&GitTarget::Local(wt.clone()), None)
+        .await
+        .expect("worktree");
+    assert!(
+        wt_status
+            .entries
+            .iter()
+            .any(|entry| entry.path == "README.md"),
+        "{wt_status:?}"
+    );
+    let preview = super::preview::get_file_preview(&GitTarget::Local(wt.clone()), "README.md")
+        .await
+        .expect("preview");
+    assert!(matches!(
+        preview,
+        super::preview::GitFilePreview::Diff { .. }
+    ));
+}
+
+#[tokio::test]
+async fn apply_resolved_file_rejects_conflict_markers() {
+    assert!(super::merge::sanitize_conflict_resolution("<<<<<<< HEAD\nkeep\n>>>>>>>\n").is_err());
+    let cleaned = super::merge::sanitize_conflict_resolution("resolved\n").expect("ok");
+    assert_eq!(cleaned, "resolved\n");
+}
+
+#[tokio::test]
+async fn apply_resolved_files_does_not_commit_when_markers_remain() {
+    let env = local_env().await;
+    let (pool, workspace_id, session_id) = seed_session().await;
+    let wt = env.dir.path().join("worktrees").join(&session_id);
+    let wt_text = wt.to_string_lossy().into_owned();
+    super::worktree::add_detached(&env.target, &wt_text)
+        .await
+        .expect("add");
+    sqlx::query("UPDATE agent_sessions SET working_dir = $1 WHERE id = $2")
+        .bind(&wt_text)
+        .bind(&session_id)
+        .execute(&pool)
+        .await
+        .expect("working_dir");
+    std::fs::write(wt.join("README.md"), "from worktree\n").unwrap();
+    std::fs::write(env.dir.path().join("README.md"), "from main\n").unwrap();
+    fixture_git(&env.target, &["add", "README.md"])
+        .await
+        .expect("add main");
+    fixture_git(&env.target, &["commit", "-m", "main change"])
+        .await
+        .expect("commit main");
+    let result = super::merge::run_merge_session_worktree(
+        &pool,
+        &env.target,
+        &GitTarget::Local(wt.clone()),
+        &workspace_id,
+        &session_id,
+        super::merge::MergeWorktreeAction::MergeCurrent,
+        None,
+        None,
+        None,
+    )
+    .await
+    .expect("merge");
+    assert_eq!(result.status, super::merge::MergeWorktreeStatus::Conflicted);
+
+    let blocked = super::merge::apply_resolved_files(
+        &env.target,
+        &[(
+            "README.md".to_string(),
+            super::merge::sanitize_conflict_resolution(
+                "<<<<<<< HEAD\nstill conflicted\n>>>>>>> x\n",
+            ),
+        )],
+    )
+    .await
+    .expect("apply");
+    assert_eq!(blocked.status, super::merge::MergeWorktreeStatus::Partial);
+    assert!(super::merge::merge_in_progress(&env.target).await.unwrap());
+    assert!(std::fs::read_to_string(env.dir.path().join("README.md"))
+        .unwrap()
+        .contains("<<<<<<<"));
+
+    let resolved = super::merge::apply_resolved_files(
+        &env.target,
+        &[("README.md".to_string(), Ok("merged both\n".to_string()))],
+    )
+    .await
+    .expect("resolve");
+    assert_eq!(resolved.status, super::merge::MergeWorktreeStatus::Resolved);
+    assert!(!super::merge::merge_in_progress(&env.target).await.unwrap());
+    assert_eq!(
+        std::fs::read_to_string(env.dir.path().join("README.md")).unwrap(),
+        "merged both\n"
+    );
+}
+
 fn nix_is_root() -> bool {
     unsafe { libc::geteuid() == 0 }
 }

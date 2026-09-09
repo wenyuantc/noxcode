@@ -323,6 +323,27 @@ describe("sessionStore history", () => {
     expect(useSessionStore.getState().backgroundBySession.s1).toEqual([]);
   });
 
+  it("closes background processes on exit and clears them on a new runtime", () => {
+    useSessionStore.getState().onStarted(started("s1", "execution"));
+    useSessionStore.getState().onBackgroundProcesses({
+      session_record_id: "s1",
+      processes: [
+        {
+          process_id: "1",
+          command: "sleep 30",
+          description: "dev server",
+          status: "running",
+          started_at_ms: 1,
+          output_preview: "",
+        },
+      ],
+    });
+    useSessionStore.getState().onExit({ ...started("s1", "execution"), code: 0 });
+    expect(useSessionStore.getState().processesBySession.s1[0].status).toBe("stopped");
+    useSessionStore.getState().onStarted(started("s1", "execution"));
+    expect(useSessionStore.getState().processesBySession.s1).toEqual([]);
+  });
+
   it("fetches history even when stdout arrived before opening a session", async () => {
     useSessionStore.getState().onStdout(stdout("s1", "live"));
     getLines.mockResolvedValue([event("old"), event("live")]);

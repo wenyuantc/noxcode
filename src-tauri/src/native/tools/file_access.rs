@@ -76,7 +76,7 @@ pub async fn collect_file_access(
     let workspace = ctx.workspace_for_read();
     let mut paths = Vec::new();
     for (input, operation) in inputs {
-        let (path, outside_workspace, directory) = if let Some(ssh) = &ctx.ssh {
+        let (path, outside_workspace, directory) = if let Some(ssh) = ctx.ssh_for_exec() {
             let path = resolve_posix_path(&ssh.root, &input)?;
             let outside = resolve_under_workspace_posix(&ssh.root, &input).is_err();
             let directory = ssh.validate_path(&path).await?;

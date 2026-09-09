@@ -21,7 +21,8 @@
     "about": "About",
     "permissions": "Permission rules",
     "memory": "Memory",
-    "automations": "Automations"
+    "automations": "Automations",
+    "worktrees": "Worktrees"
   },
   "general": {
     "language": "Language",
@@ -291,6 +292,10 @@
     "artifactRetention": "Artifact retention days (0 = never prune)",
     "shellSnapshot": "Reuse a login-shell snapshot for Bash",
     "rgSidecar": "Use ripgrep for Grep when available",
+    "lspEnabled": "Enable LSP code intelligence",
+    "lspEnabledHint": "Local sessions can call the Lsp tool, and Write / Edit / ApplyPatch results include diagnostics when a language server is installed. SSH workspaces skip LSP.",
+    "bashSandbox": "OS sandbox for local Bash",
+    "bashSandboxHint": "Uses bwrap on Linux and sandbox-exec on macOS. Falls back to unsandboxed Bash if the helper is missing. Off by default. SSH remotes are not wrapped.",
     "modelRetry": "Model request retries",
     "modelRetryHint": "Exponential backoff with jitter for rate limits, overloads, and interrupted streams. Retry-After headers are honored up to the maximum delay.",
     "modelRetryMax": "Max retries",
@@ -858,5 +863,27 @@
       "model": "Title model",
       "effort": "Title thinking level"
     }
+  },
+  "worktrees": {
+    "hint": "Choose where managed worktrees live, whether to fetch before creating one, and how old worktrees are cleaned up.",
+    "root": "Worktree root directory",
+    "rootHint": "Directory where noxcode creates managed worktrees. Leave empty to use ~/.noxcode/worktrees. Applies to local workspaces only; SSH still uses $HOME/.noxcode/worktrees.",
+    "browse": "Choose folder",
+    "fetchBeforeCreate": "Always fetch upstream before creating a worktree",
+    "fetchBeforeCreateHint": "noxcode already fetches during regular Git operations. This also fetches upstream updates before creating each new worktree. Creation continues if the fetch fails.",
+    "autoPrune": "Automatically delete old worktrees",
+    "autoPruneHint": "Recommended for most users. Turn this off only if you need to manage old worktrees and disk space yourself.",
+    "autoPruneLimit": "Auto-delete limit",
+    "autoPruneLimitHint": "Number of managed worktrees to keep. Older unused worktrees are cleaned up after this limit. A checkpoint is created before deletion so cleaned-up worktrees can be restored.",
+    "listTitle": "Worktrees",
+    "listEmptyTitle": "No worktrees yet",
+    "listEmpty": "Worktrees created by noxcode will appear here",
+    "refresh": "Refresh",
+    "inUse": "In use",
+    "missing": "Folder missing",
+    "remote": "Remote",
+    "delete": "Delete",
+    "untitled": "Session",
+    "orphaned": "Unlinked"
   }
 }

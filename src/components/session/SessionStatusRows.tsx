@@ -1,10 +1,11 @@
-import { Bot, Plug, Shield } from "lucide-react";
+import { Bot, GitFork, Plug, Shield } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import {
   parseAgentBanner,
   parseMcpStatus,
+  parseWorktreeStatus,
   permissionHint,
   stripAgentPrefix,
 } from "@/lib/sessionLines";
@@ -56,6 +57,25 @@ export function AgentStatusRow({ text }: { text: string }) {
         </span>
       </p>
     </div>
+  );
+}
+
+export function WorktreeStatusRow({ text }: { text: string }) {
+  const { t } = useTranslation("sessions");
+  const parsed = parseWorktreeStatus(text);
+  if (!parsed) return null;
+  const label = parsed.kind === "isolated" ? t("worktreeIsolated") : parsed.detail;
+  const tip = parsed.kind === "isolated" ? parsed.path : parsed.detail;
+  return (
+    <TooltipProvider>
+      <Tooltip>
+        <TooltipTrigger className="flex max-w-full items-start gap-2 text-left text-xs text-muted-foreground">
+          <GitFork className="mt-0.5 size-3.5 shrink-0" />
+          <span className="min-w-0 truncate">{label}</span>
+        </TooltipTrigger>
+        <TooltipContent>{tip}</TooltipContent>
+      </Tooltip>
+    </TooltipProvider>
   );
 }
 

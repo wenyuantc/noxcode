@@ -18,12 +18,15 @@ import type {
   NativePlanQuestionRequest,
   NativeTextDelta,
   NativeRequestResolved,
+  NativeBackgroundProcess,
+  NativeBackgroundProcesses,
   NativeBackgroundTask,
   NativeBackgroundTasks,
   NativeSessionRuntime,
   NativeInputQueue,
   NativeSessionConfigurationEvent,
   PendingSessionConfiguration,
+  WorktreeMergePrompt,
 } from "@/lib/types";
 import { useChannelStore } from "@/stores/channelStore";
 import { useWorkspaceStore } from "@/stores/workspaceStore";
@@ -66,6 +69,7 @@ interface SessionState {
   pendingConfigurationBySession: Record<string, PendingSessionConfiguration>;
   configurationRevisionBySession: Record<string, number>;
   backgroundBySession: Record<string, NativeBackgroundTask[]>;
+  processesBySession: Record<string, NativeBackgroundProcess[]>;
   inputQueueBySession: Record<string, NativeInputQueue>;
   turnState: Record<string, string>;
   usage: Record<string, NativeContextUsage>;
@@ -73,6 +77,10 @@ interface SessionState {
   permissions: Record<string, Record<string, NativePermissionRequest>>;
   planQuestions: Record<string, Record<string, NativePlanQuestionRequest>>;
   planApprovals: Record<string, Record<string, NativePlanApprovalRequest>>;
+  worktreeMergePrompt: WorktreeMergePrompt | null;
+  mergedWorktreeBySession: Record<string, boolean>;
+  autoPromptedWorktreeBySession: Record<string, boolean>;
+  pendingAiMergeResolveBySession: Record<string, boolean>;
   hasMoreEarlier: Record<string, boolean>;
   loadingEarlier: Record<string, boolean>;
   selectSession: (id: string | null) => void;
@@ -91,11 +99,18 @@ interface SessionState {
   setPlanApproval: (request: NativePlanApprovalRequest) => void;
   resolveRequest: (request: NativeRequestResolved) => void;
   onBackgroundTasks: (payload: NativeBackgroundTasks) => void;
+  onBackgroundProcesses: (payload: NativeBackgroundProcesses) => void;
   onInputQueue: (payload: NativeInputQueue) => void;
   setConfiguration: (sessionId: string, runtime: NativeSessionRuntime) => void;
   setPendingConfiguration: (sessionId: string, pending: PendingSessionConfiguration) => void;
   clearPendingConfiguration: (sessionId: string) => void;
   onConfiguration: (payload: NativeSessionConfigurationEvent) => void;
+  openWorktreeMergePrompt: (prompt: WorktreeMergePrompt) => void;
+  closeWorktreeMergePrompt: () => void;
+  markWorktreeMerged: (sessionId: string) => void;
+  markWorktreeAutoPrompted: (sessionId: string) => void;
+  markPendingAiMergeResolve: (sessionId: string) => void;
+  clearPendingAiMergeResolve: (sessionId: string) => void;
 }
 
 const historyRequests = new Map<string, Promise<void>>();
@@ -113,6 +128,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
   pendingConfigurationBySession: {},
   configurationRevisionBySession: {},
   backgroundBySession: {},
+  processesBySession: {},
   inputQueueBySession: {},
   turnState: {},
   usage: {},
@@ -120,6 +136,10 @@ export const useSessionStore = create<SessionState>((set, get) => ({
   permissions: {},
   planQuestions: {},
   planApprovals: {},
+  worktreeMergePrompt: null,
+  mergedWorktreeBySession: {},
+  autoPromptedWorktreeBySession: {},
+  pendingAiMergeResolveBySession: {},
   selectSession: (id) => {
     const session = id
       ? useWorkspaceStore.getState().sessions.find((item) => item.id === id)
@@ -271,6 +291,9 @@ export const useSessionStore = create<SessionState>((set, get) => ({
       backgroundBySession: current.liveBySession[id]
         ? current.backgroundBySession
         : { ...current.backgroundBySession, [id]: [] },
+      processesBySession: current.liveBySession[id]
+        ? current.processesBySession
+        : { ...current.processesBySession, [id]: [] },
       turnState: {
         ...current.turnState,
         [id]: current.liveBySession[id] ? (current.turnState[id] ?? "working") : "working",
@@ -374,6 +397,12 @@ export const useSessionStore = create<SessionState>((set, get) => ({
               : task,
         ),
       },
+      processesBySession: {
+        ...get().processesBySession,
+        [exit.session_record_id]: (get().processesBySession[exit.session_record_id] ?? []).map(
+          (process) => (process.status === "running" ? { ...process, status: "stopped" } : process),
+        ),
+      },
       turnState: { ...get().turnState, [exit.session_record_id]: "ended" },
     });
   },
@@ -432,6 +461,10 @@ export const useSessionStore = create<SessionState>((set, get) => ({
   onBackgroundTasks: ({ session_record_id, tasks }) =>
     set((state) => ({
       backgroundBySession: { ...state.backgroundBySession, [session_record_id]: tasks },
+    })),
+  onBackgroundProcesses: ({ session_record_id, processes }) =>
+    set((state) => ({
+      processesBySession: { ...state.processesBySession, [session_record_id]: processes },
     })),
   setConfiguration: (sessionId, runtime) =>
     set((state) => ({
@@ -497,5 +530,34 @@ export const useSessionStore = create<SessionState>((set, get) => ({
             }
           : state.liveBySession,
       };
+    }),
+  openWorktreeMergePrompt: (prompt) => set({ worktreeMergePrompt: prompt }),
+  closeWorktreeMergePrompt: () => set({ worktreeMergePrompt: null }),
+  markWorktreeMerged: (sessionId) =>
+    set((state) => ({
+      mergedWorktreeBySession: { ...state.mergedWorktreeBySession, [sessionId]: true },
+      worktreeMergePrompt:
+        state.worktreeMergePrompt?.sessionId === sessionId ? null : state.worktreeMergePrompt,
+    })),
+  markWorktreeAutoPrompted: (sessionId) =>
+    set((state) => ({
+      autoPromptedWorktreeBySession: {
+        ...state.autoPromptedWorktreeBySession,
+        [sessionId]: true,
+      },
+    })),
+  markPendingAiMergeResolve: (sessionId) =>
+    set((state) => ({
+      pendingAiMergeResolveBySession: {
+        ...state.pendingAiMergeResolveBySession,
+        [sessionId]: true,
+      },
+    })),
+  clearPendingAiMergeResolve: (sessionId) =>
+    set((state) => {
+      if (!state.pendingAiMergeResolveBySession[sessionId]) return {};
+      const pendingAiMergeResolveBySession = { ...state.pendingAiMergeResolveBySession };
+      delete pendingAiMergeResolveBySession[sessionId];
+      return { pendingAiMergeResolveBySession };
     }),
 }));

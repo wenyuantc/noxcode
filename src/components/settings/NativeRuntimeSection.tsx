@@ -321,6 +321,28 @@ export function NativeRuntimeSection() {
             onCheckedChange={(checked) => setDraft({ ...draft, rg_sidecar_enabled: checked })}
           />
         </SettingRow>
+
+        <SettingRow
+          title={t("settings:runtime.lspEnabled")}
+          description={t("settings:runtime.lspEnabledHint")}
+        >
+          <Switch
+            id="native-lsp-enabled"
+            checked={draft.lsp_enabled}
+            onCheckedChange={(checked) => setDraft({ ...draft, lsp_enabled: checked })}
+          />
+        </SettingRow>
+
+        <SettingRow
+          title={t("settings:runtime.bashSandbox")}
+          description={t("settings:runtime.bashSandboxHint")}
+        >
+          <Switch
+            id="native-bash-sandbox"
+            checked={draft.bash_sandbox_enabled}
+            onCheckedChange={(checked) => setDraft({ ...draft, bash_sandbox_enabled: checked })}
+          />
+        </SettingRow>
       </SettingCard>
 
       {/* 3. 上下文窗口与 Token 预算 */}
