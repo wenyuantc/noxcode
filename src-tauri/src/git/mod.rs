@@ -617,6 +617,7 @@ pub(crate) async fn merge_session_worktree<R: Runtime>(
     session_id: String,
     action: MergeWorktreeAction,
     branch_name: Option<String>,
+    commit_message: Option<String>,
 ) -> Result<MergeWorktreeResult, String> {
     if action != MergeWorktreeAction::Keep
         && state
@@ -672,6 +673,7 @@ pub(crate) async fn merge_session_worktree<R: Runtime>(
         &session_id,
         action,
         branch_name.as_deref(),
+        commit_message.as_deref(),
         configured_root
             .as_deref()
             .and_then(self::managed::configured_root_opt),

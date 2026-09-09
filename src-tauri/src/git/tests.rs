@@ -1247,6 +1247,7 @@ async fn merge_worktree_into_current_branch() {
         super::merge::MergeWorktreeAction::MergeCurrent,
         None,
         None,
+        None,
     )
     .await
     .expect("merge");
@@ -1255,6 +1256,43 @@ async fn merge_worktree_into_current_branch() {
         std::fs::read_to_string(env.dir.path().join("README.md")).unwrap(),
         "from worktree\n"
     );
+}
+
+#[tokio::test]
+async fn merge_uses_provided_commit_message() {
+    let env = local_env().await;
+    let (pool, workspace_id, session_id) = seed_session().await;
+    let wt = env.dir.path().join("worktrees").join(&session_id);
+    let wt_text = wt.to_string_lossy().into_owned();
+    super::worktree::add_detached(&env.target, &wt_text)
+        .await
+        .expect("add");
+    sqlx::query("UPDATE agent_sessions SET working_dir = $1 WHERE id = $2")
+        .bind(&wt_text)
+        .bind(&session_id)
+        .execute(&pool)
+        .await
+        .expect("working_dir");
+    std::fs::write(wt.join("README.md"), "status ok\n").unwrap();
+    let result = super::merge::run_merge_session_worktree(
+        &pool,
+        &env.target,
+        &GitTarget::Local(wt.clone()),
+        &workspace_id,
+        &session_id,
+        super::merge::MergeWorktreeAction::MergeCurrent,
+        None,
+        Some("feat: add status endpoint"),
+        None,
+    )
+    .await
+    .expect("merge");
+    assert_eq!(result.status, super::merge::MergeWorktreeStatus::Merged);
+    let subject = fixture_git(&env.target, &["log", "-1", "--format=%s"])
+        .await
+        .expect("log")
+        .stdout_lossy();
+    assert_eq!(subject.trim(), "feat: add status endpoint");
 }
 
 #[tokio::test]
@@ -1281,6 +1319,7 @@ async fn merge_current_ignores_checked_out_branch_name() {
         &session_id,
         super::merge::MergeWorktreeAction::MergeCurrent,
         Some("main"),
+        None,
         None,
     )
     .await
@@ -1322,6 +1361,7 @@ async fn create_branch_rejects_checked_out_name() {
         super::merge::MergeWorktreeAction::CreateBranch,
         Some("main"),
         None,
+        None,
     )
     .await
     .expect_err("checked out");
@@ -1361,6 +1401,7 @@ async fn merge_worktree_conflict_stays_and_abort_cleans() {
         &workspace_id,
         &session_id,
         super::merge::MergeWorktreeAction::MergeCurrent,
+        None,
         None,
         None,
     )
@@ -1459,6 +1500,7 @@ async fn apply_resolved_files_does_not_commit_when_markers_remain() {
         &workspace_id,
         &session_id,
         super::merge::MergeWorktreeAction::MergeCurrent,
+        None,
         None,
         None,
     )

@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { ChevronDown } from "lucide-react";
+import { ChevronDown, Loader2, Sparkles } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import {
@@ -12,11 +12,18 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
+import { Textarea } from "@/components/ui/textarea";
 import { useDismissible } from "@/hooks/useDismissible";
-import { listGitBranches, mergeSessionWorktree, resolveSessionWorktreeMerge } from "@/lib/backend";
+import {
+  generateGitCommitMessage,
+  listGitBranches,
+  mergeSessionWorktree,
+  resolveSessionWorktreeMerge,
+} from "@/lib/backend";
 import type { MergeWorktreeResult } from "@/lib/types";
 import { cn } from "@/lib/utils";
 import { useSessionStore } from "@/stores/sessionStore";
+import { useSettingsStore } from "@/stores/settingsStore";
 import { useUiStore } from "@/stores/uiStore";
 
 function BranchNameField({
@@ -124,8 +131,17 @@ export function MergeWorktreeDialog() {
   const markMerged = useSessionStore((state) => state.markWorktreeMerged);
   const setGitOpen = useUiStore((state) => state.setGitOpen);
   const [branchName, setBranchName] = useState("");
+  const [commitMessage, setCommitMessage] = useState("");
   const [busy, setBusy] = useState(false);
+  const [generatingCommit, setGeneratingCommit] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [generateError, setGenerateError] = useState<string | null>(null);
+  const commitAiEnabled = useSettingsStore((state) => state.ai?.commit_message.enabled) === true;
+
+  useEffect(() => {
+    if (useSettingsStore.getState().ai) return;
+    void useSettingsStore.getState().load();
+  }, []);
 
   const applyResult = (result: MergeWorktreeResult) => {
     if (!prompt) return;
@@ -185,6 +201,11 @@ export function MergeWorktreeDialog() {
           </DialogDescription>
         </DialogHeader>
         {error ? <p className="text-sm text-destructive">{error}</p> : null}
+        {generateError ? (
+          <p className="text-sm text-destructive">
+            {t("git:generateCommitFailed")} {generateError}
+          </p>
+        ) : null}
         {conflicted ? (
           <>
             <ul className="max-h-40 overflow-auto font-mono text-[11px] text-muted-foreground">
@@ -229,6 +250,46 @@ export function MergeWorktreeDialog() {
         ) : (
           <>
             <div className="space-y-1.5">
+              <div className="relative">
+                <Textarea
+                  value={commitMessage}
+                  placeholder={t("git:commitMessage")}
+                  className="h-20 min-h-20 max-h-20 w-full resize-none pr-10 text-xs"
+                  disabled={busy || generatingCommit}
+                  onChange={(event) => setCommitMessage(event.target.value)}
+                />
+                {commitAiEnabled ? (
+                  <Button
+                    type="button"
+                    size="icon-sm"
+                    variant="ghost"
+                    className="absolute top-1.5 right-1.5 size-7 rounded-md bg-foreground text-background hover:bg-foreground/90 hover:text-background"
+                    title={t(generatingCommit ? "git:generatingCommit" : "git:generateCommit")}
+                    aria-label={t(generatingCommit ? "git:generatingCommit" : "git:generateCommit")}
+                    disabled={busy || generatingCommit}
+                    onClick={() => {
+                      if (busy || generatingCommit) return;
+                      setGeneratingCommit(true);
+                      setGenerateError(null);
+                      void generateGitCommitMessage(prompt.workspaceId, prompt.sessionId)
+                        .then((next) => setCommitMessage(next))
+                        .catch((reason: unknown) => setGenerateError(String(reason)))
+                        .finally(() => setGeneratingCommit(false));
+                    }}
+                  >
+                    {generatingCommit ? (
+                      <Loader2 className="size-3.5 animate-spin" />
+                    ) : (
+                      <Sparkles className="size-3.5" />
+                    )}
+                  </Button>
+                ) : null}
+              </div>
+              <p className="text-[11px] text-muted-foreground">
+                {t("git:mergeWorktreeCommitHint")}
+              </p>
+            </div>
+            <div className="space-y-1.5">
               <BranchNameField
                 workspaceId={prompt.workspaceId}
                 value={branchName}
@@ -242,7 +303,7 @@ export function MergeWorktreeDialog() {
             </div>
             <DialogFooter className="flex-col gap-2 sm:flex-col">
               <Button
-                disabled={busy}
+                disabled={busy || generatingCommit || !commitMessage.trim()}
                 onClick={() =>
                   void run(() =>
                     mergeSessionWorktree(
@@ -250,6 +311,7 @@ export function MergeWorktreeDialog() {
                       prompt.sessionId,
                       "merge_current",
                       null,
+                      commitMessage.trim(),
                     ),
                   )
                 }
@@ -258,7 +320,7 @@ export function MergeWorktreeDialog() {
               </Button>
               <Button
                 variant="outline"
-                disabled={busy}
+                disabled={busy || generatingCommit || !commitMessage.trim()}
                 onClick={() =>
                   void run(() =>
                     mergeSessionWorktree(
@@ -266,6 +328,7 @@ export function MergeWorktreeDialog() {
                       prompt.sessionId,
                       "create_branch",
                       branchName.trim() || null,
+                      commitMessage.trim(),
                     ),
                   )
                 }

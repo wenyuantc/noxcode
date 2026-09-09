@@ -76,6 +76,7 @@
   "mergeWorktreeKeep": "先保留",
   "mergeWorktreeBranchName": "可选分支名，默认 noxcode/wt-<会话>",
   "mergeWorktreeBranchNameHint": "仅用于「建成新分支」。合并回当前分支不会改写已检出的分支。",
+  "mergeWorktreeCommitHint": "合并或建分支前，会用这条说明提交隔离树上的改动。",
   "mergeWorktreeConflictsTitle": "合并存在冲突",
   "mergeWorktreeConflictsHint": "主工作区停在合并中间态。可让 AI 自动解决，或打开 Git 面板手动处理。",
   "mergeWorktreeAi": "AI 自动解决",

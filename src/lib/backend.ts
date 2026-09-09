@@ -359,12 +359,14 @@ export function mergeSessionWorktree(
   sessionId: string,
   action: MergeWorktreeAction,
   branchName?: string | null,
+  commitMessage?: string | null,
 ): Promise<MergeWorktreeResult> {
   return invoke("merge_session_worktree", {
     workspaceId,
     sessionId,
     action,
     branchName: branchName ?? null,
+    commitMessage: commitMessage ?? null,
   });
 }
 

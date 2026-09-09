@@ -3,11 +3,13 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { useSessionStore } from "@/stores/sessionStore";
+import { useSettingsStore } from "@/stores/settingsStore";
 import { MergeWorktreeDialog } from "./MergeWorktreeDialog";
 
 vi.mock("@/lib/backend", () => ({
   mergeSessionWorktree: vi.fn(),
   resolveSessionWorktreeMerge: vi.fn(),
+  generateGitCommitMessage: vi.fn(),
   listGitBranches: vi.fn(async () => [{ name: "dev", is_current: true }]),
 }));
 
@@ -38,6 +40,17 @@ vi.mock("@/stores/sessionStore", async (importOriginal) => {
   };
 });
 
+vi.mock("@/stores/settingsStore", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/stores/settingsStore")>();
+  return {
+    useSettingsStore: Object.assign(
+      (selector: (state: ReturnType<typeof actual.useSettingsStore.getState>) => unknown) =>
+        selector(actual.useSettingsStore.getState()),
+      actual.useSettingsStore,
+    ),
+  };
+});
+
 vi.mock("@/stores/uiStore", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/stores/uiStore")>();
   return {
@@ -52,6 +65,23 @@ vi.mock("@/stores/uiStore", async (importOriginal) => {
 describe("MergeWorktreeDialog", () => {
   beforeEach(() => {
     useSessionStore.setState({ worktreeMergePrompt: null });
+    useSettingsStore.setState({
+      ai: {
+        commit_message: {
+          enabled: true,
+          channel_id: null,
+          model: null,
+          reasoning_effort: null,
+          style: "detailed",
+        },
+        session_title: {
+          enabled: false,
+          channel_id: null,
+          model: null,
+          reasoning_effort: null,
+        },
+      },
+    });
   });
 
   it("renders nothing when there is no prompt", () => {
@@ -74,6 +104,9 @@ describe("MergeWorktreeDialog", () => {
     expect(html).toContain("git:mergeWorktreeKeep");
     expect(html).toContain("git:mergeWorktreeBranchName");
     expect(html).toContain("git:mergeWorktreeBranchNameHint");
+    expect(html).toContain("git:commitMessage");
+    expect(html).toContain("git:mergeWorktreeCommitHint");
+    expect(html).toContain("git:generateCommit");
     expect(html).toContain('role="combobox"');
   });
 

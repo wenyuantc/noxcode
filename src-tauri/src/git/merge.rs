@@ -63,6 +63,13 @@ impl MergeWorktreeResult {
     }
 }
 
+pub fn merge_checkpoint_label(message: Option<&str>) -> &str {
+    message
+        .map(str::trim)
+        .filter(|item| !item.is_empty())
+        .unwrap_or("worktree_merge")
+}
+
 pub fn default_worktree_branch_name(session_id: &str) -> String {
     let short: String = session_id
         .chars()
@@ -201,9 +208,16 @@ async fn create_branch_at(target: &GitTarget, name: &str, oid: &str) -> Result<S
 async fn merge_named_branch(
     target: &GitTarget,
     branch: &str,
+    commit_message: Option<&str>,
 ) -> Result<MergeWorktreeResult, GitError> {
+    let label = merge_checkpoint_label(commit_message);
     let output = with_repo_lock(target, || async {
-        git(target, &["merge", "--no-edit", branch], &IndexMode::user()).await
+        git(
+            target,
+            &["merge", "--no-edit", "-m", label, branch],
+            &IndexMode::user(),
+        )
+        .await
     })
     .await?;
     if output.success() {
@@ -419,6 +433,7 @@ pub async fn run_merge_session_worktree(
     session_id: &str,
     action: MergeWorktreeAction,
     branch_name: Option<&str>,
+    commit_message: Option<&str>,
     configured_root: Option<&str>,
 ) -> Result<MergeWorktreeResult, GitError> {
     if action == MergeWorktreeAction::Keep {
@@ -431,12 +446,13 @@ pub async fn run_merge_session_worktree(
     }
     let _working_dir =
         require_managed_worktree(pool, workspace_id, session_id, configured_root).await?;
+    let label = merge_checkpoint_label(commit_message);
     let checkpoint = create_checkpoint(
         pool,
         worktree,
         workspace_id,
         session_id,
-        Some("worktree_merge"),
+        Some(label),
         Some("manual"),
     )
     .await?;
@@ -460,7 +476,7 @@ pub async fn run_merge_session_worktree(
     // 合并回当前分支：只建内部指针再 merge，绝不 force-update 已检出的分支。
     let pointer = default_worktree_branch_name(session_id);
     let pointer = create_branch_at(main, &pointer, &checkpoint.commit_oid).await?;
-    merge_named_branch(main, &pointer).await
+    merge_named_branch(main, &pointer, Some(label)).await
 }
 
 pub async fn run_abort_merge(target: &GitTarget) -> Result<MergeWorktreeResult, GitError> {
@@ -497,6 +513,16 @@ mod tests {
             default_worktree_branch_name("abc-def-123"),
             "noxcode/wt-abcdef12"
         );
+    }
+
+    #[test]
+    fn merge_label_uses_message_or_fallback() {
+        assert_eq!(
+            merge_checkpoint_label(Some(" feat: add status ")),
+            "feat: add status"
+        );
+        assert_eq!(merge_checkpoint_label(Some("   ")), "worktree_merge");
+        assert_eq!(merge_checkpoint_label(None), "worktree_merge");
     }
 
     #[test]
