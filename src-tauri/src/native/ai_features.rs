@@ -11,10 +11,10 @@ use crate::app::sessions::rename_agent_session_with;
 use crate::app::shared::{normalize_optional_text, sqlite_pool};
 use crate::db::models::AgentSessionRecord;
 use crate::git::{
-    apply_resolved_files, collect_commit_message_context, conflict_resolve_prompt,
-    list_unmerged_paths, merge_in_progress, read_worktree_text, resolve_git_target,
-    resolve_git_target_for_session, run_abort_merge, sanitize_conflict_resolution,
-    MergeWorktreeResult, ResolveWorktreeAction,
+    apply_resolved_files, collect_commit_message_context, complete_merge_from_worktree,
+    conflict_resolve_prompt, list_unmerged_paths, merge_in_progress, read_worktree_text,
+    resolve_git_target, resolve_git_target_for_session, run_abort_merge,
+    sanitize_conflict_resolution, MergeWorktreeResult, ResolveWorktreeAction,
 };
 use crate::native::channels::fetch_channel_record;
 use crate::native::manager::NativeAgentManager;
@@ -246,6 +246,9 @@ pub async fn resolve_session_worktree_merge(
     let pool = sqlite_pool(&app).await?;
     let result = match action {
         ResolveWorktreeAction::Abort => run_abort_merge(&target).await.map_err(String::from)?,
+        ResolveWorktreeAction::Complete => complete_merge_from_worktree(&target)
+            .await
+            .map_err(String::from)?,
         ResolveWorktreeAction::Ai => {
             if !merge_in_progress(&target).await.map_err(String::from)? {
                 return Err("当前没有进行中的合并".to_string());

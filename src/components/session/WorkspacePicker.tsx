@@ -61,7 +61,7 @@ export function WorkspacePicker({ onRequestOpen }: { onRequestOpen?: () => void 
         ) : null}
       </div>
       {openMenu ? (
-        <div className="absolute z-30 mt-1 w-72 rounded-lg border bg-popover p-2 shadow-lg">
+        <div className="absolute top-full left-0 z-50 mt-1 w-72 rounded-lg border bg-popover p-2 text-popover-foreground shadow-lg ring-1 ring-foreground/10">
           <div className="mb-2 flex items-center gap-2 px-1">
             <Search className="size-3.5 text-muted-foreground" />
             <Input

@@ -20,11 +20,17 @@ import {
   mergeSessionWorktree,
   resolveSessionWorktreeMerge,
 } from "@/lib/backend";
+import { resolveSessionSelection } from "@/lib/sessionModel";
+import { submitSessionPrompt } from "@/lib/sessionSubmission";
 import type { MergeWorktreeResult } from "@/lib/types";
 import { cn } from "@/lib/utils";
+import { mergeConflictResolvePrompt } from "@/lib/worktreeMergePrompt";
+import { useChannelStore } from "@/stores/channelStore";
+import { useGitStore } from "@/stores/gitStore";
 import { useSessionStore } from "@/stores/sessionStore";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { useUiStore } from "@/stores/uiStore";
+import { useWorkspaceStore } from "@/stores/workspaceStore";
 
 function BranchNameField({
   workspaceId,
@@ -124,7 +130,7 @@ function BranchNameField({
 }
 
 export function MergeWorktreeDialog() {
-  const { t } = useTranslation(["git", "common"]);
+  const { t } = useTranslation(["git", "common", "sessions"]);
   const prompt = useSessionStore((state) => state.worktreeMergePrompt);
   const close = useSessionStore((state) => state.closeWorktreeMergePrompt);
   const openPrompt = useSessionStore((state) => state.openWorktreeMergePrompt);
@@ -137,11 +143,21 @@ export function MergeWorktreeDialog() {
   const [error, setError] = useState<string | null>(null);
   const [generateError, setGenerateError] = useState<string | null>(null);
   const commitAiEnabled = useSettingsStore((state) => state.ai?.commit_message.enabled) === true;
+  const formSessionId = prompt?.sessionId ?? "";
 
   useEffect(() => {
     if (useSettingsStore.getState().ai) return;
     void useSettingsStore.getState().load();
   }, []);
+
+  useEffect(() => {
+    setBranchName("");
+    setCommitMessage("");
+    setBusy(false);
+    setGeneratingCommit(false);
+    setError(null);
+    setGenerateError(null);
+  }, [formSessionId]);
 
   const applyResult = (result: MergeWorktreeResult) => {
     if (!prompt) return;
@@ -160,6 +176,7 @@ export function MergeWorktreeDialog() {
       result.status === "resolved" ||
       result.status === "branched"
     ) {
+      useGitStore.getState().bumpRevision();
       markMerged(prompt.sessionId);
       return;
     }
@@ -216,11 +233,53 @@ export function MergeWorktreeDialog() {
             <DialogFooter className="flex-col gap-2 sm:flex-col">
               <Button
                 disabled={busy}
-                onClick={() =>
-                  void run(() =>
-                    resolveSessionWorktreeMerge(prompt.workspaceId, prompt.sessionId, "ai"),
-                  )
-                }
+                onClick={() => {
+                  if (busy) return;
+                  const current = prompt;
+                  const runtime =
+                    useSessionStore.getState().configurationBySession[current.sessionId];
+                  const session = useWorkspaceStore
+                    .getState()
+                    .sessions.find((item) => item.id === current.sessionId);
+                  const channels = useChannelStore.getState();
+                  const selection = resolveSessionSelection({
+                    sessionId: current.sessionId,
+                    runtime,
+                    session,
+                    fallbackChannelId: channels.activeChannelId,
+                    fallbackModelId: channels.activeModelId,
+                  });
+                  if (!selection.channelId || !selection.modelId) {
+                    setError(t("sessions:needChannel"));
+                    return;
+                  }
+                  setBusy(true);
+                  setError(null);
+                  useSessionStore.getState().markPendingAiMergeResolve(current.sessionId);
+                  useSessionStore.getState().selectSession(current.sessionId);
+                  void submitSessionPrompt({
+                    sessionId: current.sessionId,
+                    workspaceId: current.workspaceId,
+                    channelId: selection.channelId,
+                    prompt: mergeConflictResolvePrompt(current.conflicts),
+                    model: selection.modelId,
+                    reasoningEffort: runtime?.reasoning_effort,
+                    planMode: false,
+                    permissionMode: runtime?.permission_mode,
+                  })
+                    .then((started) => {
+                      if (started) {
+                        useSessionStore.getState().onStarted(started);
+                        void useSessionStore.getState().ensureHistory(started.session_record_id);
+                      }
+                      useSessionStore.getState().closeWorktreeMergePrompt();
+                    })
+                    .catch((reason: unknown) => {
+                      useSessionStore.getState().clearPendingAiMergeResolve(current.sessionId);
+                      setError(reason instanceof Error ? reason.message : String(reason));
+                    })
+                    .finally(() => setBusy(false));
+                }}
               >
                 {t("git:mergeWorktreeAi")}
               </Button>
