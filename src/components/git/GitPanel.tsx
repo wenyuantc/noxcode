@@ -73,8 +73,10 @@ function GitWorkspacePanel({ workspaceId }: { workspaceId: string | null }) {
   const runtime = useSessionStore((state) =>
     sessionId ? state.configurationBySession[sessionId] : undefined,
   );
+  const worktreeRoot = useSettingsStore((state) => state.native?.worktree_root);
   const isolated = Boolean(
-    session && isManagedWorktreePath(runtime?.worktree_path ?? session.working_dir, session.id),
+    session &&
+    isManagedWorktreePath(runtime?.worktree_path ?? session.working_dir, session.id, worktreeRoot),
   );
   const gitFocusPath = useUiStore((state) => state.gitFocusPath);
   const [status, setStatus] = useState<GitStatus | null>(null);

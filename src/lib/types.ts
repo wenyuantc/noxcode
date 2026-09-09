@@ -1046,6 +1046,10 @@ export interface NativeSettings {
   memory_dream_interval: number;
   hooks: NativeHook[];
   global_prompt_template: string;
+  worktree_root: string;
+  worktree_fetch_before_create: boolean;
+  worktree_auto_prune: boolean;
+  worktree_auto_prune_limit: number;
 }
 
 export interface UpdateNativeSettingsInput {
@@ -1079,6 +1083,29 @@ export interface UpdateNativeSettingsInput {
   memory_dream_interval?: number;
   hooks?: NativeHook[];
   global_prompt_template?: string;
+  worktree_root?: string;
+  worktree_fetch_before_create?: boolean;
+  worktree_auto_prune?: boolean;
+  worktree_auto_prune_limit?: number;
+}
+
+export interface ManagedWorktreeItem {
+  session_id: string;
+  title: string;
+  workspace_id: string | null;
+  workspace_name: string | null;
+  status: string;
+  path: string;
+  exists: boolean;
+  remote: boolean;
+  in_use: boolean;
+  created_at: string;
+}
+
+export interface ManagedWorktreeList {
+  root: string;
+  default_root: string;
+  items: ManagedWorktreeItem[];
 }
 
 export type NativeSkillSource =

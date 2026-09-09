@@ -9,6 +9,7 @@ import { GLOBAL_SHORTCUTS, shortcutDisplay } from "@/lib/shortcuts";
 import { cn } from "@/lib/utils";
 import { isManagedWorktreePath } from "@/lib/worktreePath";
 import { useSessionStore } from "@/stores/sessionStore";
+import { useSettingsStore } from "@/stores/settingsStore";
 import { useUiStore } from "@/stores/uiStore";
 import { useWorkspaceStore } from "@/stores/workspaceStore";
 import { BranchPicker } from "./BranchPicker";
@@ -35,8 +36,10 @@ export function SessionHeader() {
   const mergePrompt = useSessionStore((state) => state.worktreeMergePrompt);
   const [mergeConflicts, setMergeConflicts] = useState<string[]>([]);
   const workspaceId = session?.workspace_id ?? null;
+  const worktreeRoot = useSettingsStore((state) => state.native?.worktree_root);
   const isolated = Boolean(
-    session && isManagedWorktreePath(runtime?.worktree_path ?? session.working_dir, session.id),
+    session &&
+    isManagedWorktreePath(runtime?.worktree_path ?? session.working_dir, session.id, worktreeRoot),
   );
 
   useEffect(() => {

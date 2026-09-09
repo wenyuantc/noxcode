@@ -42,6 +42,7 @@ flowchart LR
 | [`commit.rs`](../src-tauri/src/git/commit.rs) | commit / push / pull / 分支 |
 | [`checkpoint.rs`](../src-tauri/src/git/checkpoint.rs) | 快照、预览、回滚、清扫 |
 | [`merge.rs`](../src-tauri/src/git/merge.rs) | 会话隔离 worktree 合并回主工作区、冲突中止 / 写回 |
+| [`managed.rs`](../src-tauri/src/git/managed.rs) | 托管 worktree 列表、删除、按上限清理 |
 | [`preflight.rs`](../src-tauri/src/git/preflight.rs) | 启动时本地 git ≥ 2.23 |
 
 ## IndexMode 三类
@@ -101,8 +102,10 @@ ref：`refs/noxcode/checkpoints/<session_id>/<seq>`。author / committer 固定 
 | `merge_session_worktree` | 会话隔离 worktree：合并回当前分支 / 建分支 / 保留；冲突保留 MERGE_HEAD |
 | `get_worktree_merge_state` | 主工作区是否在 merge 中间态及冲突文件 |
 | `resolve_session_worktree_merge` | 冲突后续：AI 写回并完成提交，或 `merge --abort` |
+| `list_managed_worktrees` | 列出托管隔离工作树（会话记录 + 根目录残留） |
+| `remove_managed_worktree` | 删除未在使用的托管工作树，清空该会话 `working_dir` |
 
-前端对应函数在 `backend.ts`：`getGitRepoInfo`、`getGitStatus`、`getGitFileDiff`、`getGitNumstat`、`stageGitPaths`、`unstageGitPaths`、`restoreGitPaths`、`commitGitChanges`、`pushGitBranch`、`listGitBranches`、`createGitBranch`、`checkoutGitBranch`、`listGitFiles`、`createGitCheckpoint`、`listGitCheckpoints`、`previewGitCheckpointRestore`、`restoreGitCheckpoint`、`clearGitCheckpoints`、`mergeSessionWorktree`、`getWorktreeMergeState`、`resolveSessionWorktreeMerge`；恢复历史另通过 `listActivityLogs` 读取。
+前端对应函数在 `backend.ts`：`getGitRepoInfo`、`getGitStatus`、`getGitFileDiff`、`getGitNumstat`、`stageGitPaths`、`unstageGitPaths`、`restoreGitPaths`、`commitGitChanges`、`pushGitBranch`、`listGitBranches`、`createGitBranch`、`checkoutGitBranch`、`listGitFiles`、`createGitCheckpoint`、`listGitCheckpoints`、`previewGitCheckpointRestore`、`restoreGitCheckpoint`、`clearGitCheckpoints`、`mergeSessionWorktree`、`getWorktreeMergeState`、`resolveSessionWorktreeMerge`、`listManagedWorktrees`、`removeManagedWorktree`；恢复历史另通过 `listActivityLogs` 读取。
 
 ## 文件预览
 

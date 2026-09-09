@@ -107,6 +107,8 @@ pub fn run() {
             git::clear_git_checkpoints,
             git::merge_session_worktree,
             git::get_worktree_merge_state,
+            git::list_managed_worktrees,
+            git::remove_managed_worktree,
             native::ai_features::resolve_session_worktree_merge,
             app::network_settings::get_network_settings,
             app::network_settings::update_network_settings,

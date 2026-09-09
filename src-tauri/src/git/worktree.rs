@@ -12,34 +12,125 @@ pub struct WorktreeInfo {
     pub branch: String,
 }
 
+pub fn normalize_path_for_compare(path: &str) -> String {
+    path.trim()
+        .replace('\\', "/")
+        .trim_end_matches('/')
+        .to_string()
+}
+
+pub fn looks_like_session_id(name: &str) -> bool {
+    let name = name.trim();
+    !name.is_empty()
+        && name.len() <= 64
+        && name.chars().any(|ch| ch.is_ascii_hexdigit())
+        && name.chars().all(|ch| ch.is_ascii_hexdigit() || ch == '-')
+}
+
+pub fn default_local_worktree_root(app_config: &Path) -> PathBuf {
+    app_config.join("worktrees")
+}
+
+pub fn resolve_local_worktree_root(app_config: &Path, configured_root: &str) -> PathBuf {
+    let trimmed = configured_root.trim();
+    if trimmed.is_empty() {
+        default_local_worktree_root(app_config)
+    } else {
+        PathBuf::from(trimmed)
+    }
+}
+
+pub fn local_worktree_path_in_root(root: &Path, session_record_id: &str) -> PathBuf {
+    root.join(session_record_id.trim())
+}
+
 pub fn local_worktree_path(app_config: &Path, session_record_id: &str) -> PathBuf {
-    app_config.join("worktrees").join(session_record_id.trim())
+    local_worktree_path_in_root(&default_local_worktree_root(app_config), session_record_id)
 }
 
 pub fn remote_worktree_path(session_record_id: &str) -> String {
     format!("$HOME/.noxcode/worktrees/{}", session_record_id.trim())
 }
 
+pub fn session_id_from_worktree_path(path: &str) -> Option<String> {
+    Path::new(path.trim())
+        .file_name()
+        .and_then(|name| name.to_str())
+        .map(str::trim)
+        .filter(|name| looks_like_session_id(name))
+        .map(ToOwned::to_owned)
+}
+
+#[allow(dead_code)]
 pub fn is_managed_worktree_path(path: &str, session_record_id: &str) -> bool {
-    let path = path.trim();
+    is_managed_worktree_path_with_root(path, session_record_id, None)
+}
+
+pub fn is_managed_worktree_path_with_root(
+    path: &str,
+    session_record_id: &str,
+    configured_root: Option<&str>,
+) -> bool {
+    let path = normalize_path_for_compare(path);
     let id = session_record_id.trim();
-    !id.is_empty()
-        && path.contains("worktrees")
+    if id.is_empty() || path.is_empty() {
+        return false;
+    }
+    if path.contains("worktrees")
         && (path.ends_with(id) || path.contains(&format!("worktrees/{id}")))
+    {
+        return true;
+    }
+    if let Some(root) = configured_root
+        .map(str::trim)
+        .filter(|item| !item.is_empty())
+    {
+        let expected = format!("{}/{id}", normalize_path_for_compare(root));
+        if path == expected {
+            return true;
+        }
+    }
+    false
+}
+
+pub fn is_any_managed_worktree_path(path: &str, configured_root: Option<&str>) -> bool {
+    let Some(id) = session_id_from_worktree_path(path) else {
+        return false;
+    };
+    is_managed_worktree_path_with_root(path, &id, configured_root)
 }
 
 /// 从托管 worktree 内的绝对文件路径拆出 worktree 根目录和相对路径。
+#[allow(dead_code)]
 pub fn split_managed_worktree_file_path(path: &str) -> Option<(String, String)> {
+    split_managed_worktree_file_path_with_root(path, None)
+}
+
+pub fn split_managed_worktree_file_path_with_root(
+    path: &str,
+    configured_root: Option<&str>,
+) -> Option<(String, String)> {
     let normalized = path.trim().replace('\\', "/");
     let marker = "/worktrees/";
-    let start = normalized.find(marker)?;
-    let after = &normalized[start + marker.len()..];
-    let (id, rest) = after.split_once('/')?;
-    if id.is_empty() || rest.is_empty() {
+    if let Some(start) = normalized.find(marker) {
+        let after = &normalized[start + marker.len()..];
+        if let Some((id, rest)) = after.split_once('/') {
+            if !id.is_empty() && !rest.is_empty() {
+                let root = normalized[..start + marker.len() + id.len()].to_string();
+                return Some((root, rest.to_string()));
+            }
+        }
+    }
+    let root = configured_root
+        .map(str::trim)
+        .filter(|item| !item.is_empty())?;
+    let root_norm = normalize_path_for_compare(root);
+    let rest = normalized.strip_prefix(&format!("{root_norm}/"))?;
+    let (id, file) = rest.split_once('/')?;
+    if id.is_empty() || file.is_empty() || !looks_like_session_id(id) {
         return None;
     }
-    let root = normalized[..start + marker.len() + id.len()].to_string();
-    Some((root, rest.to_string()))
+    Some((format!("{root_norm}/{id}"), file.to_string()))
 }
 
 pub async fn add_detached(target: &GitTarget, path: &str) -> Result<String, GitError> {
@@ -94,6 +185,12 @@ pub async fn list_worktrees(target: &GitTarget) -> Result<Vec<WorktreeInfo>, Git
     Ok(parse_porcelain(&output.stdout_lossy()))
 }
 
+pub async fn fetch_all_prune(target: &GitTarget) -> Result<(), GitError> {
+    let output = git(target, &["fetch", "--all", "--prune"], &IndexMode::ReadOnly).await?;
+    output.require_success(&["fetch", "--all", "--prune"])?;
+    Ok(())
+}
+
 #[allow(dead_code)]
 pub fn parse_porcelain(text: &str) -> Vec<WorktreeInfo> {
     let mut items = Vec::new();
@@ -140,6 +237,21 @@ mod tests {
         ));
         assert!(!is_managed_worktree_path("/repo", "abc-1"));
         assert!(!is_managed_worktree_path("/cfg/worktrees/other", "abc-1"));
+        assert!(is_managed_worktree_path_with_root(
+            "/data/nox-wt/abc-1",
+            "abc-1",
+            Some("/data/nox-wt")
+        ));
+        assert!(!is_managed_worktree_path_with_root(
+            "/data/nox-wt/abc-1",
+            "abc-1",
+            None
+        ));
+        assert!(!is_managed_worktree_path_with_root(
+            "/data/other/abc-1",
+            "abc-1",
+            Some("/data/nox-wt")
+        ));
     }
 
     #[test]
@@ -154,6 +266,22 @@ mod tests {
         );
         assert_eq!(rel, "oms/Test.java");
         assert!(split_managed_worktree_file_path("/repo/README.md").is_none());
+        let (custom_root, custom_rel) = split_managed_worktree_file_path_with_root(
+            "/data/nox-wt/abc-1/oms/Test.java",
+            Some("/data/nox-wt"),
+        )
+        .expect("custom root");
+        assert_eq!(custom_root, "/data/nox-wt/abc-1");
+        assert_eq!(custom_rel, "oms/Test.java");
+    }
+
+    #[test]
+    fn session_id_from_custom_root() {
+        assert_eq!(
+            session_id_from_worktree_path("/data/nox-wt/abc-1"),
+            Some("abc-1".to_string())
+        );
+        assert!(session_id_from_worktree_path("/data/nox-wt/not a session").is_none());
     }
 
     #[test]

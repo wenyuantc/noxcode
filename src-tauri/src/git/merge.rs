@@ -9,7 +9,7 @@ use super::runner::{
     assert_safe_rel_path, git, git_with, with_repo_lock, GitError, GitRunOptions, GitTarget,
     IndexMode,
 };
-use super::worktree::is_managed_worktree_path;
+use super::worktree::is_managed_worktree_path_with_root;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -366,6 +366,7 @@ async fn require_managed_worktree(
     pool: &SqlitePool,
     workspace_id: &str,
     session_id: &str,
+    configured_root: Option<&str>,
 ) -> Result<String, GitError> {
     let working_dir: Option<String> =
         sqlx::query_scalar("SELECT working_dir FROM agent_sessions WHERE id = $1 LIMIT 1")
@@ -390,12 +391,13 @@ async fn require_managed_worktree(
             "session_id 与 workspace_id 不匹配".to_string(),
         ));
     }
-    if !is_managed_worktree_path(&working_dir, session_id) {
+    if !is_managed_worktree_path_with_root(&working_dir, session_id, configured_root) {
         return Err(GitError::Parse("当前会话未使用托管隔离工作树".to_string()));
     }
     Ok(working_dir)
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn run_merge_session_worktree(
     pool: &SqlitePool,
     main: &GitTarget,
@@ -404,6 +406,7 @@ pub async fn run_merge_session_worktree(
     session_id: &str,
     action: MergeWorktreeAction,
     branch_name: Option<&str>,
+    configured_root: Option<&str>,
 ) -> Result<MergeWorktreeResult, GitError> {
     if action == MergeWorktreeAction::Keep {
         return Ok(MergeWorktreeResult::kept());
@@ -413,7 +416,8 @@ pub async fn run_merge_session_worktree(
             "主工作区正在进行 {operation}，请先处理后再合并"
         )));
     }
-    let _working_dir = require_managed_worktree(pool, workspace_id, session_id).await?;
+    let _working_dir =
+        require_managed_worktree(pool, workspace_id, session_id, configured_root).await?;
     let checkpoint = create_checkpoint(
         pool,
         worktree,

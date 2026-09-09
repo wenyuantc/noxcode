@@ -21,7 +21,8 @@
     "about": "About",
     "permissions": "Permission rules",
     "memory": "Memory",
-    "automations": "Automations"
+    "automations": "Automations",
+    "worktrees": "Worktrees"
   },
   "general": {
     "language": "Language",
@@ -862,5 +863,27 @@
       "model": "Title model",
       "effort": "Title thinking level"
     }
+  },
+  "worktrees": {
+    "hint": "Choose where managed worktrees live, whether to fetch before creating one, and how old worktrees are cleaned up.",
+    "root": "Worktree root directory",
+    "rootHint": "Directory where noxcode creates managed worktrees. Leave empty to use the default location. Applies to local workspaces only; SSH still uses $HOME/.noxcode/worktrees.",
+    "browse": "Choose folder",
+    "fetchBeforeCreate": "Always fetch upstream before creating a worktree",
+    "fetchBeforeCreateHint": "noxcode already fetches during regular Git operations. This also fetches upstream updates before creating each new worktree. Creation continues if the fetch fails.",
+    "autoPrune": "Automatically delete old worktrees",
+    "autoPruneHint": "Recommended for most users. Turn this off only if you need to manage old worktrees and disk space yourself.",
+    "autoPruneLimit": "Auto-delete limit",
+    "autoPruneLimitHint": "Number of managed worktrees to keep. Older unused worktrees are cleaned up after this limit. A checkpoint is created before deletion so cleaned-up worktrees can be restored.",
+    "listTitle": "Worktrees",
+    "listEmptyTitle": "No worktrees yet",
+    "listEmpty": "Worktrees created by noxcode will appear here",
+    "refresh": "Refresh",
+    "inUse": "In use",
+    "missing": "Folder missing",
+    "remote": "Remote",
+    "delete": "Delete",
+    "untitled": "Session",
+    "orphaned": "Unlinked"
   }
 }

@@ -1,6 +1,7 @@
 import { getWorktreeMergeState } from "@/lib/backend";
 import { isManagedWorktreePath } from "@/lib/worktreePath";
 import { useSessionStore } from "@/stores/sessionStore";
+import { useSettingsStore } from "@/stores/settingsStore";
 import { useWorkspaceStore } from "@/stores/workspaceStore";
 
 export async function maybeOpenWorktreeMerge(input: {
@@ -23,7 +24,8 @@ export async function maybeOpenWorktreeMerge(input: {
   const runtime = next.configurationBySession[input.sessionId];
   const workspaceId = input.workspaceId ?? session?.workspace_id ?? null;
   const path = input.worktreePath ?? runtime?.worktree_path ?? session?.working_dir;
-  if (!workspaceId || !isManagedWorktreePath(path, input.sessionId)) return false;
+  const worktreeRoot = useSettingsStore.getState().native?.worktree_root;
+  if (!workspaceId || !isManagedWorktreePath(path, input.sessionId, worktreeRoot)) return false;
 
   if (input.reason === "turn") {
     useSessionStore.getState().markWorktreeAutoPrompted(input.sessionId);

@@ -1593,6 +1593,8 @@ async fn configure_local_tool_runtime(
         Duration::from_secs(settings.bash_default_timeout_secs.max(1) as u64);
     let config_dir = app.path().app_config_dir().ok();
     runner.ctx.app_config_dir = config_dir.clone();
+    runner.ctx.worktree_root = settings.worktree_root.clone();
+    runner.ctx.worktree_fetch_before_create = settings.worktree_fetch_before_create;
     if settings.rg_sidecar_enabled {
         let bundled = app.path().resource_dir().ok().map(|dir| dir.join("tools"));
         runner.ctx.workspace.rg_binary =
@@ -1671,7 +1673,16 @@ async fn maybe_isolate_session_worktree(
             .map(str::trim)
             .filter(|item| !item.is_empty())
         {
-            if crate::git::worktree::is_managed_worktree_path(existing, session_record_id) {
+            let configured_root = crate::native::settings::load_native_settings(app)
+                .ok()
+                .map(|settings| settings.worktree_root);
+            if crate::git::worktree::is_managed_worktree_path_with_root(
+                existing,
+                session_record_id,
+                configured_root
+                    .as_deref()
+                    .and_then(crate::git::managed::configured_root_opt),
+            ) {
                 *run_cwd = existing.to_string();
                 return (Some(existing.to_string()), notices);
             }
@@ -1681,13 +1692,24 @@ async fn maybe_isolate_session_worktree(
     if !isolate {
         return (None, notices);
     }
+    let settings = crate::native::settings::load_native_settings(app).ok();
+    let configured_root = settings
+        .as_ref()
+        .map(|item| item.worktree_root.as_str())
+        .unwrap_or("");
     match crate::git::resolve_git_target(app, workspace_id).await {
         Ok(target) => {
             let path = match &target {
                 crate::git::GitTarget::Local(_) => match app.path().app_config_dir() {
-                    Ok(dir) => crate::git::worktree::local_worktree_path(&dir, session_record_id)
-                        .to_string_lossy()
-                        .into_owned(),
+                    Ok(dir) => {
+                        let root = crate::git::worktree::resolve_local_worktree_root(
+                            &dir,
+                            configured_root,
+                        );
+                        crate::git::worktree::local_worktree_path_in_root(&root, session_record_id)
+                            .to_string_lossy()
+                            .into_owned()
+                    }
                     Err(error) => {
                         notices.push(format!("无法解析配置目录，已跳过 worktree 隔离：{error}"));
                         return (None, notices);
@@ -1697,9 +1719,39 @@ async fn maybe_isolate_session_worktree(
                     crate::git::worktree::remote_worktree_path(session_record_id)
                 }
             };
+            if settings
+                .as_ref()
+                .is_some_and(|item| item.worktree_fetch_before_create)
+            {
+                if let Err(error) = crate::git::worktree::fetch_all_prune(&target).await {
+                    notices.push(format!("创建工作树前获取上游失败，已继续创建：{error}"));
+                }
+            }
             match crate::git::worktree::add_detached(&target, &path).await {
                 Ok(_) => {
                     *run_cwd = path.clone();
+                    if settings
+                        .as_ref()
+                        .is_some_and(|item| item.worktree_auto_prune)
+                    {
+                        if let (Ok(pool), Some(state)) = (
+                            crate::app::shared::sqlite_pool(app).await,
+                            app.try_state::<std::sync::Arc<
+                                tokio::sync::Mutex<crate::native::manager::NativeAgentManager>,
+                            >>(),
+                        ) {
+                            if let Err(error) = crate::git::prune_old_managed_worktrees(
+                                app,
+                                &pool,
+                                state.inner(),
+                                Some(session_record_id),
+                            )
+                            .await
+                            {
+                                notices.push(format!("自动清理旧工作树失败：{error}"));
+                            }
+                        }
+                    }
                     (Some(path), notices)
                 }
                 Err(error) => {

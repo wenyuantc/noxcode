@@ -1246,6 +1246,7 @@ async fn merge_worktree_into_current_branch() {
         &session_id,
         super::merge::MergeWorktreeAction::MergeCurrent,
         None,
+        None,
     )
     .await
     .expect("merge");
@@ -1286,6 +1287,7 @@ async fn merge_worktree_conflict_stays_and_abort_cleans() {
         &workspace_id,
         &session_id,
         super::merge::MergeWorktreeAction::MergeCurrent,
+        None,
         None,
     )
     .await
@@ -1383,6 +1385,7 @@ async fn apply_resolved_files_does_not_commit_when_markers_remain() {
         &workspace_id,
         &session_id,
         super::merge::MergeWorktreeAction::MergeCurrent,
+        None,
         None,
     )
     .await

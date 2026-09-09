@@ -80,6 +80,7 @@ import type {
   NativeSessionConfigurationEvent,
   NativeSessionTitle,
   NativeSettings,
+  ManagedWorktreeList,
   UpdateNativeSessionConfigurationInput,
   PermissionRule,
   PermissionRuleEffect,
@@ -377,6 +378,14 @@ export function resolveSessionWorktreeMerge(
 
 export function getWorktreeMergeState(workspaceId: string): Promise<WorktreeMergeState> {
   return invoke("get_worktree_merge_state", { workspaceId });
+}
+
+export function listManagedWorktrees(): Promise<ManagedWorktreeList> {
+  return invoke("list_managed_worktrees");
+}
+
+export function removeManagedWorktree(path: string): Promise<ManagedWorktreeList> {
+  return invoke("remove_managed_worktree", { path });
 }
 
 export function listActivityLogs(workspaceId?: string, limit?: number): Promise<ActivityLog[]> {

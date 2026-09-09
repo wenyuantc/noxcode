@@ -168,6 +168,8 @@ pub struct ToolCtx {
     pub active_root: std::sync::Arc<std::sync::RwLock<std::path::PathBuf>>,
     pub worktree_path: std::sync::Arc<std::sync::RwLock<Option<String>>>,
     pub app_config_dir: Option<std::path::PathBuf>,
+    pub worktree_root: String,
+    pub worktree_fetch_before_create: bool,
 }
 
 impl ToolCtx {
@@ -212,6 +214,8 @@ impl ToolCtx {
             active_root: std::sync::Arc::new(std::sync::RwLock::new(original_root)),
             worktree_path: std::sync::Arc::new(std::sync::RwLock::new(None)),
             app_config_dir: None,
+            worktree_root: String::new(),
+            worktree_fetch_before_create: false,
         }
     }
 
@@ -1963,25 +1967,40 @@ async fn call_enter_worktree(ctx: &ToolCtx, arguments: &str) -> Result<String, S
             ctx.session_record_id.clone()
         };
         match target {
-            crate::git::GitTarget::Local(_) => ctx
-                .app_config_dir
-                .as_ref()
-                .map(|dir| {
-                    crate::git::worktree::local_worktree_path(dir, &id)
-                        .to_string_lossy()
-                        .into_owned()
-                })
-                .unwrap_or_else(|| {
-                    ctx.original_root
-                        .join(".noxcode")
-                        .join("worktrees")
-                        .join(&id)
-                        .to_string_lossy()
-                        .into_owned()
-                }),
+            crate::git::GitTarget::Local(_) => {
+                if !ctx.worktree_root.trim().is_empty() {
+                    crate::git::worktree::local_worktree_path_in_root(
+                        std::path::Path::new(ctx.worktree_root.trim()),
+                        &id,
+                    )
+                    .to_string_lossy()
+                    .into_owned()
+                } else {
+                    ctx.app_config_dir
+                        .as_ref()
+                        .map(|dir| {
+                            crate::git::worktree::local_worktree_path(dir, &id)
+                                .to_string_lossy()
+                                .into_owned()
+                        })
+                        .unwrap_or_else(|| {
+                            ctx.original_root
+                                .join(".noxcode")
+                                .join("worktrees")
+                                .join(&id)
+                                .to_string_lossy()
+                                .into_owned()
+                        })
+                }
+            }
             crate::git::GitTarget::Ssh { .. } => crate::git::worktree::remote_worktree_path(&id),
         }
     };
+    if ctx.worktree_fetch_before_create {
+        if let Err(error) = crate::git::worktree::fetch_all_prune(target).await {
+            eprintln!("[native] 创建工作树前获取上游失败，已继续创建: {error}");
+        }
+    }
     crate::git::worktree::add_detached(target, &path).await?;
     let next = std::path::PathBuf::from(&path);
     if let Ok(mut root) = ctx.active_root.write() {
