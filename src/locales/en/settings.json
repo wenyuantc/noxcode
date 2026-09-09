@@ -867,7 +867,7 @@
   "worktrees": {
     "hint": "Choose where managed worktrees live, whether to fetch before creating one, and how old worktrees are cleaned up.",
     "root": "Worktree root directory",
-    "rootHint": "Directory where noxcode creates managed worktrees. Leave empty to use the default location. Applies to local workspaces only; SSH still uses $HOME/.noxcode/worktrees.",
+    "rootHint": "Directory where noxcode creates managed worktrees. Leave empty to use ~/.noxcode/worktrees. Applies to local workspaces only; SSH still uses $HOME/.noxcode/worktrees.",
     "browse": "Choose folder",
     "fetchBeforeCreate": "Always fetch upstream before creating a worktree",
     "fetchBeforeCreateHint": "noxcode already fetches during regular Git operations. This also fetches upstream updates before creating each new worktree. Creation continues if the fetch fails.",

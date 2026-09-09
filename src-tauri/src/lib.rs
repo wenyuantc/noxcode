@@ -126,6 +126,7 @@ pub fn run() {
             native::images::stage_composer_image,
             native::images::stage_composer_image_from_path,
             native::images::delete_composer_images,
+            native::session::restore_session_worktree,
             native::session::start_native_session,
             native::session::stop_native_session,
             native::session::stop_native,

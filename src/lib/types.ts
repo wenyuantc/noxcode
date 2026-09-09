@@ -235,7 +235,7 @@ export interface GitRestorePreview {
 }
 
 export type MergeWorktreeAction = "merge_current" | "create_branch" | "keep";
-export type ResolveWorktreeAction = "ai" | "abort";
+export type ResolveWorktreeAction = "ai" | "abort" | "complete";
 export type MergeWorktreeStatus =
   "merged" | "branched" | "kept" | "conflicted" | "aborted" | "resolved" | "partial";
 

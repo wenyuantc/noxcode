@@ -599,6 +599,28 @@ fn attach_subagent_runtime(
     }));
 }
 
+async fn announce_isolation_restore(
+    app: &AppHandle,
+    session_record_id: &str,
+    profile_id: &str,
+    workspace_id: &str,
+    session_kind: &str,
+    restore: Option<crate::native::tools::dispatch::IsolationRestore>,
+) {
+    let Some(restore) = restore.filter(|item| item.switched) else {
+        return;
+    };
+    emit_native_line(
+        app,
+        session_record_id,
+        profile_id,
+        Some(workspace_id),
+        session_kind,
+        format!("[WORKTREE] 已回到隔离工作树 {}", restore.path),
+    )
+    .await;
+}
+
 fn emit_turn_state(app: &AppHandle, session_record_id: &str, working: &AtomicBool, state: &str) {
     working.store(state == "working", Ordering::SeqCst);
     let _ = app.emit(
@@ -1727,7 +1749,9 @@ async fn maybe_isolate_session_worktree(
                     notices.push(format!("创建工作树前获取上游失败，已继续创建：{error}"));
                 }
             }
-            match crate::git::worktree::add_detached(&target, &path).await {
+            match crate::git::worktree::add_session_worktree(&target, &path, session_record_id)
+                .await
+            {
                 Ok(_) => {
                     *run_cwd = path.clone();
                     if settings
@@ -1781,6 +1805,69 @@ async fn load_session_ssh_config(
     let config = fetch_ssh_config_record_by_id(pool, ssh_id).await?;
     validate_password_execution(&config)?;
     Ok(Some(config))
+}
+
+#[tauri::command]
+pub async fn restore_session_worktree(
+    app: AppHandle,
+    state: State<'_, Arc<Mutex<NativeAgentManager>>>,
+    session_id: String,
+) -> Result<Option<String>, String> {
+    crate::app::lifecycle::require_running(&app)?;
+    let session_id = session_id.trim().to_string();
+    if session_id.is_empty() {
+        return Err("session_id 不能为空".to_string());
+    }
+    let pool = sqlite_pool(&app).await?;
+    let working_dir: Option<String> =
+        sqlx::query_scalar("SELECT working_dir FROM agent_sessions WHERE id = $1 LIMIT 1")
+            .bind(&session_id)
+            .fetch_optional(&pool)
+            .await
+            .map_err(|error| format!("读取会话失败: {error}"))?
+            .flatten();
+    let configured_root = crate::native::settings::load_native_settings(&app)
+        .ok()
+        .map(|settings| settings.worktree_root);
+    let configured_opt = configured_root
+        .as_deref()
+        .and_then(crate::git::managed::configured_root_opt);
+    let path = {
+        let mut manager = state.lock().await;
+        let Some(path) = manager
+            .isolation_worktree_path(&session_id)
+            .or_else(|| {
+                manager
+                    .get_session(&session_id)
+                    .and_then(|item| item.runtime.as_ref()?.worktree_path.clone())
+            })
+            .or_else(|| {
+                working_dir.filter(|item| {
+                    crate::git::worktree::is_managed_worktree_path_with_root(
+                        item,
+                        &session_id,
+                        configured_opt,
+                    )
+                })
+            })
+        else {
+            return Ok(None);
+        };
+        manager.restore_isolation_worktree_to(&session_id, &path);
+        if let Some(session) = manager.get_session_mut(&session_id) {
+            if let Some(runtime) = session.runtime.as_mut() {
+                runtime.worktree_path = Some(path.clone());
+            }
+        }
+        path
+    };
+    sqlx::query("UPDATE agent_sessions SET working_dir = $1 WHERE id = $2")
+        .bind(&path)
+        .bind(&session_id)
+        .execute(&pool)
+        .await
+        .map_err(|error| format!("更新会话工作目录失败: {error}"))?;
+    Ok(Some(path))
 }
 
 #[tauri::command]
@@ -2498,15 +2585,21 @@ async fn run_native_loop(
             }),
         );
     })));
-    if let Some(session) = manager_state
-        .lock()
-        .await
-        .get_session_mut(&session_record_id)
     {
-        session.background = Some(runner.background.clone());
-        session.processes = runner.ctx.processes.clone();
-        runner.ctx.plan_mode = session.plan_mode.clone();
-        runner.ctx.allow_session_commands = session.allow_session_commands.clone();
+        let mut manager = manager_state.lock().await;
+        if let Some(session) = manager.get_session_mut(&session_record_id) {
+            session.background = Some(runner.background.clone());
+            session.processes = runner.ctx.processes.clone();
+            runner.ctx.plan_mode = session.plan_mode.clone();
+            runner.ctx.allow_session_commands = session.allow_session_commands.clone();
+        }
+        manager.attach_workspace_roots(
+            &session_record_id,
+            crate::native::manager::SessionWorkspaceRoots {
+                active_root: runner.ctx.active_root.clone(),
+                worktree_path: runner.ctx.worktree_path.clone(),
+            },
+        );
     }
     runner.steer_rx = Some(followup_rx.clone());
     if plan_mode {
@@ -3197,6 +3290,7 @@ async fn run_native_loop(
         if cancel.is_cancelled() {
             break;
         }
+        let _ = runner.ctx.restore_isolation_worktree();
         emit_turn_state(&app, &session_record_id, &working, "working");
         let images = std::mem::take(&mut pending_images);
         emit_native_output(
@@ -3280,6 +3374,15 @@ async fn run_native_loop(
                     let _ = next_loop_step(await_followups, NativeLoopEvent::FollowupFinish);
                     break;
                 }
+                announce_isolation_restore(
+                    &app,
+                    &session_record_id,
+                    &profile_id,
+                    &workspace_id,
+                    &kind,
+                    runner.ctx.restore_isolation_worktree(),
+                )
+                .await;
                 emit_turn_state(&app, &session_record_id, &working, "waiting_input");
                 // 等待输入时先应用模型配置，再处理 /compact 与输入队列。
                 let followup = loop {
@@ -3488,10 +3591,16 @@ async fn run_native_loop(
     );
     let worktree_path = runner
         .ctx
-        .worktree_path
-        .read()
-        .ok()
-        .and_then(|slot| slot.clone());
+        .restore_isolation_worktree()
+        .map(|item| item.path)
+        .or_else(|| {
+            runner
+                .ctx
+                .worktree_path
+                .read()
+                .ok()
+                .and_then(|slot| slot.clone())
+        });
     let _ = app.emit(
         "native-exit",
         AgentSessionExit {

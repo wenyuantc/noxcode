@@ -1,5 +1,5 @@
 function normalizePath(path: string): string {
-  return path.trim().replaceAll("\\", "/").replace(/\/+$/, "");
+  return path.trim().replace(/\\/g, "/").replace(/\/+$/, "");
 }
 
 export function isManagedWorktreePath(
@@ -25,7 +25,7 @@ export function relativeWorktreeFilePath(
   sessionId?: string | null,
   configuredRoot?: string | null,
 ): string {
-  const normalized = path.replaceAll("\\", "/");
+  const normalized = path.replace(/\\/g, "/");
   const id = sessionId?.trim() ?? "";
   if (id) {
     const marker = `/worktrees/${id}/`;
