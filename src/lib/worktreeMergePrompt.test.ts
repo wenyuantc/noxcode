@@ -7,7 +7,7 @@ vi.mock("@/lib/backend", () => ({
 import { getWorktreeMergeState } from "@/lib/backend";
 import { useSessionStore } from "@/stores/sessionStore";
 import { useWorkspaceStore } from "@/stores/workspaceStore";
-import { maybeOpenWorktreeMerge } from "./worktreeMergePrompt";
+import { maybeOpenWorktreeMerge, mergeWorktreeDialogKey } from "./worktreeMergePrompt";
 
 const getState = vi.mocked(getWorktreeMergeState);
 
@@ -61,6 +61,17 @@ describe("maybeOpenWorktreeMerge", () => {
       maybeOpenWorktreeMerge({ sessionId: "s1", workspaceId: "ws-1", reason: "turn" }),
     ).resolves.toBe(false);
     expect(useSessionStore.getState().worktreeMergePrompt).toBeNull();
+  });
+
+  it("keys the merge dialog so another session cannot reuse the last form", () => {
+    expect(mergeWorktreeDialogKey(null)).toBe("closed");
+    expect(mergeWorktreeDialogKey(undefined)).toBe("closed");
+    expect(mergeWorktreeDialogKey({ sessionId: "s1" })).toBe("s1");
+    expect(mergeWorktreeDialogKey({ sessionId: "s2" })).toBe("s2");
+    expect(mergeWorktreeDialogKey({ sessionId: "  " })).toBe("closed");
+    expect(mergeWorktreeDialogKey({ sessionId: "s1" })).not.toBe(
+      mergeWorktreeDialogKey({ sessionId: "s2" }),
+    );
   });
 
   it("still opens on process exit after a dismissed turn prompt", async () => {

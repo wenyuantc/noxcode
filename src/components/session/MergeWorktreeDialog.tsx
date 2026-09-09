@@ -138,11 +138,21 @@ export function MergeWorktreeDialog() {
   const [error, setError] = useState<string | null>(null);
   const [generateError, setGenerateError] = useState<string | null>(null);
   const commitAiEnabled = useSettingsStore((state) => state.ai?.commit_message.enabled) === true;
+  const formSessionId = prompt?.sessionId ?? "";
 
   useEffect(() => {
     if (useSettingsStore.getState().ai) return;
     void useSettingsStore.getState().load();
   }, []);
+
+  useEffect(() => {
+    setBranchName("");
+    setCommitMessage("");
+    setBusy(false);
+    setGeneratingCommit(false);
+    setError(null);
+    setGenerateError(null);
+  }, [formSessionId]);
 
   const applyResult = (result: MergeWorktreeResult) => {
     if (!prompt) return;

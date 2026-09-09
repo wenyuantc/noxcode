@@ -1,8 +1,16 @@
 import { getWorktreeMergeState } from "@/lib/backend";
+import type { WorktreeMergePrompt } from "@/lib/types";
 import { isManagedWorktreePath } from "@/lib/worktreePath";
 import { useSessionStore } from "@/stores/sessionStore";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { useWorkspaceStore } from "@/stores/workspaceStore";
+
+export function mergeWorktreeDialogKey(
+  prompt: Pick<WorktreeMergePrompt, "sessionId"> | null | undefined,
+): string {
+  const sessionId = prompt?.sessionId.trim() ?? "";
+  return sessionId || "closed";
+}
 
 export async function maybeOpenWorktreeMerge(input: {
   sessionId: string;

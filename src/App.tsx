@@ -6,7 +6,9 @@ import { NativePermissionDialog } from "@/components/session/NativePermissionDia
 import { SshHostTrustDialog } from "@/components/ssh/SshHostTrustDialog";
 import { useNativeEvents } from "@/hooks/useNativeEvents";
 import { watchSystemTheme } from "@/lib/theme";
+import { mergeWorktreeDialogKey } from "@/lib/worktreeMergePrompt";
 import WorkspacePage from "@/pages/WorkspacePage";
+import { useSessionStore } from "@/stores/sessionStore";
 import { useUiStore } from "@/stores/uiStore";
 import { useUpdateStore } from "@/stores/updateStore";
 
@@ -14,6 +16,9 @@ const ApiCallLogsPage = lazy(() => import("@/pages/ApiCallLogsPage"));
 const SettingsPage = lazy(() => import("@/pages/SettingsPage"));
 
 function AppEffects() {
+  const mergeDialogKey = useSessionStore((state) =>
+    mergeWorktreeDialogKey(state.worktreeMergePrompt),
+  );
   useNativeEvents();
   useEffect(() => {
     void useUpdateStore.getState().checkOnStartup();
@@ -27,7 +32,7 @@ function AppEffects() {
   return (
     <>
       <NativePermissionDialog />
-      <MergeWorktreeDialog />
+      <MergeWorktreeDialog key={mergeDialogKey} />
       <SshHostTrustDialog />
     </>
   );
