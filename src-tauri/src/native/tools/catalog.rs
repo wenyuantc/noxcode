@@ -259,7 +259,7 @@ pub fn tool_contracts() -> Vec<ToolContract> {
         ),
         contract(
             "Lsp",
-            "通过 language server 查询定义、引用、悬停、符号与诊断；仅本地工作区",
+            "通过已安装的 language server 查询主流语言的定义、引用、悬停、符号与诊断；仅本地工作区",
             true,
             false,
             true,
@@ -805,7 +805,7 @@ fn core_tool_specs() -> Vec<ToolSpec> {
         ),
         spec(
             "Lsp",
-            "Code intelligence via a language server in local workspaces only. After Write/Edit/ApplyPatch, diagnostics are attached automatically when a server is installed. Operations: goToDefinition, findReferences, hover, documentSymbol, workspaceSymbol, goToImplementation, diagnostics. line/character are 1-based. SSH workspaces are not supported.",
+            "Code intelligence via installed language servers in local workspaces. Supports Rust, TypeScript/JavaScript, Python, Go, C/C++, Java, Kotlin, C#, PHP, Ruby, Swift, Dart, Lua, HTML, CSS, JSON, YAML, Bash, Markdown, SQL, Vue, Svelte, Dockerfile, and Terraform. After Write/Edit/ApplyPatch, diagnostics are attached automatically. Operations: goToDefinition, findReferences, hover, documentSymbol, workspaceSymbol, goToImplementation, diagnostics. line/character are 1-based. Use language to select a server for workspaceSymbol or extensionless files. SSH workspaces are not supported.",
             json!({
                 "type": "object",
                 "properties": {
@@ -813,7 +813,8 @@ fn core_tool_specs() -> Vec<ToolSpec> {
                     "file_path": {"type": "string"},
                     "line": {"type": "integer"},
                     "character": {"type": "integer"},
-                    "query": {"type": "string"}
+                    "query": {"type": "string"},
+                    "language": {"type": "string"}
                 },
                 "required": ["operation"]
             }),

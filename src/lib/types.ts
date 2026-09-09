@@ -1054,6 +1054,15 @@ export interface NativeSettings {
   worktree_auto_prune_limit: number;
 }
 
+export interface LspServerStatus {
+  id: string;
+  label: string;
+  commands: string[];
+  installed_command: string | null;
+  install_command: string | null;
+  installable: boolean;
+}
+
 export interface UpdateNativeSettingsInput {
   max_turns?: number;
   max_subagent_turns?: number;

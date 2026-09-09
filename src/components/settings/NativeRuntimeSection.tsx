@@ -1,11 +1,22 @@
-import { Bot, Gauge, RefreshCw, ShieldCheck, Sparkles, Terminal } from "lucide-react";
+import {
+  Bot,
+  Check,
+  Download,
+  Gauge,
+  Loader2,
+  RefreshCw,
+  ShieldCheck,
+  Sparkles,
+  Terminal,
+} from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 
-import { updateNativeSettings } from "@/lib/backend";
+import { installLspServer, listLspServers, updateNativeSettings } from "@/lib/backend";
 import { isNativePermissionMode, NATIVE_PERMISSION_MODES } from "@/lib/types";
-import type { NativeSettings } from "@/lib/types";
+import type { LspServerStatus, NativeSettings } from "@/lib/types";
 import { Input } from "@/components/ui/input";
+import { Button } from "@/components/ui/button";
 import {
   Select,
   SelectContent,
@@ -16,6 +27,7 @@ import {
 import { Switch } from "@/components/ui/switch";
 import { Textarea } from "@/components/ui/textarea";
 import { useSettingsStore } from "@/stores/settingsStore";
+import { SettingFeedbackCallout } from "./SettingFeedbackCallout";
 import { SettingCard, SettingRow } from "./SettingCard";
 
 const SUBAGENT_POLICIES = ["conservative", "balanced", "aggressive"] as const;
@@ -64,10 +76,55 @@ export function NativeRuntimeSection() {
   const native = useSettingsStore((state) => state.native);
   const setNative = useSettingsStore((state) => state.setNative);
   const [draft, setDraft] = useState(native);
+  const [lspServers, setLspServers] = useState<LspServerStatus[]>([]);
+  const [lspLoading, setLspLoading] = useState(true);
+  const [lspInstalling, setLspInstalling] = useState<string | null>(null);
+  const [lspFeedback, setLspFeedback] = useState<{
+    variant: "success" | "error";
+    message: string;
+  } | null>(null);
 
   const initializedRef = useRef(false);
   const draftRef = useRef(draft);
   draftRef.current = draft;
+
+  const refreshLspServers = useCallback(async () => {
+    setLspLoading(true);
+    try {
+      setLspServers(await listLspServers());
+    } catch (error) {
+      setLspFeedback({
+        variant: "error",
+        message: error instanceof Error ? error.message : String(error),
+      });
+    } finally {
+      setLspLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    void refreshLspServers();
+  }, [refreshLspServers]);
+
+  const handleInstallLsp = useCallback(
+    async (language: string) => {
+      setLspInstalling(language);
+      setLspFeedback(null);
+      try {
+        const message = await installLspServer(language);
+        setLspFeedback({ variant: "success", message });
+        await refreshLspServers();
+      } catch (error) {
+        setLspFeedback({
+          variant: "error",
+          message: error instanceof Error ? error.message : String(error),
+        });
+      } finally {
+        setLspInstalling(null);
+      }
+    },
+    [refreshLspServers],
+  );
 
   // 仅首次加载时用 native 初始化 draft；自动保存回写不再重置草稿，避免丢失正在编辑的输入
   useEffect(() => {
@@ -345,7 +402,79 @@ export function NativeRuntimeSection() {
         </SettingRow>
       </SettingCard>
 
-      {/* 3. 上下文窗口与 Token 预算 */}
+      {/* 3. Language server 安装 */}
+      <SettingCard
+        icon={Download}
+        title={t("settings:runtime.lspInstallTitle")}
+        description={t("settings:runtime.lspInstallHint")}
+        divided
+      >
+        {lspFeedback ? (
+          <div className="px-5 pt-3">
+            <SettingFeedbackCallout
+              variant={lspFeedback.variant}
+              message={lspFeedback.message}
+              onClose={() => setLspFeedback(null)}
+            />
+          </div>
+        ) : null}
+        {lspLoading ? (
+          <div className="flex items-center gap-2 px-5 py-4 text-xs text-muted-foreground">
+            <Loader2 className="size-3 animate-spin" />
+            {t("settings:runtime.lspLoading")}
+          </div>
+        ) : (
+          lspServers.map((server) => (
+            <SettingRow
+              key={server.id}
+              title={
+                <span className="flex items-center gap-2">
+                  {server.label}
+                  {server.installed_command ? (
+                    <span className="inline-flex items-center gap-1 rounded-full bg-emerald-500/10 px-1.5 py-0.5 text-[10px] text-emerald-600 dark:text-emerald-400">
+                      <Check className="size-3" />
+                      {t("settings:runtime.lspInstalled")}
+                    </span>
+                  ) : null}
+                </span>
+              }
+              description={
+                server.installed_command
+                  ? `${t("settings:runtime.lspCommand")}: ${server.installed_command}`
+                  : `${t("settings:runtime.lspInstallCommand")}: ${server.install_command ?? server.commands.join(" / ")}`
+              }
+            >
+              {server.installed_command ? (
+                <span className="text-[11px] text-muted-foreground">
+                  {t("settings:runtime.lspReady")}
+                </span>
+              ) : server.installable ? (
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  className="h-7 text-xs"
+                  disabled={lspInstalling !== null}
+                  onClick={() => void handleInstallLsp(server.id)}
+                >
+                  {lspInstalling === server.id ? (
+                    <Loader2 className="mr-1.5 size-3 animate-spin" />
+                  ) : (
+                    <Download className="mr-1.5 size-3" />
+                  )}
+                  {t("settings:runtime.lspInstall")}
+                </Button>
+              ) : (
+                <span className="text-[11px] text-muted-foreground">
+                  {t("settings:runtime.lspManual")}
+                </span>
+              )}
+            </SettingRow>
+          ))
+        )}
+      </SettingCard>
+
+      {/* 4. 上下文窗口与 Token 预算 */}
       <SettingCard
         icon={Gauge}
         title={t("settings:runtime.contextWindow")}
@@ -438,7 +567,7 @@ export function NativeRuntimeSection() {
         </SettingRow>
       </SettingCard>
 
-      {/* 4. 子智能体策略 */}
+      {/* 5. 子智能体策略 */}
       <SettingCard
         icon={Bot}
         title={t("settings:sections.subagents")}
@@ -512,7 +641,7 @@ export function NativeRuntimeSection() {
         </SettingRow>
       </SettingCard>
 
-      {/* 5. 模型请求重试 */}
+      {/* 6. 模型请求重试 */}
       <SettingCard
         icon={RefreshCw}
         title={t("settings:runtime.modelRetry")}
@@ -579,7 +708,7 @@ export function NativeRuntimeSection() {
         </SettingRow>
       </SettingCard>
 
-      {/* 6. 全局系统提示词 */}
+      {/* 7. 全局系统提示词 */}
       <SettingCard
         icon={Sparkles}
         title={t("settings:runtime.globalPrompt")}

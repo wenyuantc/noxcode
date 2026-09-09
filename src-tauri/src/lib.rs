@@ -165,6 +165,8 @@ pub fn run() {
             native::permission_rules::delete_native_permission_rule,
             native::settings::get_native_settings,
             native::settings::update_native_settings,
+            native::tools::lsp::list_lsp_servers,
+            native::tools::lsp::install_lsp_server,
             native::skills::list_native_global_skills,
             native::skills::list_native_skills,
             native::skills::open_native_skills_dir,
