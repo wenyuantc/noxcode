@@ -24,6 +24,7 @@ pub enum MergeWorktreeAction {
 pub enum ResolveWorktreeAction {
     Ai,
     Abort,
+    Complete,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -160,11 +161,25 @@ async fn current_branch_name(target: &GitTarget) -> Result<Option<String>, GitEr
     }
 }
 
-async fn point_checked_out_ref(target: &GitTarget, oid: &str) -> Result<(), GitError> {
+async fn reset_hard_to(target: &GitTarget, oid: &str) -> Result<(), GitError> {
     with_repo_lock(target, || async {
-        git(target, &["update-ref", "HEAD", oid], &IndexMode::ReadOnly)
+        git(target, &["reset", "--hard", oid], &IndexMode::user())
             .await?
-            .require_success(&["update-ref", "HEAD"])?;
+            .require_success(&["reset", "--hard"])?;
+        Ok(())
+    })
+    .await
+}
+
+async fn switch_discard_changes(target: &GitTarget, name: &str) -> Result<(), GitError> {
+    with_repo_lock(target, || async {
+        git(
+            target,
+            &["switch", "--discard-changes", name],
+            &IndexMode::user(),
+        )
+        .await?
+        .require_success(&["switch", "--discard-changes", name])?;
         Ok(())
     })
     .await
@@ -403,6 +418,36 @@ pub async fn apply_resolved_files(
     })
 }
 
+pub async fn complete_merge_from_worktree(
+    target: &GitTarget,
+) -> Result<MergeWorktreeResult, GitError> {
+    if !merge_in_progress(target).await? {
+        return Err(GitError::Parse("当前没有进行中的合并".to_string()));
+    }
+    let conflicts = list_unmerged_paths(target).await?;
+    if conflicts.is_empty() {
+        let oid = commit_merge(target).await?;
+        return Ok(MergeWorktreeResult {
+            status: MergeWorktreeStatus::Resolved,
+            branch: None,
+            commit_oid: Some(oid),
+            conflicts: Vec::new(),
+            resolved: Vec::new(),
+            failed: Vec::new(),
+            message: "已用自动解决完成合并".to_string(),
+        });
+    }
+    let mut resolutions = Vec::new();
+    for path in conflicts {
+        let outcome = match read_worktree_text(target, &path).await {
+            Ok(content) => sanitize_conflict_resolution(&content),
+            Err(error) => Err(error.to_string()),
+        };
+        resolutions.push((path, outcome));
+    }
+    apply_resolved_files(target, &resolutions).await
+}
+
 async fn require_managed_worktree(
     pool: &SqlitePool,
     workspace_id: &str,
@@ -476,7 +521,20 @@ pub async fn run_merge_session_worktree(
             .filter(|item| !item.is_empty())
             .map(ToOwned::to_owned)
             .unwrap_or_else(|| default_worktree_branch_name(session_id));
+        if current_branch_name(worktree).await?.as_deref() == Some(branch.as_str()) {
+            reset_hard_to(worktree, &checkpoint.commit_oid).await?;
+            return Ok(MergeWorktreeResult {
+                status: MergeWorktreeStatus::Branched,
+                branch: Some(branch.clone()),
+                commit_oid: Some(checkpoint.commit_oid),
+                conflicts: Vec::new(),
+                resolved: Vec::new(),
+                failed: Vec::new(),
+                message: format!("已更新分支 {branch}，隔离工作树已提交并清空，主工作区未改动"),
+            });
+        }
         let branch = create_branch_at(main, &branch, &checkpoint.commit_oid).await?;
+        switch_discard_changes(worktree, &branch).await?;
         return Ok(MergeWorktreeResult {
             status: MergeWorktreeStatus::Branched,
             branch: Some(branch.clone()),
@@ -484,17 +542,18 @@ pub async fn run_merge_session_worktree(
             conflicts: Vec::new(),
             resolved: Vec::new(),
             failed: Vec::new(),
-            message: format!("已创建分支 {branch}，主工作区未改动"),
+            message: format!("已创建分支 {branch}，隔离工作树已切换到该分支，主工作区未改动"),
         });
     }
-    // 隔离树已检出会话分支时，在该工作树内前移分支，再合并回主工作区。
+    // 隔离树已检出会话分支时，在该工作树内 reset 到打点提交（同步 index），再合并回主工作区。
     // 旧的 detached 工作树仍建内部指针，绝不 force-update 已检出分支。
     if let Some(worktree_branch) = current_branch_name(worktree).await? {
-        point_checked_out_ref(worktree, &checkpoint.commit_oid).await?;
+        reset_hard_to(worktree, &checkpoint.commit_oid).await?;
         return merge_named_branch(main, &worktree_branch, Some(label)).await;
     }
     let pointer = default_worktree_branch_name(session_id);
     let pointer = create_branch_at(main, &pointer, &checkpoint.commit_oid).await?;
+    reset_hard_to(worktree, &checkpoint.commit_oid).await?;
     merge_named_branch(main, &pointer, Some(label)).await
 }
 

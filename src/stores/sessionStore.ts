@@ -80,6 +80,7 @@ interface SessionState {
   worktreeMergePrompt: WorktreeMergePrompt | null;
   mergedWorktreeBySession: Record<string, boolean>;
   autoPromptedWorktreeBySession: Record<string, boolean>;
+  pendingAiMergeResolveBySession: Record<string, boolean>;
   hasMoreEarlier: Record<string, boolean>;
   loadingEarlier: Record<string, boolean>;
   selectSession: (id: string | null) => void;
@@ -108,6 +109,8 @@ interface SessionState {
   closeWorktreeMergePrompt: () => void;
   markWorktreeMerged: (sessionId: string) => void;
   markWorktreeAutoPrompted: (sessionId: string) => void;
+  markPendingAiMergeResolve: (sessionId: string) => void;
+  clearPendingAiMergeResolve: (sessionId: string) => void;
 }
 
 const historyRequests = new Map<string, Promise<void>>();
@@ -136,6 +139,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
   worktreeMergePrompt: null,
   mergedWorktreeBySession: {},
   autoPromptedWorktreeBySession: {},
+  pendingAiMergeResolveBySession: {},
   selectSession: (id) => {
     const session = id
       ? useWorkspaceStore.getState().sessions.find((item) => item.id === id)
@@ -542,4 +546,18 @@ export const useSessionStore = create<SessionState>((set, get) => ({
         [sessionId]: true,
       },
     })),
+  markPendingAiMergeResolve: (sessionId) =>
+    set((state) => ({
+      pendingAiMergeResolveBySession: {
+        ...state.pendingAiMergeResolveBySession,
+        [sessionId]: true,
+      },
+    })),
+  clearPendingAiMergeResolve: (sessionId) =>
+    set((state) => {
+      if (!state.pendingAiMergeResolveBySession[sessionId]) return {};
+      const pendingAiMergeResolveBySession = { ...state.pendingAiMergeResolveBySession };
+      delete pendingAiMergeResolveBySession[sessionId];
+      return { pendingAiMergeResolveBySession };
+    }),
 }));
