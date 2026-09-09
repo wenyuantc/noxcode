@@ -40,6 +40,7 @@ pub const OPERATION_SUBAGENT: &str = "subagent";
 pub const OPERATION_ONE_SHOT: &str = "one_shot";
 pub const OPERATION_COMMIT_MESSAGE: &str = "commit_message";
 pub const OPERATION_SESSION_TITLE: &str = "session_title";
+pub const OPERATION_PROMPT_ENHANCEMENT: &str = "prompt_enhancement";
 pub const OPERATION_MERGE_RESOLVE: &str = "merge_resolve";
 /// 模型角色：主模型或轻量模型。
 pub const MODEL_ROLE_MAIN: &str = "main";

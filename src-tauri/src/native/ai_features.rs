@@ -19,7 +19,8 @@ use crate::git::{
 use crate::native::channels::fetch_channel_record;
 use crate::native::manager::NativeAgentManager;
 use crate::native::model::call_log::{
-    OPERATION_COMMIT_MESSAGE, OPERATION_MERGE_RESOLVE, OPERATION_SESSION_TITLE,
+    OPERATION_COMMIT_MESSAGE, OPERATION_MERGE_RESOLVE, OPERATION_PROMPT_ENHANCEMENT,
+    OPERATION_SESSION_TITLE,
 };
 use crate::native::protocol::record_to_channel;
 use crate::native::session::{
@@ -167,6 +168,25 @@ User request:\n{prompt}"
     )
 }
 
+fn prompt_enhancement_prompt(prompt: &str, locale: Option<&str>) -> String {
+    if locale == Some("en") {
+        return format!(
+            "Rewrite the following user request into a clear, actionable prompt for a coding agent. Preserve the user's intent and facts. Make the goal, relevant context, constraints, and acceptance criteria explicit when they can be inferred. Do not invent requirements. Output only the rewritten prompt, with no explanation or code fences. Keep the same language as the user's request.\n\nUser request:\n{prompt}"
+        );
+    }
+    format!(
+        "请将下面的用户请求改写成清晰、可执行的编程 Agent 提示词。保留用户的意图和事实；在能够推断时补充明确的目标、相关上下文、约束和验收标准；不要编造需求。只输出改写后的提示词，不要解释，不要代码围栏。保持用户请求原有的语言。\n\n用户请求：\n{prompt}"
+    )
+}
+
+pub(crate) fn sanitize_enhanced_prompt(raw: &str) -> Result<String, String> {
+    let text = raw.trim();
+    if text.is_empty() {
+        return Err("模型未返回增强后的提示词".to_string());
+    }
+    Ok(text.to_string())
+}
+
 async fn run_feature_one_shot(
     app: &AppHandle,
     pool: &SqlitePool,
@@ -218,6 +238,36 @@ pub async fn generate_git_commit_message(
     )
     .await?;
     sanitize_generated_commit_message(&result.text, settings.commit_message.style)
+}
+
+#[tauri::command]
+pub async fn enhance_prompt(
+    app: AppHandle,
+    prompt: String,
+    workspace_id: Option<String>,
+    session_id: Option<String>,
+    locale: Option<String>,
+) -> Result<String, String> {
+    let prompt = prompt.trim();
+    if prompt.is_empty() {
+        return Err("提示词不能为空".to_string());
+    }
+    let settings = load_ai_settings(&app)?;
+    if !settings.prompt_enhancement.enabled {
+        return Err("未开启增强提示词".to_string());
+    }
+    let pool = sqlite_pool(&app).await?;
+    let result = run_feature_one_shot(
+        &app,
+        &pool,
+        &settings.prompt_enhancement,
+        workspace_id.as_deref(),
+        session_id.as_deref(),
+        prompt_enhancement_prompt(prompt, locale.as_deref()),
+        OPERATION_PROMPT_ENHANCEMENT,
+    )
+    .await?;
+    sanitize_enhanced_prompt(&result.text)
 }
 
 async fn resolve_merge_ai_target(
@@ -450,6 +500,24 @@ mod tests {
         )
         .expect("ok");
         assert_eq!(message, "feat(ui): add button");
+    }
+
+    #[test]
+    fn enhanced_prompt_is_trimmed_and_rejects_empty_output() {
+        assert_eq!(
+            sanitize_enhanced_prompt("  rewrite this  ").unwrap(),
+            "rewrite this"
+        );
+        let error = sanitize_enhanced_prompt("  ").expect_err("empty");
+        assert!(error.contains("增强"));
+    }
+
+    #[test]
+    fn prompt_enhancement_prompt_preserves_locale_instruction() {
+        let zh = prompt_enhancement_prompt("修复登录", None);
+        let en = prompt_enhancement_prompt("fix login", Some("en"));
+        assert!(zh.contains("改写"));
+        assert!(en.contains("Rewrite"));
     }
 
     #[test]

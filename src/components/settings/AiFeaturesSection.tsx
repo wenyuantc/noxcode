@@ -1,6 +1,7 @@
-import { GitCommitHorizontal, MessageSquareText, Save } from "lucide-react";
+import { GitCommitHorizontal, MessageSquareText, Save, WandSparkles } from "lucide-react";
 import { useEffect, useState, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
+import { useSearchParams } from "react-router-dom";
 
 import { Button } from "@/components/ui/button";
 import {
@@ -15,6 +16,7 @@ import { updateAiSettings } from "@/lib/backend";
 import {
   EMPTY_AI_COMMIT_MESSAGE,
   EMPTY_AI_FEATURE_OVERRIDE,
+  EMPTY_AI_PROMPT_ENHANCEMENT,
   normalizeAiSettings,
   withEnabledOverride,
 } from "@/lib/aiSettings";
@@ -28,6 +30,7 @@ import { SettingFeedbackCallout } from "./SettingFeedbackCallout";
 const EMPTY_AI_SETTINGS: AiSettings = {
   commit_message: EMPTY_AI_COMMIT_MESSAGE,
   session_title: EMPTY_AI_FEATURE_OVERRIDE,
+  prompt_enhancement: EMPTY_AI_PROMPT_ENHANCEMENT,
 };
 
 export function AiFeaturesSection() {
@@ -35,8 +38,9 @@ export function AiFeaturesSection() {
   const stored = useSettingsStore((state) => state.ai);
   const setAi = useSettingsStore((state) => state.setAi);
   const channels = useChannelStore((state) => state.channels);
+  const [searchParams, setSearchParams] = useSearchParams();
   const [draft, setDraft] = useState<AiSettings>(stored ?? EMPTY_AI_SETTINGS);
-  const [saving, setSaving] = useState<"commit_message" | "session_title" | null>(null);
+  const [saving, setSaving] = useState<keyof AiSettings | null>(null);
   const [feedback, setFeedback] = useState<{
     variant: "success" | "error";
     message: string;
@@ -45,6 +49,12 @@ export function AiFeaturesSection() {
   useEffect(() => {
     if (stored) setDraft(normalizeAiSettings(stored));
   }, [stored]);
+
+  useEffect(() => {
+    if (searchParams.get("prompt-enhancement") !== "missing-model") return;
+    setFeedback({ variant: "error", message: t("settings:ai.promptEnhancement.needModel") });
+    setSearchParams({}, { replace: true });
+  }, [searchParams, setSearchParams, t]);
 
   const patch = <K extends keyof AiSettings>(key: K, next: AiSettings[K]) => {
     setDraft((current) => ({ ...current, [key]: next }));
@@ -74,6 +84,27 @@ export function AiFeaturesSection() {
           onClose={() => setFeedback(null)}
         />
       ) : null}
+
+      <AiFeatureCard
+        icon={WandSparkles}
+        title={t("settings:ai.promptEnhancement.title")}
+        description={t("settings:ai.promptEnhancement.description")}
+        hint={t("settings:ai.promptEnhancement.hint")}
+        modelLabel={t("settings:ai.promptEnhancement.model")}
+        effortLabel={t("settings:ai.promptEnhancement.effort")}
+        value={draft.prompt_enhancement}
+        channels={channels}
+        saving={saving === "prompt_enhancement"}
+        disabled={saving !== null}
+        onToggle={(enabled) =>
+          patch(
+            "prompt_enhancement",
+            withEnabledOverride(draft.prompt_enhancement, channels, enabled),
+          )
+        }
+        onChange={(next) => patch("prompt_enhancement", next)}
+        onSave={() => void save("prompt_enhancement")}
+      />
 
       <AiFeatureCard
         icon={GitCommitHorizontal}

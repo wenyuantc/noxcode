@@ -55,12 +55,31 @@ impl AiCommitMessageSettings {
     }
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+fn default_prompt_enhancement() -> AiFeatureOverride {
+    AiFeatureOverride {
+        enabled: true,
+        ..AiFeatureOverride::default()
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AiSettings {
     #[serde(default)]
     pub commit_message: AiCommitMessageSettings,
     #[serde(default)]
     pub session_title: AiFeatureOverride,
+    #[serde(default = "default_prompt_enhancement")]
+    pub prompt_enhancement: AiFeatureOverride,
+}
+
+impl Default for AiSettings {
+    fn default() -> Self {
+        Self {
+            commit_message: AiCommitMessageSettings::default(),
+            session_title: AiFeatureOverride::default(),
+            prompt_enhancement: default_prompt_enhancement(),
+        }
+    }
 }
 
 fn settings_path(config_dir: &Path) -> PathBuf {
@@ -100,6 +119,7 @@ pub(crate) fn normalize_ai_settings(settings: AiSettings) -> AiSettings {
     AiSettings {
         commit_message: normalize_commit_message_settings(settings.commit_message),
         session_title: normalize_ai_feature_override(settings.session_title),
+        prompt_enhancement: normalize_ai_feature_override(settings.prompt_enhancement),
     }
 }
 
@@ -158,6 +178,7 @@ pub(crate) async fn validate_ai_settings(
             style: settings.commit_message.style,
         },
         session_title: validate_ai_feature_override(pool, settings.session_title).await?,
+        prompt_enhancement: validate_ai_feature_override(pool, settings.prompt_enhancement).await?,
     })
 }
 
@@ -240,6 +261,7 @@ mod tests {
         assert!(!loaded.commit_message.enabled);
         assert_eq!(loaded.commit_message.style, CommitMessageStyle::Detailed);
         assert!(!loaded.session_title.enabled);
+        assert!(loaded.prompt_enhancement.enabled);
         cleanup(&dir);
     }
 
@@ -269,6 +291,7 @@ mod tests {
         )
         .expect("unknown style");
         assert_eq!(unknown.commit_message.style, CommitMessageStyle::Detailed);
+        assert!(unknown.prompt_enhancement.enabled);
     }
 
     #[test]
@@ -290,6 +313,7 @@ mod tests {
                 model: None,
                 reasoning_effort: None,
             },
+            prompt_enhancement: default_prompt_enhancement(),
         };
         save_ai_settings_to(&dir, &settings).expect("save");
         let loaded = load_ai_settings_from(&dir).expect("load");
@@ -366,6 +390,7 @@ mod tests {
                 model: Some("  ".to_string()),
                 reasoning_effort: Some("low".to_string()),
             },
+            prompt_enhancement: default_prompt_enhancement(),
         });
         assert_eq!(
             settings.commit_message,
@@ -388,5 +413,6 @@ mod tests {
                 reasoning_effort: None,
             }
         );
+        assert_eq!(settings.prompt_enhancement, default_prompt_enhancement());
     }
 }

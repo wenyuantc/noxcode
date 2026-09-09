@@ -1,6 +1,6 @@
 import { convertFileSrc, isTauri } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
-import { ArrowUp, FileIcon, Loader2, Square } from "lucide-react";
+import { ArrowUp, FileIcon, Loader2, Square, WandSparkles } from "lucide-react";
 import {
   useEffect,
   useId,
@@ -19,6 +19,7 @@ import { SubagentEditorDialog } from "@/components/settings/SubagentEditorDialog
 import {
   compactNativeSession,
   deleteComposerImages,
+  enhancePrompt,
   expandNativeSlashCommand,
   forkNativeSession,
   listGitFiles,
@@ -127,6 +128,7 @@ export function Composer({ compact = false }: { compact?: boolean }) {
   const effort = useUiStore((state) => state.composerThinkingLevel);
   const setEffort = useUiStore((state) => state.setComposerThinkingLevel);
   const native = useSettingsStore((state) => state.native);
+  const ai = useSettingsStore((state) => state.ai);
   const setNative = useSettingsStore((state) => state.setNative);
   const selectedSessionId = useSessionStore((state) => state.selectedSessionId);
   const runtime = useSessionStore((state) =>
@@ -181,6 +183,7 @@ export function Composer({ compact = false }: { compact?: boolean }) {
   const [mentionOpen, setMentionOpen] = useState<"@" | "/" | "$" | null>(null);
   const [mentionIndex, setMentionIndex] = useState(0);
   const [sending, setSending] = useState(false);
+  const [enhancing, setEnhancing] = useState(false);
   const [attachments, setAttachments] = useState<ComposerImageItem[]>([]);
   const [dragging, setDragging] = useState(false);
   const composerRef = useRef<HTMLDivElement>(null);
@@ -201,6 +204,14 @@ export function Composer({ compact = false }: { compact?: boolean }) {
     efforts,
     runtime?.reasoning_effort ?? effort,
     selectedModel?.thinking_level,
+  );
+  const promptEnhancement = ai?.prompt_enhancement;
+  const enhancementChannel = channels.find(
+    (item) => item.enabled && item.id === promptEnhancement?.channel_id,
+  );
+  const enhancementReady = Boolean(
+    promptEnhancement?.enabled &&
+    enhancementChannel?.models.some((item) => item.id === promptEnhancement.model),
   );
 
   useEffect(() => {
@@ -829,6 +840,31 @@ export function Composer({ compact = false }: { compact?: boolean }) {
     }
   };
 
+  const enhanceDraft = async () => {
+    if (enhancing || sending) return;
+    const prompt = draft.trim();
+    if (!prompt) {
+      fail(t("sessions:promptEnhancementEmpty"));
+      return;
+    }
+    if (!enhancementReady) {
+      void navigate("/settings/ai?prompt-enhancement=missing-model");
+      return;
+    }
+    setError(null);
+    setInfo(null);
+    setEnhancing(true);
+    try {
+      const enhanced = await enhancePrompt(prompt, workspaceId, selectedSessionId);
+      setDraft(enhanced);
+      setInfo(t("sessions:promptEnhanced"));
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : String(reason));
+    } finally {
+      setEnhancing(false);
+    }
+  };
+
   return (
     <div className="mx-auto w-full max-w-3xl">
       {!compact ? (
@@ -875,7 +911,7 @@ export function Composer({ compact = false }: { compact?: boolean }) {
       <div
         ref={composerRef}
         className={cn(
-          "rounded-2xl border border-border/70 bg-card/95 shadow-sm transition-all duration-150 focus-within:border-ring/60 focus-within:ring-2 focus-within:ring-ring/10",
+          "relative rounded-2xl border border-border/70 bg-card/95 shadow-sm transition-all duration-150 focus-within:border-ring/60 focus-within:ring-2 focus-within:ring-ring/10",
           dragging && "border-ring ring-2 ring-ring/20",
         )}
         onPaste={handlePaste}
@@ -933,6 +969,24 @@ export function Composer({ compact = false }: { compact?: boolean }) {
             setAttachments(removeComposerImagesByIds(attachments, ids));
           }}
         />
+        {promptEnhancement?.enabled ? (
+          <Button
+            type="button"
+            size="icon"
+            variant="ghost"
+            className="absolute right-2 top-2 z-10 size-7 rounded-lg text-muted-foreground hover:text-foreground"
+            title={t("sessions:promptEnhancement")}
+            aria-label={t("sessions:promptEnhancement")}
+            disabled={enhancing || sending}
+            onClick={() => void enhanceDraft()}
+          >
+            {enhancing ? (
+              <Loader2 className="size-3.5 animate-spin" />
+            ) : (
+              <WandSparkles className="size-3.5" />
+            )}
+          </Button>
+        ) : null}
         <textarea
           ref={textareaRef}
           role="combobox"
@@ -985,7 +1039,7 @@ export function Composer({ compact = false }: { compact?: boolean }) {
             }
           }}
           placeholder={t("layout:composerPlaceholder")}
-          className="min-h-24 w-full resize-none bg-transparent px-4 py-3 text-sm leading-relaxed outline-none placeholder:text-muted-foreground/60"
+          className="min-h-24 w-full resize-none bg-transparent px-4 py-3 pr-12 text-sm leading-relaxed outline-none placeholder:text-muted-foreground/60"
         />
         <div className="grid grid-cols-[minmax(0,1fr)_auto] items-end gap-2 border-t border-border/50 px-3 py-2 text-xs">
           <div className="flex min-w-0 flex-wrap items-center gap-1.5">

@@ -2,6 +2,7 @@ import type { ReactNode } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
+import { EMPTY_AI_PROMPT_ENHANCEMENT } from "@/lib/aiSettings";
 import { useSessionStore } from "@/stores/sessionStore";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { MergeWorktreeDialog } from "./MergeWorktreeDialog";
@@ -82,6 +83,7 @@ describe("MergeWorktreeDialog", () => {
           model: null,
           reasoning_effort: null,
         },
+        prompt_enhancement: EMPTY_AI_PROMPT_ENHANCEMENT,
       },
     });
   });

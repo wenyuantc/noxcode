@@ -862,6 +862,14 @@
       "hint": "Configure a separate model and thinking level for session titles",
       "model": "Title model",
       "effort": "Title thinking level"
+    },
+    "promptEnhancement": {
+      "title": "Prompt enhancement",
+      "description": "Use a separate model to make prompt goals, constraints, and acceptance criteria clearer.",
+      "hint": "Configure the channel, model, and thinking level used for prompt enhancement",
+      "model": "Enhancement model",
+      "effort": "Enhancement thinking level",
+      "needModel": "Configure a channel and model for prompt enhancement first."
     }
   },
   "worktrees": {

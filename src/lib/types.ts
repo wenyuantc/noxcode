@@ -483,6 +483,7 @@ export interface AiCommitMessageSettings extends AiFeatureOverride {
 export interface AiSettings {
   commit_message: AiCommitMessageSettings;
   session_title: AiFeatureOverride;
+  prompt_enhancement: AiFeatureOverride;
 }
 
 export interface NativeSessionTitle {

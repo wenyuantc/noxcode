@@ -3,7 +3,9 @@ import { describe, expect, it } from "vitest";
 import {
   EMPTY_AI_COMMIT_MESSAGE,
   EMPTY_AI_FEATURE_OVERRIDE,
+  EMPTY_AI_PROMPT_ENHANCEMENT,
   fillOverrideDefaults,
+  normalizeAiSettings,
   selectOverrideChannel,
   selectOverrideModel,
   withCommitMessageDefaults,
@@ -95,6 +97,14 @@ describe("aiSettings helpers", () => {
       reasoning_effort: "medium",
     });
     expect(next.style).toBe("detailed");
+  });
+
+  it("defaults prompt enhancement to enabled when legacy settings omit it", () => {
+    const next = normalizeAiSettings({
+      commit_message: EMPTY_AI_COMMIT_MESSAGE,
+      session_title: EMPTY_AI_FEATURE_OVERRIDE,
+    } as never);
+    expect(next.prompt_enhancement).toEqual(EMPTY_AI_PROMPT_ENHANCEMENT);
   });
 
   it("resets model when switching channel", () => {

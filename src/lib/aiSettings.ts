@@ -18,6 +18,11 @@ export const EMPTY_AI_FEATURE_OVERRIDE: AiFeatureOverride = {
   reasoning_effort: null,
 };
 
+export const EMPTY_AI_PROMPT_ENHANCEMENT: AiFeatureOverride = {
+  ...EMPTY_AI_FEATURE_OVERRIDE,
+  enabled: true,
+};
+
 export const DEFAULT_COMMIT_MESSAGE_STYLE: CommitMessageStyle = "detailed";
 
 export const EMPTY_AI_COMMIT_MESSAGE: AiCommitMessageSettings = {
@@ -45,6 +50,7 @@ export function normalizeAiSettings(settings: AiSettings): AiSettings {
   return {
     ...settings,
     commit_message: withCommitMessageDefaults(settings.commit_message),
+    prompt_enhancement: settings.prompt_enhancement ?? EMPTY_AI_PROMPT_ENHANCEMENT,
   };
 }
 

@@ -463,6 +463,19 @@ export function updateAiSettings(payload: AiSettings): Promise<AiSettings> {
   return invoke("update_ai_settings", { payload });
 }
 
+export function enhancePrompt(
+  prompt: string,
+  workspaceId?: string | null,
+  sessionId?: string | null,
+): Promise<string> {
+  return invoke("enhance_prompt", {
+    prompt,
+    workspaceId: workspaceId ?? null,
+    sessionId: sessionId ?? null,
+    locale: getLocalePreference(),
+  });
+}
+
 export function generateGitCommitMessage(
   workspaceId: string,
   sessionId?: string | null,

@@ -94,6 +94,7 @@ pub fn run() {
             git::restore_git_paths,
             git::commit_git_changes,
             native::ai_features::generate_git_commit_message,
+            native::ai_features::enhance_prompt,
             git::push_git_branch,
             git::pull_git_branch,
             git::list_git_branches,
