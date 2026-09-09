@@ -3,9 +3,15 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 vi.mock("@/lib/backend", () => ({
   getWorktreeMergeState: vi.fn(async () => ({ in_progress: false, conflicts: [] })),
   resolveSessionWorktreeMerge: vi.fn(),
+  restoreSessionWorktree: vi.fn(async () => "/cfg/worktrees/s1"),
 }));
 
-import { getWorktreeMergeState, resolveSessionWorktreeMerge } from "@/lib/backend";
+import {
+  getWorktreeMergeState,
+  resolveSessionWorktreeMerge,
+  restoreSessionWorktree,
+} from "@/lib/backend";
+import { useGitStore } from "@/stores/gitStore";
 import { useSessionStore } from "@/stores/sessionStore";
 import { useWorkspaceStore } from "@/stores/workspaceStore";
 import {
@@ -17,12 +23,15 @@ import {
 
 const getState = vi.mocked(getWorktreeMergeState);
 const completeMerge = vi.mocked(resolveSessionWorktreeMerge);
+const restoreWorktree = vi.mocked(restoreSessionWorktree);
 
 describe("maybeOpenWorktreeMerge", () => {
   beforeEach(() => {
     getState.mockReset();
     getState.mockResolvedValue({ in_progress: false, conflicts: [] });
     completeMerge.mockReset();
+    restoreWorktree.mockReset();
+    restoreWorktree.mockResolvedValue("/cfg/worktrees/s1");
     useSessionStore.setState({
       worktreeMergePrompt: null,
       mergedWorktreeBySession: {},
@@ -89,6 +98,8 @@ describe("maybeOpenWorktreeMerge", () => {
     expect(text).toContain("- src/main.rs");
     expect(text).toContain("ExitWorktree");
     expect(text).toContain("Write");
+    expect(text).toContain("不要调用 EnterWorktree");
+    expect(text).toContain("自动回到隔离工作树");
   });
 
   it("does not finish an AI merge when none is pending", async () => {
@@ -111,6 +122,7 @@ describe("maybeOpenWorktreeMerge", () => {
       true,
     );
     expect(completeMerge).toHaveBeenCalledWith("ws-1", "s1", "complete");
+    expect(restoreWorktree).toHaveBeenCalledWith("s1");
     expect(useSessionStore.getState().mergedWorktreeBySession.s1).toBe(true);
     expect(useSessionStore.getState().pendingAiMergeResolveBySession.s1).toBeUndefined();
   });
@@ -124,12 +136,28 @@ describe("maybeOpenWorktreeMerge", () => {
       message: "still",
     });
     useSessionStore.getState().markPendingAiMergeResolve("s1");
+    const revision = useGitStore.getState().revision;
     await maybeFinishAiMergeResolve({ sessionId: "s1", workspaceId: "ws-1" });
+    expect(restoreWorktree).toHaveBeenCalledWith("s1");
+    expect(useGitStore.getState().revision).toBeGreaterThan(revision);
     expect(useSessionStore.getState().worktreeMergePrompt).toMatchObject({
       sessionId: "s1",
       workspaceId: "ws-1",
       phase: "conflict",
       conflicts: ["README.md"],
+    });
+  });
+
+  it("restores the isolation worktree even when complete fails", async () => {
+    completeMerge.mockRejectedValue(new Error("busy"));
+    getState.mockResolvedValue({ in_progress: true, conflicts: ["a.rs"] });
+    useSessionStore.getState().markPendingAiMergeResolve("s1");
+    await maybeFinishAiMergeResolve({ sessionId: "s1", workspaceId: "ws-1" });
+    expect(restoreWorktree).toHaveBeenCalledWith("s1");
+    expect(useSessionStore.getState().worktreeMergePrompt).toMatchObject({
+      sessionId: "s1",
+      phase: "conflict",
+      conflicts: ["a.rs"],
     });
   });
 
