@@ -56,7 +56,7 @@ gh secret set TAURI_SIGNING_PRIVATE_KEY < ~/.tauri/noxcode-updater.key
 
 ## 托盘与窗口
 
-关闭主窗口、托盘「退出」、`Cmd+Q` 都会写入 `$APPCONFIG/window-state.json`（逻辑像素，含窗口位置）。启动时 `RunEvent::Ready` 恢复尺寸与位置（坐标校验失败时居中兜底）再显示窗口。关闭主窗口后隐藏到托盘，不退出进程。托盘左键或菜单「显示窗口」恢复；macOS 点 Dock 图标触发 `RunEvent::Reopen`，同样恢复主窗口。
+关闭主窗口、托盘「退出」、`Cmd+Q` 都会写入 `$APPCONFIG/window-state.json`（物理像素 + 内存快照，含窗口位置）。启动时 `RunEvent::Ready` 恢复尺寸与位置（坐标校验失败时居中兜底），显示后再落一次几何。关闭主窗口后隐藏到托盘，不退出进程。托盘左键或菜单「显示窗口」恢复；macOS 点 Dock 图标触发 `RunEvent::Reopen`，同样恢复主窗口。
 
 退出由 `app::lifecycle` 协调：`Running → Draining → Exiting`，首次请求决定退出或重启，重复请求不重复清理。更新重启通过 `restart_app` 命令进入后台清理，最后调用 `request_restart()`；普通退出在 `ExitRequested` 暂缓，清理后重新发出退出。`Exit` 不再等待业务资源，前端不授予 process restart 权限。
 

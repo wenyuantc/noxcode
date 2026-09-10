@@ -37,6 +37,7 @@ pub fn run() {
             let lifecycle = app::lifecycle::Lifecycle::new(app.handle());
             let stopping = lifecycle.stopping();
             app.manage(lifecycle);
+            app.manage(window_state::WindowStateCache::default());
             tray::create_tray(app)?;
 
             let trust = Arc::new(HostTrustBroker::new(Duration::from_secs(120)));
@@ -222,12 +223,17 @@ pub fn run() {
         .expect("error while building tauri application")
         .run(|app, event| match event {
             tauri::RunEvent::Ready => {
-                if let Err(error) = window_state::restore_main_window_size(app) {
-                    eprintln!("恢复主窗口尺寸失败: {error}");
+                window_state::begin_restore(app);
+                if let Err(error) = window_state::restore_main_window(app) {
+                    eprintln!("恢复主窗口状态失败: {error}");
                 }
                 if let Err(error) = tray::show_main_window_handle(app) {
                     eprintln!("显示主窗口失败: {error}");
                 }
+                if let Err(error) = window_state::restore_main_window(app) {
+                    eprintln!("恢复主窗口状态失败: {error}");
+                }
+                window_state::end_restore(app);
                 git::preflight::show_fatal_dialog_if_needed(app);
                 app.state::<app::lifecycle::Lifecycle>()
                     .record("window_ready", serde_json::json!({}));

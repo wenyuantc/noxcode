@@ -244,7 +244,7 @@ async fn drain<R: Runtime>(
         "sessions_and_window",
         session_deadline,
         async move {
-            let save = crate::window_state::save_main_window_size_async(&session_app);
+            let save = crate::window_state::persist_main_window_async(&session_app);
             let sessions = async {
                 if let Some(manager) = session_app.try_state::<Arc<Mutex<NativeAgentManager>>>() {
                     let count = manager.lock().await.len();
