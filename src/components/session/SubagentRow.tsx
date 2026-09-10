@@ -95,8 +95,11 @@ export function SubagentRow({ segment, running, nowMs }: SubagentRowProps) {
     return null;
   }, [isCompleted, items, processItems]);
 
-  // Duration
-  const durationSec = segmentDurationSeconds(items, nowMs);
+  // Duration: freeze at the end line while the parent turn is still ticking.
+  const durationSec = segmentDurationSeconds(
+    items,
+    isRunning ? nowMs : endItem ? Date.parse(endItem.createdAt) : undefined,
+  );
   const durationText = durationSec > 0 ? formatSessionDuration(t, durationSec) : null;
 
   // Semantic styles based on kind
@@ -248,7 +251,7 @@ export function SubagentRow({ segment, running, nowMs }: SubagentRowProps) {
           {/* Thinking items */}
           {thinkingItems.length > 0 ? (
             <div className="pl-1">
-              <ThinkingRow items={thinkingItems} nowMs={nowMs} />
+              <ThinkingRow items={thinkingItems} nowMs={isRunning ? nowMs : undefined} />
             </div>
           ) : null}
 

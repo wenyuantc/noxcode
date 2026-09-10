@@ -17,7 +17,21 @@ vi.mock("@/lib/backend", () => ({
   updateNativeQueuedInput: vi.fn(),
   removeNativeQueuedInput: vi.fn(),
 }));
-vi.mock("react-i18next", () => ({ useTranslation: () => ({ t: (key: string) => key }) }));
+vi.mock("react-i18next", () => ({
+  useTranslation: () => ({
+    t: (key: string, options?: Record<string, number>) => {
+      if (key === "durationSeconds") return `${options?.seconds}秒`;
+      if (key === "durationMinutesOnly") return `${options?.minutes}分钟`;
+      if (key === "durationMinutesSeconds") return `${options?.minutes}分${options?.seconds}秒`;
+      if (key === "durationHoursOnly") return `${options?.hours}小时`;
+      if (key === "durationHoursMinutes") return `${options?.hours}小时${options?.minutes}分`;
+      if (key === "durationHoursMinutesSeconds") {
+        return `${options?.hours}小时${options?.minutes}分${options?.seconds}秒`;
+      }
+      return key;
+    },
+  }),
+}));
 vi.mock("./AssistantMarkdown", () => ({
   AssistantMarkdown: ({ text }: { text: string }) => <p>{text}</p>,
 }));
@@ -236,5 +250,50 @@ describe("native interaction rendering", () => {
     expect(html).not.toContain("subagentRunning");
     expect(html).not.toContain("subagentCompleted");
     expect(html).toContain(status === "失败" ? "subagentFailed" : "已停止");
+  });
+  it("freezes a completed subagent duration while the parent turn is still working", () => {
+    const items = groupSessionLines([
+      {
+        id: "start",
+        sessionId: "s1",
+        text: "[子 Agent 2(explore) - 核对前端实现] 启动（explore）",
+        createdAt: "2026-01-01T00:00:00Z",
+      },
+      {
+        id: "end",
+        sessionId: "s1",
+        text: "[子 Agent 2(explore) - 核对前端实现] 结束 成功",
+        createdAt: "2026-01-01T00:00:30Z",
+      },
+    ]);
+    const segment = buildTurnBlocks(items)
+      .flatMap((block) => block.segments)
+      .find((item) => item.kind === "subagent");
+    expect(segment).toBeDefined();
+    const nowMs = Date.parse("2026-01-01T00:00:00Z") + 258_000;
+    const html = renderToStaticMarkup(<SubagentRow segment={segment!} running nowMs={nowMs} />);
+    expect(html).toContain("subagentCompleted");
+    expect(html).not.toContain("subagentRunning");
+    expect(html).toContain("30秒");
+    expect(html).not.toContain("4分18秒");
+  });
+  it("keeps a running subagent duration live against nowMs", () => {
+    const items = groupSessionLines([
+      {
+        id: "start",
+        sessionId: "s1",
+        text: "[子 Agent 1(explore) - rust窗口状态链路检查] 启动（explore）",
+        createdAt: "2026-01-01T00:00:00Z",
+      },
+    ]);
+    const segment = buildTurnBlocks(items)
+      .flatMap((block) => block.segments)
+      .find((item) => item.kind === "subagent");
+    expect(segment).toBeDefined();
+    const nowMs = Date.parse("2026-01-01T00:00:00Z") + 258_000;
+    const html = renderToStaticMarkup(<SubagentRow segment={segment!} running nowMs={nowMs} />);
+    expect(html).toContain("subagentRunning");
+    expect(html).not.toContain("subagentCompleted");
+    expect(html).toContain("4分18秒");
   });
 });
