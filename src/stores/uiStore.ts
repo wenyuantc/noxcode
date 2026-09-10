@@ -59,6 +59,8 @@ interface UiState extends CodeAppearance {
   setGitPanelWidth: (width: number) => void;
   clearGitPreview: () => void;
   openGitPreview: (path: string | null) => void;
+  activeSubagent: { sessionId: string; identity: string } | null;
+  setActiveSubagent: (value: { sessionId: string; identity: string } | null) => void;
   setComposerDraft: (value: string) => void;
   setComposerPlanMode: (value: boolean) => void;
   setComposerIsolateWorktree: (value: boolean) => void;
@@ -129,6 +131,8 @@ export const useUiStore = create<UiState>((set, get) => ({
     localStorage.setItem(GIT_WIDTH_KEY, String(next));
     set({ gitPanelWidth: next });
   },
+  activeSubagent: null,
+  setActiveSubagent: (value) => set({ activeSubagent: value }),
   clearGitPreview: () => set({ gitFocusPath: null }),
   openGitPreview: (path) => set({ gitOpen: true, gitFocusPath: path }),
   setComposerDraft: (value) => set({ composerDraft: value }),

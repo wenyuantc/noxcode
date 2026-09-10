@@ -3,9 +3,11 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { emptyChannelModel } from "@/lib/modelCatalog";
 import { useChannelStore } from "@/stores/channelStore";
 import { useSessionStore } from "@/stores/sessionStore";
-import { groupSessionLines, buildTurnBlocks } from "@/lib/sessionLines";
+import { useUiStore } from "@/stores/uiStore";
+import { groupSessionLines, buildTurnBlocks, subagentSegmentIdentity } from "@/lib/sessionLines";
 import { PlanRow, PendingPlanApproval } from "./PlanRow";
 import { PlanAskCard } from "./PlanAskCard";
+import { SubagentDrawerContent } from "./SubagentDrawer";
 import { SubagentRow } from "./SubagentRow";
 import { QueuedInputs } from "./QueuedInputs";
 
@@ -66,6 +68,16 @@ vi.mock("@/stores/channelStore", async (importOriginal) => {
       (selector: (state: ReturnType<typeof actual.useChannelStore.getState>) => unknown) =>
         selector(actual.useChannelStore.getState()),
       actual.useChannelStore,
+    ),
+  };
+});
+vi.mock("@/stores/uiStore", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/stores/uiStore")>();
+  return {
+    useUiStore: Object.assign(
+      (selector: (state: ReturnType<typeof actual.useUiStore.getState>) => unknown) =>
+        selector(actual.useUiStore.getState()),
+      actual.useUiStore,
     ),
   };
 });
@@ -295,5 +307,93 @@ describe("native interaction rendering", () => {
     expect(html).toContain("subagentRunning");
     expect(html).not.toContain("subagentCompleted");
     expect(html).toContain("4分18秒");
+  });
+  it("renders active ring when SubagentRow matches activeSubagent", () => {
+    const items = groupSessionLines([
+      {
+        id: "start",
+        sessionId: "s1",
+        text: "[子 Agent 1(explore) - rust窗口状态链路检查] 启动（explore）",
+        createdAt: "2026-01-01T00:00:00Z",
+      },
+    ]);
+    const segment = buildTurnBlocks(items)
+      .flatMap((block) => block.segments)
+      .find((item) => item.kind === "subagent");
+    expect(segment).toBeDefined();
+    const identity = subagentSegmentIdentity(segment!.items[0] ?? {})!;
+    useUiStore.setState({
+      activeSubagent: { sessionId: "s1", identity },
+    });
+    const html = renderToStaticMarkup(<SubagentRow segment={segment!} sessionId="s1" />);
+    expect(html).toContain("ring-primary");
+  });
+  it("renders SubagentDrawerContent when activeSubagent is set for the session", () => {
+    const lines = [
+      {
+        id: "start",
+        sessionId: "s1",
+        text: "[子 Agent 1(explore) - 分析后端] 启动（explore）",
+        createdAt: "2026-01-01T00:00:00Z",
+      },
+      {
+        id: "report",
+        sessionId: "s1",
+        text: "[子 Agent 1(explore) - 分析后端] 子 Agent（explore / 分析后端）完成\n\n这是交付报告内容",
+        createdAt: "2026-01-01T00:00:10Z",
+      },
+      {
+        id: "end",
+        sessionId: "s1",
+        text: "[子 Agent 1(explore) - 分析后端] 结束 成功",
+        createdAt: "2026-01-01T00:00:11Z",
+      },
+    ];
+    const segment = buildTurnBlocks(groupSessionLines(lines))
+      .flatMap((block) => block.segments)
+      .find((item) => item.kind === "subagent");
+    expect(segment).toBeDefined();
+    const html = renderToStaticMarkup(
+      <SubagentDrawerContent
+        segment={segment!}
+        peerSegments={[segment!]}
+        sessionId="s1"
+        activeIdentity="index:1"
+        isWorking={false}
+        onClose={() => {}}
+        onSelectPeer={() => {}}
+      />,
+    );
+    expect(html).toContain("分析后端");
+    expect(html).toContain("这是交付报告内容");
+    expect(html).toContain("subagentReport");
+  });
+  it("renders running SubagentDrawerContent with live status and scroll body", () => {
+    const lines = [
+      {
+        id: "start",
+        sessionId: "s1",
+        text: "[子 Agent 2(explore) - 分析 Rust 后端结构] 启动（explore）",
+        createdAt: "2026-01-01T00:00:00Z",
+      },
+    ];
+    const segment = buildTurnBlocks(groupSessionLines(lines))
+      .flatMap((block) => block.segments)
+      .find((item) => item.kind === "subagent");
+    expect(segment).toBeDefined();
+    const html = renderToStaticMarkup(
+      <SubagentDrawerContent
+        segment={segment!}
+        peerSegments={[segment!]}
+        sessionId="s1"
+        activeIdentity="index:2"
+        isWorking={true}
+        onClose={() => {}}
+        onSelectPeer={() => {}}
+      />,
+    );
+    expect(html).toContain("分析 Rust 后端结构");
+    expect(html).toContain("subagentRunning");
+    expect(html).toContain("overflow-y-auto");
   });
 });

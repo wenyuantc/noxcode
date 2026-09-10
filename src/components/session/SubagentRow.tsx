@@ -1,5 +1,5 @@
-import { AlertCircle, Bot, CheckCircle2, ChevronRight, FileText } from "lucide-react";
-import { useMemo, useState } from "react";
+import { AlertCircle, Bot, CheckCircle2, PanelRightOpen } from "lucide-react";
+import { useMemo } from "react";
 import { useTranslation } from "react-i18next";
 
 import type { TurnSegment } from "@/lib/sessionLines";
@@ -14,27 +14,41 @@ import {
   parseUsageLine,
   segmentDurationSeconds,
   sessionLineBody,
-  toolsStillRunning,
+  subagentSegmentIdentity,
 } from "@/lib/sessionLines";
 import { cn, formatTokenCount } from "@/lib/utils";
-import { AssistantMarkdown } from "./AssistantMarkdown";
-import { ThinkingRow } from "./ThinkingRow";
-import { ToolSummaryRow } from "./ToolSummaryRow";
-import { UsageChips } from "./UsageRow";
+import { useSessionStore } from "@/stores/sessionStore";
+import { useUiStore } from "@/stores/uiStore";
 
 interface SubagentRowProps {
   segment: TurnSegment;
   running?: boolean;
   nowMs?: number;
+  sessionId?: string;
 }
 
-export function SubagentRow({ segment, running, nowMs }: SubagentRowProps) {
+export function SubagentRow({ segment, running, nowMs, sessionId }: SubagentRowProps) {
   const { t } = useTranslation("sessions");
+  const activeSubagent = useUiStore((state) => state.activeSubagent);
+  const setActiveSubagent = useUiStore((state) => state.setActiveSubagent);
+  const selectedSessionId = useSessionStore((state) => state.selectedSessionId);
+  const currentSessionId = sessionId ?? selectedSessionId ?? "";
+
   const items = segment.items;
 
   // Extract subagent tag info from first item
   const rawTag = items[0]?.subagentTag ?? "";
   const parsedTag = useMemo(() => parseSubagentTag(rawTag), [rawTag]);
+
+  const identity = useMemo(
+    () => subagentSegmentIdentity(items[0] ?? {}) ?? String(parsedTag?.index ?? 1),
+    [items, parsedTag],
+  );
+
+  const isActive =
+    Boolean(currentSessionId) &&
+    activeSubagent?.sessionId === currentSessionId &&
+    activeSubagent?.identity === identity;
 
   // Determine status (running, completed, failed)
   const endItem = useMemo(
@@ -53,10 +67,7 @@ export function SubagentRow({ segment, running, nowMs }: SubagentRowProps) {
     : !running && !isCompleted;
   const isRunning = Boolean(running && !isCompleted);
 
-  const [open, setOpen] = useState(false);
-
   // Partition items: thinking, tools, process text, report, usage
-  const thinkingItems = useMemo(() => items.filter(isThinkingItem), [items]);
   const toolItems = useMemo(
     () => items.filter((item) => item.kind === "tool" && !isParentAgentSpawn(item)),
     [items],
@@ -80,13 +91,12 @@ export function SubagentRow({ segment, running, nowMs }: SubagentRowProps) {
     });
   }, [items]);
 
-  // Try to find delivery report (either from tool result or last assistant message when completed)
+  // Try to find delivery report
   const deliveryReport = useMemo(() => {
     for (let i = items.length - 1; i >= 0; i -= 1) {
       const parsed = parseSubagentResult(items[i]?.result ?? items[i]?.text ?? "");
       if (parsed?.report) return parsed.report;
     }
-    // If completed and last process item has significant content, treat as report
     if (isCompleted && processItems.length > 0) {
       const last = processItems[processItems.length - 1];
       const body = sessionLineBody(last?.text ?? "").trim();
@@ -125,7 +135,7 @@ export function SubagentRow({ segment, running, nowMs }: SubagentRowProps) {
       ? "text-indigo-600 dark:text-indigo-400 bg-indigo-500/10"
       : "text-violet-600 dark:text-violet-400 bg-violet-500/10";
 
-  // Summary preview for collapsed state
+  // Summary preview for snippet
   const summarySnippet = useMemo(() => {
     if (deliveryReport) {
       return deliveryReport.split("\n")[0]?.slice(0, 48) ?? "";
@@ -140,8 +150,12 @@ export function SubagentRow({ segment, running, nowMs }: SubagentRowProps) {
     return "";
   }, [deliveryReport, processItems, toolItems.length, t]);
 
-  const toggleOpen = () => {
-    setOpen((prev) => !prev);
+  const handleToggle = () => {
+    if (isActive) {
+      setActiveSubagent(null);
+    } else if (currentSessionId) {
+      setActiveSubagent({ sessionId: currentSessionId, identity });
+    }
   };
 
   return (
@@ -149,13 +163,12 @@ export function SubagentRow({ segment, running, nowMs }: SubagentRowProps) {
       className={cn(
         "group my-2 overflow-hidden rounded-xl border bg-card/50 shadow-2xs backdrop-blur-xs transition-all duration-200",
         cardBorderClass,
-        open && "shadow-xs",
+        isActive && "ring-2 ring-primary/40 border-primary/60 shadow-xs bg-card/85",
       )}
     >
-      {/* Card Header */}
       <button
         type="button"
-        onClick={toggleOpen}
+        onClick={handleToggle}
         className="flex w-full cursor-pointer flex-wrap items-center justify-between gap-2.5 px-3.5 py-2.5 text-left transition-colors hover:bg-muted/30"
       >
         <div className="flex min-w-0 flex-1 basis-44 items-center gap-2">
@@ -192,15 +205,15 @@ export function SubagentRow({ segment, running, nowMs }: SubagentRowProps) {
             {parsedTag?.description || t("subagentTag")}
           </span>
 
-          {/* Collapsed Snippet Preview */}
-          {!open && summarySnippet ? (
+          {/* Summary Preview */}
+          {summarySnippet ? (
             <span className="hidden min-w-0 flex-1 truncate text-xs text-muted-foreground/75 sm:inline">
               · {summarySnippet}
             </span>
           ) : null}
         </div>
 
-        {/* Right side status / duration / chevron */}
+        {/* Right side status / duration / panel icon */}
         <div className="ml-auto flex max-w-full shrink-0 flex-wrap items-center justify-end gap-2">
           {isRunning ? (
             <span className="flex items-center gap-1 text-[11px] font-medium text-amber-600 dark:text-amber-400">
@@ -236,73 +249,16 @@ export function SubagentRow({ segment, running, nowMs }: SubagentRowProps) {
             </span>
           ) : null}
 
-          <ChevronRight
+          <div
             className={cn(
-              "size-3.5 text-muted-foreground/60 transition-transform duration-200 group-hover:text-foreground",
-              open && "rotate-90",
+              "flex items-center gap-1 text-muted-foreground/60 transition-colors group-hover:text-foreground",
+              isActive && "text-primary",
             )}
-          />
+          >
+            <PanelRightOpen className="size-3.5" />
+          </div>
         </div>
       </button>
-
-      {/* Card Body */}
-      {open ? (
-        <div className="space-y-2.5 border-t border-border/40 bg-muted/10 p-3 pt-2.5">
-          {/* Thinking items */}
-          {thinkingItems.length > 0 ? (
-            <div className="pl-1">
-              <ThinkingRow items={thinkingItems} nowMs={isRunning ? nowMs : undefined} />
-            </div>
-          ) : null}
-
-          {/* Tool calls */}
-          {toolItems.length > 0 ? (
-            <div className="pl-1">
-              <ToolSummaryRow
-                items={toolItems}
-                running={isRunning && toolsStillRunning(toolItems)}
-              />
-            </div>
-          ) : null}
-
-          {/* Process Messages */}
-          {processItems.length > 0 ? (
-            <div className="space-y-1.5 pl-1 text-xs">
-              {processItems.map((item) => {
-                const cleanText = sessionLineBody(item.text).trim();
-                if (!cleanText) return null;
-                // If this is the delivery report shown below, avoid duplicate
-                if (deliveryReport && cleanText === deliveryReport) return null;
-                return (
-                  <div key={item.id} className="text-foreground/90 leading-relaxed">
-                    <AssistantMarkdown text={cleanText} />
-                  </div>
-                );
-              })}
-            </div>
-          ) : null}
-
-          {/* Final Delivery Report Section */}
-          {deliveryReport ? (
-            <div className="mt-2 rounded-xl border border-emerald-500/25 bg-emerald-500/5 p-3 dark:border-emerald-500/20 dark:bg-emerald-500/5">
-              <div className="mb-1.5 flex items-center gap-1.5 text-xs font-semibold text-emerald-700 dark:text-emerald-300">
-                <FileText className="size-3.5" />
-                <span>{t("subagentReport")}</span>
-              </div>
-              <div className="text-xs text-foreground/90 leading-relaxed">
-                <AssistantMarkdown text={deliveryReport} />
-              </div>
-            </div>
-          ) : null}
-
-          {/* Usage chips */}
-          {totalUsage ? (
-            <div className="pt-0.5 pl-1">
-              <UsageChips usage={totalUsage} />
-            </div>
-          ) : null}
-        </div>
-      ) : null}
     </div>
   );
 }

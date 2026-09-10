@@ -11,6 +11,7 @@ import { Composer } from "./Composer";
 import { EventStream } from "./EventStream";
 import { SessionHeader } from "./SessionHeader";
 import { RestoreSessionButton } from "./SessionMenu";
+import { SubagentDrawer } from "./SubagentDrawer";
 import { TodoProcessPanel } from "./TodoProcessPanel";
 
 const KEEP_ALIVE = 3;
@@ -64,7 +65,10 @@ export function SessionView() {
             </div>
           )}
           {historyReady && viewedId ? (
-            <TodoProcessPanel sessionId={viewedId} containerRef={streamRef} />
+            <>
+              <TodoProcessPanel sessionId={viewedId} containerRef={streamRef} />
+              <SubagentDrawer sessionId={viewedId} />
+            </>
           ) : null}
         </div>
         <div className="border-t px-4 py-3">

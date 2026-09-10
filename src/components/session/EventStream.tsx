@@ -101,7 +101,9 @@ function renderSegment(
       );
     }
     case "subagent":
-      return <SubagentRow segment={segment} running={running} nowMs={nowMs} />;
+      return (
+        <SubagentRow segment={segment} running={running} nowMs={nowMs} sessionId={sessionId} />
+      );
     case "assistant":
       return <AssistantMarkdown text={segment.items.map((item) => item.text).join("\n\n")} />;
     case "usage":
