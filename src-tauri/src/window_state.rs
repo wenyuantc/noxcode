@@ -88,16 +88,16 @@ fn logical_size_to_restore(
     Some(PhysicalSize::new(state.width, state.height).to_logical(sanitize_scale(scale_factor)))
 }
 
-type MonitorRect = (PhysicalPosition<i32>, PhysicalSize<u32>);
+type MonitorInfo = (PhysicalPosition<i32>, PhysicalSize<u32>, f64);
 
 fn window_intersects_monitor(
     position: PhysicalPosition<i32>,
     size: PhysicalSize<u32>,
-    monitors: &[MonitorRect],
+    monitors: &[MonitorInfo],
 ) -> bool {
     let (left, top) = (i64::from(position.x), i64::from(position.y));
     let (right, bottom) = (left + i64::from(size.width), top + i64::from(size.height));
-    monitors.iter().any(|(monitor_position, monitor_size)| {
+    monitors.iter().any(|(monitor_position, monitor_size, _)| {
         let (m_left, m_top) = (i64::from(monitor_position.x), i64::from(monitor_position.y));
         let (m_right, m_bottom) = (
             m_left + i64::from(monitor_size.width),
@@ -109,15 +109,22 @@ fn window_intersects_monitor(
 
 fn restore_position_decision(
     state: PersistedWindowState,
-    scale_factor: f64,
-    monitors: &[MonitorRect],
+    monitors: &[MonitorInfo],
 ) -> Option<PhysicalPosition<i32>> {
     let (x, y) = (state.x?, state.y?);
-    let size = logical_size_to_restore(state, scale_factor)?;
-    let position: PhysicalPosition<f64> = LogicalPosition::new(x, y).to_physical(scale_factor);
-    let position = PhysicalPosition::new(position.x.round() as i32, position.y.round() as i32);
-    window_intersects_monitor(position, size.to_physical(scale_factor), monitors)
-        .then_some(position)
+    // 逻辑尺寸与缩放无关，scale 1.0 转换后保持不变。
+    let size = logical_size_to_restore(state, 1.0)?;
+    monitors
+        .iter()
+        .find_map(|(monitor_position, monitor_size, scale)| {
+            let scale = sanitize_scale(*scale);
+            let position: PhysicalPosition<f64> = LogicalPosition::new(x, y).to_physical(scale);
+            let position =
+                PhysicalPosition::new(position.x.round() as i32, position.y.round() as i32);
+            let size = size.to_physical(scale);
+            window_intersects_monitor(position, size, &[(*monitor_position, *monitor_size, scale)])
+                .then_some(position)
+        })
 }
 
 fn persist_logical_size<R: Runtime>(
@@ -172,12 +179,12 @@ pub fn restore_main_window_size<R: Runtime>(app: &AppHandle<R>) -> Result<(), St
     let monitors = window
         .available_monitors()
         .map_err(|error| format!("读取显示器信息失败: {error}"))?;
-    let monitor_rects: Vec<MonitorRect> = monitors
+    let monitor_infos: Vec<MonitorInfo> = monitors
         .iter()
-        .map(|monitor| (*monitor.position(), *monitor.size()))
+        .map(|monitor| (*monitor.position(), *monitor.size(), monitor.scale_factor()))
         .collect();
 
-    if let Some(position) = restore_position_decision(state, scale, &monitor_rects) {
+    if let Some(position) = restore_position_decision(state, &monitor_infos) {
         window
             .set_position(position)
             .map_err(|error| format!("恢复窗口位置失败: {error}"))?;
@@ -421,7 +428,11 @@ mod tests {
 
     #[test]
     fn window_intersects_monitor_detects_overlap() {
-        let monitors = [(PhysicalPosition::new(0, 0), PhysicalSize::new(1920, 1080))];
+        let monitors = [(
+            PhysicalPosition::new(0, 0),
+            PhysicalSize::new(1920, 1080),
+            1.0,
+        )];
         assert!(window_intersects_monitor(
             PhysicalPosition::new(100, 100),
             PhysicalSize::new(800, 600),
@@ -456,10 +467,43 @@ mod tests {
             x: Some(100.0),
             y: Some(200.0),
         };
-        let monitors = [(PhysicalPosition::new(0, 0), PhysicalSize::new(1920, 1080))];
+        let monitors = [(
+            PhysicalPosition::new(0, 0),
+            PhysicalSize::new(1920, 1080),
+            2.0,
+        )];
         assert_eq!(
-            restore_position_decision(state, 2.0, &monitors),
+            restore_position_decision(state, &monitors),
             Some(PhysicalPosition::new(200, 400))
+        );
+    }
+
+    #[test]
+    fn restore_position_decision_uses_each_monitor_scale() {
+        // 保存时窗口位于 scale 1.0 的副屏（逻辑 x=1920），
+        // 启动时窗口创建在 scale 2.0 的主屏上，也必须按副屏自身缩放恢复。
+        let state = PersistedWindowState {
+            width: 1800,
+            height: 1125,
+            logical: true,
+            x: Some(1920.0),
+            y: Some(-7.0),
+        };
+        let monitors = [
+            (
+                PhysicalPosition::new(0, 0),
+                PhysicalSize::new(3024, 1964),
+                2.0,
+            ),
+            (
+                PhysicalPosition::new(1920, 0),
+                PhysicalSize::new(1920, 1080),
+                1.0,
+            ),
+        ];
+        assert_eq!(
+            restore_position_decision(state, &monitors),
+            Some(PhysicalPosition::new(1920, -7))
         );
     }
 
@@ -472,8 +516,12 @@ mod tests {
             x: Some(3000.0),
             y: Some(200.0),
         };
-        let monitors = [(PhysicalPosition::new(0, 0), PhysicalSize::new(1920, 1080))];
-        assert_eq!(restore_position_decision(state, 1.0, &monitors), None);
+        let monitors = [(
+            PhysicalPosition::new(0, 0),
+            PhysicalSize::new(1920, 1080),
+            1.0,
+        )];
+        assert_eq!(restore_position_decision(state, &monitors), None);
     }
 
     #[test]
@@ -485,7 +533,11 @@ mod tests {
             x: None,
             y: None,
         };
-        let monitors = [(PhysicalPosition::new(0, 0), PhysicalSize::new(1920, 1080))];
-        assert_eq!(restore_position_decision(state, 1.0, &monitors), None);
+        let monitors = [(
+            PhysicalPosition::new(0, 0),
+            PhysicalSize::new(1920, 1080),
+            1.0,
+        )];
+        assert_eq!(restore_position_decision(state, &monitors), None);
     }
 }
