@@ -47,7 +47,7 @@ src/components/git/      GitPanel · DiffView · CheckpointTimeline
 | Store | 持久化键 | 职责 |
 | --- | --- | --- |
 | `uiStore` | `noxcode:sidebar-width`（200–480）、`noxcode:sidebar-collapsed`、`noxcode:composer-plan-mode`、`noxcode:composer-thinking-level`、`theme` / `theme-mode`、`noxcode:ui-font-size`、`noxcode:code-theme-light` / `noxcode:code-theme-dark`、`noxcode:code-line-numbers`、`noxcode:code-soft-wrap`、`noxcode:code-font-size` | 侧栏、命令面板、Git 抽屉、Composer 草稿、计划模式、思考等级、主题、界面字号、代码外观 |
-| `workspaceStore` | `noxcode:active-workspace` | 工作区列表、会话树、健康检查 |
+| `workspaceStore` | `noxcode:active-workspace`、`noxcode:workspace-expanded` | 工作区列表、会话树、健康检查、侧栏工作区展开状态 |
 | `channelStore` | `noxcode:active-model` | 渠道列表、新会话默认渠道/模型 |
 | `sessionStore` | — | live 会话、事件行、turn-state、按会话计划模式、权限/提问 |
 | `settingsStore` | — | native / network / AI 功能 / 快捷提示 |

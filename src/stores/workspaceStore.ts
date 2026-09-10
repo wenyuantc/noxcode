@@ -16,6 +16,7 @@ import type { AgentSession, CreateWorkspaceInput, Workspace, WorkspaceHealth } f
 import { useSessionStore } from "@/stores/sessionStore";
 
 const ACTIVE_KEY = "noxcode:active-workspace";
+const EXPANDED_KEY = "noxcode:workspace-expanded";
 const ARCHIVE_PAGE_SIZE = 50;
 let sessionRevision = 0;
 let sessionRequest = 0;
@@ -47,6 +48,35 @@ interface WorkspaceState {
   renameSession: (id: string, title: string) => Promise<void>;
   setSessionPinned: (id: string, pinned: boolean) => Promise<void>;
   setSessionArchived: (id: string, archived: boolean) => Promise<void>;
+}
+
+function readExpanded(): Record<string, boolean> {
+  if (typeof window === "undefined") return {};
+  try {
+    const raw = window.localStorage.getItem(EXPANDED_KEY);
+    if (!raw) return {};
+    const parsed = JSON.parse(raw) as unknown;
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return {};
+    const result: Record<string, boolean> = {};
+    for (const [id, value] of Object.entries(parsed)) {
+      if (typeof value === "boolean") result[id] = value;
+    }
+    return result;
+  } catch {
+    return {};
+  }
+}
+
+function persistExpanded(expanded: Record<string, boolean>) {
+  if (typeof window === "undefined") return;
+  window.localStorage.setItem(EXPANDED_KEY, JSON.stringify(expanded));
+}
+
+function mergeExpanded(
+  workspaces: Workspace[],
+  stored: Record<string, boolean>,
+): Record<string, boolean> {
+  return Object.fromEntries(workspaces.map((item) => [item.id, stored[item.id] !== false]));
 }
 
 async function mutateSession(id: string, operation: () => Promise<AgentSession | void>) {
@@ -90,7 +120,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
   sessionMutations: {},
   activeWorkspaceId: typeof window === "undefined" ? null : localStorage.getItem(ACTIVE_KEY),
   health: null,
-  expanded: {},
+  expanded: readExpanded(),
   shownCount: {},
   loading: false,
   load: async () => {
@@ -103,6 +133,8 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
         : (workspaces[0]?.id ?? null);
     if (active) localStorage.setItem(ACTIVE_KEY, active);
     else localStorage.removeItem(ACTIVE_KEY);
+    const expanded = mergeExpanded(workspaces, { ...readExpanded(), ...get().expanded });
+    persistExpanded(expanded);
     set({
       workspaces,
       sessions: get().sessions.filter(
@@ -111,7 +143,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
       ),
       activeWorkspaceId: active,
       loading: false,
-      expanded: Object.fromEntries(workspaces.map((item) => [item.id, true])),
+      expanded,
     });
     await get().refreshSessions();
     if (active) {
@@ -142,7 +174,11 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
     await deleteWorkspace(id);
     await get().load();
   },
-  toggleExpand: (id) => set({ expanded: { ...get().expanded, [id]: !get().expanded[id] } }),
+  toggleExpand: (id) => {
+    const next = { ...get().expanded, [id]: !(get().expanded[id] !== false) };
+    persistExpanded(next);
+    set({ expanded: next });
+  },
   showMore: (id) =>
     set({ shownCount: { ...get().shownCount, [id]: (get().shownCount[id] ?? 5) + 10 } }),
   refreshSessions: async () => {
