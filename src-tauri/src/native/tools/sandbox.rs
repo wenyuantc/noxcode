@@ -80,10 +80,12 @@ fn bwrap_is_runnable() -> bool {
     #[cfg(target_os = "linux")]
     {
         static RESULT: OnceLock<bool> = OnceLock::new();
-        return *RESULT.get_or_init(probe_bwrap);
+        *RESULT.get_or_init(probe_bwrap)
     }
     #[cfg(not(target_os = "linux"))]
-    false
+    {
+        false
+    }
 }
 
 #[cfg(target_os = "linux")]
