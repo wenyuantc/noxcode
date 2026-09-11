@@ -1468,7 +1468,7 @@ mod tests {
         assert!(!fallback.contains("沙箱拒绝了这次命令"));
     }
 
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     #[tokio::test]
     async fn sandboxed_bash_echo_succeeds() {
         let root = tempfile::tempdir().unwrap();
@@ -1489,12 +1489,17 @@ mod tests {
             status.output
         );
         assert!(status.output.contains("nox-ok"), "{}", status.output);
+        let expected = if cfg!(target_os = "macos") {
+            "seatbelt"
+        } else {
+            "bubblewrap"
+        };
         assert!(
             status
                 .sandbox_note
                 .as_deref()
-                .is_some_and(|note| note.contains("seatbelt")),
-            "expected seatbelt note, got {:?}",
+                .is_some_and(|note| note.contains(expected)),
+            "expected {expected} note, got {:?}",
             status.sandbox_note
         );
     }

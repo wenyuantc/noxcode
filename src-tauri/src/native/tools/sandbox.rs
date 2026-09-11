@@ -1,9 +1,10 @@
 //! 本地 Bash 的操作系统级沙箱。
 //!
-//! Linux 优先 `bwrap`（只读根 + 可写工作区 / 额外写根 / /tmp）。
+//! Linux 优先 `bwrap`（只读根 + PID 隔离 + 可写工作区 / 额外写根 / 临时目录）。
 //! macOS 使用 `sandbox-exec` seatbelt。Windows 与 SSH 不套沙箱。
 //! 开启但找不到实现时回退为普通执行，并在结果里注明。
 
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 
@@ -12,6 +13,7 @@ use crate::process_spawn::tokio_command;
 
 /// 只用系统自带的 `sandbox-exec`，避免 PATH 上的假二进制。
 const MACOS_SANDBOX_EXEC: &str = "/usr/bin/sandbox-exec";
+const LINUX_BWRAP_CANDIDATES: &[&str] = &["/usr/bin/bwrap", "/usr/local/bin/bwrap"];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SandboxKind {
@@ -53,13 +55,23 @@ pub struct SandboxApply {
 }
 
 pub fn detect_sandbox_kind() -> SandboxKind {
-    if cfg!(target_os = "linux") && resolve_program("bwrap").is_ok() {
+    if cfg!(target_os = "linux") && resolve_bwrap().is_ok() {
         return SandboxKind::Bubblewrap;
     }
     if cfg!(target_os = "macos") && Path::new(MACOS_SANDBOX_EXEC).is_file() {
         return SandboxKind::Seatbelt;
     }
     SandboxKind::None
+}
+
+fn resolve_bwrap() -> Result<PathBuf, String> {
+    for candidate in LINUX_BWRAP_CANDIDATES {
+        let path = Path::new(candidate);
+        if path.is_file() {
+            return Ok(path.to_path_buf());
+        }
+    }
+    resolve_program("bwrap")
 }
 
 pub fn sandbox_status_label(enabled: bool) -> String {
@@ -79,11 +91,19 @@ pub fn writable_paths(workspace: &Path, extra: &[PathBuf]) -> Vec<PathBuf> {
     let mut paths = Vec::new();
     push_writable(&mut paths, workspace.to_path_buf());
     push_writable(&mut paths, PathBuf::from("/tmp"));
+    if cfg!(unix) {
+        push_writable(&mut paths, PathBuf::from("/var/tmp"));
+    }
     if cfg!(target_os = "macos") {
         push_writable(&mut paths, PathBuf::from("/private/tmp"));
-        push_writable(&mut paths, PathBuf::from("/var/tmp"));
         push_writable(&mut paths, PathBuf::from("/private/var/tmp"));
         push_writable(&mut paths, PathBuf::from("/var/folders"));
+    }
+    #[cfg(target_os = "linux")]
+    {
+        if let Some(tmpdir) = env_tmpdir() {
+            push_writable(&mut paths, tmpdir);
+        }
     }
     for extra in extra {
         if extra.as_os_str().is_empty() {
@@ -92,6 +112,17 @@ pub fn writable_paths(workspace: &Path, extra: &[PathBuf]) -> Vec<PathBuf> {
         push_writable(&mut paths, extra.clone());
     }
     paths
+}
+
+#[cfg(target_os = "linux")]
+fn env_tmpdir() -> Option<PathBuf> {
+    let value = std::env::var_os("TMPDIR").filter(|value| !value.is_empty())?;
+    let path = PathBuf::from(value);
+    if path.is_absolute() && path.exists() {
+        Some(path)
+    } else {
+        None
+    }
 }
 
 fn push_writable(paths: &mut Vec<PathBuf>, path: PathBuf) {
@@ -155,6 +186,9 @@ pub fn looks_like_sandbox_denial(output: &str) -> bool {
         || output.contains("sandbox-exec:")
         || output.contains("deny(")
         || lower.contains("sandbox:")
+        || lower.contains("bwrap:")
+        || lower.contains("read-only file system")
+        || lower.contains("permission denied")
 }
 
 pub fn sandbox_was_enforced(note: Option<&str>) -> bool {
@@ -205,34 +239,54 @@ fn apply_bwrap(
     extra: &[PathBuf],
     cmd: &mut tokio::process::Command,
 ) -> Result<(), String> {
-    let bwrap = resolve_program("bwrap")?;
+    let bwrap = resolve_bwrap()?;
     let inner = take_program_and_args(cmd)?;
+    let program = resolve_inner_program(&inner.program);
     let mut wrapped = tokio_command(&bwrap);
-    wrapped
-        .arg("--die-with-parent")
-        .arg("--ro-bind")
-        .arg("/")
-        .arg("/")
-        .arg("--dev")
-        .arg("/dev")
-        .arg("--proc")
-        .arg("/proc")
-        .arg("--tmpfs")
-        .arg("/tmp");
+    wrapped.args(bwrap_args(workspace, extra));
+    wrapped.arg(&program);
+    wrapped.args(inner.args);
+    copy_stdios(cmd, &mut wrapped);
+    *cmd = wrapped;
+    Ok(())
+}
+
+fn bwrap_args(workspace: &Path, extra: &[PathBuf]) -> Vec<OsString> {
+    let mut args: Vec<OsString> = vec![
+        "--die-with-parent".into(),
+        "--unshare-pid".into(),
+        "--ro-bind".into(),
+        "/".into(),
+        "/".into(),
+        "--dev".into(),
+        "/dev".into(),
+    ];
+    let shm = Path::new("/dev/shm");
+    if shm.exists() {
+        args.push("--bind".into());
+        args.push(shm.as_os_str().to_os_string());
+        args.push(shm.as_os_str().to_os_string());
+    }
+    args.extend([
+        "--proc".into(),
+        "/proc".into(),
+        "--tmpfs".into(),
+        "/tmp".into(),
+    ]);
     for path in writable_paths(workspace, extra) {
         if path == Path::new("/tmp") || path == Path::new("/dev") {
             continue;
         }
         if path.exists() {
-            wrapped.arg("--bind").arg(&path).arg(&path);
+            args.push("--bind".into());
+            args.push(path.clone().into());
+            args.push(path.into());
         }
     }
-    wrapped.arg("--chdir").arg(workspace).arg("--");
-    wrapped.arg(inner.program);
-    wrapped.args(inner.args);
-    copy_stdios(cmd, &mut wrapped);
-    *cmd = wrapped;
-    Ok(())
+    args.push("--chdir".into());
+    args.push(workspace.as_os_str().to_os_string());
+    args.push("--".into());
+    args
 }
 
 fn apply_seatbelt(
@@ -267,7 +321,7 @@ fn resolve_inner_program(program: &Path) -> PathBuf {
 
 struct InnerCommand {
     program: PathBuf,
-    args: Vec<std::ffi::OsString>,
+    args: Vec<OsString>,
 }
 
 fn take_program_and_args(cmd: &tokio::process::Command) -> Result<InnerCommand, String> {
@@ -311,6 +365,8 @@ mod tests {
         assert!(paths.contains(&PathBuf::from("/repo")));
         assert!(paths.contains(&PathBuf::from("/tmp")));
         assert!(paths.contains(&PathBuf::from("/tmp/nox-memory")));
+        #[cfg(unix)]
+        assert!(paths.contains(&PathBuf::from("/var/tmp")));
     }
 
     #[test]
@@ -352,6 +408,11 @@ mod tests {
         ));
         assert!(looks_like_sandbox_denial("sandbox-exec: profile failed"));
         assert!(looks_like_sandbox_denial("deny(1) file-write-data"));
+        assert!(looks_like_sandbox_denial("bwrap: Can't mkdir /tmp/x"));
+        assert!(looks_like_sandbox_denial(
+            "touch: /etc/x: Read-only file system"
+        ));
+        assert!(looks_like_sandbox_denial("Permission denied"));
         assert!(!looks_like_sandbox_denial("hello world"));
         assert!(sandbox_was_enforced(Some("已在 seatbelt 沙箱中执行")));
         assert!(!sandbox_was_enforced(Some(
@@ -378,6 +439,34 @@ mod tests {
                 || enabled.contains("seatbelt")
                 || enabled.contains("不可用")
         );
+    }
+
+    #[test]
+    fn bwrap_args_include_pid_namespace_and_workspace_bind() {
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("time")
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("noxcode-bwrap-args-{stamp}"));
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        let extra = dir.join("memory");
+        std::fs::create_dir_all(&extra).expect("mkdir extra");
+        let args = bwrap_args(&dir, std::slice::from_ref(&extra));
+        let text: Vec<String> = args
+            .iter()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect();
+        let joined = text.join(" ");
+        assert!(text.iter().any(|arg| arg == "--unshare-pid"));
+        assert!(text.iter().any(|arg| arg == "--die-with-parent"));
+        assert!(joined.contains("--tmpfs /tmp"));
+        assert!(joined.contains(&format!("--bind {} {}", dir.display(), dir.display())));
+        assert!(joined.contains(&format!("--bind {} {}", extra.display(), extra.display())));
+        assert!(!text.iter().any(|arg| arg == "--unshare-net"));
+        if Path::new("/dev/shm").exists() {
+            assert!(joined.contains("--bind /dev/shm /dev/shm"));
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[cfg(target_os = "macos")]
@@ -470,6 +559,96 @@ mod tests {
             .arg("-p")
             .arg(&profile)
             .arg("--")
+            .arg("/bin/bash")
+            .arg("-c")
+            .arg(format!("printf leaked > '{}'", outside.display()))
+            .stdin(Stdio::null())
+            .output()
+            .expect("write outside");
+        let leaked = outside.exists();
+        let _ = std::fs::remove_file(&outside);
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(
+            !write_out.status.success() || !leaked,
+            "sandbox allowed write outside workspace"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn enabled_policy_wraps_with_bwrap() {
+        let Ok(bwrap) = resolve_bwrap() else {
+            return;
+        };
+        let mut cmd = tokio_command("bash");
+        cmd.arg("-lc").arg("echo hi");
+        let policy = SandboxPolicy {
+            enabled: true,
+            extra_write_roots: vec![PathBuf::from("/tmp/nox-memory")],
+        };
+        let applied = apply_sandbox(&policy, Path::new("/repo"), &mut cmd);
+        assert_eq!(applied.kind, SandboxKind::Bubblewrap);
+        assert_eq!(cmd.as_std().get_program(), bwrap.as_os_str());
+        let args: Vec<String> = cmd
+            .as_std()
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect();
+        assert!(args.iter().any(|arg| arg == "--"));
+        assert!(args.iter().any(|arg| arg == "--unshare-pid"));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn bwrap_echo_and_write_boundaries() {
+        let Ok(bwrap) = resolve_bwrap() else {
+            return;
+        };
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("time")
+            .as_nanos();
+        let Some(home) = std::env::var_os("HOME").filter(|value| !value.is_empty()) else {
+            return;
+        };
+        let dir = PathBuf::from(&home).join(format!("noxcode-bwrap-ws-{stamp}"));
+        let outside = PathBuf::from(&home).join(format!("noxcode-sandbox-probe-{stamp}"));
+        std::fs::create_dir_all(&dir).expect("mkdir workspace");
+        let args = bwrap_args(&dir, &[]);
+        let echo = std::process::Command::new(&bwrap)
+            .args(&args)
+            .arg("/bin/echo")
+            .arg("noxcode-sandbox-ok")
+            .stdin(Stdio::null())
+            .output()
+            .expect("echo");
+        let echo_err = String::from_utf8_lossy(&echo.stderr);
+        assert!(
+            echo.status.success(),
+            "echo failed status={:?} stderr={echo_err}",
+            echo.status
+        );
+        assert!(String::from_utf8_lossy(&echo.stdout).contains("noxcode-sandbox-ok"));
+
+        let inside = dir.join("inside.txt");
+        let write_ok = std::process::Command::new(&bwrap)
+            .args(&args)
+            .arg("/bin/bash")
+            .arg("-c")
+            .arg(format!("printf hello > '{}'", inside.display()))
+            .stdin(Stdio::null())
+            .output()
+            .expect("write inside");
+        assert!(
+            write_ok.status.success(),
+            "workspace write failed: {}",
+            String::from_utf8_lossy(&write_ok.stderr)
+        );
+        assert_eq!(std::fs::read_to_string(&inside).unwrap().trim(), "hello");
+
+        let _ = std::fs::remove_file(&outside);
+        let write_out = std::process::Command::new(&bwrap)
+            .args(&args)
             .arg("/bin/bash")
             .arg("-c")
             .arg(format!("printf leaked > '{}'", outside.display()))
