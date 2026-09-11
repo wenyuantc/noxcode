@@ -20,6 +20,8 @@ use super::paths::{resolve_local_path, resolve_under_workspace};
 use super::sandbox::{
     apply_sandbox, looks_like_sandbox_denial, sandbox_was_enforced, SandboxPolicy,
 };
+#[cfg(test)]
+use super::sandbox::{detect_sandbox_kind, SandboxKind};
 use super::shell_snapshot::{COMMAND_ENV, SNAPSHOT_ENV};
 
 const READ_DEFAULT_LIMIT: usize = 2000;
@@ -1471,6 +1473,14 @@ mod tests {
     #[cfg(any(target_os = "macos", target_os = "linux"))]
     #[tokio::test]
     async fn sandboxed_bash_echo_succeeds() {
+        let expected_kind = if cfg!(target_os = "macos") {
+            SandboxKind::Seatbelt
+        } else {
+            SandboxKind::Bubblewrap
+        };
+        if detect_sandbox_kind() != expected_kind {
+            return;
+        }
         let root = tempfile::tempdir().unwrap();
         let mut ws = LocalWorkspace::new(root.path().to_path_buf());
         ws.sandbox.enabled = true;

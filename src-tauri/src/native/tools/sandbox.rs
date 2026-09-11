@@ -2,11 +2,13 @@
 //!
 //! Linux 优先 `bwrap`（只读根 + PID 隔离 + 可写工作区 / 额外写根 / 临时目录）。
 //! macOS 使用 `sandbox-exec` seatbelt。Windows 与 SSH 不套沙箱。
-//! 开启但找不到实现时回退为普通执行，并在结果里注明。
+//! 开启但找不到实现、或 Linux 上 bwrap 因 user namespace 无法运行时，回退为普通执行并在结果里注明。
 
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
+#[cfg(target_os = "linux")]
+use std::sync::OnceLock;
 
 use crate::native::tools::command_path::resolve_program;
 use crate::process_spawn::tokio_command;
@@ -55,7 +57,7 @@ pub struct SandboxApply {
 }
 
 pub fn detect_sandbox_kind() -> SandboxKind {
-    if cfg!(target_os = "linux") && resolve_bwrap().is_ok() {
+    if cfg!(target_os = "linux") && bwrap_is_runnable() {
         return SandboxKind::Bubblewrap;
     }
     if cfg!(target_os = "macos") && Path::new(MACOS_SANDBOX_EXEC).is_file() {
@@ -72,6 +74,43 @@ fn resolve_bwrap() -> Result<PathBuf, String> {
         }
     }
     resolve_program("bwrap")
+}
+
+fn bwrap_is_runnable() -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        static RESULT: OnceLock<bool> = OnceLock::new();
+        return *RESULT.get_or_init(probe_bwrap);
+    }
+    #[cfg(not(target_os = "linux"))]
+    false
+}
+
+#[cfg(target_os = "linux")]
+fn probe_bwrap() -> bool {
+    let Ok(bwrap) = resolve_bwrap() else {
+        return false;
+    };
+    // Ubuntu 24.04 等环境会限制非特权 user namespace；即使找到 bwrap，
+    // 也可能因 uid map 失败。探测失败时按不可用处理，避免每条命令都报沙箱拒绝。
+    std::process::Command::new(bwrap)
+        .args([
+            "--die-with-parent",
+            "--unshare-pid",
+            "--ro-bind",
+            "/",
+            "/",
+            "--dev",
+            "/dev",
+            "--",
+            "/bin/true",
+        ])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map(|status| status.success())
+        .unwrap_or(false)
 }
 
 pub fn sandbox_status_label(enabled: bool) -> String {
@@ -229,7 +268,7 @@ pub fn apply_sandbox(
         },
         SandboxKind::None => SandboxApply {
             kind: SandboxKind::None,
-            note: Some("当前系统没有 bwrap / sandbox-exec，已回退为普通 Bash".to_string()),
+            note: Some("当前系统无法启用沙箱，已回退为普通 Bash".to_string()),
         },
     }
 }
@@ -577,6 +616,9 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn enabled_policy_wraps_with_bwrap() {
+        if detect_sandbox_kind() != SandboxKind::Bubblewrap {
+            return;
+        }
         let Ok(bwrap) = resolve_bwrap() else {
             return;
         };
@@ -600,7 +642,38 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
+    fn unusable_bwrap_falls_back_without_wrapping() {
+        if resolve_bwrap().is_err() || bwrap_is_runnable() {
+            return;
+        }
+        let mut cmd = tokio_command("bash");
+        cmd.arg("-lc").arg("echo hi");
+        let applied = apply_sandbox(
+            &SandboxPolicy {
+                enabled: true,
+                extra_write_roots: Vec::new(),
+            },
+            Path::new("/repo"),
+            &mut cmd,
+        );
+        assert_eq!(applied.kind, SandboxKind::None);
+        assert!(
+            applied
+                .note
+                .as_deref()
+                .is_some_and(|note| note.contains("回退")),
+            "expected fallback note, got {:?}",
+            applied.note
+        );
+        assert_eq!(cmd.as_std().get_program(), "bash");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
     fn bwrap_echo_and_write_boundaries() {
+        if !bwrap_is_runnable() {
+            return;
+        }
         let Ok(bwrap) = resolve_bwrap() else {
             return;
         };

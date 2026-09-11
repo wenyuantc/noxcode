@@ -368,7 +368,7 @@ mod tests {
         )
         .await
         .unwrap_err()
-        .contains("只读规划模式"));
+        .contains("确认通道"));
     }
 
     #[tokio::test]
