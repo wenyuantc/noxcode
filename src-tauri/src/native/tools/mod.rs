@@ -27,7 +27,8 @@ pub mod web;
 
 pub use cancel::CancelFlag;
 pub use catalog::{
-    ask_question_spec, is_read_only_native_tool, read_only_tool_names, tool_contracts, tool_specs,
+    ask_question_spec, is_read_only_native_tool, read_only_tool_names,
+    read_only_tool_names_with_bash, tool_contracts, tool_specs,
 };
 pub use contract::{
     builtin_contract, resolve_builtin_contract, ContractRegistry, PermissionCapability,

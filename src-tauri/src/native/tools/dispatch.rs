@@ -259,7 +259,11 @@ impl ToolCtx {
     }
 
     fn allows_in_read_only(&self, contract: &ToolContract) -> bool {
-        contract.allowed_in_plan_mode || (self.is_plan_mode() && contract.name == "Bash")
+        contract.allowed_in_plan_mode || contract.name == "Bash"
+    }
+
+    fn is_readonly_bash(&self, name: &str) -> bool {
+        self.is_read_only() && name == "Bash"
     }
 
     /// 规则匹配用的工作区根：SSH 用远端路径，本地用工作区目录。
@@ -1108,7 +1112,7 @@ async fn enforce_permissions(
     arguments: &str,
 ) -> Result<(), String> {
     let root = ctx.rules_workspace_root();
-    let plan_bash = ctx.is_plan_mode() && name == "Bash";
+    let plan_bash = ctx.is_readonly_bash(name);
     let decision = ctx
         .permission_rules
         .read()
@@ -1253,7 +1257,7 @@ async fn request_permission(
     } else {
         None
     };
-    let plan_bash = ctx.is_plan_mode() && name == "Bash";
+    let plan_bash = ctx.is_readonly_bash(name);
     // Plan Bash grants authorize a command, never the whole session or plan exit.
     // ask 规则显式要求确认，不受 yolo / 会话放行影响。
     let rule_forced = kind == NativeToolRiskKind::Rule;

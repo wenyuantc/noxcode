@@ -32,7 +32,7 @@ use crate::native::tools::contract::ContractRegistry;
 use crate::native::tools::dispatch::{finalize_tool, preflight_tool, PreparedTool};
 use crate::native::tools::hooks::{run_stop_hooks, run_user_prompt_submit_hooks};
 use crate::native::tools::{
-    execute_tool_call, read_only_tool_names, tool_contracts, tool_specs, LocalWorkspace,
+    execute_tool_call, read_only_tool_names_with_bash, tool_contracts, tool_specs, LocalWorkspace,
     ToolContract, ToolCtx, ToolOutput,
 };
 
@@ -646,8 +646,7 @@ impl AgentRunner {
         }
         if read_only {
             tools.retain(|tool| {
-                crate::native::tools::is_read_only_native_tool(&tool.name)
-                    || (plan_mode && tool.name == "Bash")
+                crate::native::tools::is_read_only_native_tool(&tool.name) || tool.name == "Bash"
             });
         }
         tools
@@ -1935,7 +1934,7 @@ impl AgentRunner {
         match &spec.kind {
             SubagentKind::Explore => {
                 child.ctx.set_read_only(true);
-                child.set_allowed_tools(&read_only_tool_names());
+                child.set_allowed_tools(&read_only_tool_names_with_bash());
             }
             SubagentKind::General => {
                 child.ctx.mcp = self.ctx.mcp.clone();
@@ -3726,6 +3725,7 @@ mod tests {
             .tool_names()
             .iter()
             .any(|name| name == "Write"));
+        assert!(explore_child.tool_names().iter().any(|name| name == "Bash"));
         let mut custom_runner = AgentRunner::new(LocalWorkspace::new(root.clone()));
         custom_runner.custom_subagents = vec![NativeSubagent {
             id: "1".to_string(),
@@ -3759,6 +3759,7 @@ mod tests {
         assert!(custom_child.tool_names().iter().any(|name| name == "Read"));
         assert!(!custom_child.tool_names().iter().any(|name| name == "Write"));
         assert!(!custom_child.tool_names().iter().any(|name| name == "Agent"));
+        assert!(!custom_child.tool_names().iter().any(|name| name == "Bash"));
         let system = custom_child
             .messages
             .iter()
@@ -3772,6 +3773,7 @@ mod tests {
         readonly.set_read_only(true);
         readonly.set_allowed_tools(&crate::native::tools::read_only_tool_names());
         assert!(!readonly.tool_names().iter().any(|name| name == "Agent"));
+        assert!(!readonly.tool_names().iter().any(|name| name == "Bash"));
         let mut extra = AgentRunner::new(LocalWorkspace::new(root.clone()));
         extra.set_read_only(true);
         extra.set_extra_tools(vec![ToolSpec {
@@ -4680,6 +4682,57 @@ mod tests {
         assert_eq!(
             fs::read_to_string(root.join("hello.txt")).expect("read"),
             "hello world\n"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn explore_child_allows_readonly_bash_not_writes() {
+        let (runner, root) = temp_runner();
+        let spec = parse_subagent_args(r#"{"prompt":"look","subagent_type":"explore"}"#).unwrap();
+        let child = runner.spawn_child_runner(&spec, 1);
+        child.ctx.allow_all_high_risk.store(true, Ordering::SeqCst);
+        let wc = crate::native::tools::execute_tool(
+            &child.ctx,
+            "Bash",
+            r#"{"command":"wc -l hello.txt"}"#,
+        )
+        .await
+        .expect("readonly bash");
+        assert!(wc.contains('1') || wc.contains("hello"), "{wc}");
+        let diff =
+            crate::native::tools::execute_tool(&child.ctx, "Bash", r#"{"command":"git diff"}"#)
+                .await;
+        let diff_text = match diff {
+            Ok(output) => output,
+            Err(error) => error,
+        };
+        assert!(
+            !diff_text.contains("只读规划模式禁止调用工具 Bash"),
+            "{diff_text}"
+        );
+        let rm =
+            crate::native::tools::execute_tool(&child.ctx, "Bash", r#"{"command":"rm hello.txt"}"#)
+                .await
+                .expect_err("explore rm");
+        assert!(
+            rm.contains("没有可用的权限确认通道") || rm.contains("禁止"),
+            "{rm}"
+        );
+        assert_eq!(
+            fs::read_to_string(root.join("hello.txt")).expect("read"),
+            "hello world\n"
+        );
+        let push = crate::native::tools::execute_tool(
+            &child.ctx,
+            "Bash",
+            r#"{"command":"git push origin main"}"#,
+        )
+        .await
+        .expect_err("explore push");
+        assert!(
+            push.contains("没有可用的权限确认通道") || push.contains("禁止"),
+            "{push}"
         );
         let _ = fs::remove_dir_all(root);
     }

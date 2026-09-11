@@ -17,6 +17,15 @@ pub fn read_only_tool_names() -> Vec<String> {
         .collect()
 }
 
+/// explore 等只读会话额外开放 Bash，走计划模式同一套只读命令分类。
+pub fn read_only_tool_names_with_bash() -> Vec<String> {
+    let mut names = read_only_tool_names();
+    if !names.iter().any(|name| name == "Bash") {
+        names.push("Bash".to_string());
+    }
+    names
+}
+
 /// 计划模式（只读）下允许调用的内置工具，由契约的 `allowed_in_plan_mode` 决定。
 pub fn is_read_only_native_tool(name: &str) -> bool {
     builtin_contract(name).is_some_and(|contract| contract.allowed_in_plan_mode)
@@ -1048,6 +1057,9 @@ mod tests {
         );
         assert!(is_read_only_native_tool("ExitPlanMode"));
         assert!(!is_read_only_native_tool("EnterPlanMode"));
+        let with_bash = read_only_tool_names_with_bash();
+        assert!(with_bash.contains(&"Bash".to_string()));
+        assert!(!names.contains(&"Bash".to_string()));
     }
 
     #[test]

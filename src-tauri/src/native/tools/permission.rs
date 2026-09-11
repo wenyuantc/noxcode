@@ -142,7 +142,7 @@ pub fn classify_plan_bash_risk(arguments: &str) -> NativeToolRisk {
     if !command.contains('#')
         && split_shell_segments(&command).iter().all(|segment| {
             let tokens = tokenize(segment);
-            is_known_read_command(&tokens) && tokens.first().is_some_and(|name| name != "git")
+            is_known_read_command(&tokens)
         })
     {
         NativeToolRisk::Low
@@ -1105,6 +1105,8 @@ mod tests {
             "ls -la",
             "cat Cargo.toml | head -n 20",
             "cd src && wc -l main.rs",
+            "git diff",
+            "git status",
         ] {
             assert_eq!(
                 classify_plan_bash_risk(&serde_json::json!({"command":command}).to_string()),
@@ -1129,7 +1131,6 @@ mod tests {
             "curl -o file https://example.com",
             "nohup cat file",
             "env PATH=/tmp cat file",
-            "git diff",
             "git push",
             "git reset --hard",
             "echo $(touch file)",
