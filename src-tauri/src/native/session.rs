@@ -504,16 +504,23 @@ async fn attach_skills_and_hooks(
 }
 
 // 仓库内的命令配置不等于用户授权；不经过工具自动批准或 permission_request hooks。
+// 完全访问（yolo）视为已信任本会话工作区钩子，不再弹 WorkspaceHooks。
 async fn approve_workspace_hooks(
     ctx: &crate::native::tools::dispatch::ToolCtx,
     hooks: &[crate::db::models::NativeHook],
 ) -> bool {
-    let Some(requester) = &ctx.request_permission else {
-        return false;
-    };
     if ctx.cancel.is_cancelled() {
         return false;
     }
+    if ctx
+        .allow_all_high_risk
+        .load(std::sync::atomic::Ordering::SeqCst)
+    {
+        return true;
+    }
+    let Some(requester) = &ctx.request_permission else {
+        return false;
+    };
     let request_id = uuid::Uuid::new_v4().to_string();
     let (tx, rx) = tokio::sync::oneshot::channel();
     requester(
@@ -2637,7 +2644,7 @@ async fn run_native_loop(
     if announce_startup {
         let notice = match permission_mode.as_str() {
             crate::native::settings::PERMISSION_MODE_YOLO => Some(
-                "[PERMISSION] 完全访问（yolo）：包含工作区外文件访问；deny 规则仍拒绝，ask 规则仍需确认",
+                "[PERMISSION] 完全访问（yolo）：不弹权限确认（含 MCP、工作区钩子与命令）；deny 规则仍拒绝",
             ),
             crate::native::settings::PERMISSION_MODE_BUILD => Some(
                 "[PERMISSION] 自动构建（build）：覆盖文件、不透明命令与只读 MCP 直接执行，删除 / 推送 / 强制 Git / 写入型 MCP 仍需确认",
@@ -2704,7 +2711,7 @@ async fn run_native_loop(
             .await;
         }
     }
-    // yolo 模式也保留确认通道：ask 规则命中时仍要问用户。
+    // 非 yolo 仍要确认通道：ask 规则、MCP、计划 Bash 与工作区钩子信任。
     {
         let app_perm = app.clone();
         let manager_perm = manager_state.clone();
@@ -4754,7 +4761,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn workspace_hooks_require_explicit_trust_even_with_yolo() {
+    async fn workspace_hooks_auto_trust_in_yolo() {
         use crate::native::tools::dispatch::ToolCtx;
         use crate::native::tools::local::LocalWorkspace;
         use crate::native::tools::permission::NativePermissionDecision;
@@ -4782,9 +4789,23 @@ mod tests {
             5,
             true,
         )];
-        assert!(!super::approve_workspace_hooks(&ctx, &hooks).await);
+        assert!(super::approve_workspace_hooks(&ctx, &hooks).await);
         let requests = Arc::new(AtomicUsize::new(0));
         let seen = requests.clone();
+        ctx.request_permission = Some(Arc::new({
+            let seen = seen.clone();
+            move |prompt, tx| {
+                assert_eq!(prompt.tool_name, "WorkspaceHooks");
+                seen.fetch_add(1, Ordering::SeqCst);
+                tx.send(NativePermissionDecision::Deny).unwrap();
+            }
+        }));
+        assert!(super::approve_workspace_hooks(&ctx, &hooks).await);
+        assert_eq!(requests.load(Ordering::SeqCst), 0);
+
+        ctx.allow_all_high_risk.store(false, Ordering::SeqCst);
+        ctx.request_permission = None;
+        assert!(!super::approve_workspace_hooks(&ctx, &hooks).await);
         ctx.request_permission = Some(Arc::new(move |prompt, tx| {
             assert_eq!(prompt.tool_name, "WorkspaceHooks");
             assert!(prompt.suggested_rule.is_none());

@@ -280,7 +280,7 @@
     "budgetShare": "子 Agent 预算占比（%）",
     "budgetShareHint": "同一批子 Agent 合计最多占用父会话剩余预算的百分比。默认 40，范围 5–100。触顶后父会话仍可继续。",
     "permissionMode": "权限模式",
-    "permissionModeHint": "变更前确认：改文件前先问。自动编辑：覆盖文件直接执行，删除 / 推送 / 强制 Git / 不透明命令 / MCP 仍需确认。完全访问：减少确认次数。计划模式在 Composer 选择，不写入此项。改完对之后新开的会话生效。",
+    "permissionModeHint": "变更前确认：改文件前先问。自动编辑：覆盖文件直接执行，删除 / 推送 / 强制 Git / 不透明命令 / MCP 仍需确认。完全访问：不弹权限确认（含 MCP、工作区钩子与命令），deny 规则仍拒绝。计划模式在 Composer 选择，不写入此项。改完对之后新开的会话生效。",
     "permissionTimeout": "高风险确认超时（秒）",
     "permissionTimeoutHint": "等待确认的秒数。超时按拒绝处理并继续会话。0 = 不超时，默认 300。",
     "checkpoints": "Git 检查点",

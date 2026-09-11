@@ -31,11 +31,11 @@ P4 把进程内编程 Agent 接到渠道 + 工作区外壳。数据流仍是 `Re
 
 `session_kind` 只有 `execution` 与 `plan`，表示启动类型，不能替代当前运行模式。`plan_mode=true` 时本轮结束后保持计划模式，等待输入；不会自动注入实施指令。计划模式由启动参数决定，不写入 `native-settings.json`。`ExitPlanMode` 必须收到当前请求的用户批准才解除限制；拒绝、取消或无审批通道均保持计划模式。计划审批一直等到用户批准、退回或会话取消，不套用高风险确认超时。用户也可在会话空闲后通过模式选择器切换。runner 与 manager 共享计划模式原子状态，运行配置快照从该状态读取；`native-plan-mode` 携带 `input_queue_id` 区分每次运行，前端不允许旧启动快照覆盖同次运行的模式事件。子 Agent 的切换不会广播到父会话。
 
-计划模式的本地与 SSH `Bash` 可用：可验证的只读命令直接执行；写入、高风险及无法确认只读的命令需用户授权，提供「本次允许 / 始终允许 / 当前会话允许所有命令 / 拒绝」。始终允许将完整命令作为字面值保存到当前工作区权限文件，附加 `plan_bash: { target, workspace_root }` 元数据以绑定执行主机和工作目录，保存成功后执行，后续计划会话命中时免确认；通配符仅作为命令内容，不扩大授权范围。可在权限设置中查看、删除，删除后重新询问。旧规则缺少该元数据时不扩权，yolo、build、普通 allow 规则和批准钩子也不跳过确认；显式 deny/ask 仍优先。命令获批后计划模式不变。复用现有权限 IPC 和原子写入流程，保存失败保留请求且不执行。命令按 PreToolUse 改写后的最终参数检查；含脚本、解释器、重定向及未验证包装器的命令保守地要求确认。本地 Bash 可按设置套操作系统沙箱，但计划模式本身不是只读沙箱；数据库查询优先使用 `SQLiteQuery`。`Write / Edit / ApplyPatch` 及写入型 MCP 仍被禁止。explore 子 Agent 与计划模式共用只读 Bash：已审计的只读命令直接执行，写入与不透明命令需确认且不受 yolo 绕过。
+计划模式的本地与 SSH `Bash` 可用：可验证的只读命令直接执行；写入、高风险及无法确认只读的命令需用户授权，提供「本次允许 / 始终允许 / 当前会话允许所有命令 / 拒绝」。始终允许将完整命令作为字面值保存到当前工作区权限文件，附加 `plan_bash: { target, workspace_root }` 元数据以绑定执行主机和工作目录，保存成功后执行，后续计划会话命中时免确认；通配符仅作为命令内容，不扩大授权范围。可在权限设置中查看、删除，删除后重新询问。旧规则缺少该元数据时不扩权，build、普通 allow 规则和批准钩子也不跳过确认；`yolo` 完全访问会跳过计划模式 Bash 确认。显式 deny 仍优先；ask 仅在非 yolo 时确认。命令获批后计划模式不变。复用现有权限 IPC 和原子写入流程，保存失败保留请求且不执行。命令按 PreToolUse 改写后的最终参数检查；含脚本、解释器、重定向及未验证包装器的命令保守地要求确认。本地 Bash 可按设置套操作系统沙箱，但计划模式本身不是只读沙箱；数据库查询优先使用 `SQLiteQuery`。`Write / Edit / ApplyPatch` 及写入型 MCP 仍被禁止。explore 子 Agent 与计划模式共用只读 Bash：已审计的只读命令直接执行；写入与不透明命令在非 yolo 时需确认。`yolo` 完全访问跳过这些 Bash 确认；`Write` / `Edit` / `ApplyPatch` 仍被只读规划禁止。
 
 「当前会话允许所有命令」使用独立 IPC 决策 `allow_session_commands`，仅为当前运行会话设置 Bash 免确认状态，立即执行当前命令并释放该会话已排队的 Bash 确认。后续本地或 SSH Bash 不再弹窗，包括高风险、写入及 ask 规则；显式 deny 仍直接拒绝。状态由当前会话及其工具上下文共享，不切换 yolo、不退出计划模式，不写权限文件或数据库，不影响其他会话及非 Bash 工具的审批；会话结束、重启或重新启动历史会话后失效。过期、取消或非 Bash 请求不能获取该授权。
 
-权限模式（`permission_mode`）四档，对齐 ZCode：`default` 变更前确认；`edit` 自动放行 `Overwrite`（删除 / 推送 / 强制 Git / 不透明命令 / MCP 仍弹确认）；`build` 再放行不透明 shell 与带 `readOnlyHint` 的 MCP；`yolo` 完全访问（`allow_all_high_risk=true`，只有 ask 规则仍会确认）。旧文件的 `confirm / auto_edit / full` 与 Claude Code 的 `acceptEdits / auto / bypassPermissions / dontAsk` 读入时映射到新名；`confirm_high_risk: false` 读成 `yolo`。`plan` 是会话态：既可由 Composer 选择在启动时进入，也可由模型调用 `EnterPlanMode` 进入；`ExitPlanMode` 提交计划触发 `native-plan-approval-request`，用户批准后恢复执行模式，退回则连同反馈交回模型继续修改。批准 IPC 可带 `ai_channel_id` / `model`：与当前 runtime 不同时先加载新 client 写入 live slot 并 `emit native-session`，再解除 `ExitPlanMode`；同一回合下一次 `chat()` 用实施模型。模型未变或退回则跳过加载。
+权限模式（`permission_mode`）四档，对齐 ZCode：`default` 变更前确认；`edit` 自动放行 `Overwrite`（删除 / 推送 / 强制 Git / 不透明命令 / MCP 仍弹确认）；`build` 再放行不透明 shell 与带 `readOnlyHint` 的 MCP；`yolo` 完全访问（`allow_all_high_risk=true`，不弹 MCP / 工作区钩子 / 命令 / ask 规则确认，deny 仍拒绝）。旧文件的 `confirm / auto_edit / full` 与 Claude Code 的 `acceptEdits / auto / bypassPermissions / dontAsk` 读入时映射到新名；`confirm_high_risk: false` 读成 `yolo`。`plan` 是会话态：既可由 Composer 选择在启动时进入，也可由模型调用 `EnterPlanMode` 进入；`ExitPlanMode` 提交计划触发 `native-plan-approval-request`，用户批准后恢复执行模式，退回则连同反馈交回模型继续修改。批准 IPC 可带 `ai_channel_id` / `model`：与当前 runtime 不同时先加载新 client 写入 live slot 并 `emit native-session`，再解除 `ExitPlanMode`；同一回合下一次 `chat()` 用实施模型。模型未变或退回则跳过加载。
 
 ## 权限规则
 
@@ -45,7 +45,7 @@ P4 把进程内编程 Agent 接到渠道 + 工作区外壳。数据流仍是 `Re
 - 本地 / SSH 的 Read、Glob、Grep、Write、Edit、ApplyPatch 均支持工作区外授权。yolo 直接允许外部访问，其他模式遇到未授权路径先确认。补丁源、删除与移动目标统一检查，全部授权后才开始修改；单次授权不进入共享上下文。SSH Glob 使用指定搜索目录，显式指定目录时返回绝对路径。
 - `external_path = { target, scope: exact | subtree }` 使用真实绝对路径及路径组件匹配，能力为 `read` 或 `edit`，两者分开。`target` 为 `{ kind: local }` 或 `{ kind: ssh, config_id, host, port, username }`，防止授权跨连接混用。旧规则没有此字段时不自动扩展文件边界。
 - 普通工具的「始终允许」沿用 `suggested_rule`，Bash 使用命令前缀、其余工具使用工具名。设置页增删规则后同步运行中会话；文件授权仍保留只读模式、内容指纹、取消和路径验证。
-- `ask` 规则命中时即便在 `yolo` 也会弹确认（`kind = rule`）。
+- `ask` 规则命中时在非 `yolo` 模式弹确认（`kind = rule`）；`yolo` 跳过该确认。
 - 子 Agent 档案可带 `permission_mode`（不共享父会话的放行开关）与 `disallowed_tools`。
 - 命令：`get/update/add/delete_native_permission_rules`；设置页「权限规则」可增删规则。
 
@@ -101,7 +101,7 @@ P4 把进程内编程 Agent 接到渠道 + 工作区外壳。数据流仍是 `Re
 
 来源：设置页的全局钩子（`native-settings.json`）+ 本地工作区的 `.noxcode/hooks.json`（`{ "hooks": [...] }`）与 `.claude/settings.json` / `.claude/settings.local.json` 的 `hooks` 段（`type: prompt` 映射为 `agent`，`matcher` 的 `A|B` 转成工具名列表）。全局先执行，工作区后执行。实现见 [`tools/hooks.rs`](../src-tauri/src/native/tools/hooks.rs) 与 [`hooks_config.rs`](../src-tauri/src/native/hooks_config.rs)。
 
-工作区及工作区插件贡献的钩子必须先通过 `WorkspaceHooks` 显式批准本次会话，拒绝、超时或取消均不执行。该信任请求不受 yolo、权限规则或其他自动批准钩子绕过，也不会连带放行其他工具。
+工作区及工作区插件贡献的钩子必须先通过 `WorkspaceHooks` 显式批准本次会话，拒绝、超时或取消均不执行。`yolo` 完全访问视为已信任并直接启用这些钩子；其它模式不受权限规则或 `permission_request` 钩子绕过，也不会连带放行其他工具。
 
 ## 子 Agent 档案与后台任务
 

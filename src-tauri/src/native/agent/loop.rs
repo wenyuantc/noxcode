@@ -4687,10 +4687,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn explore_child_allows_readonly_bash_not_writes() {
+    async fn explore_child_yolo_skips_bash_permission_but_blocks_write_tools() {
         let (runner, root) = temp_runner();
         let spec = parse_subagent_args(r#"{"prompt":"look","subagent_type":"explore"}"#).unwrap();
-        let child = runner.spawn_child_runner(&spec, 1);
+        let mut child = runner.spawn_child_runner(&spec, 1);
         child.ctx.allow_all_high_risk.store(true, Ordering::SeqCst);
         let wc = crate::native::tools::execute_tool(
             &child.ctx,
@@ -4711,29 +4711,24 @@ mod tests {
             !diff_text.contains("只读规划模式禁止调用工具 Bash"),
             "{diff_text}"
         );
-        let rm =
-            crate::native::tools::execute_tool(&child.ctx, "Bash", r#"{"command":"rm hello.txt"}"#)
-                .await
-                .expect_err("explore rm");
-        assert!(
-            rm.contains("没有可用的权限确认通道") || rm.contains("禁止"),
-            "{rm}"
-        );
-        assert_eq!(
-            fs::read_to_string(root.join("hello.txt")).expect("read"),
-            "hello world\n"
-        );
-        let push = crate::native::tools::execute_tool(
+        child.ctx.request_permission = Some(std::sync::Arc::new(|_, _| {
+            panic!("yolo explore bash must not prompt")
+        }));
+        crate::native::tools::execute_tool(&child.ctx, "Bash", r#"{"command":"sort"}"#)
+            .await
+            .expect("yolo skips explore opaque bash");
+        crate::native::tools::execute_tool(&child.ctx, "Bash", r#"{"command":"rm hello.txt"}"#)
+            .await
+            .expect("yolo skips explore rm");
+        assert!(!root.join("hello.txt").exists());
+        let write = crate::native::tools::execute_tool(
             &child.ctx,
-            "Bash",
-            r#"{"command":"git push origin main"}"#,
+            "Write",
+            r#"{"file_path":"hello.txt","content":"changed"}"#,
         )
         .await
-        .expect_err("explore push");
-        assert!(
-            push.contains("没有可用的权限确认通道") || push.contains("禁止"),
-            "{push}"
-        );
+        .expect_err("explore write tool");
+        assert!(write.contains("只读规划模式禁止调用工具 Write"), "{write}");
         let _ = fs::remove_dir_all(root);
     }
 

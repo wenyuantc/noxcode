@@ -1252,6 +1252,11 @@ async fn request_permission(
     if name == "Bash" && ctx.allow_session_commands.load(Ordering::SeqCst) {
         return Ok(());
     }
+    // 完全访问（yolo）跳过全部权限确认，包括 MCP、ask 规则、计划模式 Bash 与
+    // explore 子 Agent 的 Bash。deny 已在规则层处理。Write/Edit 仍受只读规划禁止。
+    if ctx.allow_all_high_risk.load(Ordering::SeqCst) {
+        return Ok(());
+    }
     let mcp_server_id = if kind == NativeToolRiskKind::Mcp {
         ctx.mcp.server_id_for_tool(name).await
     } else {
@@ -1259,15 +1264,6 @@ async fn request_permission(
     };
     let plan_bash = ctx.is_readonly_bash(name);
     // Plan Bash grants authorize a command, never the whole session or plan exit.
-    // ask 规则显式要求确认，不受 yolo / 会话放行影响。
-    let rule_forced = kind == NativeToolRiskKind::Rule;
-    if !plan_bash
-        && !rule_forced
-        && kind != NativeToolRiskKind::Mcp
-        && ctx.allow_all_high_risk.load(Ordering::SeqCst)
-    {
-        return Ok(());
-    }
     if !plan_bash && kind == NativeToolRiskKind::Overwrite && ctx.auto_approve_overwrite {
         return Ok(());
     }
@@ -2703,7 +2699,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn skill_read_access_still_honors_deny_and_ask_rules_in_yolo() {
+    async fn skill_read_access_still_honors_deny_rules_in_yolo() {
         use super::super::contract::{PatternSource, PermissionCapability};
         use super::super::permission::{PermissionRule, RuleEffect, RuleScope};
         let root = tempfile::tempdir().unwrap();
@@ -2711,52 +2707,89 @@ mod tests {
         let mut ctx = ctx_for(root.path());
         ctx.skills = vec![skill_fixture(outside.path(), "demo", SkillSource::Global)];
         ctx.allow_all_high_risk.store(true, Ordering::SeqCst);
-        let asked = Arc::new(Mutex::new(0));
-        let sink = asked.clone();
-        ctx.request_permission = Some(Arc::new(move |_, reply| {
-            *sink.lock().unwrap() += 1;
-            let _ = reply.send(NativePermissionDecision::Deny);
-        }));
-        for (effect, message) in [
-            (RuleEffect::Deny, "权限规则拒绝"),
-            (RuleEffect::Ask, "不允许"),
+        ctx.request_permission = Some(Arc::new(|_, _| panic!("yolo deny must not prompt")));
+        let mut rules = PermissionRules::default();
+        rules.push(
+            RuleEffect::Deny,
+            PermissionRule {
+                id: "skill-read".to_string(),
+                external_path: None,
+                plan_bash: None,
+                capability: PermissionCapability::Read,
+                pattern: "**".to_string(),
+                source: PatternSource::Path,
+                scope: RuleScope::Workspace,
+                note: String::new(),
+            },
+        );
+        *ctx.permission_rules.write().unwrap() = rules;
+        for (tool, args) in [
+            (
+                "Read",
+                serde_json::json!({"file_path": outside.path().join("notes.md")}),
+            ),
+            (
+                "Glob",
+                serde_json::json!({"path": outside.path(), "pattern": "**/*"}),
+            ),
+            (
+                "Grep",
+                serde_json::json!({"path": outside.path(), "pattern": "."}),
+            ),
         ] {
-            let mut rules = PermissionRules::default();
-            rules.push(
-                effect,
-                PermissionRule {
-                    id: "skill-read".to_string(),
-                    external_path: None,
-                    plan_bash: None,
-                    capability: PermissionCapability::Read,
-                    pattern: "**".to_string(),
-                    source: PatternSource::Path,
-                    scope: RuleScope::Workspace,
-                    note: String::new(),
-                },
-            );
-            *ctx.permission_rules.write().unwrap() = rules;
-            for (tool, args) in [
-                (
-                    "Read",
-                    serde_json::json!({"file_path": outside.path().join("notes.md")}),
-                ),
-                (
-                    "Glob",
-                    serde_json::json!({"path": outside.path(), "pattern": "**/*"}),
-                ),
-                (
-                    "Grep",
-                    serde_json::json!({"path": outside.path(), "pattern": "."}),
-                ),
-            ] {
-                let error = execute_tool(&ctx, tool, &args.to_string())
-                    .await
-                    .unwrap_err();
-                assert!(error.contains(message), "{tool}: {error}");
-            }
+            let error = execute_tool(&ctx, tool, &args.to_string())
+                .await
+                .unwrap_err();
+            assert!(error.contains("权限规则拒绝"), "{tool}: {error}");
         }
-        assert_eq!(*asked.lock().unwrap(), 3);
+    }
+
+    #[tokio::test]
+    async fn skill_read_access_ask_rules_do_not_prompt_in_yolo() {
+        use super::super::contract::{PatternSource, PermissionCapability};
+        use super::super::permission::{PermissionRule, RuleEffect, RuleScope};
+        let root = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let mut ctx = ctx_for(root.path());
+        ctx.skills = vec![skill_fixture(outside.path(), "demo", SkillSource::Global)];
+        ctx.allow_all_high_risk.store(true, Ordering::SeqCst);
+        ctx.request_permission = Some(Arc::new(|_, _| panic!("yolo ask must not prompt")));
+        let mut rules = PermissionRules::default();
+        rules.push(
+            RuleEffect::Ask,
+            PermissionRule {
+                id: "skill-read".to_string(),
+                external_path: None,
+                plan_bash: None,
+                capability: PermissionCapability::Read,
+                pattern: "**".to_string(),
+                source: PatternSource::Path,
+                scope: RuleScope::Workspace,
+                note: String::new(),
+            },
+        );
+        *ctx.permission_rules.write().unwrap() = rules;
+        execute_tool(
+            &ctx,
+            "Read",
+            &serde_json::json!({"file_path": outside.path().join("notes.md")}).to_string(),
+        )
+        .await
+        .unwrap();
+        execute_tool(
+            &ctx,
+            "Glob",
+            &serde_json::json!({"path": outside.path(), "pattern": "**/*"}).to_string(),
+        )
+        .await
+        .unwrap();
+        execute_tool(
+            &ctx,
+            "Grep",
+            &serde_json::json!({"path": outside.path(), "pattern": "."}).to_string(),
+        )
+        .await
+        .unwrap();
     }
 
     #[cfg(unix)]
@@ -3118,7 +3151,6 @@ mod tests {
         ctx.set_plan_mode(true);
         ctx.auto_approve_overwrite = true;
         ctx.auto_approve_opaque_bash = true;
-        ctx.allow_all_high_risk.store(true, Ordering::SeqCst);
         ctx.permission_rules.write().unwrap().push(
             RuleEffect::Allow,
             PermissionRule {
@@ -3177,6 +3209,71 @@ mod tests {
             "approved"
         );
         assert_eq!(ctx.permission_rules_snapshot().allow.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn yolo_plan_bash_executes_without_prompt() {
+        let root = tempfile::tempdir().unwrap();
+        fs::write(root.path().join("keep.txt"), "original").unwrap();
+        let mut ctx = ctx_for(root.path());
+        ctx.set_plan_mode(true);
+        ctx.allow_all_high_risk.store(true, Ordering::SeqCst);
+        ctx.request_permission = Some(Arc::new(|_, _| panic!("yolo must not ask")));
+        execute_tool(&ctx, "Bash", r#"{"command":"printf approved > keep.txt"}"#)
+            .await
+            .unwrap();
+        assert_eq!(
+            fs::read_to_string(root.path().join("keep.txt")).unwrap(),
+            "approved"
+        );
+        assert!(ctx.is_plan_mode() && ctx.is_read_only());
+        let blocked = execute_tool(&ctx, "Write", r#"{"file_path":"new.txt","content":"nope"}"#)
+            .await
+            .unwrap_err();
+        assert!(blocked.contains("只读规划模式禁止"), "{blocked}");
+        assert!(!root.path().join("new.txt").exists());
+    }
+
+    #[tokio::test]
+    async fn yolo_skips_explore_style_opaque_bash() {
+        let root = tempfile::tempdir().unwrap();
+        fs::write(root.path().join("keep.txt"), "b\na\n").unwrap();
+        let mut ctx = ctx_for(root.path());
+        ctx.set_read_only(true);
+        ctx.allow_all_high_risk.store(true, Ordering::SeqCst);
+        ctx.request_permission = Some(Arc::new(|_, _| panic!("yolo must not ask")));
+        execute_tool(&ctx, "Bash", r#"{"command":"sort"}"#)
+            .await
+            .expect("sort");
+        assert!(ctx.is_read_only() && !ctx.is_plan_mode());
+    }
+
+    #[tokio::test]
+    async fn yolo_skips_mcp_and_automation_permission_prompts() {
+        let root = tempfile::tempdir().unwrap();
+        let mut ctx = ctx_for(root.path());
+        ctx.allow_all_high_risk.store(true, Ordering::SeqCst);
+        ctx.request_permission = Some(Arc::new(|_, _| panic!("yolo must not ask")));
+        let mcp = execute_tool(&ctx, "mcp_fs_write", "{}").await.unwrap_err();
+        assert!(mcp.contains("unknown tool"), "{mcp}");
+        assert!(!mcp.contains("不允许"));
+        let cron = execute_tool(
+            &ctx,
+            "CronCreate",
+            r#"{"name":"n","prompt":"p","cron":"0 * * * *"}"#,
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            cron.contains("数据库作用域") || cron.contains("没有绑定工作区"),
+            "{cron}"
+        );
+        assert!(!cron.contains("不允许"));
+
+        ctx.allow_all_high_risk.store(false, Ordering::SeqCst);
+        ctx.request_permission = Some(deny_requester());
+        let denied = execute_tool(&ctx, "mcp_fs_write", "{}").await.unwrap_err();
+        assert!(denied.contains("不允许"), "{denied}");
     }
 
     #[tokio::test]
@@ -3382,7 +3479,7 @@ mod tests {
             .expect_err("deny rule");
         assert!(denied.contains("权限规则拒绝"), "{denied}");
         assert!(root.join("keep.txt").exists());
-        // ask 规则即便在 yolo 下也要弹确认；这里的确认器一律拒绝。
+        // yolo 下 ask 规则不再弹确认。
         let asked = Arc::new(Mutex::new(Vec::<PermissionPrompt>::new()));
         let sink = asked.clone();
         let mut ctx = ctx;
@@ -3390,20 +3487,15 @@ mod tests {
             sink.lock().expect("lock").push(prompt);
             let _ = tx.send(NativePermissionDecision::Deny);
         }));
-        let err = execute_tool(&ctx, "Bash", r#"{"command":"git push origin main"}"#)
-            .await
-            .expect_err("ask rule");
-        assert!(err.contains("不允许"));
-        let prompts = asked.lock().expect("lock").clone();
-        assert_eq!(prompts.len(), 1);
-        assert_eq!(prompts[0].kind, NativeToolRiskKind::Rule);
-        assert_eq!(
-            prompts[0]
-                .suggested_rule
-                .as_ref()
-                .map(|item| item.pattern.as_str()),
-            Some("git push*")
+        let asked_result =
+            execute_tool(&ctx, "Bash", r#"{"command":"git push origin main"}"#).await;
+        assert!(
+            asked.lock().expect("lock").is_empty(),
+            "yolo must not prompt for ask rules"
         );
+        if let Err(err) = asked_result {
+            assert!(!err.contains("不允许"), "{err}");
+        }
         // allow 规则让本来要确认的覆盖直接通过。
         ctx.allow_all_high_risk
             .store(false, std::sync::atomic::Ordering::SeqCst);
@@ -3424,7 +3516,7 @@ mod tests {
         )
         .await
         .expect("allow rule skips prompt");
-        assert_eq!(asked.lock().expect("lock").len(), 1);
+        assert!(asked.lock().expect("lock").is_empty());
         let _ = std::fs::remove_dir_all(root);
     }
 

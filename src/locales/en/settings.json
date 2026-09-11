@@ -280,7 +280,7 @@
     "budgetShare": "Sub-agent budget share (%)",
     "budgetShareHint": "Each batch of sub-agents may use at most this percent of the parent session's remaining budget in total. Default 40, range 5–100. The parent can continue after the batch hits its cap.",
     "permissionMode": "Permission mode",
-    "permissionModeHint": "Confirm before change: ask before editing files. Automatic editing: overwrite files immediately; delete / push / force Git / opaque commands / MCP still prompt. Full access: fewer confirmations. Plan mode is chosen in the Composer and is not stored here. Applies to sessions started after you change it.",
+    "permissionModeHint": "Confirm before change: ask before editing files. Automatic editing: overwrite files immediately; delete / push / force Git / opaque commands / MCP still prompt. Full access: no permission prompts (MCP, workspace hooks, and commands); deny rules still block. Plan mode is chosen in the Composer and is not stored here. Applies to sessions started after you change it.",
     "permissionTimeout": "High-risk confirmation timeout (seconds)",
     "permissionTimeoutHint": "How long to wait for confirmation. Timeout is treated as deny and the session continues. 0 = no timeout, default 300.",
     "checkpoints": "Git checkpoints",

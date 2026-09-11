@@ -40,6 +40,7 @@
   {"id":"claude-3-5-haiku","aliases":["claude-3-5-haiku-20241022"],"vendor":"anthropic","label":"Claude 3.5 Haiku","context_tokens":200000,"max_output_tokens":8192,"thinking":false,"thinking_levels":[],"input_types":["text","image"]},
   {"id":"claude-3-opus","aliases":["claude-3-opus-20240229"],"vendor":"anthropic","label":"Claude 3 Opus","context_tokens":200000,"max_output_tokens":4096,"thinking":false,"thinking_levels":[],"input_types":["text","image"]},
 
+  {"id":"deepseek-v4.1-flash","aliases":["deepseek-v4.1-flash","deepseek-v4.1-flash:cloud"],"vendor":"deepseek","label":"DeepSeek V4.1 Flash","context_tokens":1000000,"max_output_tokens":384000,"thinking":true,"thinking_levels":["low","high","max"],"input_types":["text","image"]},
   {"id":"deepseek-v4-pro","aliases":["deepseek-v4-pro-max","deepseek-v4-flash:cloud"],"vendor":"deepseek","label":"DeepSeek V4 Pro","context_tokens":1000000,"max_output_tokens":384000,"thinking":true,"thinking_levels":["low","high","max"]},
   {"id":"deepseek-v4-flash","aliases":["deepseek-v4-flash","deepseek-v4-flash:cloud"],"vendor":"deepseek","label":"DeepSeek V4 Flash","context_tokens":1000000,"max_output_tokens":384000,"thinking":true,"thinking_levels":["low","high","max"]},
   {"id":"deepseek-v3.2","aliases":["deepseek-v3.2-exp","DeepSeek-V3.2"],"vendor":"deepseek","label":"DeepSeek V3.2","context_tokens":163840,"max_output_tokens":65536,"thinking":true,"thinking_levels":["low","high","max"]},
