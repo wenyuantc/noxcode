@@ -702,6 +702,9 @@
     "howToCall": "How to call: the parent uses the Agent tool and sets subagent_type to the name. You can also write “use <name> to review/explore”. Built-in types general (can edit) and explore (read-only) stay available.",
     "actions": {
       "new": "New",
+      "aiCreate": "AI create",
+      "generate": "Generate",
+      "back": "Back",
       "edit": "Edit",
       "create": "Create",
       "cancel": "Cancel",
@@ -743,6 +746,11 @@
     },
     "dialogs": {
       "createTitle": "New sub-agent",
+      "aiCreateTitle": "Create sub-agent with AI",
+      "aiCreateDescription": "Describe the agent, pick a channel model and thinking level, then generate the name, tools, and system prompt.",
+      "aiPromptPlaceholder": "For example: a read-only reviewer for Rust code that finds correctness and test gaps",
+      "aiReviewTitle": "Confirm sub-agent",
+      "aiReviewDescription": "A draft was generated from your description. Scope defaults to all workspaces and the model inherits the current session. Edit before creating.",
       "editTitle": "Edit sub-agent",
       "deleteTitle": "Delete sub-agent",
       "deleteConfirm": "Delete sub-agent \"{{name}}\"?"
@@ -750,7 +758,9 @@
     "messages": {
       "created": "Sub-agent created",
       "updated": "Sub-agent updated",
-      "deleted": "Sub-agent deleted"
+      "deleted": "Sub-agent deleted",
+      "generating": "Generating…",
+      "needChannel": "Choose an AI channel and model first"
     },
     "profilesHint": "Markdown profiles are also loaded from <workspace>/.noxcode/agents, .claude/agents and $APPCONFIG/agents: frontmatter name / description / tools / disallowedTools / permissionMode / maxTurns / skills, body = system prompt. They are read-only here."
   },

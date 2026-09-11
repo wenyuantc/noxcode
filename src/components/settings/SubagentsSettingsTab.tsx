@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Bot, Loader2, Pencil, Plus } from "lucide-react";
+import { Bot, Loader2, Pencil, Plus, Sparkles } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
 import { listNativeSubagents } from "@/lib/backend";
@@ -8,6 +8,7 @@ import { Button } from "@/components/ui/button";
 import { useWorkspaceStore } from "@/stores/workspaceStore";
 import { SettingCard } from "./SettingCard";
 import { SettingFeedbackCallout } from "./SettingFeedbackCallout";
+import { SubagentAiCreateDialog } from "./SubagentAiCreateDialog";
 import { SubagentEditorDialog } from "./SubagentEditorDialog";
 
 export function SubagentsSettingsTab() {
@@ -18,6 +19,7 @@ export function SubagentsSettingsTab() {
   const [message, setMessage] = useState<string | null>(null);
   const [editing, setEditing] = useState<NativeSubagent | null>(null);
   const [dialogOpen, setDialogOpen] = useState(false);
+  const [aiDialogOpen, setAiDialogOpen] = useState(false);
 
   const load = async () => {
     setLoading(true);
@@ -56,14 +58,14 @@ export function SubagentsSettingsTab() {
 
   return (
     <div className="space-y-6">
-      {!dialogOpen && message ? (
+      {!dialogOpen && !aiDialogOpen && message ? (
         <SettingFeedbackCallout
           variant="success"
           message={message}
           onClose={() => setMessage(null)}
         />
       ) : null}
-      {!dialogOpen && error ? (
+      {!dialogOpen && !aiDialogOpen && error ? (
         <SettingFeedbackCallout variant="error" message={error} onClose={() => setError(null)} />
       ) : null}
 
@@ -73,10 +75,32 @@ export function SubagentsSettingsTab() {
         description={t("subagents.description")}
         badge={`${items.length + builtinItems.length} 个子代理`}
         headerAction={
-          <Button size="sm" onClick={openCreate} className="h-7 gap-1 text-xs">
-            <Plus className="size-3.5" />
-            {t("subagents.actions.new")}
-          </Button>
+          <div className="flex items-center gap-1.5">
+            <SubagentAiCreateDialog
+              open={aiDialogOpen}
+              onOpenChange={(next) => {
+                setAiDialogOpen(next);
+                if (next) {
+                  setError(null);
+                  setMessage(null);
+                }
+              }}
+              trigger={
+                <Button type="button" size="sm" variant="outline" className="h-7 gap-1 text-xs">
+                  <Sparkles className="size-3.5" />
+                  {t("subagents.actions.aiCreate")}
+                </Button>
+              }
+              onCreated={(created) => {
+                setItems((current) => [created, ...current]);
+                setMessage(t("subagents.messages.created"));
+              }}
+            />
+            <Button size="sm" onClick={openCreate} className="h-7 gap-1 text-xs">
+              <Plus className="size-3.5" />
+              {t("subagents.actions.new")}
+            </Button>
+          </div>
         }
       >
         <div className="space-y-4">

@@ -99,7 +99,7 @@ flowchart LR
 | `resolve_native_tool_permission` / `answer_native_plan_question` | `native::session` |
 | `get/update_native_settings` | `native::settings` |
 | `list_native_global_skills` / `list_native_skills` / `open_native_skills_dir` / `create/delete/import` 技能 | `native::skills` |
-| `list/create/update/delete_native_subagent` | `native::subagents` |
+| `list/create/generate/update/delete_native_subagent` | `native::subagents` |
 | `list/get_native_api_call_log` | `native::api_logs` |
 | `get/update/reset_mcp_servers` / `export_mcp_servers_snippet` | `native::mcp_servers` |
 | `show_main_window` | `tray` |

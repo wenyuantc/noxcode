@@ -1,5 +1,6 @@
 import type {
   CreateNativeSubagentInput,
+  GeneratedNativeSubagent,
   NativeSubagent,
   UpdateNativeSubagentInput,
   Workspace,
@@ -36,6 +37,22 @@ export const EMPTY_SUBAGENT_FORM: SubagentFormState = {
   scope: "all",
   workspaceIds: [],
 };
+
+export function formFromGeneratedSubagent(draft: GeneratedNativeSubagent): SubagentFormState {
+  return {
+    name: draft.name,
+    description: draft.description,
+    modelMode: "inherit",
+    channelId: "",
+    model: "",
+    toolMode: draft.tool_mode === "custom" ? "custom" : "all",
+    tools: draft.tools,
+    systemPrompt: draft.system_prompt,
+    injectAgentsMd: draft.inject_agents_md !== false,
+    scope: "all",
+    workspaceIds: [],
+  };
+}
 
 export function toSubagentForm(item: NativeSubagent, workspaces: Workspace[]): SubagentFormState {
   const liveIds = new Set(workspaces.map((workspace) => workspace.id));

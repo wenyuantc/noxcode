@@ -702,6 +702,9 @@
     "howToCall": "调用方式：父模型使用 Agent 工具，把名称填进 subagent_type。也可在对话里写「用 <名称> 审查/摸底」。内置类型 general（可写）与 explore（只读）始终可用。",
     "actions": {
       "new": "新建",
+      "aiCreate": "AI创建",
+      "generate": "生成",
+      "back": "返回",
       "edit": "编辑",
       "create": "创建",
       "cancel": "取消",
@@ -743,6 +746,11 @@
     },
     "dialogs": {
       "createTitle": "新建子智能体",
+      "aiCreateTitle": "AI 创建子智能体",
+      "aiCreateDescription": "输入一段描述，选择渠道模型和思考等级，自动生成名称、工具和系统提示词。",
+      "aiPromptPlaceholder": "例如：专门审查 Rust 代码的只读审查员，找出正确性和测试缺口",
+      "aiReviewTitle": "确认子智能体",
+      "aiReviewDescription": "已根据描述生成草稿。作用域默认所有工作区，模型默认继承当前会话。可改后再创建。",
       "editTitle": "编辑子智能体",
       "deleteTitle": "删除子智能体",
       "deleteConfirm": "确定删除子智能体「{{name}}」？"
@@ -750,7 +758,9 @@
     "messages": {
       "created": "子智能体已创建",
       "updated": "子智能体已更新",
-      "deleted": "子智能体已删除"
+      "deleted": "子智能体已删除",
+      "generating": "正在生成…",
+      "needChannel": "请先选择 AI 渠道和模型"
     },
     "profilesHint": "也会读取 <工作区>/.noxcode/agents、.claude/agents 与 $APPCONFIG/agents 下的 .md 档案：frontmatter 里 name / description / tools / disallowedTools / permissionMode / maxTurns / skills，正文即系统提示；这里只展示不可编辑。"
   },

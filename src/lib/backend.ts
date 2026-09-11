@@ -18,6 +18,8 @@ import type {
   CreateAiChannelInput,
   CreateNativeAutomationInput,
   CreateNativeSubagentInput,
+  GenerateNativeSubagentInput,
+  GeneratedNativeSubagent,
   CreateSshConfigInput,
   CreateWorkspaceInput,
   GitBranch,
@@ -935,6 +937,12 @@ export function listNativeSubagents(workspaceId?: string | null): Promise<Native
 
 export function createNativeSubagent(payload: CreateNativeSubagentInput): Promise<NativeSubagent> {
   return invoke("create_native_subagent", { payload });
+}
+
+export function generateNativeSubagent(
+  payload: GenerateNativeSubagentInput,
+): Promise<GeneratedNativeSubagent> {
+  return invoke("generate_native_subagent", { payload });
 }
 
 export function updateNativeSubagent(

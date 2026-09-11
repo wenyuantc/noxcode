@@ -180,6 +180,7 @@ pub fn run() {
             native::skills::import_external_skills,
             native::subagents::list_native_subagents,
             native::subagents::create_native_subagent,
+            native::subagents::generate_native_subagent,
             native::subagents::update_native_subagent,
             native::subagents::delete_native_subagent,
             native::api_logs::list_native_api_call_logs,

@@ -1311,6 +1311,26 @@ export interface UpdateNativeSubagentInput {
   disallowed_tools?: string[];
 }
 
+export interface GenerateNativeSubagentInput {
+  description: string;
+  channel_id: string;
+  model: string;
+  reasoning_effort?: string | null;
+  workspace_id?: string | null;
+}
+
+export interface GeneratedNativeSubagent {
+  name: string;
+  description: string;
+  model_mode: string;
+  tool_mode: string;
+  tools: string[];
+  system_prompt: string;
+  inject_agents_md: boolean;
+  scope: string;
+  workspace_ids: string[];
+}
+
 export interface McpEnvVar {
   key: string;
   value: string;

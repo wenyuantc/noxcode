@@ -161,7 +161,7 @@ P4 把进程内编程 Agent 接到渠道 + 工作区外壳。数据流仍是 `Re
 
 工作区 / 历史：`list/create/update/delete_workspace`、`check_workspace_health`、`list_agent_sessions`、`get_agent_session_log_lines`、`prepare_agent_session_resume`、`set_agent_session_pinned`、`delete_agent_session`、`list_activity_logs`。
 
-设置：`get/update_native_settings`、`list_native_global_skills`、`list_native_skills`、`open_native_skills_dir`、`create/delete/copy/import/scan/set_enabled` 技能命令、`list/create/update/delete_native_subagent`、`get/update/reset_mcp_servers`、`export_mcp_servers_snippet`、`list/get_native_api_call_log`。
+设置：`get/update_native_settings`、`list_native_global_skills`、`list_native_skills`、`open_native_skills_dir`、`create/delete/copy/import/scan/set_enabled` 技能命令、`list/create/generate/update/delete_native_subagent`、`get/update/reset_mcp_servers`、`export_mcp_servers_snippet`、`list/get_native_api_call_log`。
 
 删除工作区前会 `clear_workspace_checkpoints`。删除会话前会 `delete_checkpoints_for_session`。运行中的渠道 / 工作区 / 会话拒绝删除。
 

@@ -12,7 +12,9 @@ use crate::app::network_settings::load_network_settings;
 use crate::app::shared::{new_id, sqlite_pool};
 use crate::native::api_logs::sqlite_call_log_sink;
 use crate::native::channels::{fetch_channel_record, require_channel_api_key};
-use crate::native::model::call_log::{CallLogContext, CALL_KIND_SUBAGENT};
+use crate::native::model::call_log::{
+    CallLogContext, CALL_KIND_SUBAGENT, OPERATION_SUBAGENT_GENERATE,
+};
 use crate::native::model::{ModelClient, ModelClientConfig, ResponsesContinuationMode};
 use crate::native::model_catalog::{apply_catalog_defaults, fill_from_catalog};
 use crate::native::protocol::record_to_channel;
@@ -334,6 +336,37 @@ pub struct UpdateNativeSubagent {
     pub disallowed_tools: Option<Vec<String>>,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+pub struct GenerateNativeSubagentInput {
+    pub description: String,
+    pub channel_id: String,
+    pub model: String,
+    pub reasoning_effort: Option<String>,
+    pub workspace_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct GeneratedNativeSubagent {
+    pub name: String,
+    pub description: String,
+    pub model_mode: String,
+    pub tool_mode: String,
+    pub tools: Vec<String>,
+    pub system_prompt: String,
+    pub inject_agents_md: bool,
+    pub scope: String,
+    pub workspace_ids: Vec<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct GeneratedSubagentRaw {
+    name: Option<String>,
+    description: Option<String>,
+    tool_mode: Option<String>,
+    tools: Option<Vec<String>>,
+    system_prompt: Option<String>,
+}
+
 fn deserialize_explicit_nullable<'de, D, T>(deserializer: D) -> Result<Option<Option<T>>, D::Error>
 where
     D: serde::Deserializer<'de>,
@@ -550,6 +583,226 @@ fn ensure_unique_name(
         return Err(format!("子智能体名称「{name}」已存在"));
     }
     Ok(())
+}
+
+fn require_generate_description(value: &str) -> Result<String, String> {
+    let description = value.trim();
+    if description.is_empty() {
+        return Err("描述不能为空".to_string());
+    }
+    Ok(description.to_string())
+}
+
+fn truncate_chars(value: &str, max: usize) -> String {
+    if value.chars().count() <= max {
+        return value.to_string();
+    }
+    value.chars().take(max).collect()
+}
+
+fn is_reserved_name(name: &str) -> bool {
+    RESERVED_NAMES
+        .iter()
+        .any(|item| item.eq_ignore_ascii_case(name))
+}
+
+fn slugify_generated_name(value: &str) -> String {
+    let mut out = String::new();
+    let mut last_sep = false;
+    for ch in value.trim().chars() {
+        let ok = ch.is_ascii_alphanumeric()
+            || ch == '_'
+            || ch == '-'
+            || ('\u{4e00}'..='\u{9fff}').contains(&ch);
+        if ok {
+            out.push(ch);
+            last_sep = ch == '-' || ch == '_';
+        } else if !out.is_empty() && !last_sep {
+            out.push('-');
+            last_sep = true;
+        }
+    }
+    let trimmed = out.trim_matches(|ch| ch == '-' || ch == '_').to_string();
+    truncate_chars(&trimmed, MAX_SUBAGENT_NAME_CHARS)
+}
+
+fn uniquify_generated_name(raw: &str, existing: &[NativeSubagent]) -> Result<String, String> {
+    let mut base = slugify_generated_name(raw);
+    if base.is_empty() {
+        base = "subagent".to_string();
+    }
+    if is_reserved_name(&base) {
+        base = truncate_chars(&format!("{base}-custom"), MAX_SUBAGENT_NAME_CHARS);
+    }
+    let mut candidate = base.clone();
+    let mut n = 2u32;
+    loop {
+        if normalize_subagent_name(&candidate).is_ok()
+            && ensure_unique_name(existing, &candidate, None).is_ok()
+        {
+            return Ok(candidate);
+        }
+        let suffix = format!("-{n}");
+        let max_base = MAX_SUBAGENT_NAME_CHARS.saturating_sub(suffix.chars().count());
+        candidate = format!("{}{suffix}", truncate_chars(&base, max_base));
+        n += 1;
+        if n > 99 {
+            return Err("无法生成可用的子智能体名称".to_string());
+        }
+    }
+}
+
+fn strip_code_fences(raw: &str) -> String {
+    let text = raw.trim();
+    if !text.starts_with("```") {
+        return text.to_string();
+    }
+    let mut lines = text.lines();
+    let _ = lines.next();
+    let mut body: Vec<&str> = lines.collect();
+    if body
+        .last()
+        .is_some_and(|line| line.trim().starts_with("```"))
+    {
+        body.pop();
+    }
+    body.join("\n").trim().to_string()
+}
+
+fn find_matching_brace(text: &str) -> Option<usize> {
+    let mut depth = 0i32;
+    let mut in_string = false;
+    let mut escape = false;
+    for (idx, ch) in text.char_indices() {
+        if in_string {
+            if escape {
+                escape = false;
+            } else if ch == '\\' {
+                escape = true;
+            } else if ch == '"' {
+                in_string = false;
+            }
+            continue;
+        }
+        match ch {
+            '"' => in_string = true,
+            '{' => depth += 1,
+            '}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(idx);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+fn extract_json_object(raw: &str) -> Result<serde_json::Value, String> {
+    let text = strip_code_fences(raw);
+    if let Ok(value) = serde_json::from_str::<serde_json::Value>(&text) {
+        if value.is_object() {
+            return Ok(value);
+        }
+    }
+    let start = text
+        .find('{')
+        .ok_or_else(|| "模型未返回 JSON 对象".to_string())?;
+    let slice = &text[start..];
+    let end = find_matching_brace(slice).ok_or_else(|| "模型返回的 JSON 不完整".to_string())?;
+    serde_json::from_str(&slice[..=end]).map_err(|_| "模型返回的 JSON 无法解析".to_string())
+}
+
+fn filter_generated_tools(tools: &[String]) -> Vec<String> {
+    let mut out = Vec::new();
+    for tool in tools {
+        let name = tool.trim();
+        if name.is_empty() || !CUSTOM_TOOL_NAMES.contains(&name) {
+            continue;
+        }
+        if !out.iter().any(|item| item == name) {
+            out.push(name.to_string());
+        }
+    }
+    out
+}
+
+fn resolve_generated_tools(tool_mode: Option<&str>, tools: &[String]) -> (String, Vec<String>) {
+    let filtered = filter_generated_tools(tools);
+    let wants_all = matches!(
+        tool_mode.map(str::trim).filter(|item| !item.is_empty()),
+        None | Some(TOOL_MODE_ALL)
+    );
+    if wants_all || filtered.is_empty() || filtered.len() >= CUSTOM_TOOL_NAMES.len() {
+        (TOOL_MODE_ALL.to_string(), Vec::new())
+    } else {
+        (TOOL_MODE_CUSTOM.to_string(), filtered)
+    }
+}
+
+fn generate_subagent_prompt(description: &str) -> String {
+    format!(
+        "根据用户描述生成一个 noxcode 自定义子智能体档案草稿。\n\
+只输出一个 JSON 对象，不要解释，不要代码围栏。\n\
+字段：\n\
+- name: 短标识，只能包含字母、数字、下划线、连字符或中文；不能是 general、explore、general-purpose\n\
+- description: 给父模型看的委派说明，一两句，与用户描述同一语言\n\
+- tool_mode: \"all\" 或 \"custom\"\n\
+- tools: custom 时从白名单选取；all 时用空数组\n\
+- system_prompt: 子智能体系统提示，写清角色、何时使用、约束和输出格式\n\n\
+可用工具白名单：{}\n\
+只读审查或摸底用 custom 子集（通常 Read、Grep、Glob、WebSearch，不要 Write、Edit、Bash、ApplyPatch）。\n\
+需要改文件、打补丁或执行命令时用 all。\n\n\
+用户描述：\n{description}",
+        CUSTOM_TOOL_NAMES.join("、")
+    )
+}
+
+pub(crate) fn parse_generated_subagent(
+    raw: &str,
+    user_description: &str,
+    existing: &[NativeSubagent],
+) -> Result<GeneratedNativeSubagent, String> {
+    let parsed: GeneratedSubagentRaw = serde_json::from_value(extract_json_object(raw)?)
+        .map_err(|_| "模型返回的 JSON 字段无效".to_string())?;
+    let name_source = parsed
+        .name
+        .as_deref()
+        .map(str::trim)
+        .filter(|item| !item.is_empty())
+        .unwrap_or(user_description);
+    let name = uniquify_generated_name(name_source, existing)?;
+    let description = normalize_description(
+        parsed
+            .description
+            .as_deref()
+            .map(str::trim)
+            .filter(|item| !item.is_empty())
+            .unwrap_or(user_description),
+    )?;
+    let system_prompt = parsed
+        .system_prompt
+        .as_deref()
+        .map(str::trim)
+        .filter(|item| !item.is_empty())
+        .ok_or_else(|| "模型未返回系统提示词".to_string())?
+        .to_string();
+    let (tool_mode, tools) = resolve_generated_tools(
+        parsed.tool_mode.as_deref(),
+        parsed.tools.as_deref().unwrap_or(&[]),
+    );
+    Ok(GeneratedNativeSubagent {
+        name,
+        description: cap_description(&description),
+        model_mode: MODEL_MODE_INHERIT.to_string(),
+        tool_mode,
+        tools,
+        system_prompt,
+        inject_agents_md: true,
+        scope: SCOPE_ALL.to_string(),
+        workspace_ids: Vec::new(),
+    })
 }
 
 fn normalize_record(mut item: NativeSubagent) -> Result<NativeSubagent, String> {
@@ -875,6 +1128,46 @@ pub async fn create_native_subagent<R: Runtime>(
 }
 
 #[tauri::command]
+pub async fn generate_native_subagent(
+    app: AppHandle,
+    payload: GenerateNativeSubagentInput,
+) -> Result<GeneratedNativeSubagent, String> {
+    let description = require_generate_description(&payload.description)?;
+    let channel_id = payload.channel_id.trim();
+    let model = payload.model.trim();
+    if channel_id.is_empty() || model.is_empty() {
+        return Err("请先选择 AI 渠道和模型".to_string());
+    }
+    validate_channel_model(&app, channel_id, model).await?;
+    let existing = load_native_subagents(&app)?;
+    let workspace_id = payload
+        .workspace_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|item| !item.is_empty());
+    let reasoning_effort = payload
+        .reasoning_effort
+        .as_deref()
+        .map(str::trim)
+        .filter(|item| !item.is_empty());
+    let result = crate::native::session::run_native_one_shot(
+        &app,
+        crate::native::session::NativeOneShotArgs {
+            channel_id,
+            workspace_id,
+            session_id: None,
+            prompt: generate_subagent_prompt(&description),
+            image_paths: None,
+            model: Some(model),
+            reasoning_effort,
+            operation: Some(OPERATION_SUBAGENT_GENERATE),
+        },
+    )
+    .await?;
+    parse_generated_subagent(&result.text, &description, &existing)
+}
+
+#[tauri::command]
 pub async fn update_native_subagent<R: Runtime>(
     app: AppHandle<R>,
     id: String,
@@ -1166,5 +1459,116 @@ mod tests {
         let catalog = catalog_for_session(&items, Some("other"), Some(&scoped));
         assert_eq!(catalog.len(), 2);
         assert!(catalog.iter().any(|item| item.id == "p"));
+    }
+
+    #[test]
+    fn generate_description_rejects_empty() {
+        assert!(require_generate_description("   ").is_err());
+        assert_eq!(
+            require_generate_description(" 审查 Rust ").unwrap(),
+            "审查 Rust"
+        );
+    }
+
+    #[test]
+    fn parse_generated_json_strips_fences_and_filters_tools() {
+        let raw = "```json\n{\n  \"name\": \"Code Reviewer\",\n  \"description\": \"审查 diff\",\n  \"tool_mode\": \"custom\",\n  \"tools\": [\"Read\", \"Grep\", \"Agent\", \"Glob\"],\n  \"system_prompt\": \"你是严格的审查员。\"\n}\n```";
+        let draft = parse_generated_subagent(raw, "审查代码", &[]).unwrap();
+        assert_eq!(draft.name, "Code-Reviewer");
+        assert_eq!(draft.description, "审查 diff");
+        assert_eq!(draft.model_mode, MODEL_MODE_INHERIT);
+        assert_eq!(draft.scope, SCOPE_ALL);
+        assert!(draft.inject_agents_md);
+        assert!(draft.workspace_ids.is_empty());
+        assert_eq!(draft.tool_mode, TOOL_MODE_CUSTOM);
+        assert_eq!(draft.tools, vec!["Read", "Grep", "Glob"]);
+        assert_eq!(draft.system_prompt, "你是严格的审查员。");
+    }
+
+    #[test]
+    fn parse_generated_rewrites_reserved_name_and_uniquifies() {
+        let raw = r#"{
+            "name": "general",
+            "description": "通用帮手",
+            "tool_mode": "all",
+            "tools": [],
+            "system_prompt": "按需处理任务。"
+        }"#;
+        let draft = parse_generated_subagent(raw, "通用帮手", &[]).unwrap();
+        assert_eq!(draft.name, "general-custom");
+        assert_eq!(draft.tool_mode, TOOL_MODE_ALL);
+        assert!(draft.tools.is_empty());
+
+        let existing = vec![sample()];
+        let collision = parse_generated_subagent(
+            r#"{
+                "name": "code-reviewer",
+                "description": "审查",
+                "tool_mode": "custom",
+                "tools": ["Read"],
+                "system_prompt": "审。"
+            }"#,
+            "审查",
+            &existing,
+        )
+        .unwrap();
+        assert_eq!(collision.name, "code-reviewer-2");
+    }
+
+    #[test]
+    fn parse_generated_empty_or_full_tools_become_all() {
+        let empty_tools = parse_generated_subagent(
+            r#"{
+                "name": "writer",
+                "description": "改代码",
+                "tool_mode": "custom",
+                "tools": ["Agent"],
+                "system_prompt": "写代码。"
+            }"#,
+            "改代码",
+            &[],
+        )
+        .unwrap();
+        assert_eq!(empty_tools.tool_mode, TOOL_MODE_ALL);
+        assert!(empty_tools.tools.is_empty());
+
+        let all_named = CUSTOM_TOOL_NAMES
+            .iter()
+            .map(|item| format!("\"{item}\""))
+            .collect::<Vec<_>>()
+            .join(",");
+        let full = parse_generated_subagent(
+            &format!(
+                r#"{{
+                    "name": "full",
+                    "description": "全能",
+                    "tool_mode": "custom",
+                    "tools": [{all_named}],
+                    "system_prompt": "全能。"
+                }}"#
+            ),
+            "全能",
+            &[],
+        )
+        .unwrap();
+        assert_eq!(full.tool_mode, TOOL_MODE_ALL);
+        assert!(full.tools.is_empty());
+    }
+
+    #[test]
+    fn parse_generated_requires_system_prompt() {
+        let err = parse_generated_subagent(
+            r#"{
+                "name": "empty-prompt",
+                "description": "缺提示",
+                "tool_mode": "all",
+                "tools": [],
+                "system_prompt": "  "
+            }"#,
+            "缺提示",
+            &[],
+        )
+        .expect_err("prompt");
+        assert!(err.contains("系统提示词"));
     }
 }
