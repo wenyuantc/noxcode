@@ -12,11 +12,13 @@ import {
   updateWorkspace,
 } from "@/lib/backend";
 import { mergeSessions } from "@/lib/sessionActions";
+import { applyWorkspaceOrder, moveWorkspaceTo } from "@/lib/workspaceOrder";
 import type { AgentSession, CreateWorkspaceInput, Workspace, WorkspaceHealth } from "@/lib/types";
 import { useSessionStore } from "@/stores/sessionStore";
 
 const ACTIVE_KEY = "noxcode:active-workspace";
 const EXPANDED_KEY = "noxcode:workspace-expanded";
+const ORDER_KEY = "noxcode:workspace-order";
 const ARCHIVE_PAGE_SIZE = 50;
 let sessionRevision = 0;
 let sessionRequest = 0;
@@ -41,6 +43,7 @@ interface WorkspaceState {
   create: (payload: CreateWorkspaceInput) => Promise<Workspace>;
   rename: (id: string, name: string) => Promise<void>;
   remove: (id: string) => Promise<void>;
+  moveWorkspace: (id: string, insertionIndex: number) => void;
   toggleExpand: (id: string) => void;
   showMore: (id: string) => void;
   refreshSessions: () => Promise<void>;
@@ -70,6 +73,24 @@ function readExpanded(): Record<string, boolean> {
 function persistExpanded(expanded: Record<string, boolean>) {
   if (typeof window === "undefined") return;
   window.localStorage.setItem(EXPANDED_KEY, JSON.stringify(expanded));
+}
+
+function readWorkspaceOrder(): string[] {
+  if (typeof window === "undefined") return [];
+  try {
+    const raw = window.localStorage.getItem(ORDER_KEY);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw) as unknown;
+    if (!Array.isArray(parsed)) return [];
+    return parsed.filter((id): id is string => typeof id === "string" && id.length > 0);
+  } catch {
+    return [];
+  }
+}
+
+function persistWorkspaceOrder(ids: string[]) {
+  if (typeof window === "undefined") return;
+  window.localStorage.setItem(ORDER_KEY, JSON.stringify(ids));
 }
 
 function mergeExpanded(
@@ -125,7 +146,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
   loading: false,
   load: async () => {
     set({ loading: true });
-    const workspaces = await listWorkspaces();
+    const workspaces = applyWorkspaceOrder(await listWorkspaces(), readWorkspaceOrder());
     const stored = get().activeWorkspaceId;
     const active =
       stored && workspaces.some((item) => item.id === stored)
@@ -135,6 +156,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
     else localStorage.removeItem(ACTIVE_KEY);
     const expanded = mergeExpanded(workspaces, { ...readExpanded(), ...get().expanded });
     persistExpanded(expanded);
+    persistWorkspaceOrder(workspaces.map((item) => item.id));
     set({
       workspaces,
       sessions: get().sessions.filter(
@@ -173,6 +195,12 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
   remove: async (id) => {
     await deleteWorkspace(id);
     await get().load();
+  },
+  moveWorkspace: (id, insertionIndex) => {
+    const next = moveWorkspaceTo(get().workspaces, id, insertionIndex);
+    if (next === get().workspaces) return;
+    persistWorkspaceOrder(next.map((item) => item.id));
+    set({ workspaces: next });
   },
   toggleExpand: (id) => {
     const next = { ...get().expanded, [id]: !(get().expanded[id] !== false) };

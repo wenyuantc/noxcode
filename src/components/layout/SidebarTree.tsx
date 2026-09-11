@@ -1,6 +1,8 @@
 import { confirm, message } from "@tauri-apps/plugin-dialog";
 import {
   Archive,
+  ArrowDown,
+  ArrowUp,
   ChevronDown,
   Folder,
   MoreHorizontal,
@@ -10,7 +12,7 @@ import {
   Sparkle,
   Trash2,
 } from "lucide-react";
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 
 import { Button } from "@/components/ui/button";
@@ -25,11 +27,14 @@ import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
+  DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { Input } from "@/components/ui/input";
 import { SessionMenu } from "@/components/session/SessionMenu";
+import { useWorkspaceDrag } from "@/hooks/useWorkspaceDrag";
 import { displaySessionTitle } from "@/lib/sessionLines";
+import { workspaceMoveTarget } from "@/lib/workspaceOrder";
 import { formatRelativeTime } from "@/lib/utils";
 import { getCurrentAppLocale, getDateLocale } from "@/lib/i18n/locale";
 import { useSessionStore } from "@/stores/sessionStore";
@@ -128,11 +133,17 @@ export function SidebarTree() {
   const setActive = useWorkspaceStore((state) => state.setActive);
   const rename = useWorkspaceStore((state) => state.rename);
   const remove = useWorkspaceStore((state) => state.remove);
+  const moveWorkspace = useWorkspaceStore((state) => state.moveWorkspace);
   const activeWorkspaceId = useWorkspaceStore((state) => state.activeWorkspaceId);
   const [renameTarget, setRenameTarget] = useState<Workspace | null>(null);
   const [renameName, setRenameName] = useState("");
   const [renaming, setRenaming] = useState(false);
   const selectedSessionId = useSessionStore((state) => state.selectedSessionId);
+  const listRef = useRef<HTMLDivElement>(null);
+  const { draggingId, indicatorY, rowProps } = useWorkspaceDrag({
+    containerRef: listRef,
+    onMove: moveWorkspace,
+  });
   const locale = getDateLocale(getCurrentAppLocale());
   const pinnedSessions = sessions
     .filter((session) => session.pinned !== 0 && !session.archived)
@@ -141,6 +152,13 @@ export function SidebarTree() {
   const openRename = (workspace: Workspace) => {
     setRenameTarget(workspace);
     setRenameName(workspace.name);
+  };
+
+  // Keyboard-reachable equivalent of dragging a row in the workspace list.
+  const moveWorkspaceBy = (id: string, direction: "up" | "down") => {
+    const target = workspaceMoveTarget(workspaces, id, direction);
+    if (target === null) return;
+    moveWorkspace(id, target);
   };
 
   const handleRename = async () => {
@@ -177,7 +195,7 @@ export function SidebarTree() {
 
   return (
     <>
-      <div className="min-h-0 flex-1 overflow-y-auto px-2 pb-2">
+      <div ref={listRef} className="relative min-h-0 flex-1 overflow-y-auto px-2 pb-2">
         {pinnedSessions.length > 0 ? (
           <div className="mb-2.5">
             <div className="flex items-center gap-1.5 px-2.5 py-1 text-[11px] font-semibold tracking-wider text-muted-foreground uppercase">
@@ -199,7 +217,7 @@ export function SidebarTree() {
             </div>
           </div>
         ) : null}
-        {workspaces.map((workspace) => {
+        {workspaces.map((workspace, workspaceIndex) => {
           const items = sessions
             .filter(
               (session) =>
@@ -209,11 +227,16 @@ export function SidebarTree() {
           const limit = shownCount[workspace.id] ?? 5;
           const visible = items.slice(0, limit);
           const open = expanded[workspace.id] !== false;
+          const canMoveUp = workspaceIndex > 0;
+          const canMoveDown = workspaceIndex < workspaces.length - 1;
+          const dragging = draggingId === workspace.id;
           return (
-            <div key={workspace.id} className="mb-2">
+            <div key={workspace.id} data-workspace-block className="mb-2">
               <div
+                {...rowProps(workspace.id)}
                 className={cn(
-                  "group flex items-center justify-between rounded-lg px-2 py-1 transition-colors",
+                  "group flex items-center justify-between rounded-lg px-2 py-1 select-none transition-colors",
+                  dragging ? "cursor-grabbing opacity-60" : "cursor-grab",
                   activeWorkspaceId === workspace.id
                     ? "bg-sidebar-accent/50 text-sidebar-foreground"
                     : "text-sidebar-foreground/90 hover:bg-sidebar-accent/40",
@@ -241,7 +264,10 @@ export function SidebarTree() {
                     </span>
                   ) : null}
                 </button>
-                <div className="flex items-center gap-0.5 opacity-0 transition-opacity group-hover:opacity-100">
+                <div
+                  data-no-drag
+                  className="flex cursor-default items-center gap-0.5 opacity-0 transition-opacity group-hover:opacity-100"
+                >
                   <button
                     type="button"
                     className="rounded p-1 text-muted-foreground transition-colors hover:bg-sidebar-accent hover:text-foreground"
@@ -265,6 +291,21 @@ export function SidebarTree() {
                       <MoreHorizontal className="size-3.5" />
                     </DropdownMenuTrigger>
                     <DropdownMenuContent align="end">
+                      <DropdownMenuItem
+                        disabled={!canMoveUp}
+                        onClick={() => moveWorkspaceBy(workspace.id, "up")}
+                      >
+                        <ArrowUp />
+                        {t("moveWorkspaceUp")}
+                      </DropdownMenuItem>
+                      <DropdownMenuItem
+                        disabled={!canMoveDown}
+                        onClick={() => moveWorkspaceBy(workspace.id, "down")}
+                      >
+                        <ArrowDown />
+                        {t("moveWorkspaceDown")}
+                      </DropdownMenuItem>
+                      <DropdownMenuSeparator />
                       <DropdownMenuItem onClick={() => openRename(workspace)}>
                         <Pencil />
                         {t("renameWorkspace")}
@@ -306,6 +347,13 @@ export function SidebarTree() {
             </div>
           );
         })}
+        {indicatorY !== null ? (
+          <div
+            aria-hidden
+            className="pointer-events-none absolute inset-x-2 h-0.5 rounded-full bg-primary"
+            style={{ top: indicatorY }}
+          />
+        ) : null}
         <div className="mt-3 border-t border-sidebar-border/60 pt-2">
           <button
             type="button"

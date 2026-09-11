@@ -14,6 +14,8 @@
   "workspaceActions": "Workspace actions",
   "renameWorkspace": "Rename workspace",
   "deleteWorkspace": "Delete workspace",
+  "moveWorkspaceUp": "Move up",
+  "moveWorkspaceDown": "Move down",
   "deleteWorkspaceTitle": "Delete workspace",
   "deleteWorkspaceConfirm": "Delete “{{name}}”? Its sessions will also be deleted. This cannot be undone.",
   "pinnedSection": "Pinned",

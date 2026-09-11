@@ -25,6 +25,7 @@ import { useSessionStore } from "./sessionStore";
 import { useWorkspaceStore } from "./workspaceStore";
 
 const EXPANDED_KEY = "noxcode:workspace-expanded";
+const ORDER_KEY = "noxcode:workspace-order";
 let storageData: Map<string, string>;
 
 function workspace(id: string): Workspace {
@@ -270,5 +271,92 @@ describe("workspace expand persistence", () => {
     await useWorkspaceStore.getState().load();
     expect(useWorkspaceStore.getState().expanded).toEqual({ "ws-a": false });
     expect(JSON.parse(storageData.get(EXPANDED_KEY) ?? "{}")).toEqual({ "ws-a": false });
+  });
+});
+
+describe("workspace order", () => {
+  it("drops a workspace at the given slot and persists the new order", () => {
+    useWorkspaceStore.setState({ workspaces: [workspace("ws-a"), workspace("ws-b")] });
+    useWorkspaceStore.getState().moveWorkspace("ws-b", 0);
+    expect(useWorkspaceStore.getState().workspaces.map((item) => item.id)).toEqual([
+      "ws-b",
+      "ws-a",
+    ]);
+    expect(JSON.parse(storageData.get(ORDER_KEY) ?? "[]")).toEqual(["ws-b", "ws-a"]);
+  });
+
+  it("moves a workspace across several rows in one drop", () => {
+    useWorkspaceStore.setState({
+      workspaces: [workspace("ws-a"), workspace("ws-b"), workspace("ws-c")],
+    });
+    useWorkspaceStore.getState().moveWorkspace("ws-a", 3);
+    expect(useWorkspaceStore.getState().workspaces.map((item) => item.id)).toEqual([
+      "ws-b",
+      "ws-c",
+      "ws-a",
+    ]);
+    expect(JSON.parse(storageData.get(ORDER_KEY) ?? "[]")).toEqual(["ws-b", "ws-c", "ws-a"]);
+  });
+
+  it("ignores a no-op drop and keeps storage untouched", () => {
+    useWorkspaceStore.setState({
+      workspaces: [workspace("ws-a"), workspace("ws-b"), workspace("ws-c")],
+    });
+    useWorkspaceStore.getState().moveWorkspace("ws-b", 2);
+    expect(useWorkspaceStore.getState().workspaces.map((item) => item.id)).toEqual([
+      "ws-a",
+      "ws-b",
+      "ws-c",
+    ]);
+    expect(storageData.get(ORDER_KEY)).toBeUndefined();
+  });
+
+  it("restores the persisted order on load and appends new workspaces", async () => {
+    storageData.set(ORDER_KEY, JSON.stringify(["ws-b", "gone", "ws-a"]));
+    vi.mocked(listWorkspaces).mockResolvedValue([
+      workspace("ws-a"),
+      workspace("ws-b"),
+      workspace("ws-new"),
+    ]);
+    await useWorkspaceStore.getState().load();
+    expect(useWorkspaceStore.getState().workspaces.map((item) => item.id)).toEqual([
+      "ws-b",
+      "ws-a",
+      "ws-new",
+    ]);
+    expect(JSON.parse(storageData.get(ORDER_KEY) ?? "[]")).toEqual(["ws-b", "ws-a", "ws-new"]);
+  });
+
+  it("falls back to the backend order when storage holds invalid json", async () => {
+    storageData.set(ORDER_KEY, "{not json");
+    vi.mocked(listWorkspaces).mockResolvedValue([workspace("ws-a"), workspace("ws-b")]);
+    await useWorkspaceStore.getState().load();
+    expect(useWorkspaceStore.getState().workspaces.map((item) => item.id)).toEqual([
+      "ws-a",
+      "ws-b",
+    ]);
+    expect(JSON.parse(storageData.get(ORDER_KEY) ?? "[]")).toEqual(["ws-a", "ws-b"]);
+  });
+
+  it("keeps the moved order after a simulated app restart", async () => {
+    useWorkspaceStore.setState({
+      workspaces: [workspace("ws-a"), workspace("ws-b"), workspace("ws-c")],
+    });
+    useWorkspaceStore.getState().moveWorkspace("ws-c", 0);
+
+    // The backend still returns its own updated_at DESC order on restart.
+    useWorkspaceStore.setState(useWorkspaceStore.getInitialState(), true);
+    vi.mocked(listWorkspaces).mockResolvedValue([
+      workspace("ws-a"),
+      workspace("ws-b"),
+      workspace("ws-c"),
+    ]);
+    await useWorkspaceStore.getState().load();
+
+    expect(useWorkspaceStore.getState().workspaces.map((item) => item.id)).toEqual([
+      "ws-c",
+      "ws-a",
+      "ws-b",
+    ]);
   });
 });

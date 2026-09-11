@@ -47,7 +47,7 @@ src/components/git/      GitPanel · DiffView · CheckpointTimeline
 | Store | 持久化键 | 职责 |
 | --- | --- | --- |
 | `uiStore` | `noxcode:sidebar-width`（200–480）、`noxcode:sidebar-collapsed`、`noxcode:composer-plan-mode`、`noxcode:composer-thinking-level`、`theme` / `theme-mode`、`noxcode:ui-font-size`、`noxcode:code-theme-light` / `noxcode:code-theme-dark`、`noxcode:code-line-numbers`、`noxcode:code-soft-wrap`、`noxcode:code-font-size` | 侧栏、命令面板、Git 抽屉、Composer 草稿、计划模式、思考等级、主题、界面字号、代码外观 |
-| `workspaceStore` | `noxcode:active-workspace`、`noxcode:workspace-expanded` | 工作区列表、会话树、健康检查、侧栏工作区展开状态 |
+| `workspaceStore` | `noxcode:active-workspace`、`noxcode:workspace-expanded`、`noxcode:workspace-order` | 工作区列表、会话树、健康检查、侧栏工作区展开状态与项目顺序 |
 | `channelStore` | `noxcode:active-model` | 渠道列表、新会话默认渠道/模型 |
 | `sessionStore` | — | live 会话、事件行、turn-state、按会话计划模式、权限/提问 |
 | `settingsStore` | — | native / network / AI 功能 / 快捷提示 |
@@ -79,7 +79,7 @@ Composer / 编辑重发 / 重试走 `submitSessionPrompt`：有选中会话则 `
 
 工作区选择器五条路径：搜索切换、打开文件夹（`plugin-dialog` `open({directory:true})` 后 `createWorkspace` local）、远程连接（选或建 SSH 配置 + 远端路径）、不在项目中工作（`ensureScratchWorkspace` → `$APPCONFIG/scratch` + 「临时工作区」）。打开历史会话时，若该会话有 `workspace_id` 且与当前不同，则把 `activeWorkspaceId` 同步到该工作区。
 
-侧栏工作区行悬停显示操作菜单，可重命名或删除。删除先弹不可撤销确认；后端发现该工作区仍有运行中的会话时拒绝删除并把错误展示给用户。
+侧栏工作区行可直接按住拖动排序：按下后纵向移动超过 4px 才进入拖拽（普通点击仍是展开 / 激活），拖拽用 `setPointerCapture`，落点按行的上下半区解析成插入位置，主色横线预览落点，松手即写入顺序；`pointercancel` / `lostpointercapture` / 窗口失焦都会取消，拖拽结束后的那次 click 会被吞掉以免误触发展开。拖拽逻辑在 `src/hooks/useWorkspaceDrag.ts`，落点与几何计算在 `src/lib/workspaceOrder.ts`（纯函数）。不使用 HTML5 drag：主窗口 `dragDropEnabled` 默认为 true，`dragover` / `drop` 会被 Tauri 原生拖放接管。悬停操作菜单里另有键盘可达的「上移」/「下移」（首项禁用上移、末项禁用下移）。顺序写入 `localStorage` 的 `noxcode:workspace-order`，`load()` 时按该顺序重排，已删除的 ID 丢弃、新工作区追加到末尾。删除先弹不可撤销确认；后端发现该工作区仍有运行中的会话时拒绝删除并把错误展示给用户。
 
 分支选择器：`listGitBranches(workspaceId, sessionId)` 搜索切换已有分支（`checkoutGitBranch` / `git switch`），以及「创建并检出」。隔离会话显示该 worktree 的当前分支，不再固定主工作区的 `dev`。点外或 Escape 关闭菜单。合并工作树成功后 `gitStore.revision` 递增，选择器与 Git 侧栏一起刷新。
 
