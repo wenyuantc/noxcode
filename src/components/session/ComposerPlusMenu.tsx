@@ -1,4 +1,4 @@
-import { AtSign, CircleSlash, DollarSign, Paperclip, Plus } from "lucide-react";
+import { Bot, FileText, Package, Paperclip, Plus, Zap } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
 import {
@@ -28,20 +28,24 @@ export function ComposerPlusMenu({ onAddAttachment, onInsertTrigger }: ComposerP
       </DropdownMenuTrigger>
       <DropdownMenuContent align="start" side="top" sideOffset={6} className="min-w-56">
         <DropdownMenuItem onClick={onAddAttachment}>
-          <Paperclip className="size-3.5" />
+          <Paperclip className="size-3.5 text-muted-foreground" />
           {t("addAttachment")}
         </DropdownMenuItem>
         <DropdownMenuItem onClick={() => onInsertTrigger("@")}>
-          <AtSign className="size-3.5" />
+          <FileText className="size-3.5 text-muted-foreground" />
           {t("useAtContext")}
         </DropdownMenuItem>
-        <DropdownMenuItem onClick={() => onInsertTrigger("/")}>
-          <CircleSlash className="size-3.5" />
-          {t("useSlashCapability")}
-        </DropdownMenuItem>
         <DropdownMenuItem onClick={() => onInsertTrigger("$")}>
-          <DollarSign className="size-3.5" />
+          <Package className="size-3.5 text-cyan-500" />
           {t("useDollarSkill")}
+        </DropdownMenuItem>
+        <DropdownMenuItem onClick={() => onInsertTrigger("/")}>
+          <Bot className="size-3.5 text-purple-500" />
+          {t("slashSubagents", { defaultValue: "子智能体" })}
+        </DropdownMenuItem>
+        <DropdownMenuItem onClick={() => onInsertTrigger("/")}>
+          <Zap className="size-3.5 text-amber-500" />
+          {t("useSlashCapability")}
         </DropdownMenuItem>
       </DropdownMenuContent>
     </DropdownMenu>

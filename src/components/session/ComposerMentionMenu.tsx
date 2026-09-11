@@ -61,6 +61,13 @@ export function ComposerMentionMenu({
             className="max-h-[min(20rem,var(--available-height))] overflow-x-hidden overflow-y-auto overscroll-contain rounded-xl border border-border/80 bg-popover p-1 text-popover-foreground shadow-lg ring-1 ring-foreground/5 outline-none dark:shadow-black/30"
           >
             {children}
+            <div className="sticky bottom-0 -mx-1 -mb-1 mt-1 flex items-center justify-between border-t border-border/40 bg-popover/95 px-2.5 py-1 text-[10px] text-muted-foreground/70 backdrop-blur-xs select-none">
+              <div className="flex items-center gap-2">
+                <span>↑↓ 导航</span>
+                <span>↵ / Tab 选为标签</span>
+                <span>Esc 关闭</span>
+              </div>
+            </div>
           </Popover.Popup>
         </Popover.Positioner>
       </Popover.Portal>
@@ -71,6 +78,7 @@ export function ComposerMentionMenu({
 interface ComposerMentionOptionProps extends ComponentProps<"button"> {
   active: boolean;
   icon: LucideIcon;
+  iconClassName?: string;
   label: string;
   description?: string;
   sourceLabel?: string;
@@ -79,6 +87,7 @@ interface ComposerMentionOptionProps extends ComponentProps<"button"> {
 export function ComposerMentionOption({
   active,
   icon: Icon,
+  iconClassName,
   label,
   description,
   sourceLabel,
@@ -99,15 +108,18 @@ export function ComposerMentionOption({
       )}
       onMouseDown={(event) => event.preventDefault()}
     >
-      <Icon aria-hidden="true" className="size-3.5 shrink-0 text-muted-foreground" />
-      <span className={cn("min-w-0 truncate", description ? "max-w-[55%]" : "flex-1")}>
+      <Icon
+        aria-hidden="true"
+        className={cn("size-3.5 shrink-0 text-muted-foreground", iconClassName)}
+      />
+      <span className={cn("min-w-0 font-medium truncate", description ? "max-w-[55%]" : "flex-1")}>
         {label}
       </span>
       {description ? (
-        <span className="min-w-0 flex-1 truncate text-muted-foreground">{description}</span>
+        <span className="min-w-0 flex-1 truncate text-xs text-muted-foreground">{description}</span>
       ) : null}
       {sourceLabel ? (
-        <span className="hidden max-w-24 shrink-0 truncate text-xs text-muted-foreground/70 sm:inline">
+        <span className="hidden max-w-24 shrink-0 truncate rounded-sm bg-muted/60 px-1 py-0.5 text-[10px] text-muted-foreground sm:inline">
           {sourceLabel}
         </span>
       ) : null}

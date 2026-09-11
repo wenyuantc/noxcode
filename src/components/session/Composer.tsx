@@ -1,6 +1,15 @@
 import { convertFileSrc, isTauri } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
-import { ArrowUp, FileIcon, Loader2, Square, WandSparkles } from "lucide-react";
+import {
+  ArrowUp,
+  Bot,
+  FileText,
+  Laptop,
+  Loader2,
+  Server,
+  Square,
+  WandSparkles,
+} from "lucide-react";
 import {
   useEffect,
   useId,
@@ -51,6 +60,18 @@ import {
 } from "@/lib/composerImages";
 import { clampMentionIndex, resolveComposerMentionKey } from "@/lib/composerMention";
 import {
+  addFilePill,
+  clearTargetPill,
+  hasPills,
+  initialComposerPills,
+  popLastPill,
+  removeFilePill,
+  removeTrailingTrigger,
+  setTargetPill,
+  type ComposerPillsState,
+} from "@/lib/composerPills";
+import { assembleComposerPrompt } from "@/lib/composerPromptAssembly";
+import {
   builtinSlashCommands,
   filterComposerSlashItems,
   parseComposerTrigger,
@@ -64,7 +85,6 @@ import {
   isLocalSlashIntent,
   matchComposerEffort,
   matchComposerModel,
-  resolveComposerSlash,
   type SlashIntent,
 } from "@/lib/composerSlashActions";
 import { applyComposerPlanMode, resolveComposerPlanMode } from "@/lib/planMode";
@@ -72,7 +92,7 @@ import { sessionUsageTotal } from "@/lib/sessionLines";
 import { resolveSessionSelection } from "@/lib/sessionModel";
 import { submitSessionPrompt } from "@/lib/sessionSubmission";
 import { changeSessionConfiguration, finishIdleSession } from "@/lib/sessionConfiguration";
-import { isNativePermissionMode } from "@/lib/types";
+import { isNativePermissionMode, type NativeSubagent } from "@/lib/types";
 import {
   composerThinkingEnabled,
   composerThinkingLevels,
@@ -86,13 +106,13 @@ import { useSettingsStore } from "@/stores/settingsStore";
 import { useUiStore } from "@/stores/uiStore";
 import { useWorkspaceStore } from "@/stores/workspaceStore";
 import { BranchPicker } from "./BranchPicker";
-import { ChannelModelPicker } from "./ChannelModelPicker";
 import { ComposerImageStrip } from "./ComposerImageStrip";
 import { ComposerMentionMenu, ComposerMentionOption } from "./ComposerMentionMenu";
+import { ComposerPillStrip } from "./ComposerPillStrip";
 import { ComposerPlusMenu } from "./ComposerPlusMenu";
 import { ContextCapacity } from "./ContextCapacity";
+import { ModelEffortPicker } from "./ModelEffortPicker";
 import { PermissionModePicker } from "./PermissionModePicker";
-import { ThinkingLevelPicker } from "./ThinkingLevelPicker";
 import { WorkspacePicker } from "./WorkspacePicker";
 import { WorktreeToggle } from "./WorktreeToggle";
 import { QueuedInputs } from "./QueuedInputs";
@@ -115,11 +135,13 @@ async function readFileAsBase64(file: File): Promise<string> {
 }
 
 export function Composer({ compact = false }: { compact?: boolean }) {
-  const { t } = useTranslation(["sessions", "layout"]);
+  const { t } = useTranslation(["sessions", "layout", "git"]);
   const navigate = useNavigate();
   const draft = useUiStore((state) => state.composerDraft);
   const setDraft = useUiStore((state) => state.setComposerDraft);
   const workspaceId = useWorkspaceStore((state) => state.activeWorkspaceId);
+  const workspaces = useWorkspaceStore((state) => state.workspaces);
+  const sessionWorkspace = workspaces.find((item) => item.id === workspaceId);
   const channels = useChannelStore((state) => state.channels);
   const channelId = useChannelStore((state) => state.activeChannelId);
   const activeModelId = useChannelStore((state) => state.activeModelId);
@@ -179,9 +201,11 @@ export function Composer({ compact = false }: { compact?: boolean }) {
   const [skillDialogOpen, setSkillDialogOpen] = useState(false);
   const [subagentDialogOpen, setSubagentDialogOpen] = useState(false);
   const [files, setFiles] = useState<string[]>([]);
+  const [mentionSubagents, setMentionSubagents] = useState<NativeSubagent[]>([]);
   const [slashItems, setSlashItems] = useState<ComposerSlashItem[]>([]);
   const [mentionOpen, setMentionOpen] = useState<"@" | "/" | "$" | null>(null);
   const [mentionIndex, setMentionIndex] = useState(0);
+  const [pills, setPills] = useState<ComposerPillsState>(initialComposerPills());
   const [sending, setSending] = useState(false);
   const [enhancing, setEnhancing] = useState(false);
   const [attachments, setAttachments] = useState<ComposerImageItem[]>([]);
@@ -221,6 +245,7 @@ export function Composer({ compact = false }: { compact?: boolean }) {
       void deleteComposerImages(stale.map((item) => item.path)).catch(() => undefined);
     }
     setAttachments([]);
+    setPills(initialComposerPills());
   }, [selectedSessionId]);
 
   useEffect(() => {
@@ -247,13 +272,20 @@ export function Composer({ compact = false }: { compact?: boolean }) {
     if (trigger?.kind === "@" && workspaceId) {
       let cancelled = false;
       setMentionOpen("@");
-      void listGitFiles(workspaceId, trigger.query, 30)
-        .then((items) => {
-          if (!cancelled) setFiles(items);
-        })
-        .catch(() => {
-          if (!cancelled) setFiles([]);
-        });
+      void Promise.all([
+        listGitFiles(workspaceId, trigger.query, 30).catch(() => []),
+        listNativeSubagents(workspaceId).catch(() => []),
+      ]).then(([items, allAgents]) => {
+        if (!cancelled) {
+          setFiles(items);
+          const q = trigger.query.toLowerCase().trim();
+          const matchedAgents = allAgents.filter(
+            (a) =>
+              !q || a.name.toLowerCase().includes(q) || a.description?.toLowerCase().includes(q),
+          );
+          setMentionSubagents(matchedAgents);
+        }
+      });
       return () => {
         cancelled = true;
       };
@@ -264,6 +296,7 @@ export function Composer({ compact = false }: { compact?: boolean }) {
     }
     setMentionOpen(null);
     setSlashItems([]);
+    setMentionSubagents([]);
   }, [draft, trigger?.kind, trigger?.query, workspaceId]);
 
   useEffect(() => {
@@ -310,6 +343,7 @@ export function Composer({ compact = false }: { compact?: boolean }) {
         name: agent.name,
         description: agent.description,
         token: subagentDelegationPrompt(agent.name, agent.id),
+        subagentId: agent.id,
       }));
       setSlashItems(
         mentionOpen === "$" ? skillItems : [...commandItems, ...skillItems, ...agentItems],
@@ -325,17 +359,77 @@ export function Composer({ compact = false }: { compact?: boolean }) {
     setMentionIndex(0);
   }, [mentionOpen, mentionQuery]);
 
-  const mentionItems =
-    mentionOpen === "@" ? files.map((file) => ({ key: file, label: file, token: `@${file}` })) : [];
+  const atAgentItems = mentionSubagents.map((agent) => ({
+    key: `subagent:${agent.id}`,
+    kind: "subagent" as const,
+    label: agent.name,
+    description: agent.description,
+    subagent: agent,
+    token: agent.name,
+  }));
+  const atFileItems = files.map((file) => ({
+    key: `file:${file}`,
+    kind: "file" as const,
+    label: file,
+    file,
+    token: file,
+  }));
+  const atItems = [...atAgentItems, ...atFileItems];
+
   const visibleSlashItems =
     mentionOpen === "/" || mentionOpen === "$"
       ? filterComposerSlashItems(slashItems, mentionQuery)
       : [];
   const pickerItems =
     mentionOpen === "@"
-      ? mentionItems
+      ? atItems
       : visibleSlashItems.map((item) => ({ key: item.key, label: item.name, token: item.token }));
   const activeMentionIndex = clampMentionIndex(mentionIndex, pickerItems.length);
+
+  const pickMentionItem = (item: {
+    kind: "file" | "subagent" | "skill" | "command";
+    file?: string;
+    subagent?: { id: string; name: string; description?: string };
+    skill?: ComposerSlashItem;
+    command?: ComposerSlashItem;
+  }) => {
+    if (item.kind === "file" && item.file) {
+      setPills((prev) => addFilePill(prev, item.file!));
+    } else if (item.kind === "subagent" && item.subagent) {
+      setPills((prev) =>
+        setTargetPill(prev, {
+          kind: "subagent",
+          id: item.subagent!.id,
+          name: item.subagent!.name,
+          description: item.subagent!.description,
+          token: item.subagent!.name,
+        }),
+      );
+    } else if (item.kind === "skill" && item.skill) {
+      setPills((prev) =>
+        setTargetPill(prev, {
+          kind: "skill",
+          name: item.skill!.name,
+          description: item.skill!.description,
+          sourceLabel: item.skill!.sourceLabel,
+          token: item.skill!.token,
+        }),
+      );
+    } else if (item.kind === "command" && item.command) {
+      setPills((prev) =>
+        setTargetPill(prev, {
+          kind: "command",
+          name: item.command!.name,
+          description: item.command!.description,
+          argumentHint: item.command!.argumentHint,
+          token: item.command!.token,
+        }),
+      );
+    }
+    setDraft(removeTrailingTrigger(draft));
+    setMentionOpen(null);
+    focusAfterInsertRef.current = true;
+  };
 
   useEffect(() => {
     const list = mentionListRef.current;
@@ -664,7 +758,9 @@ export function Composer({ compact = false }: { compact?: boolean }) {
 
   const send = async () => {
     if (sendingRef.current || sending || applyingConfig) return;
-    const prompt = draft.trim();
+    const assembled = assembleComposerPrompt(pills, draft);
+    const prompt = assembled.prompt.trim();
+    const intent = assembled.intent;
     if (!prompt && attachments.length === 0) {
       fail(t("sessions:emptyPrompt"));
       return;
@@ -673,9 +769,9 @@ export function Composer({ compact = false }: { compact?: boolean }) {
       fail(t("sessions:needWorkspace"));
       return;
     }
-    const intent = prompt ? resolveComposerSlash(prompt) : { type: "plain" as const, prompt: "" };
     if (prompt && isLocalSlashIntent(intent)) {
       await runLocalIntent(intent);
+      setPills(initialComposerPills());
       return;
     }
     if (intent.type === "fork") {
@@ -691,6 +787,7 @@ export function Composer({ compact = false }: { compact?: boolean }) {
         await useWorkspaceStore.getState().refreshSessions();
         await useSessionStore.getState().loadHistory(forked);
         setDraft("");
+        setPills(initialComposerPills());
       } catch (err) {
         fail(err instanceof Error ? err.message : String(err));
       } finally {
@@ -708,7 +805,10 @@ export function Composer({ compact = false }: { compact?: boolean }) {
       try {
         const accepted = await compactNativeSession(live.session_record_id, intent.instructions);
         if (!accepted) fail(t("sessions:compactNeedsLiveSession"));
-        else setDraft("");
+        else {
+          setDraft("");
+          setPills(initialComposerPills());
+        }
       } catch (err) {
         fail(err instanceof Error ? err.message : String(err));
       } finally {
@@ -728,7 +828,7 @@ export function Composer({ compact = false }: { compact?: boolean }) {
       nextPrompt = intent.task;
     } else if (intent.type === "expand") {
       nextPrompt = intent.prompt;
-      if (!working) {
+      if (!working && !pills.target) {
         setDraft(nextPrompt);
         return;
       }
@@ -750,6 +850,7 @@ export function Composer({ compact = false }: { compact?: boolean }) {
           .getState()
           .onInputQueue(await sendNativeInput(live.session_record_id, nextPrompt));
         setDraft("");
+        setPills(initialComposerPills());
       } catch (reason) {
         fail(String(reason));
       } finally {
@@ -791,6 +892,7 @@ export function Composer({ compact = false }: { compact?: boolean }) {
       }
       attachmentsRef.current = [];
       setDraft("");
+      setPills(initialComposerPills());
       setAttachments([]);
     } catch (err) {
       fail(err instanceof Error ? err.message : String(err));
@@ -798,14 +900,6 @@ export function Composer({ compact = false }: { compact?: boolean }) {
       sendingRef.current = false;
       setSending(false);
     }
-  };
-
-  const insertToken = (token: string) => {
-    const parts = draft.split(/\s/);
-    parts[parts.length - 1] = token;
-    focusAfterInsertRef.current = true;
-    setDraft(`${parts.join(" ")} `);
-    setMentionOpen(null);
   };
 
   const insertTrigger = (trigger: ComposerTriggerChar) => {
@@ -868,8 +962,21 @@ export function Composer({ compact = false }: { compact?: boolean }) {
   return (
     <div className="mx-auto w-full max-w-3xl">
       {!compact ? (
-        <div className="relative z-20 mb-2 flex items-center gap-2">
+        <div className="relative z-20 mb-2 flex flex-wrap items-center gap-1.5 text-xs text-muted-foreground">
           <WorkspacePicker />
+          <div className="inline-flex h-7 items-center gap-1.5 rounded-lg border border-border/70 bg-background/80 px-2 text-xs font-medium text-foreground/80 shadow-2xs">
+            {sessionWorkspace?.ssh_config_id ? (
+              <>
+                <Server className="size-3.5 text-muted-foreground" />
+                <span>{t("git:remoteEnv", { defaultValue: "远程" })}</span>
+              </>
+            ) : (
+              <>
+                <Laptop className="size-3.5 text-muted-foreground" />
+                <span>{t("git:localEnv", { defaultValue: "本地" })}</span>
+              </>
+            )}
+          </div>
           <BranchPicker />
           <WorktreeToggle />
         </div>
@@ -969,6 +1076,11 @@ export function Composer({ compact = false }: { compact?: boolean }) {
             setAttachments(removeComposerImagesByIds(attachments, ids));
           }}
         />
+        <ComposerPillStrip
+          pills={pills}
+          onRemoveTarget={() => setPills((prev) => clearTargetPill(prev))}
+          onRemoveFile={(file) => setPills((prev) => removeFilePill(prev, file))}
+        />
         {promptEnhancement?.enabled ? (
           <Button
             type="button"
@@ -1017,15 +1129,52 @@ export function Composer({ compact = false }: { compact?: boolean }) {
               return;
             }
             if (action.type === "confirm") {
-              const item = pickerItems[activeMentionIndex];
-              if (!item) return;
               event.preventDefault();
-              insertToken(item.token);
+              if (mentionOpen === "@") {
+                const picked = atItems[activeMentionIndex];
+                if (picked) {
+                  if (picked.kind === "subagent") {
+                    pickMentionItem({ kind: "subagent", subagent: picked.subagent });
+                  } else {
+                    pickMentionItem({ kind: "file", file: picked.file });
+                  }
+                }
+              } else {
+                const picked = visibleSlashItems[activeMentionIndex];
+                if (picked) {
+                  if (picked.group === "skills") {
+                    pickMentionItem({ kind: "skill", skill: picked });
+                  } else if (picked.group === "subagents") {
+                    pickMentionItem({
+                      kind: "subagent",
+                      subagent: {
+                        id: picked.subagentId ?? picked.name,
+                        name: picked.name,
+                        description: picked.description,
+                      },
+                    });
+                  } else {
+                    pickMentionItem({ kind: "command", command: picked });
+                  }
+                }
+              }
               return;
             }
             if (action.type === "dismiss") {
               event.preventDefault();
               setMentionOpen(null);
+              return;
+            }
+            if (
+              event.key === "Backspace" &&
+              !event.nativeEvent.isComposing &&
+              mentionOpen === null &&
+              textareaRef.current?.selectionStart === 0 &&
+              textareaRef.current?.selectionEnd === 0 &&
+              hasPills(pills)
+            ) {
+              event.preventDefault();
+              setPills((prev) => popLastPill(prev));
               return;
             }
             if (action.type === "togglePlanMode") {
@@ -1041,34 +1190,26 @@ export function Composer({ compact = false }: { compact?: boolean }) {
           placeholder={t("layout:composerPlaceholder")}
           className="min-h-24 w-full resize-none bg-transparent px-4 py-3 pr-12 text-sm leading-relaxed outline-none placeholder:text-muted-foreground/60"
         />
-        <div className="grid grid-cols-[minmax(0,1fr)_auto] items-end gap-2 border-t border-border/50 px-3 py-2 text-xs">
+        <div className="flex items-center justify-between gap-2 border-t border-border/50 px-3 py-2 text-xs">
           <div className="flex min-w-0 flex-wrap items-center gap-1.5">
             <ComposerPlusMenu
               onAddAttachment={() => void pickAttachments()}
               onInsertTrigger={insertTrigger}
             />
             <PermissionModePicker disabled={working || sending} onError={setError} />
-            <ChannelModelPicker onError={fail} onInfo={note} />
-            {composerThinkingEnabled(selectedModel) && efforts.length > 0 ? (
-              <ThinkingLevelPicker
-                value={live?.runtime?.reasoning_effort ?? resolvedEffort}
-                levels={efforts}
-                disabled={working || sending || applyingConfig}
-                onChange={(value) => {
-                  void changeSessionConfiguration(selectedSessionId, { reasoning_effort: value })
-                    .then(() => setEffort(value))
-                    .catch((reason) => setError(String(reason)));
-                }}
-              />
-            ) : null}
+          </div>
+          <div className="flex shrink-0 items-center gap-1.5 self-end">
+            <ModelEffortPicker
+              onError={fail}
+              onInfo={note}
+              disabled={working || sending || applyingConfig}
+            />
             <ContextCapacity
               usage={usage}
               totalTokens={totalTokens}
               open={contextOpen}
               onOpenChange={setContextOpen}
             />
-          </div>
-          <div className="flex shrink-0 items-center gap-1.5 self-end">
             {working && live ? (
               <Button
                 size="icon"
@@ -1091,7 +1232,7 @@ export function Composer({ compact = false }: { compact?: boolean }) {
               title={working ? t("sessions:queuedInput.add") : t("sessions:send")}
               aria-label={working ? t("sessions:queuedInput.add") : t("sessions:send")}
               onClick={() => void send()}
-              disabled={sendBusy || (!draft.trim() && attachments.length === 0)}
+              disabled={sendBusy || (!draft.trim() && attachments.length === 0 && !hasPills(pills))}
             >
               {sendBusy ? (
                 <Loader2 className="size-3.5 animate-spin" />
@@ -1114,18 +1255,55 @@ export function Composer({ compact = false }: { compact?: boolean }) {
         onDismiss={() => setMentionOpen(null)}
       >
         {mentionOpen === "@" ? (
-          mentionItems.length > 0 ? (
-            mentionItems.map((item, index) => (
-              <ComposerMentionOption
-                key={item.key}
-                id={`${mentionListId}-${index}`}
-                active={index === activeMentionIndex}
-                icon={FileIcon}
-                label={item.label}
-                onMouseEnter={() => setMentionIndex(index)}
-                onClick={() => insertToken(item.token)}
-              />
-            ))
+          atItems.length > 0 ? (
+            <div className="space-y-0.5">
+              {atAgentItems.length > 0 ? (
+                <div role="group" aria-label={t("slashSubagents", { defaultValue: "子智能体" })}>
+                  <div className="flex items-center gap-1.5 px-2.5 py-1 text-[11px] font-semibold tracking-wider text-muted-foreground/70 uppercase select-none">
+                    {t("slashSubagents", { defaultValue: "子智能体" })}
+                  </div>
+                  {atAgentItems.map((item, index) => (
+                    <ComposerMentionOption
+                      key={item.key}
+                      id={`${mentionListId}-${index}`}
+                      active={index === activeMentionIndex}
+                      icon={Bot}
+                      iconClassName="text-purple-500"
+                      label={item.label}
+                      description={item.description}
+                      onMouseEnter={() => setMentionIndex(index)}
+                      onClick={() => pickMentionItem({ kind: "subagent", subagent: item.subagent })}
+                    />
+                  ))}
+                </div>
+              ) : null}
+              {atFileItems.length > 0 ? (
+                <div
+                  role="group"
+                  aria-label={t("files", { defaultValue: "文件" })}
+                  className={cn(atAgentItems.length > 0 && "border-t border-border/50 pt-1")}
+                >
+                  <div className="flex items-center gap-1.5 px-2.5 py-1 text-[11px] font-semibold tracking-wider text-muted-foreground/70 uppercase select-none">
+                    {t("files", { defaultValue: "工作区文件" })}
+                  </div>
+                  {atFileItems.map((item, index) => {
+                    const overallIndex = atAgentItems.length + index;
+                    return (
+                      <ComposerMentionOption
+                        key={item.key}
+                        id={`${mentionListId}-${overallIndex}`}
+                        active={overallIndex === activeMentionIndex}
+                        icon={FileText}
+                        iconClassName="text-muted-foreground"
+                        label={item.label}
+                        onMouseEnter={() => setMentionIndex(overallIndex)}
+                        onClick={() => pickMentionItem({ kind: "file", file: item.file })}
+                      />
+                    );
+                  })}
+                </div>
+              ) : null}
+            </div>
           ) : (
             <p role="status" className="px-2.5 py-2 text-xs text-muted-foreground">
               {t("noFiles")}
@@ -1138,7 +1316,22 @@ export function Composer({ compact = false }: { compact?: boolean }) {
             listId={mentionListId}
             emptyLabel={t(mentionOpen === "$" ? "slashEmptySkills" : "slashEmpty")}
             onHover={setMentionIndex}
-            onPick={(item) => insertToken(item.token)}
+            onPick={(item) => {
+              if (item.group === "skills") {
+                pickMentionItem({ kind: "skill", skill: item });
+              } else if (item.group === "subagents") {
+                pickMentionItem({
+                  kind: "subagent",
+                  subagent: {
+                    id: item.subagentId ?? item.name,
+                    name: item.name,
+                    description: item.description,
+                  },
+                });
+              } else {
+                pickMentionItem({ kind: "command", command: item });
+              }
+            }}
           />
         )}
       </ComposerMentionMenu>

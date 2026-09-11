@@ -19,7 +19,7 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { cn } from "@/lib/utils";
 
-function EffortIcon({ level, className }: { level: string; className?: string }) {
+export function EffortIcon({ level, className }: { level: string; className?: string }) {
   const iconClass = cn("size-3.5 shrink-0", className);
   switch (level) {
     case "none":

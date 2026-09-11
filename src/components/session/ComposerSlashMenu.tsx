@@ -1,4 +1,4 @@
-import { Bot, CircleSlash, Sparkles } from "lucide-react";
+import { Bot, Package, Zap } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
 import type { ComposerSlashGroup, ComposerSlashItem } from "@/lib/composerSlash";
@@ -50,6 +50,9 @@ export function ComposerSlashMenu({
           aria-label={t(GROUP_LABEL[section.group])}
           className="not-first:mt-1 not-first:border-t not-first:border-border/50 not-first:pt-1"
         >
+          <div className="flex items-center gap-1.5 px-2.5 py-1 text-[11px] font-semibold tracking-wider text-muted-foreground/70 uppercase select-none">
+            {t(GROUP_LABEL[section.group])}
+          </div>
           {section.items.map((item) => {
             cursor += 1;
             const index = cursor;
@@ -58,8 +61,13 @@ export function ComposerSlashMenu({
                 key={item.key}
                 id={`${listId}-${index}`}
                 active={index === activeIndex}
-                icon={
-                  item.group === "skills" ? Sparkles : item.group === "commands" ? CircleSlash : Bot
+                icon={item.group === "skills" ? Package : item.group === "commands" ? Zap : Bot}
+                iconClassName={
+                  item.group === "skills"
+                    ? "text-cyan-500"
+                    : item.group === "commands"
+                      ? "text-amber-500"
+                      : "text-purple-500"
                 }
                 label={
                   item.group === "skills"

@@ -10,6 +10,7 @@ export interface ComposerSlashItem {
   argumentHint?: string;
   sourceLabel?: string;
   token: string;
+  subagentId?: string;
 }
 
 export type ComposerTrigger =
