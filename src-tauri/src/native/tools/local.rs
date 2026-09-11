@@ -17,7 +17,9 @@ use super::cancel::CancelFlag;
 use super::file_access::AuthorizedPath;
 use super::glob::glob_match;
 use super::paths::{resolve_local_path, resolve_under_workspace};
-use super::sandbox::{apply_sandbox, SandboxPolicy};
+use super::sandbox::{
+    apply_sandbox, looks_like_sandbox_denial, sandbox_was_enforced, SandboxPolicy,
+};
 use super::shell_snapshot::{COMMAND_ENV, SNAPSHOT_ENV};
 
 const READ_DEFAULT_LIMIT: usize = 2000;
@@ -418,7 +420,7 @@ impl LocalWorkspace {
         let text = cap_bytes_tail(&text, BASH_OUTPUT_HARD_LIMIT);
         Ok(CommandStatus {
             exit_code: status.code().unwrap_or(-1),
-            output: prepend_sandbox_note(text, sandbox_note.as_deref()),
+            output: annotate_sandbox_output(text, sandbox_note.as_deref()),
             timed_out: false,
             sandbox_note,
         })
@@ -447,6 +449,7 @@ impl LocalWorkspace {
             }
         }
         cmd.current_dir(&self.root)
+            .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .kill_on_drop(true);
@@ -455,12 +458,26 @@ impl LocalWorkspace {
         for (key, value) in extra_env {
             cmd.env(key, value);
         }
-        let applied = apply_sandbox(&self.sandbox, &self.root, &mut cmd);
+        let policy = self.sandbox.with_write_roots(&self.extra_write_roots);
+        let applied = apply_sandbox(&policy, &self.root, &mut cmd);
         let child = cmd
             .spawn()
             .map_err(|error| format!("启动 Bash 失败: {error}"))?;
         Ok((child, applied.note))
     }
+}
+
+fn annotate_sandbox_output(output: String, note: Option<&str>) -> String {
+    let output = if sandbox_was_enforced(note) && looks_like_sandbox_denial(&output) {
+        if output.is_empty() {
+            "沙箱拒绝了这次命令。".to_string()
+        } else {
+            format!("沙箱拒绝了这次命令。\n{output}")
+        }
+    } else {
+        output
+    };
+    prepend_sandbox_note(output, note)
 }
 
 fn prepend_sandbox_note(output: String, note: Option<&str>) -> String {
@@ -1432,6 +1449,54 @@ mod tests {
             },
         );
         assert_eq!(result.unwrap_err(), "已取消");
+    }
+
+    #[test]
+    fn annotate_sandbox_output_explains_denial() {
+        let text = annotate_sandbox_output(
+            "touch: /etc/x: Operation not permitted".to_string(),
+            Some("已在 seatbelt 沙箱中执行"),
+        );
+        assert!(text.contains("沙箱拒绝了这次命令"));
+        assert!(text.contains("已在 seatbelt 沙箱中执行"));
+        let plain = annotate_sandbox_output("ok".to_string(), Some("已在 seatbelt 沙箱中执行"));
+        assert!(!plain.contains("沙箱拒绝"));
+        let fallback = annotate_sandbox_output(
+            "Operation not permitted".to_string(),
+            Some("沙箱启动失败，已回退为普通 Bash"),
+        );
+        assert!(!fallback.contains("沙箱拒绝了这次命令"));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn sandboxed_bash_echo_succeeds() {
+        let root = tempfile::tempdir().unwrap();
+        let mut ws = LocalWorkspace::new(root.path().to_path_buf());
+        ws.sandbox.enabled = true;
+        let status = ws
+            .bash_with_status("printf nox-ok", Some(5000), &CancelFlag::new(), &[])
+            .await
+            .unwrap();
+        assert!(
+            !status.timed_out,
+            "sandboxed bash timed out: {}",
+            status.output
+        );
+        assert_eq!(
+            status.exit_code, 0,
+            "sandboxed bash failed: {}",
+            status.output
+        );
+        assert!(status.output.contains("nox-ok"), "{}", status.output);
+        assert!(
+            status
+                .sandbox_note
+                .as_deref()
+                .is_some_and(|note| note.contains("seatbelt")),
+            "expected seatbelt note, got {:?}",
+            status.sandbox_note
+        );
     }
 
     #[test]
