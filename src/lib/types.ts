@@ -1063,6 +1063,16 @@ export interface LspServerStatus {
   installable: boolean;
 }
 
+export interface LspTestResult {
+  language: string;
+  label: string;
+  command: string;
+  server_name: string | null;
+  server_version: string | null;
+  elapsed_ms: number;
+  warning: string | null;
+}
+
 export interface UpdateNativeSettingsInput {
   max_turns?: number;
   max_subagent_turns?: number;

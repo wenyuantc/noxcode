@@ -318,8 +318,13 @@
     "command": "Command",
     "installCommand": "Install command",
     "install": "Install",
-    "installMissing": "Install missing ({{count}})",
-    "manual": "Install manually"
+        "installMissing": "Install missing ({{count}})",
+    "manual": "Install manually",
+    "test": "Test",
+    "testing": "Testing…",
+    "testHint": "Start this language server in a temporary directory and complete one LSP handshake to confirm it works.",
+    "testSuccess": "{{label}} ready · {{detail}}",
+    "testWarning": "workspace/symbol call failed: {{detail}}"
   },
   "usage": {
     "title": "Usage",

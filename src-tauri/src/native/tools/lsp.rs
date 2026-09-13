@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde::Serialize;
 use serde_json::{json, Value};
@@ -44,7 +44,8 @@ struct LanguageServer {
     pending: Mutex<HashMap<i64, oneshot::Sender<Value>>>,
     diagnostics: Mutex<HashMap<String, Vec<LspDiagnostic>>>,
     opened: Mutex<HashMap<String, i64>>,
-    _child: Child,
+    init_result: Mutex<Option<Value>>,
+    child: Mutex<Child>,
 }
 
 #[derive(Debug, Clone)]
@@ -655,6 +656,94 @@ pub async fn install_lsp_server(language: String) -> Result<String, String> {
     ))
 }
 
+/// 从 initialize 结果里取 serverInfo 的名称与版本。
+fn parse_server_info(result: &Value) -> (Option<String>, Option<String>) {
+    let read = |key: &str| {
+        result
+            .pointer(&format!("/serverInfo/{key}"))
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string)
+    };
+    (read("name"), read("version"))
+}
+
+/// initialize 结果是否声明支持 workspace/symbol。
+fn supports_workspace_symbol(result: &Value) -> bool {
+    match result.pointer("/capabilities/workspaceSymbolProvider") {
+        Some(Value::Bool(flag)) => *flag,
+        Some(Value::Object(_)) => true,
+        _ => false,
+    }
+}
+
+/// 测试用 workspace root：稳定的临时目录，不依赖当前会话工作区。
+fn test_workspace_root(language: &str) -> Result<PathBuf, String> {
+    let root = std::env::temp_dir()
+        .join("noxcode-lsp")
+        .join(format!("{language}-test"));
+    std::fs::create_dir_all(&root).map_err(|error| format!("创建测试目录失败：{error}"))?;
+    Ok(root)
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct LspTestResult {
+    pub language: String,
+    pub label: String,
+    pub command: String,
+    pub server_name: Option<String>,
+    pub server_version: Option<String>,
+    pub elapsed_ms: u64,
+    pub warning: Option<String>,
+}
+
+/// 启动 language server 并完成一次 LSP 握手，确认已安装的服务器真的可用。
+#[tauri::command]
+pub async fn test_lsp_server(language: String) -> Result<LspTestResult, String> {
+    let language = normalize_language(&language)?;
+    let label = language_label(language).to_string();
+    let spec =
+        server_spec(language).ok_or_else(|| format!("没有为 {language} 配置 language server"))?;
+    let Some(command) = installed_server_command(language) else {
+        return Err(format!(
+            "未检测到 {label} 的 language server，请先安装：{}",
+            install_command_text(language).unwrap_or_default()
+        ));
+    };
+    let root = test_workspace_root(language)?;
+    let started_at = Instant::now();
+    let server = tokio::time::timeout(
+        Duration::from_secs(30),
+        LanguageServer::start(&root, language, spec),
+    )
+    .await
+    .map_err(|_| {
+        format!("启动 {label} language server 超时（30 秒），请检查 `{command}` 是否可用")
+    })??;
+    let init_result = server.init_result().await;
+    let (server_name, server_version) = parse_server_info(&init_result);
+    let mut warning = None;
+    if supports_workspace_symbol(&init_result) {
+        if let Err(error) = server
+            .request("workspace/symbol", json!({ "query": "" }))
+            .await
+        {
+            warning = Some(error);
+        }
+    }
+    server.close().await;
+    Ok(LspTestResult {
+        language: language.to_string(),
+        label,
+        command,
+        server_name,
+        server_version,
+        elapsed_ms: u64::try_from(started_at.elapsed().as_millis()).unwrap_or(u64::MAX),
+        warning,
+    })
+}
+
 fn installed_server_command(language: &str) -> Option<String> {
     installed_server_command_with_extra(language, &[])
 }
@@ -930,7 +1019,8 @@ impl LanguageServer {
             pending: Mutex::new(HashMap::new()),
             diagnostics: Mutex::new(HashMap::new()),
             opened: Mutex::new(HashMap::new()),
-            _child: child,
+            init_result: Mutex::new(None),
+            child: Mutex::new(child),
         });
         let reader_server = server.clone();
         tauri::async_runtime::spawn(async move {
@@ -960,14 +1050,30 @@ impl LanguageServer {
                 }),
             )
             .await;
-        if let Err(error) = init {
-            return Err(format!("{} 初始化失败: {error}", candidate.command));
-        }
+        let init = match init {
+            Ok(value) => value,
+            Err(error) => {
+                // 握手失败时立刻回收进程，避免留下无法回收的 language server。
+                server.terminate().await;
+                return Err(format!("{} 初始化失败: {error}", candidate.command));
+            }
+        };
+        *server.init_result.lock().await = Some(init);
         let _ = server.notify("initialized", json!({})).await;
         Ok(server)
     }
 
     async fn request(&self, method: &str, params: Value) -> Result<Value, String> {
+        self.request_with_timeout(method, params, Duration::from_secs(12))
+            .await
+    }
+
+    async fn request_with_timeout(
+        &self,
+        method: &str,
+        params: Value,
+        timeout: Duration,
+    ) -> Result<Value, String> {
         let id = self.next_id.fetch_add(1, Ordering::SeqCst);
         let (tx, rx) = oneshot::channel();
         {
@@ -981,7 +1087,7 @@ impl LanguageServer {
             "params": params
         }))
         .await?;
-        let response = tokio::time::timeout(Duration::from_secs(12), rx)
+        let response = tokio::time::timeout(timeout, rx)
             .await
             .map_err(|_| format!("{} 请求超时: {method}", self.command))?
             .map_err(|_| format!("{} 已关闭: {method}", self.command))?;
@@ -1044,6 +1150,31 @@ impl LanguageServer {
             .get(&uri)
             .cloned()
             .unwrap_or_default()
+    }
+
+    async fn init_result(&self) -> Value {
+        self.init_result.lock().await.clone().unwrap_or(Value::Null)
+    }
+
+    /// 关闭 language server：先 shutdown / exit，超时后强杀，避免残留进程。
+    async fn close(&self) {
+        let _ = self
+            .request_with_timeout("shutdown", Value::Null, Duration::from_secs(2))
+            .await;
+        let _ = self.notify("exit", Value::Null).await;
+        let mut child = self.child.lock().await;
+        let exited = tokio::time::timeout(Duration::from_secs(2), child.wait())
+            .await
+            .is_ok();
+        if !exited {
+            let _ = child.kill().await;
+        }
+    }
+
+    /// 直接回收进程，用于握手失败等已经无法通信的场景。
+    async fn terminate(&self) {
+        let mut child = self.child.lock().await;
+        let _ = child.kill().await;
     }
 }
 
@@ -1332,6 +1463,88 @@ mod tests {
             install_command_text("java").as_deref(),
             Some("brew install jdtls")
         );
+    }
+
+    #[test]
+    fn parses_server_info_from_initialize_result() {
+        let full = json!({
+            "serverInfo": { "name": "rust-analyzer", "version": "1.2.3" },
+            "capabilities": { "workspaceSymbolProvider": true }
+        });
+        assert_eq!(
+            parse_server_info(&full),
+            (Some("rust-analyzer".to_string()), Some("1.2.3".to_string()))
+        );
+
+        let minimal = json!({ "serverInfo": { "name": "gopls" } });
+        assert_eq!(
+            parse_server_info(&minimal),
+            (Some("gopls".to_string()), None)
+        );
+
+        let blank = json!({ "serverInfo": { "name": "  " } });
+        assert_eq!(parse_server_info(&blank), (None, None));
+        assert_eq!(parse_server_info(&json!(null)), (None, None));
+    }
+
+    #[test]
+    fn detects_workspace_symbol_capability() {
+        assert!(supports_workspace_symbol(
+            &json!({ "capabilities": { "workspaceSymbolProvider": true } })
+        ));
+        assert!(supports_workspace_symbol(&json!({
+            "capabilities": { "workspaceSymbolProvider": { "resolveProvider": false } }
+        })));
+        assert!(!supports_workspace_symbol(
+            &json!({ "capabilities": { "workspaceSymbolProvider": false } })
+        ));
+        assert!(!supports_workspace_symbol(&json!({ "capabilities": {} })));
+        assert!(!supports_workspace_symbol(&json!(null)));
+    }
+
+    #[test]
+    fn test_workspace_root_is_language_scoped() {
+        let rust = test_workspace_root("rust").expect("root");
+        assert!(rust.ends_with("rust-test"));
+        assert!(rust.is_dir());
+        let _ = std::fs::remove_dir_all(&rust);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn handshake_with_fake_server_reports_server_info() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("time")
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("noxcode-lsp-handshake-{stamp}"));
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        let bin = dir.join("fake-lsp");
+        let body = r#"{"jsonrpc":"2.0","id":1,"result":{"serverInfo":{"name":"fake-lsp","version":"0.0.1"},"capabilities":{"workspaceSymbolProvider":true}}}"#;
+        let script = format!(
+            "#!/bin/sh\nread -r header\nbody='{body}'\nprintf 'Content-Length: %s\\r\\n\\r\\n%s' \"${{#body}}\" \"$body\"\n"
+        );
+        std::fs::write(&bin, script).expect("write");
+        let mut perms = std::fs::metadata(&bin).expect("meta").permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&bin, perms).expect("chmod");
+
+        let spec = server_spec("rust").expect("spec");
+        let candidate = command("fake-lsp", &[]);
+        let server = LanguageServer::start_command(&dir, "rust", &spec, &candidate, &bin, &[])
+            .await
+            .expect("handshake");
+        let init = server.init_result().await;
+        assert_eq!(
+            parse_server_info(&init),
+            (Some("fake-lsp".to_string()), Some("0.0.1".to_string()))
+        );
+        assert!(supports_workspace_symbol(&init));
+        server.close().await;
+
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]

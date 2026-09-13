@@ -1,14 +1,36 @@
-import { Check, Code2, Download, Loader2 } from "lucide-react";
+import { Check, Code2, Download, Loader2, Zap } from "lucide-react";
+import type { ReactNode } from "react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 
-import { installLspServer, listLspServers, updateNativeSettings } from "@/lib/backend";
-import type { LspServerStatus } from "@/lib/types";
+import {
+  installLspServer,
+  listLspServers,
+  testLspServer,
+  updateNativeSettings,
+} from "@/lib/backend";
+import type { LspServerStatus, LspTestResult } from "@/lib/types";
 import { Button } from "@/components/ui/button";
 import { Switch } from "@/components/ui/switch";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { SettingFeedbackCallout } from "./SettingFeedbackCallout";
 import { SettingCard, SettingRow } from "./SettingCard";
+
+/** 测试结果摘要：优先展示 language server 自报的名称与版本。 */
+export function lspTestSummary(result: LspTestResult): string {
+  const identity = result.server_name
+    ? result.server_version
+      ? `${result.server_name} ${result.server_version}`
+      : result.server_name
+    : result.command;
+  return `${identity} · ${result.elapsed_ms} ms`;
+}
+
+/** 已安装的服务器提供「测试」，其余按是否可自动安装区分为「安装」或「手动安装」。 */
+export function lspRowAction(server: LspServerStatus): "test" | "install" | "manual" {
+  if (server.installed_command) return "test";
+  return server.installable ? "install" : "manual";
+}
 
 export function LspSection() {
   const { t } = useTranslation(["settings", "common"]);
@@ -17,12 +39,14 @@ export function LspSection() {
   const [lspServers, setLspServers] = useState<LspServerStatus[]>([]);
   const [lspLoading, setLspLoading] = useState(true);
   const [lspInstalling, setLspInstalling] = useState<Set<string>>(() => new Set());
+  const [lspTesting, setLspTesting] = useState<Set<string>>(() => new Set());
   const [lspErrors, setLspErrors] = useState<Record<string, string>>({});
   const [feedback, setFeedback] = useState<{
     variant: "success" | "error";
-    message: string;
+    message: ReactNode;
   } | null>(null);
   const lspInstallingRef = useRef(new Set<string>());
+  const lspTestingRef = useRef(new Set<string>());
 
   const refreshLspServers = useCallback(async (silent = false) => {
     if (!silent) setLspLoading(true);
@@ -67,6 +91,50 @@ export function LspSection() {
       }
     },
     [refreshLspServers],
+  );
+
+  const handleTestLsp = useCallback(
+    async (server: LspServerStatus) => {
+      if (lspTestingRef.current.has(server.id)) return;
+      lspTestingRef.current.add(server.id);
+      setLspTesting(new Set(lspTestingRef.current));
+      setLspErrors((prev) => {
+        if (!(server.id in prev)) return prev;
+        const next = { ...prev };
+        delete next[server.id];
+        return next;
+      });
+      try {
+        const result = await testLspServer(server.id);
+        setFeedback({
+          variant: "success",
+          message: (
+            <>
+              <span>
+                {t("settings:lsp.testSuccess", {
+                  label: result.label,
+                  detail: lspTestSummary(result),
+                })}
+              </span>
+              {result.warning ? (
+                <span className="mt-0.5 block opacity-80">
+                  {t("settings:lsp.testWarning", { detail: result.warning })}
+                </span>
+              ) : null}
+            </>
+          ),
+        });
+      } catch (error) {
+        setLspErrors((prev) => ({
+          ...prev,
+          [server.id]: error instanceof Error ? error.message : String(error),
+        }));
+      } finally {
+        lspTestingRef.current.delete(server.id);
+        setLspTesting(new Set(lspTestingRef.current));
+      }
+    },
+    [t],
   );
 
   const pendingLspCount = lspServers.filter(
@@ -157,7 +225,9 @@ export function LspSection() {
         ) : (
           lspServers.map((server) => {
             const installing = lspInstalling.has(server.id);
+            const testing = lspTesting.has(server.id);
             const error = lspErrors[server.id];
+            const action = lspRowAction(server);
             return (
               <SettingRow
                 key={server.id}
@@ -182,11 +252,29 @@ export function LspSection() {
                   )
                 }
               >
-                {server.installed_command ? (
-                  <span className="text-[11px] text-muted-foreground">
-                    {t("settings:lsp.ready")}
-                  </span>
-                ) : server.installable ? (
+                {action === "test" ? (
+                  <div className="flex items-center gap-2">
+                    <span className="text-[11px] text-muted-foreground">
+                      {t("settings:lsp.ready")}
+                    </span>
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      className="h-7 gap-1.5 text-xs"
+                      disabled={testing}
+                      title={t("settings:lsp.testHint")}
+                      onClick={() => void handleTestLsp(server)}
+                    >
+                      {testing ? (
+                        <Loader2 className="size-3 animate-spin" />
+                      ) : (
+                        <Zap className="size-3" />
+                      )}
+                      {testing ? t("settings:lsp.testing") : t("settings:lsp.test")}
+                    </Button>
+                  </div>
+                ) : action === "install" ? (
                   <Button
                     type="button"
                     variant="outline"

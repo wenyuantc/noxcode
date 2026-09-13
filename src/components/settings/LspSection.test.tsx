@@ -1,13 +1,14 @@
 import { renderToStaticMarkup } from "react-dom/server";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-import type { NativeSettings } from "@/lib/types";
+import type { LspServerStatus, LspTestResult, NativeSettings } from "@/lib/types";
 import { useSettingsStore } from "@/stores/settingsStore";
-import { LspSection } from "./LspSection";
+import { LspSection, lspRowAction, lspTestSummary } from "./LspSection";
 
 vi.mock("@/lib/backend", () => ({
   listLspServers: vi.fn().mockResolvedValue([]),
   installLspServer: vi.fn(),
+  testLspServer: vi.fn(),
   updateNativeSettings: vi.fn(),
 }));
 
@@ -81,5 +82,49 @@ describe("LspSection", () => {
     expect(html).toContain("settings:lsp.installHint");
     expect(html).toContain("settings:lsp.loading");
     expect(html).toContain('id="native-lsp-enabled"');
+  });
+});
+
+describe("lspRowAction", () => {
+  const server = (overrides: Partial<LspServerStatus>): LspServerStatus => ({
+    id: "rust",
+    label: "Rust",
+    commands: ["rust-analyzer"],
+    installed_command: null,
+    install_command: "rustup component add rust-analyzer",
+    installable: true,
+    ...overrides,
+  });
+
+  it("offers the test button for installed servers", () => {
+    expect(lspRowAction(server({ installed_command: "rust-analyzer" }))).toBe("test");
+  });
+
+  it("falls back to install, then manual", () => {
+    expect(lspRowAction(server({}))).toBe("install");
+    expect(lspRowAction(server({ installable: false, install_command: null }))).toBe("manual");
+  });
+});
+
+describe("lspTestSummary", () => {
+  const base: LspTestResult = {
+    language: "rust",
+    label: "Rust",
+    command: "rust-analyzer",
+    server_name: null,
+    server_version: null,
+    elapsed_ms: 820,
+    warning: null,
+  };
+
+  it("prefers the reported server name and version", () => {
+    expect(lspTestSummary({ ...base, server_name: "rust-analyzer", server_version: "1.2.3" })).toBe(
+      "rust-analyzer 1.2.3 · 820 ms",
+    );
+  });
+
+  it("falls back to name only, then to the command", () => {
+    expect(lspTestSummary({ ...base, server_name: "gopls" })).toBe("gopls · 820 ms");
+    expect(lspTestSummary(base)).toBe("rust-analyzer · 820 ms");
   });
 });

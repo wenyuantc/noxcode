@@ -168,6 +168,7 @@ pub fn run() {
             native::settings::update_native_settings,
             native::tools::lsp::list_lsp_servers,
             native::tools::lsp::install_lsp_server,
+            native::tools::lsp::test_lsp_server,
             native::skills::list_native_global_skills,
             native::skills::list_native_skills,
             native::skills::open_native_skills_dir,

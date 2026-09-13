@@ -84,6 +84,7 @@ import type {
   NativeSessionTitle,
   NativeSettings,
   LspServerStatus,
+  LspTestResult,
   ManagedWorktreeList,
   UpdateNativeSessionConfigurationInput,
   PermissionRule,
@@ -871,6 +872,10 @@ export function listLspServers(): Promise<LspServerStatus[]> {
 
 export function installLspServer(language: string): Promise<string> {
   return invoke("install_lsp_server", { language });
+}
+
+export function testLspServer(language: string): Promise<LspTestResult> {
+  return invoke("test_lsp_server", { language });
 }
 
 export function listNativeGlobalSkills(): Promise<NativeGlobalSkills> {

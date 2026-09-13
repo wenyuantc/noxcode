@@ -317,9 +317,14 @@
     "ready": "可用",
     "command": "命令",
     "installCommand": "安装命令",
-    "install": "安装",
+        "install": "安装",
     "installMissing": "安装未安装项 ({{count}})",
-    "manual": "请手动安装"
+    "manual": "请手动安装",
+    "test": "测试",
+    "testing": "测试中…",
+    "testHint": "使用临时目录启动该 language server 并完成一次 LSP 握手，确认可用。",
+    "testSuccess": "{{label}} 可用 · {{detail}}",
+    "testWarning": "workspace/symbol 调用异常：{{detail}}"
   },
   "usage": {
     "title": "使用统计",
