@@ -105,7 +105,7 @@ P4 把进程内编程 Agent 接到渠道 + 工作区外壳。数据流仍是 `Re
 
 ## 子 Agent 档案与后台任务
 
-- `.md` 档案：`<workspace>/.noxcode/agents/*.md`、`.claude/agents/*.md`、`$APPCONFIG/agents/*.md`。frontmatter：`name`（必填）、`description`、`tools`（逗号或数组；空 / `*` = 全部）、`disallowedTools`、`permissionMode`、`maxTurns`、`skills`（只对子 Agent 开放的技能名）、`injectAgentsMd`；正文即系统提示。与设置页 json 同名时 json 优先；档案 `source = file`，设置页只展示不可编辑。解析见 [`subagents.rs`](../src-tauri/src/native/subagents.rs) `parse_subagent_markdown`。
+- `.md` 档案：`<workspace>/.noxcode/agents/*.md`、`.claude/agents/*.md`、`$APPCONFIG/agents/*.md`。frontmatter：`name`（必填）、`description`、`tools`（逗号或数组；空 / `*` = 全部）、`disallowedTools`、`permissionMode`、`maxTurns`、`skills`（只对子 Agent 开放的技能名）、`injectAgentsMd`；正文即系统提示。与设置页 json 同名时 json 优先；档案 `source = file`，设置页只展示不可编辑。解析见 [`subagents.rs`](../src-tauri/src/native/subagents.rs) `parse_subagent_markdown`。设置页 json 子智能体指定渠道模型时可另选思考等级，未设置则用模型默认；`.md` 档案不支持。
 - 后台任务：`Agent(run_in_background=true)` 立即返回 `task_id`，子 Agent 在独立 tokio 任务里运行（自己的 CancelFlag，父取消会级联）。父 Agent 用 `TaskOutput(task_id, wait, timeout_ms)` 读取 / 等待、`TaskStop` 取消、`SendMessage` 追加指令（进子 Agent 的 steer 通道）；子 Agent 用 `RespondToCoordinator` 留言。完成与留言在父 Agent 下一次模型调用前以 `[后台任务提醒]` 注入。注册表见 [`agent/background.rs`](../src-tauri/src/native/agent/background.rs)；会话结束时停掉全部后台任务。
 - Agent 特殊调度与普通工具共用权限、只读检查及 Hook 前后置入口；前台和后台跨批共享同一并发许可。后台状态包含 queued / running / done / failed / stopped，消息在模型调用边界和最终返回前消费，队列满或任务已关闭立即报错。前端可查看任务、发送消息与停止任务，使用 `list_native_background_tasks`、`send_native_background_message`、`stop_native_background_task`。
 

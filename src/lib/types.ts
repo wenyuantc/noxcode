@@ -1274,6 +1274,7 @@ export interface NativeSubagent {
   model_mode: string;
   channel_id: string | null;
   model: string | null;
+  reasoning_effort?: string | null;
   tool_mode: string;
   tools: string[];
   system_prompt: string;
@@ -1295,6 +1296,7 @@ export interface CreateNativeSubagentInput {
   model_mode?: string | null;
   channel_id?: string | null;
   model?: string | null;
+  reasoning_effort?: string | null;
   tool_mode?: string | null;
   tools?: string[] | null;
   system_prompt?: string | null;
@@ -1311,6 +1313,7 @@ export interface UpdateNativeSubagentInput {
   model_mode?: string;
   channel_id?: string | null;
   model?: string | null;
+  reasoning_effort?: string | null;
   tool_mode?: string;
   tools?: string[];
   system_prompt?: string;

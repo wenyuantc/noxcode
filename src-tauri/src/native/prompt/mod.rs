@@ -398,6 +398,7 @@ mod tests {
             path: None,
             max_turns: None,
             skills: Vec::new(),
+            reasoning_effort: None,
         };
         let with_custom =
             agent_tool_description(3, "balanced", std::slice::from_ref(&custom), None);

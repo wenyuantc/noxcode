@@ -81,6 +81,9 @@ pub struct NativeSubagent {
     /// 只对子 Agent 开放的技能名；空表示继承父会话全部技能。
     #[serde(default)]
     pub skills: Vec<String>,
+    /// `model_mode = channel` 时指定渠道模型的思考等级；`None` 走渠道模型默认。
+    #[serde(default)]
+    pub reasoning_effort: Option<String>,
 }
 
 pub const SUBAGENT_SOURCE_JSON: &str = "json";
@@ -200,6 +203,7 @@ pub fn parse_subagent_markdown(text: &str, path: &Path) -> Result<NativeSubagent
         path: Some(path.to_string_lossy().into_owned()),
         max_turns,
         skills,
+        reasoning_effort: None,
     })
 }
 
@@ -314,6 +318,8 @@ pub struct CreateNativeSubagent {
     pub permission_mode: Option<String>,
     #[serde(default)]
     pub disallowed_tools: Option<Vec<String>>,
+    #[serde(default)]
+    pub reasoning_effort: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -334,6 +340,9 @@ pub struct UpdateNativeSubagent {
     pub permission_mode: Option<Option<String>>,
     #[serde(default)]
     pub disallowed_tools: Option<Vec<String>>,
+    /// `Some(Some(effort))` 设置，`Some(None)` 清空，`None` 不改。
+    #[serde(default, deserialize_with = "deserialize_explicit_nullable")]
+    pub reasoning_effort: Option<Option<String>>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -814,6 +823,7 @@ fn normalize_record(mut item: NativeSubagent) -> Result<NativeSubagent, String> 
     if item.model_mode == MODEL_MODE_INHERIT {
         item.channel_id = None;
         item.model = None;
+        item.reasoning_effort = None;
     } else {
         let channel_id = item
             .channel_id
@@ -829,6 +839,12 @@ fn normalize_record(mut item: NativeSubagent) -> Result<NativeSubagent, String> 
             .ok_or_else(|| "指定渠道模型时必须选择模型".to_string())?;
         item.channel_id = Some(channel_id.to_string());
         item.model = Some(model.to_string());
+        item.reasoning_effort = item
+            .reasoning_effort
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string);
     }
     if item.tool_mode == TOOL_MODE_ALL {
         item.tools = Vec::new();
@@ -952,17 +968,35 @@ async fn validate_channel_model<R: Runtime>(
     app: &AppHandle<R>,
     channel_id: &str,
     model: &str,
-) -> Result<(), String> {
+    reasoning_effort: Option<&str>,
+) -> Result<Option<String>, String> {
     let pool = sqlite_pool(app).await?;
     let record = fetch_channel_record(&pool, channel_id).await?;
     if record.enabled == 0 {
         return Err(format!("渠道「{}」已停用", record.name));
     }
     let channel = record_to_channel(record)?;
-    if !channel.models.iter().any(|item| item.id == model) {
-        return Err(format!("渠道「{}」没有模型 {model}", channel.name));
+    let config = channel
+        .models
+        .iter()
+        .find(|item| item.id == model)
+        .ok_or_else(|| format!("渠道「{}」没有模型 {model}", channel.name))?;
+    // 模型未开启思考时不接收推理强度。
+    if config.thinking_enabled != Some(true) {
+        return Ok(None);
     }
-    Ok(())
+    let effort = reasoning_effort
+        .map(str::trim)
+        .filter(|item| !item.is_empty());
+    if let Some(effort) = effort {
+        let allowed = crate::native::model_catalog::selected_thinking_levels(config);
+        if !allowed.iter().any(|item| item == effort) {
+            return Err(format!(
+                "推理强度「{effort}」不在模型「{model}」的允许范围内"
+            ));
+        }
+    }
+    Ok(effort.map(str::to_string))
 }
 
 async fn persist_and_log<R: Runtime>(
@@ -985,6 +1019,7 @@ pub async fn resolve_child_model<R: Runtime>(
     app: &AppHandle<R>,
     channel_id: &str,
     model: &str,
+    reasoning_effort: Option<&str>,
 ) -> Result<ChildModelSettings, String> {
     let pool = sqlite_pool(app).await?;
     let record = fetch_channel_record(&pool, channel_id).await?;
@@ -1004,11 +1039,8 @@ pub async fn resolve_child_model<R: Runtime>(
         .unwrap_or_else(|| apply_catalog_defaults(model));
     fill_from_catalog(&mut config);
     let thinking_enabled = config.thinking_enabled.unwrap_or(false);
-    let effort = if thinking_enabled {
-        config.thinking_level.clone()
-    } else {
-        None
-    };
+    let effort =
+        crate::native::model_catalog::resolve_runtime_reasoning_effort(&config, reasoning_effort);
     let client = ModelClient::new(ModelClientConfig {
         protocol: channel.protocol,
         base_url: channel.base_url,
@@ -1080,7 +1112,7 @@ pub async fn create_native_subagent<R: Runtime>(
     if items.len() >= MAX_NATIVE_SUBAGENTS {
         return Err(format!("最多配置 {MAX_NATIVE_SUBAGENTS} 个子智能体"));
     }
-    let record = normalize_record(NativeSubagent {
+    let mut record = normalize_record(NativeSubagent {
         id: new_id(),
         name: payload.name,
         description: payload.description,
@@ -1099,6 +1131,7 @@ pub async fn create_native_subagent<R: Runtime>(
         workspace_ids: payload.workspace_ids.unwrap_or_default(),
         permission_mode: payload.permission_mode,
         disallowed_tools: payload.disallowed_tools.unwrap_or_default(),
+        reasoning_effort: payload.reasoning_effort,
         source: SUBAGENT_SOURCE_JSON.to_string(),
         path: None,
         max_turns: None,
@@ -1109,12 +1142,14 @@ pub async fn create_native_subagent<R: Runtime>(
         validate_live_workspace_ids(&app, &record.workspace_ids).await?;
     }
     if record.model_mode == MODEL_MODE_CHANNEL {
-        validate_channel_model(
+        let effort = validate_channel_model(
             &app,
             record.channel_id.as_deref().unwrap_or(""),
             record.model.as_deref().unwrap_or(""),
+            record.reasoning_effort.as_deref(),
         )
         .await?;
+        record.reasoning_effort = effort;
     }
     items.push(record.clone());
     persist_and_log(
@@ -1138,7 +1173,7 @@ pub async fn generate_native_subagent(
     if channel_id.is_empty() || model.is_empty() {
         return Err("请先选择 AI 渠道和模型".to_string());
     }
-    validate_channel_model(&app, channel_id, model).await?;
+    validate_channel_model(&app, channel_id, model, None).await?;
     let existing = load_native_subagents(&app)?;
     let workspace_id = payload
         .workspace_id
@@ -1218,18 +1253,23 @@ pub async fn update_native_subagent<R: Runtime>(
     if let Some(disallowed_tools) = payload.disallowed_tools {
         next.disallowed_tools = disallowed_tools;
     }
-    let record = normalize_record(next)?;
+    if let Some(reasoning_effort) = payload.reasoning_effort {
+        next.reasoning_effort = reasoning_effort;
+    }
+    let mut record = normalize_record(next)?;
     ensure_unique_name(&items, &record.name, Some(&id))?;
     if record.scope == SCOPE_WORKSPACES {
         validate_live_workspace_ids(&app, &record.workspace_ids).await?;
     }
     if record.model_mode == MODEL_MODE_CHANNEL {
-        validate_channel_model(
+        let effort = validate_channel_model(
             &app,
             record.channel_id.as_deref().unwrap_or(""),
             record.model.as_deref().unwrap_or(""),
+            record.reasoning_effort.as_deref(),
         )
         .await?;
+        record.reasoning_effort = effort;
     }
     items[index] = record.clone();
     persist_and_log(
@@ -1336,6 +1376,7 @@ mod tests {
             path: None,
             max_turns: None,
             skills: Vec::new(),
+            reasoning_effort: None,
         }
     }
 
@@ -1570,5 +1611,38 @@ mod tests {
         )
         .expect_err("prompt");
         assert!(err.contains("系统提示词"));
+    }
+
+    #[test]
+    fn normalize_inherit_clears_reasoning_effort() {
+        let mut item = sample();
+        item.model_mode = MODEL_MODE_INHERIT.to_string();
+        item.channel_id = Some("ch-1".to_string());
+        item.model = Some("gpt-4o".to_string());
+        item.reasoning_effort = Some("high".to_string());
+        let normalized = normalize_record(item).expect("valid");
+        assert_eq!(normalized.model_mode, MODEL_MODE_INHERIT);
+        assert_eq!(normalized.channel_id, None);
+        assert_eq!(normalized.model, None);
+        assert_eq!(normalized.reasoning_effort, None);
+    }
+
+    #[test]
+    fn normalize_channel_trims_and_keeps_reasoning_effort() {
+        let mut item = sample();
+        item.model_mode = MODEL_MODE_CHANNEL.to_string();
+        item.channel_id = Some(" ch-1 ".to_string());
+        item.model = Some(" gpt-4o ".to_string());
+        item.reasoning_effort = Some("  high  ".to_string());
+        let normalized = normalize_record(item).expect("valid");
+        assert_eq!(normalized.model_mode, MODEL_MODE_CHANNEL);
+        assert_eq!(normalized.channel_id.as_deref(), Some("ch-1"));
+        assert_eq!(normalized.model.as_deref(), Some("gpt-4o"));
+        assert_eq!(normalized.reasoning_effort.as_deref(), Some("high"));
+        // 空串/空白归一为 None。
+        let mut blank = normalize_record(normalized).expect("valid");
+        blank.reasoning_effort = Some("  ".to_string());
+        let normalized_blank = normalize_record(blank).expect("valid");
+        assert_eq!(normalized_blank.reasoning_effort, None);
     }
 }

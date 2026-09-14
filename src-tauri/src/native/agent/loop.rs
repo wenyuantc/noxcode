@@ -90,6 +90,7 @@ pub(crate) type ChildModelLoader = Arc<
     dyn Fn(
             String,
             String,
+            Option<String>,
         ) -> Pin<Box<dyn Future<Output = Result<ChildModelSettings, String>> + Send>>
         + Send
         + Sync,
@@ -2089,7 +2090,13 @@ impl AgentRunner {
             let custom_override = match &job.spec.kind {
                 SubagentKind::Custom(name) => find_native_subagent(&self.custom_subagents, name)
                     .filter(|item| item.model_mode == MODEL_MODE_CHANNEL)
-                    .and_then(|item| Some((item.channel_id.clone()?, item.model.clone()?))),
+                    .and_then(|item| {
+                        Some((
+                            item.channel_id.clone()?,
+                            item.model.clone()?,
+                            item.reasoning_effort.clone(),
+                        ))
+                    }),
                 _ => None,
             };
             let mut child = self.spawn_child_with_quota(&job.spec, job.index, batch_quota.clone());
@@ -2263,7 +2270,7 @@ fn run_child_job(
     spec: SubagentSpec,
     permit: Arc<Semaphore>,
     stub: Option<SubagentStub>,
-    custom_override: Option<(String, String)>,
+    custom_override: Option<(String, String, Option<String>)>,
     child_model_loader: Option<ChildModelLoader>,
     client_owned: Option<ModelClient>,
     model_turn: Option<ModelTurnCfg>,
@@ -2283,11 +2290,11 @@ fn run_child_job(
         let run = async {
             if let Some(stub) = stub {
                 Ok(stub(&spec))
-            } else if let Some((channel_id, model)) = custom_override {
+            } else if let Some((channel_id, model, effort)) = custom_override {
                 let Some(loader) = child_model_loader else {
                     return Err("子 Agent 需要模型客户端".to_string());
                 };
-                let settings = loader(channel_id, model).await?;
+                let settings = loader(channel_id, model, effort).await?;
                 child
                     .run_child_with_client(
                         client_owned.as_ref(),
@@ -3746,6 +3753,7 @@ mod tests {
             path: None,
             max_turns: None,
             skills: Vec::new(),
+            reasoning_effort: None,
         }];
         custom_runner.workspace_context = "Working directory: /repo".to_string();
         custom_runner.project_agents = "secret agents".to_string();

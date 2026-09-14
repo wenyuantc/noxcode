@@ -598,10 +598,16 @@ fn attach_subagent_runtime(
         )
     }));
     let app_load = app.clone();
-    runner.child_model_loader = Some(std::sync::Arc::new(move |channel_id, model| {
+    runner.child_model_loader = Some(std::sync::Arc::new(move |channel_id, model, effort| {
         let app = app_load.clone();
         Box::pin(async move {
-            crate::native::subagents::resolve_child_model(&app, &channel_id, &model).await
+            crate::native::subagents::resolve_child_model(
+                &app,
+                &channel_id,
+                &model,
+                effort.as_deref(),
+            )
+            .await
         })
     }));
 }

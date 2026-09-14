@@ -2,6 +2,11 @@ import { useTranslation } from "react-i18next";
 
 import { NATIVE_SUBAGENT_CUSTOM_TOOLS } from "@/lib/backend";
 import type { SubagentFormState } from "@/lib/subagentForm";
+import {
+  composerThinkingEnabled,
+  composerThinkingLevels,
+  resolveComposerThinkingLevel,
+} from "@/lib/modelCatalog";
 import type { AiChannel, Workspace } from "@/lib/types";
 import { Input } from "@/components/ui/input";
 import {
@@ -26,8 +31,11 @@ export function SubagentFormFields({
   busy: boolean;
   onPatch: (updates: Partial<SubagentFormState>) => void;
 }) {
-  const { t } = useTranslation("settings");
+  const { t } = useTranslation(["settings", "sessions"]);
   const selectedChannel = enabledChannels.find((channel) => channel.id === form.channelId) ?? null;
+  const selectedModel = selectedChannel?.models.find((item) => item.id === form.model) ?? null;
+  const thinkingOn = composerThinkingEnabled(selectedModel);
+  const effortLevels = composerThinkingLevels(selectedModel);
   const toggleTool = (tool: string, checked: boolean) => {
     onPatch({
       tools: checked
@@ -42,6 +50,15 @@ export function SubagentFormFields({
         : form.workspaceIds.filter((item) => item !== workspaceId),
     });
   };
+  // 切到某个渠道的模型后，把思考等级重置为该模型支持时的默认等级；不支持思考则清空。
+  const resetReasoningEffortForModel = (
+    channel: AiChannel | null | undefined,
+    modelId: string,
+  ): string => {
+    const model = channel?.models.find((item) => item.id === modelId) ?? null;
+    if (!composerThinkingEnabled(model)) return "";
+    return resolveComposerThinkingLevel(composerThinkingLevels(model), null, model?.thinking_level);
+  };
 
   return (
     <div className="space-y-3">
@@ -49,18 +66,18 @@ export function SubagentFormFields({
         value={form.name}
         disabled={busy}
         onChange={(event) => onPatch({ name: event.target.value })}
-        placeholder={t("subagents.fields.name")}
+        placeholder={t("settings:subagents.fields.name")}
       />
       <Textarea
         value={form.description}
         disabled={busy}
         onChange={(event) => onPatch({ description: event.target.value })}
-        placeholder={t("subagents.fields.description")}
+        placeholder={t("settings:subagents.fields.description")}
         rows={3}
       />
       <div>
         <label className="text-xs font-medium text-muted-foreground">
-          {t("subagents.fields.scope")}
+          {t("settings:subagents.fields.scope")}
         </label>
         <Select
           value={form.scope}
@@ -75,27 +92,31 @@ export function SubagentFormFields({
             <SelectValue>
               {(value) =>
                 value === "workspaces"
-                  ? t("subagents.fields.scopeWorkspaces")
-                  : t("subagents.fields.scopeAll")
+                  ? t("settings:subagents.fields.scopeWorkspaces")
+                  : t("settings:subagents.fields.scopeAll")
               }
             </SelectValue>
           </SelectTrigger>
           <SelectContent>
-            <SelectItem value="all">{t("subagents.fields.scopeAll")}</SelectItem>
-            <SelectItem value="workspaces">{t("subagents.fields.scopeWorkspaces")}</SelectItem>
+            <SelectItem value="all">{t("settings:subagents.fields.scopeAll")}</SelectItem>
+            <SelectItem value="workspaces">
+              {t("settings:subagents.fields.scopeWorkspaces")}
+            </SelectItem>
           </SelectContent>
         </Select>
-        <p className="mt-1 text-xs text-muted-foreground">{t("subagents.fields.scopeHint")}</p>
+        <p className="mt-1 text-xs text-muted-foreground">
+          {t("settings:subagents.fields.scopeHint")}
+        </p>
       </div>
       {form.scope === "workspaces" ? (
         <div>
           <label className="text-xs font-medium text-muted-foreground">
-            {t("subagents.fields.scopePickWorkspaces")}
+            {t("settings:subagents.fields.scopePickWorkspaces")}
           </label>
           <div className="mt-1 max-h-48 space-y-2 overflow-y-auto rounded-md border border-border p-3">
             {workspaces.length === 0 ? (
               <p className="text-xs text-muted-foreground">
-                {t("subagents.fields.scopeWorkspacesEmpty")}
+                {t("settings:subagents.fields.scopeWorkspacesEmpty")}
               </p>
             ) : (
               workspaces.map((workspace) => (
@@ -116,14 +137,18 @@ export function SubagentFormFields({
       ) : null}
       <div>
         <label className="text-xs font-medium text-muted-foreground">
-          {t("subagents.fields.modelMode")}
+          {t("settings:subagents.fields.modelMode")}
         </label>
         <Select
           value={form.modelMode}
           disabled={busy}
           onValueChange={(value) => {
             if (value === "inherit" || value === "channel") {
-              onPatch({ modelMode: value });
+              // 切回继承默认时清空思考等级。
+              onPatch({
+                modelMode: value,
+                reasoningEffort: value === "inherit" ? "" : form.reasoningEffort,
+              });
             }
           }}
         >
@@ -131,23 +156,25 @@ export function SubagentFormFields({
             <SelectValue>
               {(value) =>
                 value === "channel"
-                  ? t("subagents.fields.modelChannel")
-                  : t("subagents.fields.modelInherit")
+                  ? t("settings:subagents.fields.modelChannel")
+                  : t("settings:subagents.fields.modelInherit")
               }
             </SelectValue>
           </SelectTrigger>
           <SelectContent>
-            <SelectItem value="inherit">{t("subagents.fields.modelInherit")}</SelectItem>
-            <SelectItem value="channel">{t("subagents.fields.modelChannel")}</SelectItem>
+            <SelectItem value="inherit">{t("settings:subagents.fields.modelInherit")}</SelectItem>
+            <SelectItem value="channel">{t("settings:subagents.fields.modelChannel")}</SelectItem>
           </SelectContent>
         </Select>
-        <p className="mt-1 text-xs text-muted-foreground">{t("subagents.fields.modelHint")}</p>
+        <p className="mt-1 text-xs text-muted-foreground">
+          {t("settings:subagents.fields.modelHint")}
+        </p>
       </div>
       {form.modelMode === "channel" ? (
         <>
           <div>
             <label className="text-xs font-medium text-muted-foreground">
-              {t("subagents.fields.channel")}
+              {t("settings:subagents.fields.channel")}
             </label>
             <Select
               value={form.channelId || undefined}
@@ -155,9 +182,11 @@ export function SubagentFormFields({
               onValueChange={(value) => {
                 if (typeof value === "string") {
                   const channel = enabledChannels.find((item) => item.id === value);
+                  const nextModel = channel?.models[0]?.id ?? "";
                   onPatch({
                     channelId: value,
-                    model: channel?.models[0]?.id ?? "",
+                    model: nextModel,
+                    reasoningEffort: resetReasoningEffortForModel(channel, nextModel),
                   });
                 }
               }}
@@ -167,7 +196,7 @@ export function SubagentFormFields({
                   {(value) =>
                     typeof value === "string"
                       ? (enabledChannels.find((item) => item.id === value)?.name ?? value)
-                      : t("subagents.fields.channel")
+                      : t("settings:subagents.fields.channel")
                   }
                 </SelectValue>
               </SelectTrigger>
@@ -182,20 +211,25 @@ export function SubagentFormFields({
           </div>
           <div>
             <label className="text-xs font-medium text-muted-foreground">
-              {t("subagents.fields.model")}
+              {t("settings:subagents.fields.model")}
             </label>
             <Select
               value={form.model || undefined}
               disabled={busy}
               onValueChange={(value) => {
                 if (typeof value === "string") {
-                  onPatch({ model: value });
+                  onPatch({
+                    model: value,
+                    reasoningEffort: resetReasoningEffortForModel(selectedChannel, value),
+                  });
                 }
               }}
             >
               <SelectTrigger className="mt-1 bg-background">
                 <SelectValue>
-                  {(value) => (typeof value === "string" ? value : t("subagents.fields.model"))}
+                  {(value) =>
+                    typeof value === "string" ? value : t("settings:subagents.fields.model")
+                  }
                 </SelectValue>
               </SelectTrigger>
               <SelectContent>
@@ -207,11 +241,45 @@ export function SubagentFormFields({
               </SelectContent>
             </Select>
           </div>
+          <div>
+            <label className="text-xs font-medium text-muted-foreground">
+              {t("settings:subagents.fields.effort")}
+            </label>
+            <Select
+              value={thinkingOn ? form.reasoningEffort || undefined : undefined}
+              disabled={busy || !thinkingOn}
+              onValueChange={(value) => {
+                if (typeof value === "string") {
+                  onPatch({ reasoningEffort: value });
+                }
+              }}
+            >
+              <SelectTrigger className="mt-1 bg-background">
+                <SelectValue>
+                  {(selected) =>
+                    typeof selected === "string"
+                      ? t(`sessions:effortLevels.${selected}.title`, { defaultValue: selected })
+                      : t("settings:subagents.fields.effortPlaceholder")
+                  }
+                </SelectValue>
+              </SelectTrigger>
+              <SelectContent>
+                {effortLevels.map((level) => (
+                  <SelectItem key={level} value={level}>
+                    {t(`sessions:effortLevels.${level}.title`, { defaultValue: level })}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+            <p className="mt-1 text-xs text-muted-foreground">
+              {t("settings:subagents.fields.effortHint")}
+            </p>
+          </div>
         </>
       ) : null}
       <div>
         <label className="text-xs font-medium text-muted-foreground">
-          {t("subagents.fields.toolMode")}
+          {t("settings:subagents.fields.toolMode")}
         </label>
         <Select
           value={form.toolMode}
@@ -226,14 +294,14 @@ export function SubagentFormFields({
             <SelectValue>
               {(value) =>
                 value === "custom"
-                  ? t("subagents.fields.toolCustom")
-                  : t("subagents.fields.toolAll")
+                  ? t("settings:subagents.fields.toolCustom")
+                  : t("settings:subagents.fields.toolAll")
               }
             </SelectValue>
           </SelectTrigger>
           <SelectContent>
-            <SelectItem value="all">{t("subagents.fields.toolAll")}</SelectItem>
-            <SelectItem value="custom">{t("subagents.fields.toolCustom")}</SelectItem>
+            <SelectItem value="all">{t("settings:subagents.fields.toolAll")}</SelectItem>
+            <SelectItem value="custom">{t("settings:subagents.fields.toolCustom")}</SelectItem>
           </SelectContent>
         </Select>
       </div>
@@ -255,14 +323,14 @@ export function SubagentFormFields({
       ) : null}
       <div>
         <label className="text-xs font-medium text-muted-foreground">
-          {t("subagents.fields.systemPrompt")}
+          {t("settings:subagents.fields.systemPrompt")}
         </label>
         <Textarea
           className="mt-1 min-h-40"
           value={form.systemPrompt}
           disabled={busy}
           onChange={(event) => onPatch({ systemPrompt: event.target.value })}
-          placeholder={t("subagents.fields.systemPromptPlaceholder")}
+          placeholder={t("settings:subagents.fields.systemPromptPlaceholder")}
           rows={10}
         />
       </div>
@@ -275,9 +343,9 @@ export function SubagentFormFields({
           onChange={(event) => onPatch({ injectAgentsMd: event.target.checked })}
         />
         <div className="space-y-1">
-          <p className="text-sm font-medium">{t("subagents.fields.injectAgentsMd")}</p>
+          <p className="text-sm font-medium">{t("settings:subagents.fields.injectAgentsMd")}</p>
           <p className="text-xs text-muted-foreground">
-            {t("subagents.fields.injectAgentsMdHint")}
+            {t("settings:subagents.fields.injectAgentsMdHint")}
           </p>
         </div>
       </label>

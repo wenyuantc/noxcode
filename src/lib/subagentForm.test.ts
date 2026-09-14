@@ -1,7 +1,8 @@
 import { describe, expect, it } from "vitest";
 
 import type { GeneratedNativeSubagent } from "./types";
-import { formFromGeneratedSubagent } from "./subagentForm";
+import type { SubagentFormState } from "./subagentForm";
+import { formFromGeneratedSubagent, subagentPayloadFrom } from "./subagentForm";
 
 function draft(overrides: Partial<GeneratedNativeSubagent> = {}): GeneratedNativeSubagent {
   return {
@@ -27,6 +28,7 @@ describe("formFromGeneratedSubagent", () => {
       modelMode: "inherit",
       channelId: "",
       model: "",
+      reasoningEffort: "",
       toolMode: "custom",
       tools: ["Read", "Grep"],
       systemPrompt: "你是审查员",
@@ -40,5 +42,35 @@ describe("formFromGeneratedSubagent", () => {
     const form = formFromGeneratedSubagent(draft({ tool_mode: "all", tools: [] }));
     expect(form.toolMode).toBe("all");
     expect(form.tools).toEqual([]);
+  });
+});
+
+function state(overrides: Partial<SubagentFormState> = {}): SubagentFormState {
+  return {
+    name: "code-reviewer",
+    description: "审查 diff",
+    modelMode: "channel",
+    channelId: "ch1",
+    model: "model-1",
+    reasoningEffort: "",
+    toolMode: "custom",
+    tools: ["Read"],
+    systemPrompt: "你是审查员",
+    injectAgentsMd: true,
+    scope: "all",
+    workspaceIds: [],
+    ...overrides,
+  };
+}
+
+describe("subagentPayloadFrom", () => {
+  it("submits reasoning_effort when a channel model mode and an effort are set", () => {
+    const payload = subagentPayloadFrom(state({ reasoningEffort: "high" }));
+    expect(payload.reasoning_effort).toBe("high");
+  });
+
+  it("submits null reasoning_effort when model mode is inherit", () => {
+    const payload = subagentPayloadFrom(state({ modelMode: "inherit", reasoningEffort: "high" }));
+    expect(payload.reasoning_effort).toBeNull();
   });
 });

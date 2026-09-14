@@ -16,6 +16,7 @@ export interface SubagentFormState {
   modelMode: NativeSubagentModelMode;
   channelId: string;
   model: string;
+  reasoningEffort: string;
   toolMode: NativeSubagentToolMode;
   tools: string[];
   systemPrompt: string;
@@ -30,6 +31,7 @@ export const EMPTY_SUBAGENT_FORM: SubagentFormState = {
   modelMode: "inherit",
   channelId: "",
   model: "",
+  reasoningEffort: "",
   toolMode: "all",
   tools: [],
   systemPrompt: "",
@@ -45,6 +47,7 @@ export function formFromGeneratedSubagent(draft: GeneratedNativeSubagent): Subag
     modelMode: "inherit",
     channelId: "",
     model: "",
+    reasoningEffort: "",
     toolMode: draft.tool_mode === "custom" ? "custom" : "all",
     tools: draft.tools,
     systemPrompt: draft.system_prompt,
@@ -62,6 +65,7 @@ export function toSubagentForm(item: NativeSubagent, workspaces: Workspace[]): S
     modelMode: item.model_mode === "channel" ? "channel" : "inherit",
     channelId: item.channel_id ?? "",
     model: item.model ?? "",
+    reasoningEffort: item.reasoning_effort ?? "",
     toolMode: item.tool_mode === "custom" ? "custom" : "all",
     tools: item.tools,
     systemPrompt: item.system_prompt,
@@ -80,6 +84,7 @@ export function subagentPayloadFrom(
     model_mode: state.modelMode,
     channel_id: state.modelMode === "channel" ? state.channelId || null : null,
     model: state.modelMode === "channel" ? state.model || null : null,
+    reasoning_effort: state.modelMode === "channel" ? state.reasoningEffort.trim() || null : null,
     tool_mode: state.toolMode,
     tools: state.toolMode === "custom" ? state.tools : [],
     system_prompt: state.systemPrompt,
