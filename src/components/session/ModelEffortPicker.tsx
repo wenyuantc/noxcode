@@ -178,12 +178,13 @@ export function ModelEffortPicker({
             enabledChannels.map((c) => (
               <DropdownMenuSub key={c.id}>
                 <DropdownMenuSubTrigger className="text-xs">
+                  <Check
+                    className={cn(
+                      "size-3.5 shrink-0 text-primary",
+                      c.id !== displayChannelId && "invisible",
+                    )}
+                  />
                   <span className="min-w-0 truncate">{c.name}</span>
-                  {c.id === displayChannelId ? (
-                    <span className="ml-auto mr-2 shrink-0 text-[10px] text-muted-foreground">
-                      当前
-                    </span>
-                  ) : null}
                 </DropdownMenuSubTrigger>
                 <DropdownMenuSubContent className="max-h-72 min-w-max overflow-y-auto">
                   {(c.models ?? []).map((m) => (
