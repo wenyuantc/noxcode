@@ -1,8 +1,9 @@
 import { useEffect, useState } from "react";
-import { Bot, Loader2, Pencil, Plus, Sparkles } from "lucide-react";
+import { Bot, ClipboardPaste, Copy, Loader2, Pencil, Plus, Sparkles } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
 import { listNativeSubagents } from "@/lib/backend";
+import { serializeSubagentJson } from "@/lib/subagentJson";
 import type { NativeSubagent } from "@/lib/types";
 import { Button } from "@/components/ui/button";
 import { useWorkspaceStore } from "@/stores/workspaceStore";
@@ -10,6 +11,7 @@ import { SettingCard } from "./SettingCard";
 import { SettingFeedbackCallout } from "./SettingFeedbackCallout";
 import { SubagentAiCreateDialog } from "./SubagentAiCreateDialog";
 import { SubagentEditorDialog } from "./SubagentEditorDialog";
+import { SubagentJsonImportDialog } from "./SubagentJsonImportDialog";
 
 export function SubagentsSettingsTab() {
   const { t } = useTranslation("settings");
@@ -20,6 +22,7 @@ export function SubagentsSettingsTab() {
   const [editing, setEditing] = useState<NativeSubagent | null>(null);
   const [dialogOpen, setDialogOpen] = useState(false);
   const [aiDialogOpen, setAiDialogOpen] = useState(false);
+  const [importOpen, setImportOpen] = useState(false);
 
   const load = async () => {
     setLoading(true);
@@ -51,6 +54,16 @@ export function SubagentsSettingsTab() {
     setDialogOpen(true);
   };
 
+  const handleCopy = async (item: NativeSubagent) => {
+    setError(null);
+    try {
+      await navigator.clipboard.writeText(serializeSubagentJson(item));
+      setMessage(t("subagents.messages.copied"));
+    } catch {
+      setError(t("subagents.messages.copyFailed"));
+    }
+  };
+
   const builtinItems = [
     { id: "general", name: "general", hintKey: "subagents.builtin.general" },
     { id: "explore", name: "explore", hintKey: "subagents.builtin.explore" },
@@ -58,14 +71,14 @@ export function SubagentsSettingsTab() {
 
   return (
     <div className="space-y-6">
-      {!dialogOpen && !aiDialogOpen && message ? (
+      {!dialogOpen && !aiDialogOpen && !importOpen && message ? (
         <SettingFeedbackCallout
           variant="success"
           message={message}
           onClose={() => setMessage(null)}
         />
       ) : null}
-      {!dialogOpen && !aiDialogOpen && error ? (
+      {!dialogOpen && !aiDialogOpen && !importOpen && error ? (
         <SettingFeedbackCallout variant="error" message={error} onClose={() => setError(null)} />
       ) : null}
 
@@ -75,7 +88,7 @@ export function SubagentsSettingsTab() {
         description={t("subagents.description")}
         badge={`${items.length + builtinItems.length} 个子代理`}
         headerAction={
-          <div className="flex items-center gap-1.5">
+          <div className="flex flex-wrap items-center gap-1.5">
             <SubagentAiCreateDialog
               open={aiDialogOpen}
               onOpenChange={(next) => {
@@ -96,6 +109,20 @@ export function SubagentsSettingsTab() {
                 setMessage(t("subagents.messages.created"));
               }}
             />
+            <Button
+              type="button"
+              size="sm"
+              variant="outline"
+              className="h-7 gap-1 text-xs"
+              onClick={() => {
+                setError(null);
+                setMessage(null);
+                setImportOpen(true);
+              }}
+            >
+              <ClipboardPaste className="size-3.5" />
+              {t("subagents.actions.importJson")}
+            </Button>
             <Button size="sm" onClick={openCreate} className="h-7 gap-1 text-xs">
               <Plus className="size-3.5" />
               {t("subagents.actions.new")}
@@ -187,8 +214,18 @@ export function SubagentsSettingsTab() {
                       </div>
                     </div>
 
-                    {item.source !== "file" ? (
-                      <div className="flex shrink-0 items-center gap-1.5 self-end sm:self-center">
+                    <div className="flex shrink-0 items-center gap-1.5 self-end sm:self-center">
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="sm"
+                        className="h-7 gap-1 text-xs"
+                        onClick={() => void handleCopy(item)}
+                      >
+                        <Copy className="size-3" />
+                        {t("subagents.actions.copy")}
+                      </Button>
+                      {item.source !== "file" ? (
                         <Button
                           type="button"
                           variant="outline"
@@ -199,8 +236,8 @@ export function SubagentsSettingsTab() {
                           <Pencil className="size-3" />
                           {t("subagents.actions.edit")}
                         </Button>
-                      </div>
-                    ) : null}
+                      ) : null}
+                    </div>
                   </div>
                 ))}
               </div>
@@ -225,6 +262,19 @@ export function SubagentsSettingsTab() {
           setItems((current) => current.filter((item) => item.id !== id));
           setEditing(null);
           setMessage(t("subagents.messages.deleted"));
+        }}
+      />
+
+      <SubagentJsonImportDialog
+        open={importOpen}
+        onOpenChange={setImportOpen}
+        onImported={(created, warnings) => {
+          setItems((current) => {
+            const seen = new Set(current.map((item) => item.id));
+            return [...created.filter((item) => !seen.has(item.id)), ...current];
+          });
+          const imported = t("subagents.messages.imported", { count: created.length });
+          setMessage(warnings.length > 0 ? `${imported} ${warnings.join(" ")}` : imported);
         }}
       />
     </div>

@@ -708,6 +708,9 @@
     "actions": {
       "new": "New",
       "aiCreate": "AI create",
+      "importJson": "Import JSON",
+      "copy": "Copy",
+      "pasteClipboard": "Paste from clipboard",
       "generate": "Generate",
       "back": "Back",
       "edit": "Edit",
@@ -731,7 +734,7 @@
       "modelInherit": "Inherit default (this session’s channel and model)",
       "modelChannel": "Specific channel model",
       "modelHint": "Inherit uses the channel and model of this session. A specific channel only changes local HTTP; SSH file tools still use the remote workspace.",
-            "channel": "Channel",
+      "channel": "Channel",
       "model": "Model",
       "effort": "Thinking level",
       "effortPlaceholder": "Select thinking level",
@@ -761,14 +764,28 @@
       "aiReviewDescription": "A draft was generated from your description. Scope defaults to all workspaces and the model inherits the current session. Edit before creating.",
       "editTitle": "Edit sub-agent",
       "deleteTitle": "Delete sub-agent",
-      "deleteConfirm": "Delete sub-agent \"{{name}}\"?"
+      "deleteConfirm": "Delete sub-agent \"{{name}}\"?",
+      "importTitle": "Import sub-agent JSON",
+      "importDescription": "Paste copied JSON to import one or more sub-agents. Missing local channels or workspaces are downgraded with a warning.",
+      "importPlaceholder": "Paste JSON…"
     },
     "messages": {
       "created": "Sub-agent created",
       "updated": "Sub-agent updated",
       "deleted": "Sub-agent deleted",
       "generating": "Generating…",
-      "needChannel": "Choose an AI channel and model first"
+      "needChannel": "Choose an AI channel and model first",
+      "copied": "Copied as JSON",
+      "copyFailed": "Could not write to the clipboard",
+      "imported": "Imported {{count}} sub-agent(s)",
+      "clipboardReadFailed": "Could not read the clipboard. Paste the JSON instead.",
+      "importing": "Importing…",
+      "importPartial": "Imported {{count}}, remaining failed: {{detail}}"
+    },
+    "warnings": {
+      "channelMissing": "\"{{name}}\" uses a channel/model that is not available here; it will inherit the session default",
+      "workspacesMissing": "\"{{name}}\" targets workspaces that are not on this machine; it will be available in all workspaces",
+      "workspacesPartial": "\"{{name}}\" dropped {{dropped}} workspace(s) that are not on this machine"
     },
     "profilesHint": "Markdown profiles are also loaded from <workspace>/.noxcode/agents, .claude/agents and $APPCONFIG/agents: frontmatter name / description / tools / disallowedTools / permissionMode / maxTurns / skills, body = system prompt. They are read-only here."
   },
