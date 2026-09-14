@@ -17,6 +17,7 @@ import {
 import {
   DropdownMenu,
   DropdownMenuContent,
+  DropdownMenuGroup,
   DropdownMenuItem,
   DropdownMenuLabel,
   DropdownMenuRadioGroup,
@@ -103,6 +104,9 @@ export function ModelEffortPicker({
       ? `${currentChannel.name}/${displayModelId}`
       : displayModelId
     : t("needChannel");
+  const displayTitle =
+    thinkingOn && resolvedEffort ? `${modelLabel} · ${effortTitleOf(resolvedEffort)}` : modelLabel;
+  const triggerTitle = showPending ? t("modelPending") : displayTitle;
 
   const selectModel = async (channelId: string, modelId: string) => {
     if (disabled) return;
@@ -144,9 +148,9 @@ export function ModelEffortPicker({
     <DropdownMenu>
       <DropdownMenuTrigger
         disabled={disabled}
-        title={showPending ? t("modelPending") : undefined}
+        title={triggerTitle}
         className={cn(
-          "inline-flex h-7 min-w-0 max-w-64 cursor-pointer items-center gap-1.5 rounded-lg border border-border/70 bg-background/80 px-2 text-xs font-medium text-foreground/90 shadow-2xs transition-all duration-150 outline-none hover:bg-muted/40 disabled:opacity-60",
+          "inline-flex h-7 min-w-0 max-w-full cursor-pointer items-center gap-1.5 rounded-lg border border-border/70 bg-background/80 px-2 text-xs font-medium text-foreground/90 shadow-2xs transition-all duration-150 outline-none hover:bg-muted/40 disabled:opacity-60",
           className,
         )}
       >
@@ -164,48 +168,52 @@ export function ModelEffortPicker({
         <ChevronDown className="size-3 shrink-0 text-muted-foreground/70" />
       </DropdownMenuTrigger>
       <DropdownMenuContent align="end" className="w-64">
-        <DropdownMenuLabel className="text-[11px] font-semibold text-muted-foreground/70 uppercase">
-          {t("modelSelectorTitle", { defaultValue: "模型与思考深度" })}
-        </DropdownMenuLabel>
-        {enabledChannels.length === 0 ? (
-          <DropdownMenuItem disabled>{t("noEnabledChannels")}</DropdownMenuItem>
-        ) : (
-          enabledChannels.map((c) => (
-            <DropdownMenuSub key={c.id}>
-              <DropdownMenuSubTrigger className="text-xs">
-                <span className="truncate">{c.name}</span>
-                {c.id === displayChannelId ? (
-                  <span className="ml-auto text-[10px] text-muted-foreground">当前</span>
-                ) : null}
-              </DropdownMenuSubTrigger>
-              <DropdownMenuSubContent className="max-h-72 min-w-48 overflow-y-auto">
-                {c.models.map((m) => (
-                  <DropdownMenuItem
-                    key={m.id}
-                    onClick={() => void selectModel(c.id, m.id)}
-                    className="flex items-center justify-between text-xs"
-                  >
-                    <span className="truncate">{m.id}</span>
-                    {c.id === displayChannelId && m.id === displayModelId ? (
-                      <Check className="size-3.5 shrink-0 text-primary" />
-                    ) : null}
-                  </DropdownMenuItem>
-                ))}
-              </DropdownMenuSubContent>
-            </DropdownMenuSub>
-          ))
-        )}
+        <DropdownMenuGroup>
+          <DropdownMenuLabel className="text-[11px] font-semibold text-muted-foreground/70 uppercase">
+            {t("modelSelectorTitle", { defaultValue: "模型与思考深度" })}
+          </DropdownMenuLabel>
+          {enabledChannels.length === 0 ? (
+            <DropdownMenuItem disabled>{t("needChannel")}</DropdownMenuItem>
+          ) : (
+            enabledChannels.map((c) => (
+              <DropdownMenuSub key={c.id}>
+                <DropdownMenuSubTrigger className="text-xs">
+                  <span className="min-w-0 truncate">{c.name}</span>
+                  {c.id === displayChannelId ? (
+                    <span className="ml-auto mr-2 shrink-0 text-[10px] text-muted-foreground">
+                      当前
+                    </span>
+                  ) : null}
+                </DropdownMenuSubTrigger>
+                <DropdownMenuSubContent className="max-h-72 min-w-max overflow-y-auto">
+                  {(c.models ?? []).map((m) => (
+                    <DropdownMenuItem
+                      key={m.id}
+                      onClick={() => void selectModel(c.id, m.id)}
+                      className="flex items-center justify-between gap-2 text-xs"
+                    >
+                      <span className="whitespace-nowrap">{m.id}</span>
+                      {c.id === displayChannelId && m.id === displayModelId ? (
+                        <Check className="size-3.5 shrink-0 text-primary" />
+                      ) : null}
+                    </DropdownMenuItem>
+                  ))}
+                </DropdownMenuSubContent>
+              </DropdownMenuSub>
+            ))
+          )}
+        </DropdownMenuGroup>
 
         {thinkingOn && efforts.length > 0 ? (
           <>
             <DropdownMenuSeparator />
-            <DropdownMenuLabel className="text-[11px] font-semibold text-muted-foreground/70 uppercase">
-              {t("thinkingSelectorTitle", { defaultValue: "思考深度" })}
-            </DropdownMenuLabel>
             <DropdownMenuRadioGroup
               value={resolvedEffort}
               onValueChange={(next) => next && void selectEffort(next)}
             >
+              <DropdownMenuLabel className="text-[11px] font-semibold text-muted-foreground/70 uppercase">
+                {t("thinkingSelectorTitle", { defaultValue: "思考深度" })}
+              </DropdownMenuLabel>
               {efforts.map((level) => {
                 const desc = effortDescOf(level);
                 return (
@@ -235,7 +243,7 @@ export function ModelEffortPicker({
           className="text-xs text-muted-foreground hover:text-foreground"
         >
           <Settings2 className="size-3.5" />
-          {t("manageChannels")}
+          {t("manageModels")}
         </DropdownMenuItem>
       </DropdownMenuContent>
     </DropdownMenu>

@@ -9,19 +9,19 @@ import { useSessionStore } from "@/stores/sessionStore";
 import { ModelEffortPicker } from "./ModelEffortPicker";
 
 describe("ModelEffortPicker", () => {
-  it("renders trigger with model and effort label", () => {
+  it("renders trigger with full model id, effort label, and no 16rem cap", () => {
     useSessionStore.setState({ selectedSessionId: null });
     useChannelStore.setState({
       channels: [
         {
           id: "chan-1",
-          name: "6 Astra",
+          name: "Myai-ollama",
           protocol: "openai",
           base_url: "http://localhost",
           extra_headers_json: null,
           models: [
             {
-              id: "astra-v1",
+              id: "deepseek-v4-flash",
               context_tokens: null,
               max_output_tokens: null,
               thinking_enabled: true,
@@ -39,21 +39,23 @@ describe("ModelEffortPicker", () => {
         },
       ],
       activeChannelId: "chan-1",
-      activeModelId: "astra-v1",
+      activeModelId: "deepseek-v4-flash",
     });
 
     const html = renderToStaticMarkup(
       <I18nextProvider i18n={i18n}>
         <MemoryRouter>
           <ModelEffortPicker
-            selection={{ channelId: "chan-1", modelId: "astra-v1" }}
+            selection={{ channelId: "chan-1", modelId: "deepseek-v4-flash" }}
             reasoningEffort="high"
           />
         </MemoryRouter>
       </I18nextProvider>,
     );
 
-    expect(html).toContain("6 Astra/astra-v1");
-    expect(html).toContain("max-w-64");
+    expect(html).toContain("Myai-ollama/deepseek-v4-flash");
+    expect(html).toContain("max-w-full");
+    expect(html).not.toContain("max-w-64");
+    expect(html).toContain('title="Myai-ollama/deepseek-v4-flash · 高"');
   });
 });
