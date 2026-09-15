@@ -1,14 +1,12 @@
-import { ChevronRight, Loader2, RotateCcw } from "lucide-react";
-import { useState } from "react";
+import { Loader2, RotateCcw } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
 import type { GroupedSessionItem } from "@/lib/sessionLines";
 import { parseRetryLine, summarizeRetry } from "@/lib/sessionLines";
-import { cn } from "@/lib/utils";
+import { SegmentCard } from "./SegmentCard";
 
 export function RetryRow({ items, live }: { items: GroupedSessionItem[]; live?: boolean }) {
   const { t } = useTranslation("sessions");
-  const [open, setOpen] = useState(false);
   const summary = summarizeRetry(items);
   const failed = summary.failed;
   const parts = [
@@ -22,31 +20,23 @@ export function RetryRow({ items, live }: { items: GroupedSessionItem[]; live?: 
   ].filter(Boolean);
 
   return (
-    <div>
-      <button
-        type="button"
-        className={cn(
-          "flex w-full items-center gap-2 text-sm",
-          failed ? "text-red-600 dark:text-red-400" : "text-muted-foreground",
-        )}
-        onClick={() => setOpen((value) => !value)}
-      >
-        {live && !failed ? (
-          <Loader2 className="size-3.5 shrink-0 animate-spin" />
+    <SegmentCard
+      icon={
+        live && !failed ? (
+          <Loader2 className="size-3 animate-spin" />
         ) : (
-          <RotateCcw className="size-3.5 shrink-0" />
-        )}
-        <span className="min-w-0 flex-1 truncate text-left">{parts.join(" · ")}</span>
-        <ChevronRight className={`size-3.5 shrink-0 transition ${open ? "rotate-90" : ""}`} />
-      </button>
-      {open ? (
-        <div className="mt-1 space-y-2">
-          {items.map((item) => (
-            <RetryAttempt key={item.id} text={item.text} />
-          ))}
-        </div>
-      ) : null}
-    </div>
+          <RotateCcw className="size-3" />
+        )
+      }
+      iconClassName="bg-muted/60 text-muted-foreground"
+      title={parts.join(" · ")}
+      tone={failed ? "danger" : "default"}
+      contentClassName="space-y-2"
+    >
+      {items.map((item) => (
+        <RetryAttempt key={item.id} text={item.text} />
+      ))}
+    </SegmentCard>
   );
 }
 
