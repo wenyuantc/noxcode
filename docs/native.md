@@ -37,6 +37,8 @@ P4 把进程内编程 Agent 接到渠道 + 工作区外壳。数据流仍是 `Re
 
 权限模式（`permission_mode`）四档，对齐 ZCode：`default` 变更前确认；`edit` 自动放行 `Overwrite`（删除 / 推送 / 强制 Git / 不透明命令 / MCP 仍弹确认）；`build` 再放行不透明 shell 与带 `readOnlyHint` 的 MCP；`yolo` 完全访问（`allow_all_high_risk=true`，不弹 MCP / 工作区钩子 / 命令 / ask 规则确认，deny 仍拒绝）。旧文件的 `confirm / auto_edit / full` 与 Claude Code 的 `acceptEdits / auto / bypassPermissions / dontAsk` 读入时映射到新名；`confirm_high_risk: false` 读成 `yolo`。`plan` 是会话态：既可由 Composer 选择在启动时进入，也可由模型调用 `EnterPlanMode` 进入；`ExitPlanMode` 提交计划触发 `native-plan-approval-request`，用户批准后恢复执行模式，退回则连同反馈交回模型继续修改。批准 IPC 可带 `ai_channel_id` / `model`：与当前 runtime 不同时先加载新 client 写入 live slot 并 `emit native-session`，再解除 `ExitPlanMode`；同一回合下一次 `chat()` 用实施模型。模型未变或退回则跳过加载。
 
+待批准的计划在入队时写入 `agent_sessions.pending_plan_json`（`{request_id, plan, created_at}`）。批准、退回、换到队列里下一条待批计划，以及非 live 会话开启新一轮时清空；**停止会话、取消 `ExitPlanMode` 与应用退出都不清**。因此会话停止或应用重开后，前端仍能从该列还原出一张 detached 审批卡：挂起的 `ExitPlanMode` 已失效，批准改为以 `resume_native_session` 续聊新一轮（`plan_mode=false`，提示词带上完整计划正文，因为 transcript 里未完成的工具对可能已被清洗掉），退回则以 `plan_mode=true` 带反馈重新规划。
+
 ## 权限规则
 
 规则层在风险分类之前裁决：`deny → allow → ask → 未命中`（对齐 ZCode 的 `denyPriority: beforeAsk`）。每条规则 `{ capability, pattern, source, scope, note, external_path? }`：`capability` 是契约里的能力，`source` 决定匹配字段。普通命令支持前缀通配，路径 / 工具名 / 输入支持 glob。全局规则存 `$APPCONFIG/native-permissions.json`，本地工作区存 `.noxcode/permissions.json`；SSH 工作区存本机 `$APPCONFIG/ssh-workspaces/<工作区 ID 的 UTF-8 十六进制>/.noxcode/permissions.json`。同效果下工作区规则优先。

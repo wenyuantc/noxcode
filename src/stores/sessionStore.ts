@@ -279,9 +279,17 @@ export const useSessionStore = create<SessionState>((set, get) => ({
     if (current.liveBySession[id]?.input_queue_id !== session.input_queue_id) {
       delete configurationRevisionBySession[id];
     }
+    // 新一轮开始让上一份 detached 计划作废；live 会话续聊也会走这里，不能动仍在等待的审批。
+    const planApprovals = {
+      ...current.planApprovals,
+      [id]: Object.fromEntries(
+        Object.entries(current.planApprovals[id] ?? {}).filter(([, request]) => !request.detached),
+      ),
+    };
     set({
       liveBySession: { ...current.liveBySession, [id]: { ...session, runtime } },
       inputQueueBySession,
+      planApprovals,
       planModeBySession: { ...current.planModeBySession, [id]: planMode },
       planModeRunBySession,
       configurationRevisionBySession,
@@ -369,10 +377,17 @@ export const useSessionStore = create<SessionState>((set, get) => ({
     delete stream[exit.session_record_id];
     const permissions = { ...get().permissions };
     const planQuestions = { ...get().planQuestions };
-    const planApprovals = { ...get().planApprovals };
     delete permissions[exit.session_record_id];
     delete planQuestions[exit.session_record_id];
-    delete planApprovals[exit.session_record_id];
+    // 待批准的计划已落库，这里标记 detached 而不是删除，卡片可以原位继续。
+    const planApprovals = {
+      ...get().planApprovals,
+      [exit.session_record_id]: Object.fromEntries(
+        Object.entries(get().planApprovals[exit.session_record_id] ?? {}).map(
+          ([requestId, request]) => [requestId, { ...request, detached: true }],
+        ),
+      ),
+    };
     const inputQueueBySession = { ...get().inputQueueBySession };
     delete inputQueueBySession[exit.session_record_id];
     const planModeRunBySession = { ...get().planModeRunBySession };

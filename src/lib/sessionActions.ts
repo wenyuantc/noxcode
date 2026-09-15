@@ -19,7 +19,7 @@ interface SessionActivity {
   inputQueueBySession: Record<string, NativeInputQueue>;
   permissions: Record<string, Record<string, unknown>>;
   planQuestions: Record<string, Record<string, unknown>>;
-  planApprovals: Record<string, Record<string, unknown>>;
+  planApprovals: Record<string, Record<string, { detached?: boolean }>>;
 }
 
 export function isSessionBusy(sessionId: string, state: SessionActivity): boolean {
@@ -32,7 +32,8 @@ export function isSessionBusy(sessionId: string, state: SessionActivity): boolea
     state.inputQueueBySession[sessionId]?.items.length ||
     Object.keys(state.permissions[sessionId] ?? {}).length ||
     Object.keys(state.planQuestions[sessionId] ?? {}).length ||
-    Object.keys(state.planApprovals[sessionId] ?? {}).length,
+    // detached 计划属于已结束的会话，不算忙
+    Object.values(state.planApprovals[sessionId] ?? {}).some((request) => !request.detached),
   );
 }
 

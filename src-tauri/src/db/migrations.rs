@@ -429,6 +429,14 @@ pub fn get_all_migrations() -> Vec<Migration> {
             "#,
             kind: tauri_plugin_sql::MigrationKind::Up,
         },
+        Migration {
+            version: 12,
+            description: "agent_sessions.pending_plan_json resumable plan approval",
+            sql: r#"
+                ALTER TABLE agent_sessions ADD COLUMN pending_plan_json TEXT;
+            "#,
+            kind: tauri_plugin_sql::MigrationKind::Up,
+        },
     ]
 }
 
@@ -474,7 +482,7 @@ mod tests {
         for (index, migration) in get_all_migrations().iter().enumerate() {
             assert_eq!(migration.version, index as i64 + 1);
         }
-        assert_eq!(latest_migration_version(), 11);
+        assert_eq!(latest_migration_version(), 12);
         assert_eq!(
             get_all_migrations()
                 .last()
@@ -553,6 +561,23 @@ mod tests {
             .map(|row| row.get::<String, _>("name"))
             .collect();
             assert_eq!(columns, vec!["context_usage_json"]);
+        });
+    }
+
+    #[test]
+    fn agent_sessions_has_pending_plan_json_column() {
+        tauri::async_runtime::block_on(async {
+            let pool = setup_test_pool().await;
+            let columns: Vec<String> = sqlx::query(
+                "SELECT name FROM pragma_table_info('agent_sessions') WHERE name = 'pending_plan_json'",
+            )
+            .fetch_all(&pool)
+            .await
+            .expect("read pending_plan_json column")
+            .into_iter()
+            .map(|row| row.get::<String, _>("name"))
+            .collect();
+            assert_eq!(columns, vec!["pending_plan_json"]);
         });
     }
 

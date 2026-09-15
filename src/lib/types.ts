@@ -565,6 +565,8 @@ export interface AgentSession {
   cached_tokens: number | null;
   created_at: string;
   context_usage_json?: string | null;
+  /** 等待批准的计划快照（`PendingPlanSnapshot` JSON）。会话停止或应用退出后仍保留，用于继续实施。 */
+  pending_plan_json?: string | null;
   model?: string | null;
 }
 
@@ -874,6 +876,8 @@ export interface NativePlanApprovalRequest {
   workspace_id: string | null;
   session_kind: string;
   plan: string;
+  /** 会话已结束、原挂起的 ExitPlanMode 已失效；批准或退回要以续聊新一轮的方式继续。 */
+  detached?: boolean;
 }
 
 export interface NativePlanQuestion {

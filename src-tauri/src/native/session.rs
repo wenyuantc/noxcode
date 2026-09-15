@@ -1967,6 +1967,10 @@ async fn start_native_session_locked(
     }
 
     let pool = sqlite_pool(&app).await?;
+    // 走到这里说明会话不是 live（live 输入已在上面入队返回），新一轮开始即让上一份待批准计划作废。
+    if let Some(resume_id) = resume_id.as_deref() {
+        clear_pending_plan_with(&pool, resume_id).await?;
+    }
     let execution_context =
         resolve_workspace_execution_context_with_pool(&pool, &workspace_id).await?;
     let workspace_root = execution_context
@@ -2344,6 +2348,65 @@ fn apply_run_settings_to_runner(runner: &mut AgentRunner, run: &NativeRunSetting
         scope.channel_id = run.channel_id.clone();
         scope.model = run.model.clone();
     }
+}
+
+/// 落库的待批准计划快照。会话停止或应用退出时保留，供重新打开后继续实施。
+#[derive(Debug, Clone, Serialize)]
+struct PendingPlanSnapshot {
+    request_id: String,
+    plan: String,
+    created_at: String,
+}
+
+async fn save_pending_plan(
+    app: &AppHandle,
+    session_record_id: &str,
+    request_id: &str,
+    plan: &str,
+) -> Result<(), String> {
+    let pool = sqlite_pool(app).await?;
+    save_pending_plan_with(&pool, session_record_id, request_id, plan).await
+}
+
+async fn save_pending_plan_with(
+    pool: &sqlx::SqlitePool,
+    session_record_id: &str,
+    request_id: &str,
+    plan: &str,
+) -> Result<(), String> {
+    let snapshot = PendingPlanSnapshot {
+        request_id: request_id.to_string(),
+        plan: plan.to_string(),
+        created_at: now_sqlite(),
+    };
+    let payload = serde_json::to_string(&snapshot)
+        .map_err(|error| format!("序列化待批准计划失败: {error}"))?;
+    sqlx::query("UPDATE agent_sessions SET pending_plan_json = $1 WHERE id = $2")
+        .bind(payload)
+        .bind(session_record_id)
+        .execute(pool)
+        .await
+        .map_err(|error| format!("保存待批准计划失败: {error}"))?;
+    Ok(())
+}
+
+async fn clear_pending_plan(app: &AppHandle, session_record_id: &str) -> Result<(), String> {
+    let pool = sqlite_pool(app).await?;
+    clear_pending_plan_with(&pool, session_record_id).await
+}
+
+async fn clear_pending_plan_with(
+    pool: &sqlx::SqlitePool,
+    session_record_id: &str,
+) -> Result<(), String> {
+    sqlx::query(
+        "UPDATE agent_sessions SET pending_plan_json = NULL WHERE id = $1 AND pending_plan_json IS NOT NULL",
+    )
+    .bind(session_record_id)
+    .execute(pool)
+    .await
+    .map_err(|error| format!("清除待批准计划失败: {error}"))?;
+    Ok(())
 }
 
 async fn update_agent_session_channel(
@@ -2875,6 +2938,10 @@ async fn run_native_loop(
                         Err(_) => return,
                     }
                 };
+                // 落库后即使会话被停止或应用退出，重新打开仍能继续这份计划。
+                let _ =
+                    save_pending_plan(&app, &session_record_id, &request.request_id, &prompt.plan)
+                        .await;
                 emit_native_line(
                     &app,
                     &session_record_id,
@@ -4139,10 +4206,14 @@ pub async fn resolve_native_plan_approval(
     )?;
     emit_request_resolved(&app, &session_record_id, &request_id, "plan_approval");
     if let Some(request) = next {
+        let _ =
+            save_pending_plan(&app, &session_record_id, &request.request_id, &request.plan).await;
         let _ = app.emit(
             "native-plan-approval-request",
             plan_approval_event(&session_record_id, &request),
         );
+    } else {
+        let _ = clear_pending_plan(&app, &session_record_id).await;
     }
     Ok(())
 }
@@ -4764,6 +4835,44 @@ mod tests {
                 .await
                 .unwrap();
         assert_eq!(channel, "ch-new");
+    }
+
+    #[tokio::test]
+    async fn pending_plan_survives_until_explicitly_cleared() {
+        let pool = crate::db::test_support::setup_migrated_pool().await;
+        sqlx::query(
+            "INSERT INTO agent_sessions (id, session_kind, status, started_at, created_at) VALUES ('sess-plan', 'plan', 'running', 't', 't')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        super::save_pending_plan_with(&pool, "sess-plan", "req-1", "## 目标\n落库计划")
+            .await
+            .unwrap();
+        let raw: String = sqlx::query_scalar(
+            "SELECT pending_plan_json FROM agent_sessions WHERE id = 'sess-plan'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        let saved: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        assert_eq!(saved["request_id"], "req-1");
+        assert_eq!(saved["plan"], "## 目标\n落库计划");
+        assert!(saved["created_at"]
+            .as_str()
+            .is_some_and(|it| !it.is_empty()));
+
+        super::clear_pending_plan_with(&pool, "sess-plan")
+            .await
+            .unwrap();
+        let cleared: Option<String> = sqlx::query_scalar(
+            "SELECT pending_plan_json FROM agent_sessions WHERE id = 'sess-plan'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert!(cleared.is_none());
     }
 
     #[tokio::test]

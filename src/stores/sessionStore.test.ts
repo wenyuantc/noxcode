@@ -375,8 +375,39 @@ describe("sessionStore history", () => {
     expect(Object.keys(useSessionStore.getState().planApprovals.s1)).toEqual(["r2"]);
     expect(Object.keys(useSessionStore.getState().planApprovals.s2)).toEqual(["r1"]);
     useSessionStore.getState().onExit({ ...started("s1", "execution"), code: 0 });
-    expect(useSessionStore.getState().planApprovals.s1).toBeUndefined();
+    expect(useSessionStore.getState().planApprovals.s1.r2.detached).toBe(true);
     expect(useSessionStore.getState().planApprovals.s2.r1).toBeDefined();
+    expect(useSessionStore.getState().planApprovals.s2.r1.detached).toBeUndefined();
+  });
+
+  it("marks pending plans detached on exit and drops them when a new turn starts", () => {
+    const request = {
+      session_record_id: "s1",
+      request_id: "r1",
+      profile_id: "p",
+      workspace_id: "ws-1",
+      session_kind: "plan",
+      plan: "plan",
+    };
+    useSessionStore.getState().setPlanApproval(request);
+    useSessionStore.getState().onExit({ ...started("s1", "plan"), code: 0 });
+    expect(useSessionStore.getState().planApprovals.s1.r1.detached).toBe(true);
+    useSessionStore.getState().onStarted(started("s1", "plan"));
+    expect(useSessionStore.getState().planApprovals.s1).toEqual({});
+  });
+
+  it("keeps a live pending plan when the same session starts another turn", () => {
+    const request = {
+      session_record_id: "s1",
+      request_id: "r1",
+      profile_id: "p",
+      workspace_id: "ws-1",
+      session_kind: "plan",
+      plan: "plan",
+    };
+    useSessionStore.getState().setPlanApproval(request);
+    useSessionStore.getState().onStarted(started("s1", "plan"));
+    expect(useSessionStore.getState().planApprovals.s1.r1).toBeDefined();
   });
 
   it("keeps a previous fetch in cache after switching away", async () => {

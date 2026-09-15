@@ -118,6 +118,14 @@ describe("isSessionBusy", () => {
         isSessionBusy("session", { ...activity(), [field]: { session: { request: {} } } }),
       ).toBe(true);
     }
+    // detached 计划属于已结束的会话，不应阻塞归档等操作
+    expect(
+      isSessionBusy("session", {
+        ...activity(),
+        turnState: { session: "ended" },
+        planApprovals: { session: { request: { detached: true } } },
+      }),
+    ).toBe(false);
     for (const status of ["queued", "running", "done", "failed", "stopped"] as const) {
       expect(
         isSessionBusy("session", {

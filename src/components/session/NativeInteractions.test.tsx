@@ -4,6 +4,8 @@ import { emptyChannelModel } from "@/lib/modelCatalog";
 import { useChannelStore } from "@/stores/channelStore";
 import { useSessionStore } from "@/stores/sessionStore";
 import { useUiStore } from "@/stores/uiStore";
+import { useWorkspaceStore } from "@/stores/workspaceStore";
+import type { AgentSession } from "@/lib/types";
 import { groupSessionLines, buildTurnBlocks, subagentSegmentIdentity } from "@/lib/sessionLines";
 import { PlanRow, PendingPlanApproval } from "./PlanRow";
 import { PlanAskCard } from "./PlanAskCard";
@@ -18,6 +20,8 @@ vi.mock("@/lib/backend", () => ({
   listNativeQueuedInputs: vi.fn(),
   updateNativeQueuedInput: vi.fn(),
   removeNativeQueuedInput: vi.fn(),
+  startNativeSession: vi.fn(),
+  resumeNativeSession: vi.fn(),
 }));
 vi.mock("react-i18next", () => ({
   useTranslation: () => ({
@@ -81,6 +85,43 @@ vi.mock("@/stores/uiStore", async (importOriginal) => {
     ),
   };
 });
+vi.mock("@/stores/workspaceStore", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/stores/workspaceStore")>();
+  return {
+    useWorkspaceStore: Object.assign(
+      (selector: (state: ReturnType<typeof actual.useWorkspaceStore.getState>) => unknown) =>
+        selector(actual.useWorkspaceStore.getState()),
+      actual.useWorkspaceStore,
+    ),
+  };
+});
+
+function stoppedPlanSession(pendingPlanJson?: string | null): AgentSession {
+  return {
+    id: "s1",
+    ai_channel_id: "ch",
+    workspace_id: "ws-1",
+    working_dir: null,
+    execution_target: "local",
+    ssh_config_id: null,
+    target_host_label: null,
+    session_kind: "plan",
+    status: "exited",
+    started_at: "t",
+    ended_at: "t",
+    exit_code: 0,
+    resume_session_id: null,
+    pinned: 0,
+    archived: 0,
+    input_tokens: null,
+    output_tokens: null,
+    total_tokens: null,
+    reasoning_tokens: null,
+    cached_tokens: null,
+    created_at: "t",
+    pending_plan_json: pendingPlanJson,
+  };
+}
 
 describe("native interaction rendering", () => {
   beforeEach(() => {
@@ -89,7 +130,9 @@ describe("native interaction rendering", () => {
       planQuestions: {},
       planApprovals: {},
       configurationBySession: {},
+      liveBySession: {},
     });
+    useWorkspaceStore.setState({ sessions: [] });
     useChannelStore.setState({
       channels: [],
       activeChannelId: null,
@@ -128,6 +171,46 @@ describe("native interaction rendering", () => {
     expect(historical).toContain("planHistoricalBadge");
     expect(historical).not.toContain("planApprovalApprove");
     expect(historical).not.toContain("planApprovalReject");
+  });
+  it("keeps the approval card from the persisted plan after the session stopped", () => {
+    const plan = "## 目标\n落库计划";
+    useWorkspaceStore.setState({
+      sessions: [
+        stoppedPlanSession(
+          JSON.stringify({ request_id: "req-1", plan, created_at: "2026-09-15 04:00:00" }),
+        ),
+      ],
+    });
+
+    const card = renderToStaticMarkup(<PendingPlanApproval sessionId="s1" />);
+    expect(card).toContain("落库计划");
+    expect(card).toContain("planContinueBadge");
+    expect(card).toContain("planContinueHint");
+    expect(card).toContain("planApprovalApprove");
+    expect(card).toContain("planApprovalReject");
+    expect(card).not.toContain("planWaitingApproval");
+
+    // 同一份计划的历史 [PLAN] 行不再重复渲染
+    const item = groupSessionLines([
+      { id: "plan-line", sessionId: "s1", text: `[PLAN]\n${plan}`, createdAt: "t" },
+    ])[0];
+    expect(renderToStaticMarkup(<PlanRow item={item} sessionId="s1" />)).toBe("");
+  });
+  it("hides the persisted plan card while the session is live again", () => {
+    useWorkspaceStore.setState({
+      sessions: [stoppedPlanSession(JSON.stringify({ request_id: "req-1", plan: "落库计划" }))],
+    });
+    useSessionStore.setState({
+      liveBySession: {
+        s1: {
+          profile_id: "p",
+          workspace_id: "ws-1",
+          session_kind: "plan",
+          session_record_id: "s1",
+        },
+      },
+    });
+    expect(renderToStaticMarkup(<PendingPlanApproval sessionId="s1" />)).toBe("");
   });
   it("ignores surrounding whitespace when matching the pending plan", () => {
     useSessionStore.getState().setPlanApproval({

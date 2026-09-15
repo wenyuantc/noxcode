@@ -11,7 +11,7 @@ import {
   Play,
   Undo2,
 } from "lucide-react";
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 
 import { Badge } from "@/components/ui/badge";
@@ -19,13 +19,16 @@ import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import { resolveNativePlanApproval } from "@/lib/backend";
 import { resolveSessionRequest } from "@/lib/nativeRequestResolution";
+import { parsePendingPlan, planApprovalResumeInput } from "@/lib/planApproval";
 import {
   planApprovalModelArgs,
   resolvePlanApprovalThinking,
   resolveSessionSelection,
 } from "@/lib/sessionModel";
+import { submitSessionPrompt } from "@/lib/sessionSubmission";
 import type { GroupedSessionItem, PlanLineStatus } from "@/lib/sessionLines";
 import { parsePlanLine, planTitleFromBody } from "@/lib/sessionLines";
+import type { NativePlanApprovalRequest } from "@/lib/types";
 import { cn } from "@/lib/utils";
 import { useChannelStore } from "@/stores/channelStore";
 import { useSessionStore } from "@/stores/sessionStore";
@@ -96,12 +99,25 @@ function isLongContent(text: string): boolean {
   return lines > 14 || text.length > 600;
 }
 
+/**
+ * 当前待批准的计划：优先用 live 会话的挂起请求；会话已结束时回落到落库的快照，
+ * 这样停止或重开应用后仍能继续实施。
+ */
+function usePlanApproval(sessionId: string): NativePlanApprovalRequest | undefined {
+  const live = useSessionStore((state) => Object.values(state.planApprovals[sessionId] ?? {})[0]);
+  const isLive = useSessionStore((state) => Boolean(state.liveBySession[sessionId]));
+  const session = useWorkspaceStore((state) =>
+    state.sessions.find((item) => item.id === sessionId),
+  );
+  const persisted = useMemo(() => parsePendingPlan(session) ?? undefined, [session]);
+  if (live) return live;
+  return isLive ? undefined : persisted;
+}
+
 export function PlanRow({ item, sessionId }: { item: GroupedSessionItem; sessionId: string }) {
   const { t } = useTranslation("sessions");
   const parsed = parsePlanLine(item.text);
-  const pendingApproval = useSessionStore(
-    (state) => Object.values(state.planApprovals[sessionId] ?? {})[0],
-  );
+  const pendingApproval = usePlanApproval(sessionId);
   const pendingAsk = useSessionStore(
     (state) => Object.values(state.planQuestions[sessionId] ?? {})[0],
   );
@@ -218,9 +234,7 @@ export function PlanRow({ item, sessionId }: { item: GroupedSessionItem; session
 
 export function PendingPlanApproval({ sessionId }: { sessionId: string }) {
   const { t } = useTranslation("sessions");
-  const pendingApproval = useSessionStore(
-    (state) => Object.values(state.planApprovals[sessionId] ?? {})[0],
-  );
+  const pendingApproval = usePlanApproval(sessionId);
   const runtime = useSessionStore((state) => state.configurationBySession[sessionId]);
   const session = useWorkspaceStore((state) =>
     state.sessions.find((item) => item.id === sessionId),
@@ -310,6 +324,27 @@ export function PendingPlanApproval({ sessionId }: { sessionId: string }) {
     }
   };
 
+  /** 会话已结束：挂起的 ExitPlanMode 早已失效，用续聊新一轮来实施或重新规划。 */
+  const continueDetached = async (approved: boolean) => {
+    if (!session?.workspace_id || !selection.channelId) {
+      throw new Error(t("planContinueNeedChannel"));
+    }
+    const started = await submitSessionPrompt(
+      planApprovalResumeInput({
+        approved,
+        sessionId,
+        workspaceId: session.workspace_id,
+        channelId: selection.channelId,
+        modelId: selection.modelId,
+        reasoningEffort: thinking.enabled ? thinking.effort : null,
+        permissionMode: runtime?.permission_mode,
+        plan: pendingApproval.plan,
+        feedback,
+      }),
+    );
+    if (started) useSessionStore.getState().onStarted(started);
+  };
+
   const resolve = async (approved: boolean) => {
     if (busy) return;
     const current = pendingApproval;
@@ -321,17 +356,21 @@ export function PendingPlanApproval({ sessionId }: { sessionId: string }) {
     setBusy(true);
     setError(null);
     try {
-      await resolveSessionRequest({ ...current, kind: "plan_approval" }, () =>
-        resolveNativePlanApproval(
-          current.session_record_id,
-          current.request_id,
-          approved,
-          feedback.trim() || undefined,
-          modelArgs.aiChannelId,
-          modelArgs.model,
-          modelArgs.reasoningEffort,
-        ),
-      );
+      if (current.detached) {
+        await continueDetached(approved);
+      } else {
+        await resolveSessionRequest({ ...current, kind: "plan_approval" }, () =>
+          resolveNativePlanApproval(
+            current.session_record_id,
+            current.request_id,
+            approved,
+            feedback.trim() || undefined,
+            modelArgs.aiChannelId,
+            modelArgs.model,
+            modelArgs.reasoningEffort,
+          ),
+        );
+      }
       if (approved && modelArgs.aiChannelId && modelArgs.model) {
         setChannelSelection(modelArgs.aiChannelId, modelArgs.model);
       }
@@ -339,7 +378,7 @@ export function PendingPlanApproval({ sessionId }: { sessionId: string }) {
         setComposerThinkingLevel(modelArgs.reasoningEffort);
       }
     } catch (reason) {
-      setError(String(reason));
+      setError(reason instanceof Error ? reason.message : String(reason));
     } finally {
       setBusy(false);
     }
@@ -349,6 +388,12 @@ export function PendingPlanApproval({ sessionId }: { sessionId: string }) {
     if (!showFeedback && !feedback.trim()) {
       setShowFeedback(true);
       setTimeout(() => textareaRef.current?.focus(), 50);
+      return;
+    }
+    // detached 退回要靠反馈文本组成续聊指令，空反馈无法发起新一轮。
+    if (pendingApproval.detached && !feedback.trim()) {
+      setError(t("planContinueNeedFeedback"));
+      textareaRef.current?.focus();
       return;
     }
     void resolve(false);
@@ -378,8 +423,15 @@ export function PendingPlanApproval({ sessionId }: { sessionId: string }) {
               variant="outline"
               className="h-5 shrink-0 gap-1 border-amber-500/40 bg-amber-500/10 px-1.5 text-[11px] font-medium text-amber-600 dark:text-amber-400"
             >
-              <span className="size-1.5 rounded-full bg-amber-500 animate-pulse" />
-              <span>{t("planWaitingApproval")}</span>
+              <span
+                className={cn(
+                  "size-1.5 rounded-full bg-amber-500",
+                  !pendingApproval.detached && "animate-pulse",
+                )}
+              />
+              <span>
+                {pendingApproval.detached ? t("planContinueBadge") : t("planWaitingApproval")}
+              </span>
             </Badge>
           </div>
         </div>
@@ -426,6 +478,13 @@ export function PendingPlanApproval({ sessionId }: { sessionId: string }) {
               <span>{t("planCollapse")}</span>
               <ChevronUp className="size-3" />
             </button>
+          </div>
+        ) : null}
+
+        {pendingApproval.detached ? (
+          <div className="mt-3 flex items-center gap-2 rounded-lg border border-border/60 bg-muted/20 px-3 py-2 text-xs text-muted-foreground">
+            <AlertCircle className="size-4 shrink-0" />
+            <span>{t("planContinueHint")}</span>
           </div>
         ) : null}
 

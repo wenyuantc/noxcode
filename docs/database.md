@@ -10,7 +10,7 @@ React (UI) → Tauri IPC commands → Rust service layer → SQLite
 
 | 路径 | 职责 |
 | --- | --- |
-| [`src-tauri/src/db/migrations.rs`](../src-tauri/src/db/migrations.rs) | 迁移清单（version 1 baseline + version 2 去掉档案 + version 3 `agent_sessions.title` + version 4 `agent_sessions.pinned` + version 5 `agent_sessions.context_usage_json` + version 6 `ssh_configs.algorithms_json` + version 7 `activity_logs` + version 8 `native_tool_artifacts` / call log `operation`、`model_role` / `ai_channels.lite_model` + version 9 `native_automations`、`native_goals` + version 10 `agent_sessions.archived` + version 11 `ai_channels.responses_continuation`） |
+| [`src-tauri/src/db/migrations.rs`](../src-tauri/src/db/migrations.rs) | 迁移清单（version 1 baseline + version 2 去掉档案 + version 3 `agent_sessions.title` + version 4 `agent_sessions.pinned` + version 5 `agent_sessions.context_usage_json` + version 6 `ssh_configs.algorithms_json` + version 7 `activity_logs` + version 8 `native_tool_artifacts` / call log `operation`、`model_role` / `ai_channels.lite_model` + version 9 `native_automations`、`native_goals` + version 10 `agent_sessions.archived` + version 11 `ai_channels.responses_continuation` + version 12 `agent_sessions.pending_plan_json`） |
 | [`src-tauri/src/db/models.rs`](../src-tauri/src/db/models.rs) | 行模型与 IPC DTO |
 | [`src-tauri/src/app/shared.rs`](../src-tauri/src/app/shared.rs) | `sqlite_pool` / `database_path` / `now_sqlite` / `new_id` |
 | [`src-tauri/src/app/database.rs`](../src-tauri/src/app/database.rs) | 健康检查、备份、恢复 |
@@ -128,6 +128,7 @@ SSH 连接配置。密码与密钥口令只存 keyring 引用（`password_ref` /
 | `archived` | version 10 新增，默认 `0`。`1` 为已归档，保留置顶标记、上下文、历史、用量和附件；取消归档后可继续输入。普通列表在 SQL 分页前排除已归档记录 |
 | `input_tokens` / `output_tokens` / `total_tokens` / `reasoning_tokens` / `cached_tokens` | 累计计费用量 |
 | `context_usage_json` | 最后一次 `NativeContextUsage` 快照。version 5 新增，供历史会话 Composer 显示 `used/limit` 与缓存率 |
+| `pending_plan_json` | 等待批准的计划快照 `{request_id, plan, created_at}`。version 12 新增。`ExitPlanMode` 入队时写入；批准 / 退回 / 换下一条待批计划 / 非 live 会话开启新一轮时清空。**停止会话与应用退出都不清**，这样重开后审批卡仍能继续实施 |
 
 ### `agent_session_events`
 
