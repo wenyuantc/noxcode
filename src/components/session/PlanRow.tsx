@@ -130,6 +130,8 @@ export function PlanRow({ item, sessionId }: { item: GroupedSessionItem; session
     );
   }
 
+  if (pendingApproval && parsed.body.trim() === pendingApproval.plan.trim()) return null;
+
   const title = parsed.title ?? t("planDocument");
   const cleanBody = cleanPlanBody(parsed.body, title);
   const isLong = isLongContent(cleanBody || parsed.body);

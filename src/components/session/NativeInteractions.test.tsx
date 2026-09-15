@@ -96,6 +96,59 @@ describe("native interaction rendering", () => {
       activeModelId: null,
     });
   });
+  it("shows only the approval card for the current persisted plan", () => {
+    const approval = {
+      session_record_id: "s1",
+      request_id: "current",
+      profile_id: "p",
+      workspace_id: "ws",
+      session_kind: "plan",
+      plan: "## 目标\n\n- 修改接口",
+    };
+    useSessionStore.getState().setPlanApproval(approval);
+    const item = groupSessionLines([
+      {
+        id: "current-plan",
+        sessionId: "s1",
+        text: `[PLAN]\n${approval.plan}`,
+        createdAt: "t",
+      },
+    ])[0];
+
+    expect(renderToStaticMarkup(<PlanRow item={item} sessionId="s1" />)).toBe("");
+    const current = renderToStaticMarkup(<PendingPlanApproval sessionId="s1" />);
+    expect(current).toContain("修改接口");
+    expect(current).toContain("planWaitingApproval");
+    expect(current).toContain("planApprovalApprove");
+    expect(current).toContain("planApprovalReject");
+
+    useSessionStore.getState().resolveRequest({ ...approval, kind: "plan_approval" });
+    const historical = renderToStaticMarkup(<PlanRow item={item} sessionId="s1" />);
+    expect(historical).toContain("修改接口");
+    expect(historical).toContain("planHistoricalBadge");
+    expect(historical).not.toContain("planApprovalApprove");
+    expect(historical).not.toContain("planApprovalReject");
+  });
+  it("ignores surrounding whitespace when matching the pending plan", () => {
+    useSessionStore.getState().setPlanApproval({
+      session_record_id: "s1",
+      request_id: "current",
+      profile_id: "p",
+      workspace_id: "ws",
+      session_kind: "plan",
+      plan: "\ncurrent plan\n",
+    });
+    const item = groupSessionLines([
+      {
+        id: "current-plan",
+        sessionId: "s1",
+        text: "[PLAN]\n  current plan  ",
+        createdAt: "t",
+      },
+    ])[0];
+
+    expect(renderToStaticMarkup(<PlanRow item={item} sessionId="s1" />)).toBe("");
+  });
   it("never attaches current approval controls to a historical plan", () => {
     useSessionStore.getState().setPlanApproval({
       session_record_id: "s1",
