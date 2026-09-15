@@ -4,6 +4,7 @@ import { useTranslation } from "react-i18next";
 
 import { listNativeSubagents } from "@/lib/backend";
 import { serializeSubagentJson } from "@/lib/subagentJson";
+import { errorMessage, showToast } from "@/lib/toast";
 import type { NativeSubagent } from "@/lib/types";
 import { Button } from "@/components/ui/button";
 import { useWorkspaceStore } from "@/stores/workspaceStore";
@@ -13,12 +14,24 @@ import { SubagentAiCreateDialog } from "./SubagentAiCreateDialog";
 import { SubagentEditorDialog } from "./SubagentEditorDialog";
 import { SubagentJsonImportDialog } from "./SubagentJsonImportDialog";
 
+/**
+ * 导入结果的提示策略：有警告时降级为 warning 变体（不自动关闭），否则复用成功文案。
+ * 便于单测覆盖导入提示的变体选择。
+ */
+export function importNotice(
+  imported: string,
+  warnings: string[],
+): { variant: "success" | "warning"; description: string } {
+  if (warnings.length === 0) return { variant: "success", description: imported };
+  return { variant: "warning", description: `${imported} ${warnings.join(" ")}` };
+}
+
 export function SubagentsSettingsTab() {
   const { t } = useTranslation("settings");
   const [items, setItems] = useState<NativeSubagent[]>([]);
   const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
-  const [message, setMessage] = useState<string | null>(null);
+  // 仅列表加载失败常驻页面内；复制/创建的成败走 toast。
+  const [loadError, setLoadError] = useState<string | null>(null);
   const [editing, setEditing] = useState<NativeSubagent | null>(null);
   const [dialogOpen, setDialogOpen] = useState(false);
   const [aiDialogOpen, setAiDialogOpen] = useState(false);
@@ -26,11 +39,11 @@ export function SubagentsSettingsTab() {
 
   const load = async () => {
     setLoading(true);
-    setError(null);
+    setLoadError(null);
     try {
       setItems(await listNativeSubagents(useWorkspaceStore.getState().activeWorkspaceId));
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      setLoadError(errorMessage(err));
     } finally {
       setLoading(false);
     }
@@ -42,25 +55,20 @@ export function SubagentsSettingsTab() {
 
   const openCreate = () => {
     setEditing(null);
-    setError(null);
-    setMessage(null);
     setDialogOpen(true);
   };
 
   const openEdit = (item: NativeSubagent) => {
     setEditing(item);
-    setError(null);
-    setMessage(null);
     setDialogOpen(true);
   };
 
   const handleCopy = async (item: NativeSubagent) => {
-    setError(null);
     try {
       await navigator.clipboard.writeText(serializeSubagentJson(item));
-      setMessage(t("subagents.messages.copied"));
+      showToast({ variant: "success", description: t("subagents.messages.copied") });
     } catch {
-      setError(t("subagents.messages.copyFailed"));
+      showToast({ variant: "error", description: t("subagents.messages.copyFailed") });
     }
   };
 
@@ -71,15 +79,12 @@ export function SubagentsSettingsTab() {
 
   return (
     <div className="space-y-6">
-      {!dialogOpen && !aiDialogOpen && !importOpen && message ? (
+      {loadError ? (
         <SettingFeedbackCallout
-          variant="success"
-          message={message}
-          onClose={() => setMessage(null)}
+          variant="error"
+          message={loadError}
+          onClose={() => setLoadError(null)}
         />
-      ) : null}
-      {!dialogOpen && !aiDialogOpen && !importOpen && error ? (
-        <SettingFeedbackCallout variant="error" message={error} onClose={() => setError(null)} />
       ) : null}
 
       <SettingCard
@@ -91,13 +96,7 @@ export function SubagentsSettingsTab() {
           <div className="flex flex-wrap items-center gap-1.5">
             <SubagentAiCreateDialog
               open={aiDialogOpen}
-              onOpenChange={(next) => {
-                setAiDialogOpen(next);
-                if (next) {
-                  setError(null);
-                  setMessage(null);
-                }
-              }}
+              onOpenChange={setAiDialogOpen}
               trigger={
                 <Button type="button" size="sm" variant="outline" className="h-7 gap-1 text-xs">
                   <Sparkles className="size-3.5" />
@@ -106,7 +105,7 @@ export function SubagentsSettingsTab() {
               }
               onCreated={(created) => {
                 setItems((current) => [created, ...current]);
-                setMessage(t("subagents.messages.created"));
+                showToast({ variant: "success", description: t("subagents.messages.created") });
               }}
             />
             <Button
@@ -114,11 +113,7 @@ export function SubagentsSettingsTab() {
               size="sm"
               variant="outline"
               className="h-7 gap-1 text-xs"
-              onClick={() => {
-                setError(null);
-                setMessage(null);
-                setImportOpen(true);
-              }}
+              onClick={() => setImportOpen(true)}
             >
               <ClipboardPaste className="size-3.5" />
               {t("subagents.actions.importJson")}
@@ -252,16 +247,16 @@ export function SubagentsSettingsTab() {
         item={editing}
         onCreated={(created) => {
           setItems((current) => [created, ...current]);
-          setMessage(t("subagents.messages.created"));
+          showToast({ variant: "success", description: t("subagents.messages.created") });
         }}
         onUpdated={(updated) => {
           setItems((current) => current.map((item) => (item.id === updated.id ? updated : item)));
-          setMessage(t("subagents.messages.updated"));
+          showToast({ variant: "success", description: t("subagents.messages.updated") });
         }}
         onDeleted={(id) => {
           setItems((current) => current.filter((item) => item.id !== id));
           setEditing(null);
-          setMessage(t("subagents.messages.deleted"));
+          showToast({ variant: "success", description: t("subagents.messages.deleted") });
         }}
       />
 
@@ -273,8 +268,9 @@ export function SubagentsSettingsTab() {
             const seen = new Set(current.map((item) => item.id));
             return [...created.filter((item) => !seen.has(item.id)), ...current];
           });
-          const imported = t("subagents.messages.imported", { count: created.length });
-          setMessage(warnings.length > 0 ? `${imported} ${warnings.join(" ")}` : imported);
+          showToast(
+            importNotice(t("subagents.messages.imported", { count: created.length }), warnings),
+          );
         }}
       />
     </div>

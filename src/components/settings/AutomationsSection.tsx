@@ -10,6 +10,7 @@ import {
   runNativeAutomationNow,
   updateNativeAutomation,
 } from "@/lib/backend";
+import { errorMessage, showToast } from "@/lib/toast";
 import type { NativeAutomation } from "@/lib/types";
 import { Button } from "@/components/ui/button";
 import {
@@ -36,8 +37,9 @@ export function AutomationsSection() {
   const channelId = useChannelStore((state) => state.activeChannelId);
   const model = useChannelStore((state) => state.activeModelId);
   const [items, setItems] = useState<NativeAutomation[]>([]);
-  const [error, setError] = useState<string | null>(null);
-  const [message, setMessage] = useState<string | null>(null);
+  // 列表加载失败常驻页面内；表单校验与保存失败留在弹窗内。
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [modalError, setModalError] = useState<string | null>(null);
   const [dialogOpen, setDialogOpen] = useState(false);
   const [saving, setSaving] = useState(false);
   const [runningId, setRunningId] = useState<string | null>(null);
@@ -60,9 +62,9 @@ export function AutomationsSection() {
     listNativeAutomations(workspaceId)
       .then((next) => {
         setItems(next);
-        setError(null);
+        setLoadError(null);
       })
-      .catch((reason: unknown) => setError(String(reason)));
+      .catch((reason: unknown) => setLoadError(errorMessage(reason)));
   }, [workspaceId]);
 
   useEffect(() => {
@@ -76,8 +78,7 @@ export function AutomationsSection() {
     setName("");
     setCron("0 9 * * mon-fri");
     setPrompt("");
-    setError(null);
-    setMessage(null);
+    setModalError(null);
     setDialogOpen(true);
   };
 
@@ -88,7 +89,7 @@ export function AutomationsSection() {
     setPrompt(item.prompt);
     setFormChannelId(item.channel_id ?? "");
     setFormModel(item.model ?? "");
-    setError(null);
+    setModalError(null);
     setDialogOpen(true);
   };
   const openResult = async (sessionId: string) => {
@@ -97,14 +98,19 @@ export function AutomationsSection() {
       await useSessionStore.getState().loadHistory(sessionId);
       await navigate("/");
     } catch (reason) {
-      setError(String(reason));
+      // 打开运行结果属于一次性操作，失败走 toast，不占页面布局。
+      showToast({
+        id: "automation-open-session",
+        variant: "error",
+        description: errorMessage(reason),
+      });
     }
   };
 
   const create = async () => {
     if (!workspaceId || !name.trim() || !cron.trim() || !prompt.trim()) return;
     setSaving(true);
-    setError(null);
+    setModalError(null);
     try {
       const values = {
         name: name.trim(),
@@ -118,10 +124,15 @@ export function AutomationsSection() {
       setName("");
       setPrompt("");
       setDialogOpen(false);
-      setMessage(t("common:saved", { defaultValue: "任务创建成功" }));
+      // 保存成功是一次性反馈：全局 toast，不占页面布局。
+      showToast({
+        id: "automation-save",
+        variant: "success",
+        description: t("common:saved", { defaultValue: "任务创建成功" }),
+      });
       reload();
     } catch (reason: unknown) {
-      setError(String(reason));
+      setModalError(errorMessage(reason));
     } finally {
       setSaving(false);
     }
@@ -130,41 +141,67 @@ export function AutomationsSection() {
   const toggle = (item: NativeAutomation, enabled: boolean) => {
     updateNativeAutomation(item.id, { enabled })
       .then(() => reload())
-      .catch((reason: unknown) => setError(String(reason)));
+      .catch((reason: unknown) => {
+        // 启停失败是一次性操作结果，走 toast。
+        showToast({
+          id: `automation-toggle-${item.id}`,
+          variant: "error",
+          description: errorMessage(reason),
+        });
+      });
   };
 
   const remove = (item: NativeAutomation) => {
     deleteNativeAutomation(item.id)
       .then(() => {
-        setMessage(t("common:deleted", { defaultValue: "已删除" }));
+        showToast({
+          id: "automation-delete",
+          variant: "success",
+          description: t("common:deleted", { defaultValue: "已删除" }),
+        });
         reload();
       })
-      .catch((reason: unknown) => setError(String(reason)));
+      .catch((reason: unknown) => {
+        showToast({
+          id: "automation-delete",
+          variant: "error",
+          description: errorMessage(reason),
+        });
+      });
   };
 
   const runNow = (item: NativeAutomation) => {
     setRunningId(item.id);
     runNativeAutomationNow(item.id)
       .then((sessionId) => {
-        setMessage(t("settings:automations.started", { session: sessionId }));
+        // 运行结果一次性提示走 toast；会话入口保留在页面内随时可再次打开。
+        showToast({
+          id: `automation-run-${item.id}`,
+          variant: "success",
+          description: t("settings:automations.started", { session: sessionId }),
+        });
         setResultSessionId(sessionId);
         reload();
       })
-      .catch((reason: unknown) => setError(String(reason)))
+      .catch((reason: unknown) => {
+        showToast({
+          id: `automation-run-${item.id}`,
+          variant: "error",
+          description: errorMessage(reason),
+        });
+      })
       .finally(() => setRunningId(null));
   };
 
   return (
     <div className="space-y-6">
-      {message ? (
+      {/* 列表加载失败需要持续可见；一次性操作结果统一走全局 toast */}
+      {loadError ? (
         <SettingFeedbackCallout
-          variant="success"
-          message={message}
-          onClose={() => setMessage(null)}
+          variant="error"
+          message={loadError}
+          onClose={() => setLoadError(null)}
         />
-      ) : null}
-      {error ? (
-        <SettingFeedbackCallout variant="error" message={error} onClose={() => setError(null)} />
       ) : null}
       {resultSessionId ? (
         <Button
@@ -329,11 +366,7 @@ export function AutomationsSection() {
             </DialogDescription>
           </DialogHeader>
           <div className="space-y-3.5 px-6 py-4">
-            {error ? (
-              <p role="alert" className="text-sm text-destructive">
-                {error}
-              </p>
-            ) : null}
+            {modalError ? <SettingFeedbackCallout variant="error" message={modalError} /> : null}
             <div>
               <label className="text-xs font-medium text-muted-foreground">
                 {t("settings:automations.name")}

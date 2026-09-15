@@ -29,6 +29,7 @@ import {
   emptyChannelModel,
   materializeThinkingLevels,
 } from "@/lib/modelCatalog";
+import { errorMessage, showToast } from "@/lib/toast";
 import { formatDate } from "@/lib/utils";
 import type {
   AiChannel,
@@ -106,8 +107,9 @@ export function AiChannelsSettingsTab() {
   const [saving, setSaving] = useState<"save" | "delete" | "test" | "models" | null>(null);
   const [testingId, setTestingId] = useState<string | null>(null);
   const [deleteConfirming, setDeleteConfirming] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [message, setMessage] = useState<string | null>(null);
+  // 列表加载失败常驻页面内；表单校验与保存失败留在弹窗内。
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [modalError, setModalError] = useState<string | null>(null);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [form, setForm] = useState<ChannelFormState>(EMPTY_FORM);
   const [showApiKey, setShowApiKey] = useState(false);
@@ -126,9 +128,9 @@ export function AiChannelsSettingsTab() {
       const [data, catalogData] = await Promise.all([listAiChannels(), listModelCatalog()]);
       setChannels(data);
       setCatalog(catalogData);
-      setError(null);
+      setLoadError(null);
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      setLoadError(errorMessage(err));
     } finally {
       setLoading(false);
     }
@@ -146,8 +148,7 @@ export function AiChannelsSettingsTab() {
     setSelectedId(null);
     setForm(EMPTY_FORM);
     setShowApiKey(false);
-    setError(null);
-    setMessage(null);
+    setModalError(null);
     setDialogOpen(true);
   };
 
@@ -155,8 +156,7 @@ export function AiChannelsSettingsTab() {
     setSelectedId(channel.id);
     setForm(channelToForm(channel));
     setShowApiKey(false);
-    setError(null);
-    setMessage(null);
+    setModalError(null);
     setDialogOpen(true);
   };
 
@@ -174,33 +174,32 @@ export function AiChannelsSettingsTab() {
 
   const handleSave = async () => {
     if (!form.name.trim()) {
-      setError(t("channels.validation.nameRequired"));
+      setModalError(t("channels.validation.nameRequired"));
       return;
     }
     if (!form.baseUrl.trim()) {
-      setError(t("channels.validation.baseUrlRequired"));
+      setModalError(t("channels.validation.baseUrlRequired"));
       return;
     }
     if (form.models.length > 0 && !canSaveChannelModels(form.models)) {
-      setError(t("channels.validation.modelIdsRequired"));
+      setModalError(t("channels.validation.modelIdsRequired"));
       return;
     }
     if (form.extraHeaders.trim().length > 0) {
       try {
         const parsed: unknown = JSON.parse(form.extraHeaders);
         if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
-          setError(t("channels.validation.extraHeadersJsonObject"));
+          setModalError(t("channels.validation.extraHeadersJsonObject"));
           return;
         }
       } catch {
-        setError(t("channels.validation.extraHeadersJsonInvalid"));
+        setModalError(t("channels.validation.extraHeadersJsonInvalid"));
         return;
       }
     }
 
     setSaving("save");
-    setError(null);
-    setMessage(null);
+    setModalError(null);
 
     const materializedModels = form.models.map((m) => materializeThinkingLevels(catalog, m));
 
@@ -222,7 +221,12 @@ export function AiChannelsSettingsTab() {
         );
         setSelectedId(updated.id);
         setDialogOpen(false);
-        setMessage(t("channels.messages.saved"));
+        // 保存成功属于一次性反馈，走全局 toast，不占页面布局。
+        showToast({
+          id: "ai-channel-save",
+          variant: "success",
+          description: t("channels.messages.saved"),
+        });
       } else {
         const created = await createAiChannel({
           name: form.name,
@@ -238,11 +242,15 @@ export function AiChannelsSettingsTab() {
         setChannels((current) => [created, ...current]);
         setSelectedId(created.id);
         setDialogOpen(false);
-        setMessage(t("channels.messages.created"));
+        showToast({
+          id: "ai-channel-save",
+          variant: "success",
+          description: t("channels.messages.created"),
+        });
       }
       refreshChannelStore();
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      setModalError(errorMessage(err));
     } finally {
       setSaving(null);
     }
@@ -253,8 +261,6 @@ export function AiChannelsSettingsTab() {
     const targetId = selected.id;
     const targetName = selected.name;
     setDeleteConfirming(true);
-    setError(null);
-    setMessage(null);
     try {
       const confirmed = await confirm(t("channels.dialogs.deleteConfirm", { name: targetName }), {
         title: t("channels.dialogs.deleteTitle"),
@@ -267,10 +273,19 @@ export function AiChannelsSettingsTab() {
       setSelectedId(null);
       setForm(EMPTY_FORM);
       setDialogOpen(false);
-      setMessage(t("channels.messages.deleted"));
+      showToast({
+        id: "ai-channel-delete",
+        variant: "success",
+        description: t("channels.messages.deleted"),
+      });
       refreshChannelStore();
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      // 删除失败是一次性操作结果，走 toast 而不是页面内反馈条。
+      showToast({
+        id: "ai-channel-delete",
+        variant: "error",
+        description: errorMessage(err),
+      });
     } finally {
       setDeleteConfirming(false);
       setSaving(null);
@@ -287,20 +302,30 @@ export function AiChannelsSettingsTab() {
 
   const handleFetchModels = async () => {
     setSaving("models");
-    setError(null);
-    setMessage(null);
     try {
       const result = await listAiChannelModels(channelRequestPayload());
       if (result.models.length > 0) {
         patchForm({
           models: result.models.map((id) => applyCatalogToModel(catalog, emptyChannelModel(id))),
         });
-        setMessage(t("channels.messages.modelsFetched", { count: result.models.length }));
+        showToast({
+          id: "ai-channel-fetch-models",
+          variant: "success",
+          description: t("channels.messages.modelsFetched", { count: result.models.length }),
+        });
       } else {
-        setMessage(t("channels.messages.noModelsFetched"));
+        showToast({
+          id: "ai-channel-fetch-models",
+          variant: "success",
+          description: t("channels.messages.noModelsFetched"),
+        });
       }
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      showToast({
+        id: "ai-channel-fetch-models",
+        variant: "error",
+        description: errorMessage(err),
+      });
     } finally {
       setSaving(null);
     }
@@ -308,8 +333,6 @@ export function AiChannelsSettingsTab() {
 
   const handleTest = async (modelId?: string | null) => {
     setSaving("test");
-    setError(null);
-    setMessage(null);
     const targetModel =
       modelId?.trim() ||
       form.liteModel.trim() ||
@@ -321,13 +344,18 @@ export function AiChannelsSettingsTab() {
         model: targetModel,
       });
       const prefix = targetModel ? `[${targetModel}] ` : "";
-      if (result.ok) {
-        setMessage(`${prefix}${result.message}`);
-      } else {
-        setError(`${prefix}${result.message}`);
-      }
+      // 测通结果一次性呈现，成功/失败都走 toast。
+      showToast({
+        id: "ai-channel-test",
+        variant: result.ok ? "success" : "error",
+        description: `${prefix}${result.message}`,
+      });
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      showToast({
+        id: "ai-channel-test",
+        variant: "error",
+        description: errorMessage(err),
+      });
     } finally {
       setSaving(null);
     }
@@ -335,8 +363,6 @@ export function AiChannelsSettingsTab() {
 
   const handleQuickTest = async (channel: AiChannel, modelId?: string | null) => {
     setTestingId(channel.id);
-    setError(null);
-    setMessage(null);
     const targetModel =
       modelId?.trim() ||
       channel.lite_model?.trim() ||
@@ -352,13 +378,23 @@ export function AiChannelsSettingsTab() {
         model: targetModel,
       });
       const header = targetModel ? `[${channel.name} / ${targetModel}]` : `[${channel.name}]`;
-      if (result.ok) {
-        setMessage(`${header} 测通成功: ${result.message}`);
-      } else {
-        setError(`${header} 测通失败: ${result.message}`);
-      }
+      // 测通结果一次性呈现，成功/失败都走 toast；文案走 settings 命名空间，跟随界面语言。
+      showToast({
+        id: `ai-channel-quick-test-${channel.id}`,
+        variant: result.ok ? "success" : "error",
+        description: result.ok
+          ? t("channels.messages.quickTestSuccess", { header, message: result.message })
+          : t("channels.messages.quickTestFailed", { header, message: result.message }),
+      });
     } catch (err) {
-      setError(`[${channel.name}] 测通异常: ${String(err)}`);
+      showToast({
+        id: `ai-channel-quick-test-${channel.id}`,
+        variant: "error",
+        description: t("channels.messages.quickTestError", {
+          header: `[${channel.name}]`,
+          error: errorMessage(err),
+        }),
+      });
     } finally {
       setTestingId(null);
     }
@@ -380,16 +416,13 @@ export function AiChannelsSettingsTab() {
 
   return (
     <div className="space-y-6">
-      {/* 外部反馈提示 */}
-      {!dialogOpen && message ? (
+      {/* 列表加载失败需要持续可见；一次性操作结果统一走全局 toast */}
+      {loadError ? (
         <SettingFeedbackCallout
-          variant="success"
-          message={message}
-          onClose={() => setMessage(null)}
+          variant="error"
+          message={loadError}
+          onClose={() => setLoadError(null)}
         />
-      ) : null}
-      {!dialogOpen && error ? (
-        <SettingFeedbackCallout variant="error" message={error} onClose={() => setError(null)} />
       ) : null}
 
       <SettingCard
@@ -526,8 +559,7 @@ export function AiChannelsSettingsTab() {
 
           <div className="min-h-0 flex-1 overflow-y-auto px-6 py-4">
             <div className="space-y-4">
-              {error ? <SettingFeedbackCallout variant="error" message={error} /> : null}
-              {message ? <SettingFeedbackCallout variant="success" message={message} /> : null}
+              {modalError ? <SettingFeedbackCallout variant="error" message={modalError} /> : null}
 
               <div className="grid gap-3 sm:grid-cols-2">
                 <div>

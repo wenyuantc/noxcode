@@ -3,6 +3,7 @@ import { Loader2, Plus, Save, Workflow } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
 import { updateNativeSettings } from "@/lib/backend";
+import { errorMessage, showToast } from "@/lib/toast";
 import {
   NATIVE_HOOK_EVENTS,
   NATIVE_HOOK_HANDLER_TYPES,
@@ -22,7 +23,6 @@ import {
 import { Textarea } from "@/components/ui/textarea";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { SettingCard } from "./SettingCard";
-import { SettingFeedbackCallout } from "./SettingFeedbackCallout";
 
 const HOOK_MATCHER_ALL = "*";
 const HOOK_MATCHER_TOOLS = [
@@ -106,10 +106,6 @@ export function NativeHooksSettingsCard() {
   const setNative = useSettingsStore((state) => state.setNative);
   const [hooks, setHooks] = useState<NativeHook[]>(native?.hooks ?? []);
   const [saving, setSaving] = useState(false);
-  const [feedback, setFeedback] = useState<{
-    variant: "success" | "error";
-    message: string;
-  } | null>(null);
 
   useEffect(() => {
     if (native) setHooks(native.hooks);
@@ -125,7 +121,6 @@ export function NativeHooksSettingsCard() {
 
   const saveHooks = async () => {
     setSaving(true);
-    setFeedback(null);
     try {
       const updated = await updateNativeSettings({
         hooks: hooks.map((hook) => ({
@@ -135,9 +130,9 @@ export function NativeHooksSettingsCard() {
         })),
       });
       setNative(updated);
-      setFeedback({ variant: "success", message: t("common:saved") ?? "保存成功" });
+      showToast({ variant: "success", description: t("common:saved") });
     } catch (err) {
-      setFeedback({ variant: "error", message: String(err) });
+      showToast({ variant: "error", description: errorMessage(err) });
     } finally {
       setSaving(false);
     }
@@ -166,14 +161,6 @@ export function NativeHooksSettingsCard() {
 
   return (
     <div className="space-y-6">
-      {feedback ? (
-        <SettingFeedbackCallout
-          variant={feedback.variant}
-          message={feedback.message}
-          onClose={() => setFeedback(null)}
-        />
-      ) : null}
-
       <SettingCard
         icon={Workflow}
         title={t("settings:hooks.title")}

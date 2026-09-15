@@ -151,13 +151,16 @@
       "editTitle": "编辑渠道",
       "deleteTitle": "删除渠道",
       "deleteConfirm": "确定删除渠道「{{name}}」？运行中的会话正在使用该渠道时会阻止删除。"
-    },
+        },
     "messages": {
       "created": "渠道已创建",
       "updated": "渠道已更新",
       "deleted": "渠道已删除",
       "modelsFetched": "已获取 {{count}} 个模型，保存后生效",
-      "modelsFetchedTruncated": "已获取 {{count}} 个模型（列表已截断，可能不完整），保存后生效"
+      "modelsFetchedTruncated": "已获取 {{count}} 个模型（列表已截断，可能不完整），保存后生效",
+      "quickTestSuccess": "{{header}} 测通成功: {{message}}",
+      "quickTestFailed": "{{header}} 测通失败: {{message}}",
+      "quickTestError": "{{header}} 测通异常: {{error}}"
     }
   },
   "ssh": {
@@ -323,8 +326,9 @@
     "test": "测试",
     "testing": "测试中…",
     "testHint": "使用临时目录启动该 language server 并完成一次 LSP 握手，确认可用。",
-    "testSuccess": "{{label}} 可用 · {{detail}}",
-    "testWarning": "workspace/symbol 调用异常：{{detail}}"
+        "testSuccess": "{{label}} 可用 · {{detail}}",
+    "testWarning": "workspace/symbol 调用异常：{{detail}}",
+    "loadFailed": "无法检测 language server：{{detail}}"
   },
   "usage": {
     "title": "使用统计",

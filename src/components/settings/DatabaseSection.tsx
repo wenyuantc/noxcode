@@ -13,6 +13,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 
 import { backupDatabase, healthCheck, openDatabaseFolder, restoreDatabase } from "@/lib/backend";
+import { errorMessage, showToast } from "@/lib/toast";
 import type { AppHealthCheck } from "@/lib/types";
 import { formatDate, formatFileSize } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
@@ -56,8 +57,10 @@ export function DatabaseSection() {
   const [actionLoading, setActionLoading] = useState<"backup" | "restore" | "open-folder" | null>(
     null,
   );
-  const [actionMessage, setActionMessage] = useState<string | null>(null);
-  const [actionError, setActionError] = useState<string | null>(null);
+  // 健康检查失败常驻页面内，只有重新加载健康状态成功才清除；备份/恢复/打开目录失败走 toast。
+  const [healthError, setHealthError] = useState<string | null>(null);
+  // 恢复成功的结果信息（含回滚备份路径）保留在页面内，方便核对。
+  const [restoreMessage, setRestoreMessage] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
 
   const databaseFileFilters = useMemo(
@@ -83,12 +86,14 @@ export function DatabaseSection() {
   const refreshHealth = useCallback(async () => {
     const next = await healthCheck();
     setHealth(next);
+    // 健康状态重新加载成功才清除加载失败提示；操作入口不清理该提示。
+    setHealthError(null);
     return next;
   }, []);
 
   useEffect(() => {
     void refreshHealth().catch((error: unknown) => {
-      setActionError(error instanceof Error ? error.message : String(error));
+      setHealthError(errorMessage(error));
     });
   }, [refreshHealth]);
 
@@ -101,8 +106,7 @@ export function DatabaseSection() {
 
   async function handleBackup() {
     setActionLoading("backup");
-    setActionError(null);
-    setActionMessage(null);
+    setRestoreMessage(null);
 
     try {
       const defaultPath = buildBackupDefaultPath(health);
@@ -118,9 +122,12 @@ export function DatabaseSection() {
 
       const result = await backupDatabase(selectedPath);
       await refreshHealth();
-      setActionMessage(result.message);
+      showToast({ variant: "success", description: result.message });
     } catch (error) {
-      setActionError(error instanceof Error ? error.message : t("database.messages.exportFailed"));
+      showToast({
+        variant: "error",
+        description: error instanceof Error ? error.message : t("database.messages.exportFailed"),
+      });
     } finally {
       setActionLoading(null);
     }
@@ -128,8 +135,7 @@ export function DatabaseSection() {
 
   async function handleRestore() {
     setActionLoading("restore");
-    setActionError(null);
-    setActionMessage(null);
+    setRestoreMessage(null);
 
     try {
       const confirmed = await confirm(t("database.dialogs.importConfirmMessage"), {
@@ -153,7 +159,7 @@ export function DatabaseSection() {
       }
 
       const result = await restoreDatabase(selectedPath);
-      setActionMessage(result.message);
+      setRestoreMessage(result.message);
       await refreshHealth();
       await Promise.all([
         useWorkspaceStore.getState().load(),
@@ -172,7 +178,10 @@ export function DatabaseSection() {
         },
       );
     } catch (error) {
-      setActionError(error instanceof Error ? error.message : t("database.messages.importFailed"));
+      showToast({
+        variant: "error",
+        description: error instanceof Error ? error.message : t("database.messages.importFailed"),
+      });
     } finally {
       setActionLoading(null);
     }
@@ -180,15 +189,16 @@ export function DatabaseSection() {
 
   async function handleOpenFolder() {
     setActionLoading("open-folder");
-    setActionError(null);
-    setActionMessage(null);
+    setRestoreMessage(null);
 
     try {
       await openDatabaseFolder();
     } catch (error) {
-      setActionError(
-        error instanceof Error ? error.message : t("database.messages.openFolderFailed"),
-      );
+      showToast({
+        variant: "error",
+        description:
+          error instanceof Error ? error.message : t("database.messages.openFolderFailed"),
+      });
     } finally {
       setActionLoading(null);
     }
@@ -196,18 +206,18 @@ export function DatabaseSection() {
 
   return (
     <div className="space-y-6">
-      {actionMessage ? (
+      {restoreMessage ? (
         <SettingFeedbackCallout
           variant="success"
-          message={actionMessage}
-          onClose={() => setActionMessage(null)}
+          message={restoreMessage}
+          onClose={() => setRestoreMessage(null)}
         />
       ) : null}
-      {actionError ? (
+      {healthError ? (
         <SettingFeedbackCallout
           variant="error"
-          message={actionError}
-          onClose={() => setActionError(null)}
+          message={healthError}
+          onClose={() => setHealthError(null)}
         />
       ) : null}
 

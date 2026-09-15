@@ -155,9 +155,12 @@
     "messages": {
       "created": "Channel created",
       "updated": "Channel updated",
-      "deleted": "Channel deleted",
+            "deleted": "Channel deleted",
       "modelsFetched": "Fetched {{count}} models. Save to keep them.",
-      "modelsFetchedTruncated": "Fetched {{count}} models (list truncated, may be incomplete). Save to keep them."
+      "modelsFetchedTruncated": "Fetched {{count}} models (list truncated, may be incomplete). Save to keep them.",
+      "quickTestSuccess": "{{header}} test succeeded: {{message}}",
+      "quickTestFailed": "{{header}} test failed: {{message}}",
+      "quickTestError": "{{header}} test error: {{error}}"
     }
   },
   "ssh": {
@@ -323,8 +326,9 @@
     "test": "Test",
     "testing": "Testing…",
     "testHint": "Start this language server in a temporary directory and complete one LSP handshake to confirm it works.",
-    "testSuccess": "{{label}} ready · {{detail}}",
-    "testWarning": "workspace/symbol call failed: {{detail}}"
+        "testSuccess": "{{label}} ready · {{detail}}",
+    "testWarning": "workspace/symbol call failed: {{detail}}",
+    "loadFailed": "Could not detect language servers: {{detail}}"
   },
   "usage": {
     "title": "Usage",

@@ -5,13 +5,13 @@ import { useTranslation } from "react-i18next";
 
 import { changeAppLocale, getCurrentAppLocale } from "@/lib/i18n";
 import { updateNativeSettings, updateNetworkSettings, updateQuickPrompts } from "@/lib/backend";
+import { errorMessage, showToast } from "@/lib/toast";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Switch } from "@/components/ui/switch";
 import { Textarea } from "@/components/ui/textarea";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { SettingCard, SettingRow } from "./SettingCard";
-import { SettingFeedbackCallout } from "./SettingFeedbackCallout";
 
 export function GeneralSection() {
   const { t } = useTranslation(["settings", "common"]);
@@ -27,10 +27,6 @@ export function GeneralSection() {
   const [noProxy, setNoProxy] = useState(network?.no_proxy ?? "");
   const [ca, setCa] = useState(network?.ca_cert_path ?? "");
   const [draftPrompts, setDraftPrompts] = useState(prompts);
-  const [feedback, setFeedback] = useState<{
-    variant: "success" | "error";
-    message: string;
-  } | null>(null);
 
   useEffect(() => {
     setProxy(network?.http_proxy ?? "");
@@ -50,9 +46,9 @@ export function GeneralSection() {
         ca_cert_path: ca.trim() || null,
       });
       setNetwork(updated);
-      setFeedback({ variant: "success", message: t("common:saved") ?? "保存成功" });
+      showToast({ variant: "success", description: t("common:saved") });
     } catch (err) {
-      setFeedback({ variant: "error", message: String(err) });
+      showToast({ variant: "error", description: errorMessage(err) });
     }
   };
 
@@ -60,9 +56,9 @@ export function GeneralSection() {
     try {
       const updated = await updateQuickPrompts(draftPrompts);
       setQuickPrompts(updated);
-      setFeedback({ variant: "success", message: t("common:saved") ?? "保存成功" });
+      showToast({ variant: "success", description: t("common:saved") });
     } catch (err) {
-      setFeedback({ variant: "error", message: String(err) });
+      showToast({ variant: "error", description: errorMessage(err) });
     }
   };
 
@@ -83,14 +79,6 @@ export function GeneralSection() {
 
   return (
     <div className="space-y-6">
-      {feedback ? (
-        <SettingFeedbackCallout
-          variant={feedback.variant}
-          message={feedback.message}
-          onClose={() => setFeedback(null)}
-        />
-      ) : null}
-
       {/* 偏好与通知 */}
       <SettingCard
         title={t("settings:sections.general")}
@@ -150,10 +138,10 @@ export function GeneralSection() {
                 void updateNativeSettings({ desktop_notifications })
                   .then((res) => {
                     setNative(res);
-                    setFeedback({ variant: "success", message: t("common:saved") ?? "保存成功" });
+                    showToast({ variant: "success", description: t("common:saved") });
                   })
                   .catch((err: unknown) => {
-                    setFeedback({ variant: "error", message: String(err) });
+                    showToast({ variant: "error", description: errorMessage(err) });
                   });
               }}
             />

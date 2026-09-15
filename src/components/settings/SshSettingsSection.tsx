@@ -22,6 +22,7 @@ import {
   type SshConfigFormValues,
 } from "@/lib/sshConfigVerification";
 import { formatDate } from "@/lib/utils";
+import { errorMessage, showToast } from "@/lib/toast";
 import type {
   SshAlgorithms,
   SshConfig,
@@ -101,8 +102,9 @@ export function SshSettingsSection() {
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState<"save" | "delete" | "test" | "probe" | null>(null);
   const [deleteConfirming, setDeleteConfirming] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [message, setMessage] = useState<string | null>(null);
+  // 列表/算法目录加载失败常驻页面内；表单校验、保存失败与导入告警留在弹窗内。
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [modalError, setModalError] = useState<string | null>(null);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [form, setForm] = useState<SshConfigFormState>(EMPTY_FORM);
   const [dialogOpen, setDialogOpen] = useState(false);
@@ -126,7 +128,7 @@ export function SshSettingsSection() {
 
   const load = async () => {
     setLoading(true);
-    setError(null);
+    setLoadError(null);
     try {
       const [items, fileHosts, algorithms] = await Promise.all([
         listSshConfigs(),
@@ -137,7 +139,7 @@ export function SshSettingsSection() {
       setHosts(fileHosts);
       setAlgorithmCatalog(algorithms);
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      setLoadError(errorMessage(err));
     } finally {
       setLoading(false);
     }
@@ -166,16 +168,14 @@ export function SshSettingsSection() {
   const openCreate = () => {
     setSelectedId(null);
     setForm({ ...EMPTY_FORM, algorithms: emptyAlgorithms() });
-    setMessage(null);
-    setError(null);
+    setModalError(null);
     setDialogOpen(true);
   };
 
   const openEdit = (config: SshConfig) => {
     setSelectedId(config.id);
     setForm(configToForm(config));
-    setMessage(null);
-    setError(null);
+    setModalError(null);
     setDialogOpen(true);
   };
 
@@ -184,13 +184,11 @@ export function SshSettingsSection() {
       return;
     }
     setDialogOpen(false);
-    setMessage(null);
-    setError(null);
+    setModalError(null);
   };
 
   const handleImport = async (alias: string) => {
-    setError(null);
-    setMessage(null);
+    setModalError(null);
     try {
       const imported = await importSshConfigFileHost(alias);
       setSelectedId(null);
@@ -208,10 +206,12 @@ export function SshSettingsSection() {
       });
       setDialogOpen(true);
       if (imported.proxy_jump_unsupported) {
-        setError(t("ssh.import.proxyJumpUnsupported"));
+        // 导入告警需要跟随表单持续可见，留在弹窗内。
+        setModalError(t("ssh.import.proxyJumpUnsupported"));
       }
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      // 导入失败是一次性操作结果，走 toast。
+      showToast({ variant: "error", description: errorMessage(err) });
     }
   };
 
@@ -228,8 +228,7 @@ export function SshSettingsSection() {
   };
 
   const handleSave = async () => {
-    setError(null);
-    setMessage(null);
+    setModalError(null);
     setSaving("save");
     try {
       const persisted = await persistSshConfigForm(
@@ -238,9 +237,13 @@ export function SshSettingsSection() {
       );
       rememberConfig(persisted);
       setDialogOpen(false);
-      setMessage(selectedId ? t("ssh.messages.updated") : t("ssh.messages.created"));
+      showToast({
+        variant: "success",
+        description: selectedId ? t("ssh.messages.updated") : t("ssh.messages.created"),
+      });
     } catch (err) {
-      setError(formErrorMessage(err));
+      // 表单校验与保存失败需要贴着表单显示，留在弹窗内。
+      setModalError(formErrorMessage(err));
     } finally {
       setSaving(null);
     }
@@ -251,8 +254,7 @@ export function SshSettingsSection() {
     const targetId = selected.id;
     const targetName = selected.name;
     setDeleteConfirming(true);
-    setError(null);
-    setMessage(null);
+    setModalError(null);
     try {
       const confirmed = await confirm(t("ssh.dialogs.deleteConfirm", { name: targetName }), {
         title: t("ssh.dialogs.deleteTitle"),
@@ -265,9 +267,9 @@ export function SshSettingsSection() {
       setSelectedId(null);
       setForm({ ...EMPTY_FORM, algorithms: emptyAlgorithms() });
       setDialogOpen(false);
-      setMessage(t("ssh.messages.deleted"));
+      showToast({ variant: "success", description: t("ssh.messages.deleted") });
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      showToast({ variant: "error", description: errorMessage(err) });
     } finally {
       setDeleteConfirming(false);
       setSaving(null);
@@ -283,8 +285,7 @@ export function SshSettingsSection() {
 
   const handleTest = async () => {
     setSaving("test");
-    setError(null);
-    setMessage(null);
+    setModalError(null);
     try {
       const { result } = await persistAndTestSshConfig(
         { selectedId, form, passwordConfigured: selected?.password_configured },
@@ -293,13 +294,13 @@ export function SshSettingsSection() {
       );
       const items = await listSshConfigs();
       setConfigs(items);
-      if (result.ok) {
-        setMessage(result.message);
-      } else {
-        setError(result.message);
-      }
+      // 测试结果是一次性反馈，走 toast；持久状态仍由 last_check_* 呈现在弹窗内。
+      showToast({
+        variant: result.ok ? "success" : "error",
+        description: result.message,
+      });
     } catch (err) {
-      setError(formErrorMessage(err));
+      setModalError(formErrorMessage(err));
     } finally {
       setSaving(null);
     }
@@ -308,8 +309,7 @@ export function SshSettingsSection() {
   const handleProbe = async () => {
     if (form.authType !== "password") return;
     setSaving("probe");
-    setError(null);
-    setMessage(null);
+    setModalError(null);
     try {
       const { result } = await persistAndProbeSshPasswordAuth(
         { selectedId, form, passwordConfigured: selected?.password_configured },
@@ -318,13 +318,14 @@ export function SshSettingsSection() {
       );
       const items = await listSshConfigs();
       setConfigs(items);
-      if (result.supported && result.status !== "failed") {
-        setMessage(result.message);
-      } else {
-        setError(result.message);
-      }
+      // 探测结果是一次性反馈，走 toast；持久状态仍由 password_probe_* 呈现在弹窗内。
+      const probeSucceeded = result.supported && result.status !== "failed";
+      showToast({
+        variant: probeSucceeded ? "success" : "error",
+        description: result.message,
+      });
     } catch (err) {
-      setError(formErrorMessage(err));
+      setModalError(formErrorMessage(err));
     } finally {
       setSaving(null);
     }
@@ -356,16 +357,8 @@ export function SshSettingsSection() {
 
   return (
     <div className="space-y-6">
-      {!dialogOpen && message ? (
-        <SettingFeedbackCallout
-          variant="success"
-          message={message}
-          onClose={() => setMessage(null)}
-        />
-      ) : null}
-      {!dialogOpen && error ? (
-        <SettingFeedbackCallout variant="error" message={error} onClose={() => setError(null)} />
-      ) : null}
+      {/* 列表/算法目录加载失败常驻页面内联；一次性操作结果走 toast。 */}
+      {loadError ? <SettingFeedbackCallout variant="error" message={loadError} /> : null}
 
       {/* SSH 连接列表卡片 */}
       <SettingCard
@@ -509,6 +502,8 @@ export function SshSettingsSection() {
           </DialogHeader>
           <div className="min-h-0 flex-1 overflow-y-auto pr-1">
             <div className="space-y-3">
+              {modalError ? <SettingFeedbackCallout variant="error" message={modalError} /> : null}
+
               <div className="grid gap-3 md:grid-cols-2">
                 <div>
                   <label className="text-xs font-medium text-muted-foreground">
@@ -813,9 +808,6 @@ export function SshSettingsSection() {
                   {testDetail ? <div className="mt-1">{testDetail}</div> : null}
                 </div>
               ) : null}
-
-              {error ? <p className="text-sm text-destructive">{error}</p> : null}
-              {message ? <p className="text-sm text-muted-foreground">{message}</p> : null}
             </div>
           </div>
           <DialogFooter className="mt-4 shrink-0">

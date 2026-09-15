@@ -48,9 +48,10 @@ import type {
   GitStatus,
   GitStatusEntry,
 } from "@/lib/types";
+import { errorMessage, runToastAction, showToast, type ToastInput } from "@/lib/toast";
 import { cn, formatRelativeTime } from "@/lib/utils";
 import { isManagedWorktreePath } from "@/lib/worktreePath";
-import { useGitStore } from "@/stores/gitStore";
+import { useGitStore, type GitPullState } from "@/stores/gitStore";
 import { useSessionStore } from "@/stores/sessionStore";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { useUiStore } from "@/stores/uiStore";
@@ -58,6 +59,37 @@ import { useWorkspaceStore } from "@/stores/workspaceStore";
 import { CheckpointTimeline } from "./CheckpointTimeline";
 import { GitDiffDialog, type GitDiffTarget } from "./GitDiffDialog";
 import { RestoreCheckpointDialog } from "./RestoreCheckpointDialog";
+
+/**
+ * pull 结果会跨挂载保留在 store 里，所以只能在真实完成入口提示一次（挂载时用 effect 会重播）；
+ * 这里只做「状态 → toast 内容」的映射，便于单测覆盖。
+ */
+export function gitPullToast(
+  state: GitPullState | undefined,
+  t: (key: "pullSuccess" | "pullUpToDate" | "pullFailed") => string,
+): ToastInput | null {
+  if (state?.status === "success") {
+    return {
+      variant: "success",
+      description: t(state.result.updated ? "pullSuccess" : "pullUpToDate"),
+    };
+  }
+  if (state?.status === "error") {
+    return { variant: "error", title: t("pullFailed"), description: state.error };
+  }
+  return null;
+}
+
+/** 一次性 Git 操作统一入口：失败弹不自动关闭的 error toast，成功后才执行刷新等后续动作。 */
+export async function runGitAction(
+  id: string,
+  action: () => Promise<unknown>,
+  onSuccess?: () => void | Promise<void>,
+): Promise<boolean> {
+  const ok = await runToastAction(action, { id });
+  if (ok) await onSuccess?.();
+  return ok;
+}
 
 export function GitPanel() {
   const workspaceId = useWorkspaceStore((state) => state.activeWorkspaceId);
@@ -104,10 +136,7 @@ function GitWorkspacePanel({ workspaceId }: { workspaceId: string | null }) {
   const isBusy = () =>
     busyRef.current ||
     Boolean(workspaceId && useGitStore.getState().pulls[workspaceId]?.status === "pulling");
-  const [checkpointNotice, setCheckpointNotice] = useState<string | null>(null);
-  const [checkpointError, setCheckpointError] = useState<string | null>(null);
   const [generatingCommit, setGeneratingCommit] = useState(false);
-  const [generateError, setGenerateError] = useState<string | null>(null);
   const commitAiEnabled = useSettingsStore((state) => state.ai?.commit_message.enabled) === true;
 
   useEffect(() => {
@@ -208,11 +237,21 @@ function GitWorkspacePanel({ workspaceId }: { workspaceId: string | null }) {
     });
   };
 
+  /** pull 的结果保存在 store 里，只在点击完成时提示一次，避免重新打开面板时重播。 */
+  const pullNow = async () => {
+    if (!workspaceId || isBusy()) return;
+    await useGitStore.getState().pull(workspaceId);
+    const result = gitPullToast(useGitStore.getState().pulls[workspaceId], t);
+    if (result) showToast({ id: `git-pull-${workspaceId}`, ...result });
+  };
+
   const handleStageAll = async () => {
     if (!workspaceId || allUnstagedPaths.length === 0 || isBusy()) return;
     setBusy(true);
     try {
-      await stageGitPaths(workspaceId, allUnstagedPaths, sessionId);
+      await runGitAction(`git-stage-${workspaceId}`, () =>
+        stageGitPaths(workspaceId, allUnstagedPaths, sessionId),
+      );
       await reload();
     } finally {
       setBusy(false);
@@ -223,12 +262,17 @@ function GitWorkspacePanel({ workspaceId }: { workspaceId: string | null }) {
     if (!workspaceId || selectedUnstagedPaths.length === 0 || isBusy()) return;
     setBusy(true);
     try {
-      await stageGitPaths(workspaceId, selectedUnstagedPaths, sessionId);
-      setSelected((curr) => {
-        const next = new Set(curr);
-        selectedUnstagedPaths.forEach((p) => next.delete(p));
-        return next;
-      });
+      await runGitAction(
+        `git-stage-${workspaceId}`,
+        () => stageGitPaths(workspaceId, selectedUnstagedPaths, sessionId),
+        () => {
+          setSelected((curr) => {
+            const next = new Set(curr);
+            selectedUnstagedPaths.forEach((p) => next.delete(p));
+            return next;
+          });
+        },
+      );
       await reload();
     } finally {
       setBusy(false);
@@ -239,12 +283,51 @@ function GitWorkspacePanel({ workspaceId }: { workspaceId: string | null }) {
     if (!workspaceId || selectedStagedPaths.length === 0 || isBusy()) return;
     setBusy(true);
     try {
-      await unstageGitPaths(workspaceId, selectedStagedPaths, sessionId);
-      setSelected((curr) => {
-        const next = new Set(curr);
-        selectedStagedPaths.forEach((p) => next.delete(p));
-        return next;
-      });
+      await runGitAction(
+        `git-unstage-${workspaceId}`,
+        () => unstageGitPaths(workspaceId, selectedStagedPaths, sessionId),
+        () => {
+          setSelected((curr) => {
+            const next = new Set(curr);
+            selectedStagedPaths.forEach((p) => next.delete(p));
+            return next;
+          });
+        },
+      );
+      await reload();
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const handleStageGroupAll = async (entries: GitStatusEntry[]) => {
+    if (!workspaceId || entries.length === 0 || isBusy()) return;
+    setBusy(true);
+    try {
+      await runGitAction(`git-stage-${workspaceId}`, () =>
+        stageGitPaths(
+          workspaceId,
+          entries.map((entry) => entry.path),
+          sessionId,
+        ),
+      );
+      await reload();
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const handleUnstageGroupAll = async (entries: GitStatusEntry[]) => {
+    if (!workspaceId || entries.length === 0 || isBusy()) return;
+    setBusy(true);
+    try {
+      await runGitAction(`git-unstage-${workspaceId}`, () =>
+        unstageGitPaths(
+          workspaceId,
+          entries.map((entry) => entry.path),
+          sessionId,
+        ),
+      );
       await reload();
     } finally {
       setBusy(false);
@@ -260,15 +343,20 @@ function GitWorkspacePanel({ workspaceId }: { workspaceId: string | null }) {
     if (!accepted || isBusy()) return;
     setBusy(true);
     try {
-      await restoreGitPaths(workspaceId, selectedUnstagedPaths, sessionId);
-      setSelected((curr) => {
-        const next = new Set(curr);
-        selectedUnstagedPaths.forEach((p) => next.delete(p));
-        return next;
-      });
-      if (diff && selectedUnstagedPaths.includes(diff.path)) {
-        closeDiff();
-      }
+      await runGitAction(
+        `git-discard-${workspaceId}`,
+        () => restoreGitPaths(workspaceId, selectedUnstagedPaths, sessionId),
+        () => {
+          setSelected((curr) => {
+            const next = new Set(curr);
+            selectedUnstagedPaths.forEach((p) => next.delete(p));
+            return next;
+          });
+          if (diff && selectedUnstagedPaths.includes(diff.path)) {
+            closeDiff();
+          }
+        },
+      );
       await reload();
     } finally {
       setBusy(false);
@@ -279,12 +367,17 @@ function GitWorkspacePanel({ workspaceId }: { workspaceId: string | null }) {
     if (!workspaceId || isBusy()) return;
     setBusy(true);
     try {
-      await stageGitPaths(workspaceId, [path], sessionId);
-      setSelected((curr) => {
-        const next = new Set(curr);
-        next.delete(path);
-        return next;
-      });
+      await runGitAction(
+        `git-stage-${workspaceId}`,
+        () => stageGitPaths(workspaceId, [path], sessionId),
+        () => {
+          setSelected((curr) => {
+            const next = new Set(curr);
+            next.delete(path);
+            return next;
+          });
+        },
+      );
       await reload();
     } finally {
       setBusy(false);
@@ -295,12 +388,17 @@ function GitWorkspacePanel({ workspaceId }: { workspaceId: string | null }) {
     if (!workspaceId || isBusy()) return;
     setBusy(true);
     try {
-      await unstageGitPaths(workspaceId, [path], sessionId);
-      setSelected((curr) => {
-        const next = new Set(curr);
-        next.delete(path);
-        return next;
-      });
+      await runGitAction(
+        `git-unstage-${workspaceId}`,
+        () => unstageGitPaths(workspaceId, [path], sessionId),
+        () => {
+          setSelected((curr) => {
+            const next = new Set(curr);
+            next.delete(path);
+            return next;
+          });
+        },
+      );
       await reload();
     } finally {
       setBusy(false);
@@ -316,15 +414,20 @@ function GitWorkspacePanel({ workspaceId }: { workspaceId: string | null }) {
     if (!accepted || isBusy()) return;
     setBusy(true);
     try {
-      await restoreGitPaths(workspaceId, [path], sessionId);
-      setSelected((curr) => {
-        const next = new Set(curr);
-        next.delete(path);
-        return next;
-      });
-      if (diff?.path === path) {
-        closeDiff();
-      }
+      await runGitAction(
+        `git-discard-${workspaceId}`,
+        () => restoreGitPaths(workspaceId, [path], sessionId),
+        () => {
+          setSelected((curr) => {
+            const next = new Set(curr);
+            next.delete(path);
+            return next;
+          });
+          if (diff?.path === path) {
+            closeDiff();
+          }
+        },
+      );
       await reload();
     } finally {
       setBusy(false);
@@ -335,9 +438,14 @@ function GitWorkspacePanel({ workspaceId }: { workspaceId: string | null }) {
     if (!workspaceId || !message.trim() || isBusy()) return;
     setBusy(true);
     try {
-      await commitGitChanges(workspaceId, message.trim(), undefined, sessionId);
-      setMessage("");
-      if (diff) closeDiff();
+      await runGitAction(
+        `git-commit-${workspaceId}`,
+        () => commitGitChanges(workspaceId, message.trim(), undefined, sessionId),
+        () => {
+          setMessage("");
+          if (diff) closeDiff();
+        },
+      );
       await reload();
     } finally {
       setBusy(false);
@@ -348,7 +456,9 @@ function GitWorkspacePanel({ workspaceId }: { workspaceId: string | null }) {
     if (!workspaceId || isBusy()) return;
     setBusy(true);
     try {
-      await pushGitBranch(workspaceId, undefined, undefined, setUpstream);
+      await runGitAction(`git-push-${workspaceId}`, () =>
+        pushGitBranch(workspaceId, undefined, undefined, setUpstream),
+      );
       await reload();
     } finally {
       setBusy(false);
@@ -363,14 +473,14 @@ function GitWorkspacePanel({ workspaceId }: { workspaceId: string | null }) {
     });
     if (!accepted || isBusy()) return;
     setBusy(true);
-    setCheckpointNotice(null);
-    setCheckpointError(null);
+    const toastId = `git-clear-checkpoints-${workspaceId}`;
     try {
       const count = await clearGitCheckpoints(workspaceId);
-      setCheckpointNotice(t("clearAllDone", { count }));
+      // 成功文案要带后端返回的数量，因此直接 showToast；失败落在同一个 id 上原地替换。
+      showToast({ id: toastId, variant: "success", description: t("clearAllDone", { count }) });
       await reload();
     } catch (error) {
-      setCheckpointError(error instanceof Error ? error.message : String(error));
+      showToast({ id: toastId, variant: "error", description: errorMessage(error) });
     } finally {
       setBusy(false);
     }
@@ -416,7 +526,7 @@ function GitWorkspacePanel({ workspaceId }: { workspaceId: string | null }) {
             aria-label={t("pull")}
             disabled={!workspaceId || busy}
             onClick={() => {
-              if (workspaceId && !isBusy()) void useGitStore.getState().pull(workspaceId);
+              void pullNow();
             }}
           >
             {pulling ? (
@@ -453,37 +563,13 @@ function GitWorkspacePanel({ workspaceId }: { workspaceId: string | null }) {
         </div>
       </div>
 
-      {pullState?.status === "success" ? (
-        <div
-          role="status"
-          className="shrink-0 border-b px-3 py-2 text-xs text-emerald-700 dark:text-emerald-400"
-        >
-          {t(pullState.result.updated ? "pullSuccess" : "pullUpToDate")}
-        </div>
-      ) : null}
-      {pullState?.status === "error" ? (
-        <div
-          role="alert"
-          className="max-h-32 shrink-0 overflow-auto whitespace-pre-wrap break-words border-b px-3 py-2 text-xs text-destructive"
-        >
-          <p className="font-medium">{t("pullFailed")}</p>
-          {pullState.error}
-        </div>
-      ) : null}
+      {/* pull 的结果只在点击完成时弹一次 toast（见 pullNow），这里不再渲染页面内结果条。 */}
       {refreshError ? (
         <div
           role="alert"
           className="max-h-24 shrink-0 overflow-auto whitespace-pre-wrap break-words border-b px-3 py-2 text-xs text-destructive"
         >
           {t("refreshFailed")} {refreshError}
-        </div>
-      ) : null}
-      {generateError ? (
-        <div
-          role="alert"
-          className="max-h-24 shrink-0 overflow-auto whitespace-pre-wrap break-words border-b px-3 py-2 text-xs text-destructive"
-        >
-          {t("generateCommitFailed")} {generateError}
         </div>
       ) : null}
 
@@ -540,13 +626,16 @@ function GitWorkspacePanel({ workspaceId }: { workspaceId: string | null }) {
                     onClick={() => {
                       if (!workspaceId || isBusy() || generatingCommit) return;
                       setGeneratingCommit(true);
-                      setGenerateError(null);
                       void generateGitCommitMessage(workspaceId, sessionId)
                         .then((next) => {
                           if (mounted.current) setMessage(next);
                         })
-                        .catch((reason: unknown) => {
-                          if (mounted.current) setGenerateError(String(reason));
+                        .catch((error: unknown) => {
+                          showToast({
+                            id: `git-generate-commit-${workspaceId}`,
+                            variant: "error",
+                            description: `${t("generateCommitFailed")} ${errorMessage(error)}`,
+                          });
                         })
                         .finally(() => {
                           if (mounted.current) setGeneratingCommit(false);
@@ -664,17 +753,7 @@ function GitWorkspacePanel({ workspaceId }: { workspaceId: string | null }) {
                 onToggleAll={() => toggleGroup(groups.staged)}
                 onOpen={(entry) => showDiff(entry, "staged")}
                 onUnstageSingle={handleUnstageSingle}
-                onActionAll={() => {
-                  if (!workspaceId || isBusy()) return;
-                  setBusy(true);
-                  void unstageGitPaths(
-                    workspaceId,
-                    groups.staged.map((e) => e.path),
-                    sessionId,
-                  )
-                    .then(reload)
-                    .finally(() => setBusy(false));
-                }}
+                onActionAll={() => void handleUnstageGroupAll(groups.staged)}
                 actionAllTooltip={t("unstage")}
               />
 
@@ -690,17 +769,7 @@ function GitWorkspacePanel({ workspaceId }: { workspaceId: string | null }) {
                 onOpen={(entry) => showDiff(entry, "worktree")}
                 onStageSingle={handleStageSingle}
                 onDiscardSingle={handleDiscardSingle}
-                onActionAll={() => {
-                  if (!workspaceId || isBusy()) return;
-                  setBusy(true);
-                  void stageGitPaths(
-                    workspaceId,
-                    groups.unstaged.map((e) => e.path),
-                    sessionId,
-                  )
-                    .then(reload)
-                    .finally(() => setBusy(false));
-                }}
+                onActionAll={() => void handleStageGroupAll(groups.unstaged)}
                 actionAllTooltip={t("stage")}
               />
 
@@ -716,17 +785,7 @@ function GitWorkspacePanel({ workspaceId }: { workspaceId: string | null }) {
                 onOpen={(entry) => showDiff(entry, "worktree")}
                 onStageSingle={handleStageSingle}
                 onDiscardSingle={handleDiscardSingle}
-                onActionAll={() => {
-                  if (!workspaceId || isBusy()) return;
-                  setBusy(true);
-                  void stageGitPaths(
-                    workspaceId,
-                    groups.untracked.map((e) => e.path),
-                    sessionId,
-                  )
-                    .then(reload)
-                    .finally(() => setBusy(false));
-                }}
+                onActionAll={() => void handleStageGroupAll(groups.untracked)}
                 actionAllTooltip={t("stage")}
               />
 
@@ -755,25 +814,24 @@ function GitWorkspacePanel({ workspaceId }: { workspaceId: string | null }) {
               {t("clearAll")}
             </Button>
           </div>
-          {checkpointNotice ? (
-            <div className="mb-3 rounded-lg border border-border/60 bg-muted/40 p-2 text-xs text-muted-foreground">
-              {checkpointNotice}
-            </div>
-          ) : null}
-          {checkpointError ? (
-            <div className="mb-3 rounded-lg border border-destructive/30 bg-destructive/10 p-2 text-xs text-destructive">
-              {checkpointError}
-            </div>
-          ) : null}
           <CheckpointTimeline
             checkpoints={checkpoints}
             disabled={busy}
             onRestore={(checkpoint) => {
               if (!workspaceId || isBusy()) return;
               setRestoreTarget(checkpoint);
-              void previewGitCheckpointRestore(workspaceId, checkpoint.id).then(setPreview);
+              void previewGitCheckpointRestore(workspaceId, checkpoint.id)
+                .then(setPreview)
+                .catch((error: unknown) => {
+                  showToast({
+                    id: `git-restore-preview-${workspaceId}`,
+                    variant: "error",
+                    description: errorMessage(error),
+                  });
+                });
             }}
           />
+
           <Collapsible className="mt-4 rounded-xl border border-border/70 bg-card/40">
             <CollapsibleTrigger className="flex w-full items-center justify-between px-3 py-2 text-left text-xs font-medium text-muted-foreground hover:text-foreground">
               <span className="flex items-center gap-1.5">
@@ -819,12 +877,16 @@ function GitWorkspacePanel({ workspaceId }: { workspaceId: string | null }) {
         }}
         onConfirm={(deleteNewPaths) => {
           if (!workspaceId || !restoreTarget || isBusy()) return;
+          const toastId = `git-restore-checkpoint-${workspaceId}`;
           setBusy(true);
           void restoreGitCheckpoint(workspaceId, restoreTarget.id, deleteNewPaths)
             .then(() => {
               setRestoreTarget(null);
               setPreview(null);
               void reload();
+            })
+            .catch((error: unknown) => {
+              showToast({ id: toastId, variant: "error", description: errorMessage(error) });
             })
             .finally(() => setBusy(false));
         }}

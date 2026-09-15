@@ -3,7 +3,6 @@ import {
   ArchiveRestore,
   ArrowDown,
   ArrowUp,
-  Check,
   Copy,
   FolderOpen,
   Hash,
@@ -11,10 +10,8 @@ import {
   Pencil,
   Pin,
   PinOff,
-  X,
 } from "lucide-react";
-import { useEffect, useId, useRef, useState, type ReactNode } from "react";
-import { createPortal } from "react-dom";
+import { useId, useRef, useState, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 
 import { Button } from "@/components/ui/button";
@@ -36,6 +33,7 @@ import { Input } from "@/components/ui/input";
 import { openAgentSessionDirectory } from "@/lib/backend";
 import { isSessionBusy, resolveSessionDirectory } from "@/lib/sessionActions";
 import { isMac } from "@/lib/shortcuts";
+import { runToastAction } from "@/lib/toast";
 import { orderedWorkspaceSessions, workspaceMoveTarget } from "@/lib/workspaceOrder";
 import type { AgentSession } from "@/lib/types";
 import { cn } from "@/lib/utils";
@@ -65,22 +63,10 @@ export function SessionMenu({
   const [renameOpen, setRenameOpen] = useState(false);
   const [name, setName] = useState("");
   const [renameError, setRenameError] = useState<string | null>(null);
-  const [feedback, setFeedback] = useState<{ text: string; error: boolean } | null>(null);
 
-  useEffect(() => {
-    if (!feedback || feedback.error) return;
-    const timer = window.setTimeout(() => setFeedback(null), 2000);
-    return () => window.clearTimeout(timer);
-  }, [feedback]);
-
-  const run = async (action: () => Promise<unknown>, copied = false) => {
-    try {
-      await action();
-      if (copied) setFeedback({ text: t("common:copied"), error: false });
-    } catch (error) {
-      setFeedback({ text: error instanceof Error ? error.message : String(error), error: true });
-    }
-  };
+  // 结果反馈统一走全局 toast：成功复制提示，失败展示不自动关闭的错误。
+  const run = (action: () => Promise<unknown>, copied = false) =>
+    runToastAction(action, copied ? { successMessage: t("common:copied") } : undefined);
 
   const openAt = (x: number, y: number, target: HTMLElement) => {
     returnFocus.current = target;
@@ -304,29 +290,6 @@ export function SessionMenu({
           </form>
         </DialogContent>
       </Dialog>
-      {feedback && typeof document !== "undefined"
-        ? createPortal(
-            <div
-              role={feedback.error ? "alert" : "status"}
-              className="fixed right-4 bottom-4 z-[100] flex max-w-[min(28rem,calc(100vw-32px))] items-center gap-2 rounded-lg border bg-popover px-3 py-2 text-sm text-popover-foreground shadow-md"
-            >
-              {feedback.error ? null : <Check className="size-4 shrink-0 text-emerald-600" />}
-              <span className="min-w-0 break-words">{feedback.text}</span>
-              {feedback.error ? (
-                <Button
-                  variant="ghost"
-                  size="icon-sm"
-                  className="shrink-0"
-                  aria-label={t("common:close")}
-                  onClick={() => setFeedback(null)}
-                >
-                  <X className="size-4" />
-                </Button>
-              ) : null}
-            </div>,
-            document.body,
-          )
-        : null}
     </>
   );
 }
@@ -334,30 +297,20 @@ export function SessionMenu({
 export function RestoreSessionButton({ sessionId }: { sessionId: string }) {
   const { t } = useTranslation("layout");
   const pending = useWorkspaceStore((state) => Boolean(state.sessionMutations[sessionId]));
-  const [error, setError] = useState<string | null>(null);
   return (
     <div className="flex flex-col items-center gap-2 py-3">
       <Button
         variant="outline"
         disabled={pending}
-        onClick={() => {
-          setError(null);
-          void useWorkspaceStore
-            .getState()
-            .setSessionArchived(sessionId, false)
-            .catch((reason: unknown) =>
-              setError(reason instanceof Error ? reason.message : String(reason)),
-            );
-        }}
+        onClick={() =>
+          void runToastAction(() =>
+            useWorkspaceStore.getState().setSessionArchived(sessionId, false),
+          )
+        }
       >
         <ArchiveRestore className="size-4" />
         {t("sessionMenu.restore")}
       </Button>
-      {error ? (
-        <p role="alert" className="text-sm break-words text-destructive">
-          {error}
-        </p>
-      ) : null}
     </div>
   );
 }

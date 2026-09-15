@@ -27,6 +27,7 @@ import {
   testMcpServer,
   updateMcpServers,
 } from "@/lib/backend";
+import { errorMessage, showToast } from "@/lib/toast";
 import type { McpEnvVar, McpOAuthConfig, McpServerConfig, McpTransport } from "@/lib/types";
 import { Button } from "@/components/ui/button";
 import {
@@ -190,7 +191,12 @@ function McpOAuthPanel({
     let unlisten: (() => void) | undefined;
     void onNativeMcpOAuth((event) => {
       if (event.serverId !== serverId) return;
-      setNotice(event.message);
+      // 授权回调是一次性事件结果，走 toast；panel 内只保留需要持续访问的链接提示。
+      showToast({
+        id: `mcp-oauth-${serverId}`,
+        variant: event.ok ? "success" : "error",
+        description: event.message,
+      });
       setBusy(false);
       void refresh();
     }).then((fn) => {
@@ -309,10 +315,15 @@ function McpOAuthPanel({
             setNotice(null);
             try {
               const started = await startMcpOAuth(serverId);
+              // 授权链接需要用户持续访问，留在 panel 内而不是 toast。
               setNotice(t("mcp.oauth.browserOpened", { url: started.authorizeUrl }));
             } catch (err) {
               setBusy(false);
-              setNotice(err instanceof Error ? err.message : String(err));
+              showToast({
+                id: `mcp-oauth-${serverId}`,
+                variant: "error",
+                description: errorMessage(err),
+              });
             }
           }}
         >
@@ -328,10 +339,19 @@ function McpOAuthPanel({
             onClick={async () => {
               try {
                 await clearMcpOAuth(serverId);
-                setNotice(t("mcp.oauth.cleared"));
+                setNotice(null);
+                showToast({
+                  id: `mcp-oauth-${serverId}`,
+                  variant: "success",
+                  description: t("mcp.oauth.cleared"),
+                });
                 await refresh();
               } catch (err) {
-                setNotice(err instanceof Error ? err.message : String(err));
+                showToast({
+                  id: `mcp-oauth-${serverId}`,
+                  variant: "error",
+                  description: errorMessage(err),
+                });
               }
             }}
           >
@@ -383,8 +403,8 @@ export function McpSettingsTab() {
   const [deleteConfirming, setDeleteConfirming] = useState(false);
   const [togglingId, setTogglingId] = useState<string | null>(null);
   const [testingId, setTestingId] = useState<string | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const [message, setMessage] = useState<string | null>(null);
+  // 列表加载失败需要持续可见，只有列表重新加载成功才清除；一次性操作结果统一走全局 toast。
+  const [loadError, setLoadError] = useState<string | null>(null);
   const [modalError, setModalError] = useState<string | null>(null);
   const [snippet, setSnippet] = useState<string | null>(null);
   const [selectedId, setSelectedId] = useState<string | null>(null);
@@ -402,15 +422,15 @@ export function McpSettingsTab() {
     let cancelled = false;
     const load = async () => {
       setLoading(true);
-      setError(null);
       try {
         const doc = await getMcpServers();
         if (!cancelled) {
           setServers(localizeExampleServers(doc.servers, t));
+          setLoadError(null);
         }
       } catch (err) {
         if (!cancelled) {
-          setError(err instanceof Error ? err.message : String(err));
+          setLoadError(errorMessage(err));
         }
       } finally {
         if (!cancelled) {
@@ -527,10 +547,14 @@ export function McpSettingsTab() {
       setDialogOpen(false);
       setSelectedId(null);
       setForm(EMPTY_FORM);
-      setMessage(isCreate ? t("mcp.messages.created") : t("mcp.messages.updated"));
-      setError(null);
+      // 保存成功是一次性反馈：全局 toast，不占页面布局。
+      showToast({
+        id: "mcp-server-save",
+        variant: "success",
+        description: isCreate ? t("mcp.messages.created") : t("mcp.messages.updated"),
+      });
     } catch (err) {
-      setModalError(err instanceof Error ? err.message : String(err));
+      setModalError(errorMessage(err));
     } finally {
       setSaving(null);
     }
@@ -555,10 +579,17 @@ export function McpSettingsTab() {
       setSelectedId(null);
       setForm(EMPTY_FORM);
       setDialogOpen(false);
-      setMessage(t("mcp.messages.deleted"));
-      setError(null);
+      showToast({
+        id: "mcp-server-delete",
+        variant: "success",
+        description: t("mcp.messages.deleted"),
+      });
     } catch (err) {
-      setModalError(err instanceof Error ? err.message : String(err));
+      showToast({
+        id: "mcp-server-delete",
+        variant: "error",
+        description: errorMessage(err),
+      });
     } finally {
       setDeleteConfirming(false);
       setSaving(null);
@@ -568,7 +599,6 @@ export function McpSettingsTab() {
   const handleToggleEnabled = async (server: McpServerConfig, enabled: boolean) => {
     if (togglingId !== null) return;
     setTogglingId(server.id);
-    setError(null);
     const nextServers = servers.map((item) =>
       item.id === server.id ? { ...item, enabled } : item,
     );
@@ -576,7 +606,12 @@ export function McpSettingsTab() {
       const doc = await updateMcpServers({ servers: nextServers });
       setServers(localizeExampleServers(doc.servers, t));
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      // 启停失败是一次性操作结果，走 toast。
+      showToast({
+        id: `mcp-server-toggle-${server.id}`,
+        variant: "error",
+        description: errorMessage(err),
+      });
     } finally {
       setTogglingId(null);
     }
@@ -585,13 +620,19 @@ export function McpSettingsTab() {
   const handleTest = async (server: McpServerConfig) => {
     if (testingId !== null) return;
     setTestingId(server.id);
-    setError(null);
-    setMessage(null);
     try {
       const summary = await testMcpServer(server);
-      setMessage(summary);
+      showToast({
+        id: `mcp-server-test-${server.id}`,
+        variant: "success",
+        description: summary,
+      });
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      showToast({
+        id: `mcp-server-test-${server.id}`,
+        variant: "error",
+        description: errorMessage(err),
+      });
     } finally {
       setTestingId(null);
     }
@@ -599,8 +640,6 @@ export function McpSettingsTab() {
 
   const handleReset = async () => {
     if (formLocked) return;
-    setError(null);
-    setMessage(null);
     try {
       const confirmed = await confirm(t("mcp.dialogs.resetConfirm"), {
         title: t("mcp.dialogs.resetTitle"),
@@ -610,36 +649,53 @@ export function McpSettingsTab() {
       setSaving("reset");
       const doc = await resetMcpServers();
       setServers(localizeExampleServers(doc.servers, t));
-      setMessage(t("mcp.messages.reset"));
+      showToast({
+        id: "mcp-server-reset",
+        variant: "success",
+        description: t("mcp.messages.reset"),
+      });
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      showToast({
+        id: "mcp-server-reset",
+        variant: "error",
+        description: errorMessage(err),
+      });
     } finally {
       setSaving(null);
     }
   };
 
   const handleExport = async () => {
-    setError(null);
     try {
       const text = await exportMcpServersSnippet();
       setSnippet(text);
       await navigator.clipboard?.writeText(text);
-      setMessage(t("mcp.messages.exported"));
+      showToast({
+        id: "mcp-server-export",
+        variant: "success",
+        description: t("mcp.messages.exported"),
+      });
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      showToast({
+        id: "mcp-server-export",
+        variant: "error",
+        description: errorMessage(err),
+      });
     }
   };
 
   const addPlaywrightPreset = () => {
-    setError(null);
-    setMessage(null);
     const exists = servers.some(
       (server) =>
         server.name.trim().toLowerCase() === "playwright" ||
         server.args.some((arg) => arg.includes("@playwright/mcp")),
     );
     if (exists) {
-      setMessage(t("mcp.messages.playwrightExists"));
+      showToast({
+        id: "mcp-playwright-preset",
+        variant: "info",
+        description: t("mcp.messages.playwrightExists"),
+      });
       return;
     }
     openCreate({
@@ -653,15 +709,13 @@ export function McpSettingsTab() {
 
   return (
     <div className="space-y-6">
-      {message ? (
+      {/* 列表加载失败需要持续可见；一次性操作结果统一走全局 toast */}
+      {loadError ? (
         <SettingFeedbackCallout
-          variant="success"
-          message={message}
-          onClose={() => setMessage(null)}
+          variant="error"
+          message={loadError}
+          onClose={() => setLoadError(null)}
         />
-      ) : null}
-      {error ? (
-        <SettingFeedbackCallout variant="error" message={error} onClose={() => setError(null)} />
       ) : null}
 
       <SettingCard

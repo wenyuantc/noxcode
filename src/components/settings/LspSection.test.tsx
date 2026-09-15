@@ -3,7 +3,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { LspServerStatus, LspTestResult, NativeSettings } from "@/lib/types";
 import { useSettingsStore } from "@/stores/settingsStore";
-import { LspSection, lspRowAction, lspTestSummary } from "./LspSection";
+import { LspSection, lspRowAction, lspTestSummary, lspTestVariant } from "./LspSection";
 
 vi.mock("@/lib/backend", () => ({
   listLspServers: vi.fn().mockResolvedValue([]),
@@ -126,5 +126,25 @@ describe("lspTestSummary", () => {
   it("falls back to name only, then to the command", () => {
     expect(lspTestSummary({ ...base, server_name: "gopls" })).toBe("gopls · 820 ms");
     expect(lspTestSummary(base)).toBe("rust-analyzer · 820 ms");
+  });
+});
+
+describe("lspTestVariant", () => {
+  const base: LspTestResult = {
+    language: "rust",
+    label: "Rust",
+    command: "rust-analyzer",
+    server_name: null,
+    server_version: null,
+    elapsed_ms: 820,
+    warning: null,
+  };
+
+  it("reports a clean test as success", () => {
+    expect(lspTestVariant(base)).toBe("success");
+  });
+
+  it("downgrades to warning when the language server reports one", () => {
+    expect(lspTestVariant({ ...base, warning: "workspace/symbol call failed" })).toBe("warning");
   });
 });

@@ -22,6 +22,7 @@ import {
   workspaceSkillPath,
 } from "@/lib/skillWorkspaceDir";
 import type { NativeSkill, NativeSkillSource, NativeSkillsView, Workspace } from "@/lib/types";
+import { errorMessage, showToast } from "@/lib/toast";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import {
@@ -62,10 +63,8 @@ export function NativeSkillsSettingsCard() {
   const [createOpen, setCreateOpen] = useState(false);
   const [importOpen, setImportOpen] = useState(false);
   const [diagnosticsOpen, setDiagnosticsOpen] = useState(false);
-  const [feedback, setFeedback] = useState<{
-    variant: "success" | "error";
-    message: string;
-  } | null>(null);
+  // 仅加载失败需要常驻页面内提示；开关/复制/删除的成败走 toast。
+  const [loadError, setLoadError] = useState<string | null>(null);
   const loadGeneration = useRef(0);
 
   const disabled = useMemo(() => new Set((view?.disabled_paths ?? []).map(normalizePath)), [view]);
@@ -89,10 +88,7 @@ export function NativeSkillsSettingsCard() {
       setView(next);
     } catch (err) {
       if (generation !== loadGeneration.current) return;
-      setFeedback({
-        variant: "error",
-        message: err instanceof Error ? err.message : String(err),
-      });
+      setLoadError(errorMessage(err));
     } finally {
       if (generation === loadGeneration.current) setBusy(false);
     }
@@ -103,10 +99,7 @@ export function NativeSkillsSettingsCard() {
       .getState()
       .load()
       .catch((err) => {
-        setFeedback({
-          variant: "error",
-          message: err instanceof Error ? err.message : String(err),
-        });
+        setLoadError(errorMessage(err));
       });
   }, []);
 
@@ -157,9 +150,9 @@ export function NativeSkillsSettingsCard() {
       const paths = await setNativeSkillEnabled(skill.skill_md_path, enabled);
       setView((current) => (current ? { ...current, disabled_paths: paths } : current));
     } catch (err) {
-      setFeedback({
+      showToast({
         variant: "error",
-        message: err instanceof Error ? err.message : t("skills.toggleFailed"),
+        description: err instanceof Error ? err.message : t("skills.toggleFailed"),
       });
     }
   };
@@ -167,12 +160,12 @@ export function NativeSkillsSettingsCard() {
   const copy = async (skill: NativeSkill) => {
     try {
       await copyNativeSkillToGlobal(skill.skill_md_path);
-      setFeedback({ variant: "success", message: t("skills.copiedToCommon") });
+      showToast({ variant: "success", description: t("skills.copiedToCommon") });
       await load();
     } catch (err) {
-      setFeedback({
+      showToast({
         variant: "error",
-        message: err instanceof Error ? err.message : t("skills.copyFailed"),
+        description: err instanceof Error ? err.message : t("skills.copyFailed"),
       });
     }
   };
@@ -185,12 +178,12 @@ export function NativeSkillsSettingsCard() {
     if (!ok) return;
     try {
       await deleteNativeSkill(skill.skill_md_path, mutationWorkspaceId);
-      setFeedback({ variant: "success", message: t("skills.deleted") });
+      showToast({ variant: "success", description: t("skills.deleted") });
       await load();
     } catch (err) {
-      setFeedback({
+      showToast({
         variant: "error",
-        message: err instanceof Error ? err.message : t("skills.deleteFailed"),
+        description: err instanceof Error ? err.message : t("skills.deleteFailed"),
       });
     }
   };
@@ -328,11 +321,11 @@ export function NativeSkillsSettingsCard() {
           </div>
         }
       >
-        {feedback ? (
+        {loadError ? (
           <SettingFeedbackCallout
-            variant={feedback.variant}
-            message={feedback.message}
-            onClose={() => setFeedback(null)}
+            variant="error"
+            message={loadError}
+            onClose={() => setLoadError(null)}
           />
         ) : null}
         <div className="mb-3 flex flex-wrap gap-2">

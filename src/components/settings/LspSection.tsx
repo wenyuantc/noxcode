@@ -1,5 +1,4 @@
 import { Check, Code2, Download, Loader2, Zap } from "lucide-react";
-import type { ReactNode } from "react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 
@@ -9,11 +8,11 @@ import {
   testLspServer,
   updateNativeSettings,
 } from "@/lib/backend";
+import { errorMessage, runToastAction, showToast, type ToastVariant } from "@/lib/toast";
 import type { LspServerStatus, LspTestResult } from "@/lib/types";
 import { Button } from "@/components/ui/button";
 import { Switch } from "@/components/ui/switch";
 import { useSettingsStore } from "@/stores/settingsStore";
-import { SettingFeedbackCallout } from "./SettingFeedbackCallout";
 import { SettingCard, SettingRow } from "./SettingCard";
 
 /** 测试结果摘要：优先展示 language server 自报的名称与版本。 */
@@ -32,6 +31,11 @@ export function lspRowAction(server: LspServerStatus): "test" | "install" | "man
   return server.installable ? "install" : "manual";
 }
 
+/** 测试成功但 language server 自报异常时用 warning 变体（保留更久），否则 success。 */
+export function lspTestVariant(result: LspTestResult): ToastVariant {
+  return result.warning ? "warning" : "success";
+}
+
 export function LspSection() {
   const { t } = useTranslation(["settings", "common"]);
   const native = useSettingsStore((state) => state.native);
@@ -41,10 +45,7 @@ export function LspSection() {
   const [lspInstalling, setLspInstalling] = useState<Set<string>>(() => new Set());
   const [lspTesting, setLspTesting] = useState<Set<string>>(() => new Set());
   const [lspErrors, setLspErrors] = useState<Record<string, string>>({});
-  const [feedback, setFeedback] = useState<{
-    variant: "success" | "error";
-    message: ReactNode;
-  } | null>(null);
+  const [lspListError, setLspListError] = useState<string | null>(null);
   const lspInstallingRef = useRef(new Set<string>());
   const lspTestingRef = useRef(new Set<string>());
 
@@ -52,11 +53,10 @@ export function LspSection() {
     if (!silent) setLspLoading(true);
     try {
       setLspServers(await listLspServers());
+      setLspListError(null);
     } catch (error) {
-      setFeedback({
-        variant: "error",
-        message: error instanceof Error ? error.message : String(error),
-      });
+      // 列表加载失败是持久问题：内联展示，直到重试成功，不用会自动消失的 toast。
+      setLspListError(errorMessage(error));
     } finally {
       if (!silent) setLspLoading(false);
     }
@@ -83,7 +83,7 @@ export function LspSection() {
       } catch (error) {
         setLspErrors((prev) => ({
           ...prev,
-          [language]: error instanceof Error ? error.message : String(error),
+          [language]: errorMessage(error),
         }));
       } finally {
         lspInstallingRef.current.delete(language);
@@ -106,9 +106,12 @@ export function LspSection() {
       });
       try {
         const result = await testLspServer(server.id);
-        setFeedback({
-          variant: "success",
-          message: (
+        // 测试结果走 toast：正常为 success（约 3s），language server 自报异常时用
+        // warning 变体保留更久，并完整展示 warning 内容。
+        showToast({
+          id: `lsp-test-${server.id}`,
+          variant: lspTestVariant(result),
+          description: (
             <>
               <span>
                 {t("settings:lsp.testSuccess", {
@@ -127,7 +130,7 @@ export function LspSection() {
       } catch (error) {
         setLspErrors((prev) => ({
           ...prev,
-          [server.id]: error instanceof Error ? error.message : String(error),
+          [server.id]: errorMessage(error),
         }));
       } finally {
         lspTestingRef.current.delete(server.id);
@@ -151,17 +154,13 @@ export function LspSection() {
 
   const persistEnabled = useCallback(
     (checked: boolean) => {
-      void updateNativeSettings({ lsp_enabled: checked })
-        .then((updated) => {
-          setNative(updated);
-          setFeedback({ variant: "success", message: t("common:saved") ?? "保存成功" });
-        })
-        .catch((error: unknown) => {
-          setFeedback({
-            variant: "error",
-            message: error instanceof Error ? error.message : String(error),
-          });
-        });
+      void runToastAction(
+        () => updateNativeSettings({ lsp_enabled: checked }).then((updated) => setNative(updated)),
+        {
+          id: "lsp-enabled-save",
+          successMessage: t("common:saved"),
+        },
+      );
     },
     [setNative, t],
   );
@@ -170,12 +169,24 @@ export function LspSection() {
 
   return (
     <div className="space-y-6">
-      {feedback ? (
-        <SettingFeedbackCallout
-          variant={feedback.variant}
-          message={feedback.message}
-          onClose={() => setFeedback(null)}
-        />
+      {lspListError ? (
+        <div
+          role="alert"
+          className="flex flex-wrap items-start gap-2 rounded-xl border border-destructive/30 bg-destructive/10 px-3.5 py-2.5 text-xs text-destructive"
+        >
+          <span className="min-w-0 flex-1 break-words">
+            {t("settings:lsp.loadFailed", { detail: lspListError })}
+          </span>
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            className="h-7 shrink-0 text-xs"
+            onClick={() => void refreshLspServers()}
+          >
+            {t("common:retry")}
+          </Button>
+        </div>
       ) : null}
 
       <SettingCard

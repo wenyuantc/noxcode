@@ -38,7 +38,9 @@ import {
   type PointerRowProps,
 } from "@/hooks/useWorkspaceDrag";
 import { displaySessionTitle } from "@/lib/sessionLines";
+import { errorMessage, showToast } from "@/lib/toast";
 import { orderedWorkspaceSessions, workspaceMoveTarget } from "@/lib/workspaceOrder";
+
 import { formatRelativeTime } from "@/lib/utils";
 import { getCurrentAppLocale, getDateLocale } from "@/lib/i18n/locale";
 import { useSessionStore } from "@/stores/sessionStore";
@@ -217,7 +219,12 @@ export function SidebarTree() {
         useSessionStore.getState().selectSession(null);
       }
     } catch (error) {
-      await message(error instanceof Error ? error.message : String(error), { kind: "error" });
+      // 删除是原生工作区的一次性操作：失败用不自动关闭的 error toast，重命名表单错误仍走弹窗。
+      showToast({
+        id: `workspace-delete-${workspace.id}`,
+        variant: "error",
+        description: errorMessage(error),
+      });
     }
   };
 

@@ -19,6 +19,7 @@ import {
   updateNativeSettings,
 } from "@/lib/backend";
 import { resolveMemoryWorkspaceId } from "@/lib/memoryWorkspace";
+import { errorMessage, showToast } from "@/lib/toast";
 import type { NativeMemoryEntry, NativeMemoryView } from "@/lib/types";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -50,7 +51,8 @@ export function MemorySection() {
   const [busy, setBusy] = useState(false);
   const [open, setOpen] = useState<string | null>(null);
   const [interval, setInterval] = useState<number>(native?.memory_dream_interval ?? 10);
-  const [feedback, setFeedback] = useState<{
+  // 仅承载需要常驻页面内的提示：列表加载失败、Dream 长摘要与缺少渠道指引。
+  const [inlineFeedback, setInlineFeedback] = useState<{
     variant: "success" | "error";
     message: string;
   } | null>(null);
@@ -80,7 +82,7 @@ export function MemorySection() {
       })
       .catch((reason: unknown) => {
         if (workspaceIdRef.current === requested) {
-          setFeedback({ variant: "error", message: String(reason) });
+          setInlineFeedback({ variant: "error", message: errorMessage(reason) });
         }
       });
   }, [workspaceId]);
@@ -91,7 +93,7 @@ export function MemorySection() {
 
   useEffect(() => {
     setOpen(null);
-    setFeedback(null);
+    setInlineFeedback(null);
     setView(null);
   }, [workspaceId]);
 
@@ -99,28 +101,28 @@ export function MemorySection() {
     if (!workspaceId) return;
     deleteNativeMemory(workspaceId, entry.file_name)
       .then(() => {
-        setFeedback({ variant: "success", message: t("common:deleted") ?? "已删除" });
+        showToast({ variant: "success", description: t("common:deleted") });
         reload();
       })
       .catch((reason: unknown) => {
-        setFeedback({ variant: "error", message: String(reason) });
+        showToast({ variant: "error", description: errorMessage(reason) });
       });
   };
 
   const dream = () => {
     if (!workspaceId || !channelId) {
-      setFeedback({ variant: "error", message: t("settings:memory.needChannel") });
+      setInlineFeedback({ variant: "error", message: t("settings:memory.needChannel") });
       return;
     }
     setBusy(true);
-    setFeedback(null);
+    setInlineFeedback(null);
     dreamNativeMemory(workspaceId, channelId)
       .then((summary) => {
-        setFeedback({ variant: "success", message: summary });
+        setInlineFeedback({ variant: "success", message: summary });
         reload();
       })
       .catch((reason: unknown) => {
-        setFeedback({ variant: "error", message: String(reason) });
+        showToast({ variant: "error", description: errorMessage(reason) });
       })
       .finally(() => setBusy(false));
   };
@@ -129,11 +131,11 @@ export function MemorySection() {
 
   return (
     <div className="space-y-6">
-      {feedback ? (
+      {inlineFeedback ? (
         <SettingFeedbackCallout
-          variant={feedback.variant}
-          message={feedback.message}
-          onClose={() => setFeedback(null)}
+          variant={inlineFeedback.variant}
+          message={inlineFeedback.message}
+          onClose={() => setInlineFeedback(null)}
         />
       ) : null}
 
@@ -152,10 +154,14 @@ export function MemorySection() {
             id="memory-enabled"
             checked={native.memory_enabled}
             onCheckedChange={(checked) => {
-              void updateNativeSettings({ memory_enabled: checked }).then((res) => {
-                setNative(res);
-                setFeedback({ variant: "success", message: t("common:saved") ?? "保存成功" });
-              });
+              void updateNativeSettings({ memory_enabled: checked })
+                .then((res) => {
+                  setNative(res);
+                  showToast({ variant: "success", description: t("common:saved") });
+                })
+                .catch((err: unknown) => {
+                  showToast({ variant: "error", description: errorMessage(err) });
+                });
             }}
           />
         </SettingRow>
@@ -185,10 +191,14 @@ export function MemorySection() {
               variant="outline"
               className="h-8 text-xs"
               onClick={() =>
-                void updateNativeSettings({ memory_dream_interval: interval }).then((res) => {
-                  setNative(res);
-                  setFeedback({ variant: "success", message: t("common:saved") ?? "保存成功" });
-                })
+                void updateNativeSettings({ memory_dream_interval: interval })
+                  .then((res) => {
+                    setNative(res);
+                    showToast({ variant: "success", description: t("common:saved") });
+                  })
+                  .catch((err: unknown) => {
+                    showToast({ variant: "error", description: errorMessage(err) });
+                  })
               }
             >
               {t("common:save")}

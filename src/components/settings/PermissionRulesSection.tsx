@@ -17,6 +17,7 @@ import type {
   PathAccessScope,
 } from "@/lib/types";
 import { permissionTargetLabel } from "@/lib/nativeFileAccess";
+import { errorMessage, showToast } from "@/lib/toast";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -63,8 +64,9 @@ export function PermissionRulesSection() {
   const activeWorkspaceId = useWorkspaceStore((state) => state.activeWorkspaceId);
   const [selectedWorkspaceId, setSelectedWorkspaceId] = useState<string | null>(activeWorkspaceId);
   const [view, setView] = useState<NativePermissionRulesView | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const [message, setMessage] = useState<string | null>(null);
+  // 列表加载失败常驻页面内；弹窗内的校验与保存失败留在弹窗内。
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [modalError, setModalError] = useState<string | null>(null);
   const [dialogOpen, setDialogOpen] = useState(false);
   const [saving, setSaving] = useState(false);
 
@@ -97,9 +99,9 @@ export function PermissionRulesSection() {
     getNativePermissionRules(selectedWorkspaceId)
       .then((next) => {
         setView(next);
-        setError(null);
+        setLoadError(null);
       })
-      .catch((reason: unknown) => setError(String(reason)));
+      .catch((reason: unknown) => setLoadError(errorMessage(reason)));
   }, [selectedWorkspaceId]);
 
   useEffect(() => {
@@ -117,8 +119,7 @@ export function PermissionRulesSection() {
     setPathScope("exact");
     setTargetKind(view?.workspace_target?.kind ?? "local");
     setRuleWorkspaceId(selectedWorkspaceId);
-    setError(null);
-    setMessage(null);
+    setModalError(null);
     setDialogOpen(true);
   };
 
@@ -128,7 +129,7 @@ export function PermissionRulesSection() {
     const targetWsId = scope === "workspace" ? (ruleWorkspaceId ?? selectedWorkspaceId) : null;
     if (scope === "workspace" && !targetWsId) return;
     setSaving(true);
-    setError(null);
+    setModalError(null);
     try {
       const rule: PermissionRule = {
         id: "",
@@ -155,10 +156,15 @@ export function PermissionRulesSection() {
       setPattern("");
       setNote("");
       setDialogOpen(false);
-      setMessage(t("common:saved", { defaultValue: "规则已添加" }));
+      // 添加成功是一次性反馈：全局 toast，不占页面布局。
+      showToast({
+        id: "permission-rule-add",
+        variant: "success",
+        description: t("common:saved", { defaultValue: "规则已添加" }),
+      });
       reload();
     } catch (reason: unknown) {
-      setError(String(reason));
+      setModalError(errorMessage(reason));
     } finally {
       setSaving(false);
     }
@@ -167,10 +173,21 @@ export function PermissionRulesSection() {
   const remove = (id: string) => {
     deleteNativePermissionRule(id, selectedWorkspaceId)
       .then(() => {
-        setMessage(t("common:deleted", { defaultValue: "已删除" }));
+        showToast({
+          id: "permission-rule-delete",
+          variant: "success",
+          description: t("common:deleted", { defaultValue: "已删除" }),
+        });
         reload();
       })
-      .catch((reason: unknown) => setError(String(reason)));
+      .catch((reason: unknown) => {
+        // 删除失败是一次性操作结果，走 toast 而不是页面内反馈条。
+        showToast({
+          id: "permission-rule-delete",
+          variant: "error",
+          description: errorMessage(reason),
+        });
+      });
   };
 
   const renderRuleList = (rules: PermissionRule[], ruleEffect: PermissionRuleEffect) => {
@@ -365,15 +382,13 @@ export function PermissionRulesSection() {
 
   return (
     <div className="space-y-6">
-      {message ? (
+      {/* 列表加载失败需要持续可见；一次性操作结果统一走全局 toast */}
+      {loadError ? (
         <SettingFeedbackCallout
-          variant="success"
-          message={message}
-          onClose={() => setMessage(null)}
+          variant="error"
+          message={loadError}
+          onClose={() => setLoadError(null)}
         />
-      ) : null}
-      {error ? (
-        <SettingFeedbackCallout variant="error" message={error} onClose={() => setError(null)} />
       ) : null}
 
       <SettingCard
@@ -412,6 +427,7 @@ export function PermissionRulesSection() {
           </DialogHeader>
 
           <div className="space-y-3.5 px-6 py-4">
+            {modalError ? <SettingFeedbackCallout variant="error" message={modalError} /> : null}
             <div className="grid gap-3 sm:grid-cols-2">
               <div>
                 <label className="text-xs font-medium text-muted-foreground">

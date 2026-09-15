@@ -24,6 +24,8 @@
   "none": "None",
   "copy": "Copy",
   "copied": "Copied",
-  "saved": "Saved successfully",
-  "deleted": "Deleted successfully"
+    "saved": "Saved successfully",
+  "deleted": "Deleted successfully",
+    "notifications": "Notifications",
+  "toastMoreHidden": "{{hidden}} more notifications, show all"
 }

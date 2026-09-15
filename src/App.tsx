@@ -4,6 +4,7 @@ import { BrowserRouter, Navigate, Route, Routes } from "react-router-dom";
 import { MergeWorktreeDialog } from "@/components/session/MergeWorktreeDialog";
 import { NativePermissionDialog } from "@/components/session/NativePermissionDialog";
 import { SshHostTrustDialog } from "@/components/ssh/SshHostTrustDialog";
+import { Toaster, ToastProvider } from "@/components/ui/toast";
 import { useNativeEvents } from "@/hooks/useNativeEvents";
 import { watchSystemTheme } from "@/lib/theme";
 import { mergeWorktreeDialogKey } from "@/lib/worktreeMergePrompt";
@@ -40,26 +41,29 @@ function AppEffects() {
 
 export default function App() {
   return (
-    <BrowserRouter>
-      <AppEffects />
-      <Suspense
-        fallback={
-          <div
-            role="status"
-            className="flex h-screen items-center justify-center text-sm text-muted-foreground"
-          >
-            加载中...
-          </div>
-        }
-      >
-        <Routes>
-          <Route path="/" element={<WorkspacePage />} />
-          <Route path="/settings" element={<SettingsPage />} />
-          <Route path="/settings/:section" element={<SettingsPage />} />
-          <Route path="/api-logs" element={<ApiCallLogsPage />} />
-          <Route path="*" element={<Navigate to="/" replace />} />
-        </Routes>
-      </Suspense>
-    </BrowserRouter>
+    <ToastProvider>
+      <BrowserRouter>
+        <AppEffects />
+        <Suspense
+          fallback={
+            <div
+              role="status"
+              className="flex h-screen items-center justify-center text-sm text-muted-foreground"
+            >
+              加载中...
+            </div>
+          }
+        >
+          <Routes>
+            <Route path="/" element={<WorkspacePage />} />
+            <Route path="/settings" element={<SettingsPage />} />
+            <Route path="/settings/:section" element={<SettingsPage />} />
+            <Route path="/api-logs" element={<ApiCallLogsPage />} />
+            <Route path="*" element={<Navigate to="/" replace />} />
+          </Routes>
+        </Suspense>
+      </BrowserRouter>
+      <Toaster />
+    </ToastProvider>
   );
 }

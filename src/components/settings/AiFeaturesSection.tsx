@@ -13,6 +13,7 @@ import {
 } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
 import { updateAiSettings } from "@/lib/backend";
+import { errorMessage, showToast } from "@/lib/toast";
 import {
   EMPTY_AI_COMMIT_MESSAGE,
   EMPTY_AI_FEATURE_OVERRIDE,
@@ -41,10 +42,8 @@ export function AiFeaturesSection() {
   const [searchParams, setSearchParams] = useSearchParams();
   const [draft, setDraft] = useState<AiSettings>(stored ?? EMPTY_AI_SETTINGS);
   const [saving, setSaving] = useState<keyof AiSettings | null>(null);
-  const [feedback, setFeedback] = useState<{
-    variant: "success" | "error";
-    message: string;
-  } | null>(null);
+  // `?prompt-enhancement=missing-model` 的指引是页面内联提示，不走 toast。
+  const [missingModelHint, setMissingModelHint] = useState(false);
 
   useEffect(() => {
     if (stored) setDraft(normalizeAiSettings(stored));
@@ -52,9 +51,9 @@ export function AiFeaturesSection() {
 
   useEffect(() => {
     if (searchParams.get("prompt-enhancement") !== "missing-model") return;
-    setFeedback({ variant: "error", message: t("settings:ai.promptEnhancement.needModel") });
+    setMissingModelHint(true);
     setSearchParams({}, { replace: true });
-  }, [searchParams, setSearchParams, t]);
+  }, [searchParams, setSearchParams]);
 
   const patch = <K extends keyof AiSettings>(key: K, next: AiSettings[K]) => {
     setDraft((current) => ({ ...current, [key]: next }));
@@ -62,14 +61,14 @@ export function AiFeaturesSection() {
 
   const save = async (key: keyof AiSettings) => {
     setSaving(key);
-    setFeedback(null);
+    setMissingModelHint(false);
     try {
       const updated = await updateAiSettings(draft);
       setAi(updated);
       setDraft(updated);
-      setFeedback({ variant: "success", message: t("common:saved") });
+      showToast({ variant: "success", description: t("common:saved") });
     } catch (reason) {
-      setFeedback({ variant: "error", message: String(reason) });
+      showToast({ variant: "error", description: errorMessage(reason) });
     } finally {
       setSaving(null);
     }
@@ -77,11 +76,11 @@ export function AiFeaturesSection() {
 
   return (
     <div className="space-y-6">
-      {feedback ? (
+      {missingModelHint ? (
         <SettingFeedbackCallout
-          variant={feedback.variant}
-          message={feedback.message}
-          onClose={() => setFeedback(null)}
+          variant="error"
+          message={t("settings:ai.promptEnhancement.needModel")}
+          onClose={() => setMissingModelHint(false)}
         />
       ) : null}
 

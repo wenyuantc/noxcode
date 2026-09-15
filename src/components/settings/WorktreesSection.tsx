@@ -6,6 +6,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Switch } from "@/components/ui/switch";
 import { listManagedWorktrees, removeManagedWorktree, updateNativeSettings } from "@/lib/backend";
+import { errorMessage, showToast } from "@/lib/toast";
 import type { ManagedWorktreeList, NativeSettings } from "@/lib/types";
 import { formatRelativeTime } from "@/lib/utils";
 import { useSettingsStore } from "@/stores/settingsStore";
@@ -49,10 +50,8 @@ export function WorktreesSection({ initialList = null }: WorktreesSectionProps =
   const [removing, setRemoving] = useState<string | null>(null);
   const [confirmingPath, setConfirmingPath] = useState<string | null>(null);
   const [copiedPath, setCopiedPath] = useState<string | null>(null);
-  const [feedback, setFeedback] = useState<{
-    variant: "success" | "error";
-    message: string;
-  } | null>(null);
+  // 仅列表加载失败需要常驻页面内提示；删除的成败走 toast。
+  const [loadError, setLoadError] = useState<string | null>(null);
 
   const initializedRef = useRef(false);
   const draftRef = useRef(draft);
@@ -95,13 +94,10 @@ export function WorktreesSection({ initialList = null }: WorktreesSectionProps =
     listManagedWorktrees()
       .then((next) => {
         setList(next);
-        setFeedback(null);
+        setLoadError(null);
       })
       .catch((error: unknown) => {
-        setFeedback({
-          variant: "error",
-          message: error instanceof Error ? error.message : String(error),
-        });
+        setLoadError(errorMessage(error));
       })
       .finally(() => setLoading(false));
   }, []);
@@ -147,14 +143,10 @@ export function WorktreesSection({ initialList = null }: WorktreesSectionProps =
     void removeManagedWorktree(path)
       .then((next) => {
         setList(next);
-        setFeedback(null);
         setConfirmingPath(null);
       })
       .catch((error: unknown) => {
-        setFeedback({
-          variant: "error",
-          message: error instanceof Error ? error.message : String(error),
-        });
+        showToast({ variant: "error", description: errorMessage(error) });
       })
       .finally(() => setRemoving(null));
   };
@@ -273,9 +265,9 @@ export function WorktreesSection({ initialList = null }: WorktreesSectionProps =
           </Button>
         }
       >
-        {feedback ? (
+        {loadError ? (
           <div className="px-5 pt-4">
-            <SettingFeedbackCallout variant={feedback.variant} message={feedback.message} />
+            <SettingFeedbackCallout variant="error" message={loadError} />
           </div>
         ) : null}
         {items.length === 0 ? (
