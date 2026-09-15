@@ -177,9 +177,7 @@ export function usePointerReorder(options: {
 
   const rowProps = useCallback(
     (id: string): PointerRowProps => ({
-      ...(rowAttr === "workspace-row"
-        ? { "data-workspace-row": id }
-        : { "data-session-row": id }),
+      ...(rowAttr === "workspace-row" ? { "data-workspace-row": id } : { "data-session-row": id }),
       onPointerDown: (event: ReactPointerEvent<HTMLElement>) => {
         if (event.button !== 0) return;
         const target = event.target;
