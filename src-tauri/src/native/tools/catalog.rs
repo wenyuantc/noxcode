@@ -814,7 +814,7 @@ fn core_tool_specs() -> Vec<ToolSpec> {
         ),
         spec(
             "Lsp",
-            "Code intelligence via installed language servers in local workspaces. Supports Rust, TypeScript/JavaScript, Python, Go, C/C++, Java, Kotlin, C#, PHP, Ruby, Swift, Dart, Lua, HTML, CSS, JSON, YAML, Bash, Markdown, SQL, Vue, Svelte, Dockerfile, and Terraform. After Write/Edit/ApplyPatch, diagnostics are attached automatically. Operations: goToDefinition, findReferences, hover, documentSymbol, workspaceSymbol, goToImplementation, diagnostics. line/character are 1-based. Use language to select a server for workspaceSymbol or extensionless files. SSH workspaces are not supported.",
+            "Code intelligence via installed language servers in local workspaces. Supports Rust, TypeScript/JavaScript, Python, Go, C/C++, Java, Kotlin, C#, PHP, Ruby, Swift, Dart, Lua, HTML, CSS, JSON, YAML, Bash, Markdown, SQL, Vue, Svelte, Dockerfile, and Terraform. After Write/Edit/ApplyPatch, diagnostics are attached automatically. Operations: goToDefinition, findReferences, hover, documentSymbol, workspaceSymbol, goToImplementation, diagnostics. line/character are 1-based. Use language to select a server for workspaceSymbol or extensionless files; workspaceSymbol may first open a matching source file. SSH workspaces are not supported.",
             json!({
                 "type": "object",
                 "properties": {

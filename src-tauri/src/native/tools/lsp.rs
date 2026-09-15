@@ -7,7 +7,7 @@ use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::atomic::{AtomicI64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
 use serde::Serialize;
@@ -17,7 +17,7 @@ use tokio::process::{Child, ChildStdin};
 use tokio::sync::{oneshot, Mutex};
 
 use crate::native::tools::command_path::{
-    apply_augmented_path, resolve_program, resolve_program_with_extra_dirs,
+    apply_augmented_path, augmented_path, resolve_program, resolve_program_with_extra_dirs,
 };
 use crate::process_spawn::{std_command, tokio_command};
 
@@ -45,6 +45,8 @@ struct LanguageServer {
     diagnostics: Mutex<HashMap<String, Vec<LspDiagnostic>>>,
     opened: Mutex<HashMap<String, i64>>,
     init_result: Mutex<Option<Value>>,
+    /// stderr 末尾内容，供握手失败时报出真实原因。
+    stderr_tail: Mutex<String>,
     child: Mutex<Child>,
 }
 
@@ -128,17 +130,30 @@ impl LspHub {
             .map(normalize_language)
             .transpose()?;
         if operation == "workspaceSymbol" {
-            let file_language = if file_path.is_empty() {
+            let resolved_file = if file_path.is_empty() {
                 None
             } else {
-                let resolved = resolve_under_workspace(&self.root, file_path)?;
-                language_for_path(&resolved)
+                Some(resolve_under_workspace(&self.root, file_path)?)
             };
+            let file_language = resolved_file
+                .as_ref()
+                .and_then(|path| language_for_path(path));
             let language = select_workspace_language(requested_language, file_language, query)?;
             let server = self.ensure_server(language).await?;
-            let result = server
-                .request("workspace/symbol", json!({ "query": query }))
-                .await?;
+            // tsserver 在未打开源文件时会把目录当成 navto 的 file，报 No Project。
+            let open_path = resolved_file
+                .filter(|path| language_for_path(path) == Some(language))
+                .or_else(|| {
+                    if workspace_symbol_needs_open_document(language) {
+                        find_sample_source(&self.root, language)
+                    } else {
+                        None
+                    }
+                });
+            if let Some(path) = open_path {
+                server.did_open(&path).await?;
+            }
+            let result = request_workspace_symbol(&server, language, query).await?;
             return Ok(format_lsp_json("workspaceSymbol", &result));
         }
         if file_path.is_empty() {
@@ -440,15 +455,18 @@ fn install_commands(language: &str) -> Vec<InstallCommand> {
             args: &["component", "add", "rust-analyzer"],
             display: "rustup component add rust-analyzer",
         }],
+        // typescript-language-server 只认 typescript 包里的 lib/tsserver.js；
+        // TypeScript 7（npm latest）是原生移植版，不再提供 tsserver，必须锁 5.x。
+        // 将来 tsls 适配 TS 7 后再放开版本。
         "typescript" | "javascript" => vec![InstallCommand {
             program: "npm",
             args: &[
                 "install",
                 "--global",
-                "typescript",
+                "typescript@5",
                 "typescript-language-server",
             ],
-            display: "npm install --global typescript typescript-language-server",
+            display: "npm install --global typescript@5 typescript-language-server",
         }],
         "python" => vec![
             InstallCommand {
@@ -687,6 +705,102 @@ fn test_workspace_root(language: &str) -> Result<PathBuf, String> {
     Ok(root)
 }
 
+/// tsserver 必须先有打开的源文件，workspace/symbol 才会进项目而不是 No Project。
+fn workspace_symbol_needs_open_document(language: &str) -> bool {
+    matches!(language, "typescript" | "javascript")
+}
+
+const TEST_SOURCE: &str = "export function ping() { return 1; }\n";
+
+/// 给设置页 LSP 测试写入一份最小源文件；其他语言不需要。
+fn prepare_test_source(language: &str, root: &Path) -> Result<Option<PathBuf>, String> {
+    let name = match language {
+        "javascript" => "index.js",
+        "typescript" => "index.ts",
+        _ => return Ok(None),
+    };
+    let path = root.join(name);
+    std::fs::write(&path, TEST_SOURCE).map_err(|error| format!("写入测试源文件失败：{error}"))?;
+    Ok(Some(path))
+}
+
+const SAMPLE_SOURCE_MAX_DEPTH: usize = 8;
+const SAMPLE_SOURCE_MAX_VISITS: usize = 500;
+
+fn skip_sample_source_dir(name: &str) -> bool {
+    matches!(
+        name,
+        "node_modules" | "target" | "dist" | "build" | "out" | "vendor" | "__pycache__"
+    ) || name.starts_with('.')
+}
+
+/// 在工作区里找一份对应语言的源文件，供 workspace/symbol 前 didOpen。
+fn find_sample_source(root: &Path, language: &str) -> Option<PathBuf> {
+    let mut visits = 0;
+    find_sample_source_in(root, language, 0, &mut visits)
+}
+
+fn find_sample_source_in(
+    current: &Path,
+    language: &str,
+    depth: usize,
+    visits: &mut usize,
+) -> Option<PathBuf> {
+    if depth > SAMPLE_SOURCE_MAX_DEPTH || *visits >= SAMPLE_SOURCE_MAX_VISITS {
+        return None;
+    }
+    let entries = std::fs::read_dir(current).ok()?;
+    let mut paths: Vec<PathBuf> = entries.flatten().map(|entry| entry.path()).collect();
+    paths.sort();
+    for path in paths {
+        if *visits >= SAMPLE_SOURCE_MAX_VISITS {
+            return None;
+        }
+        *visits += 1;
+        let metadata = match std::fs::symlink_metadata(&path) {
+            Ok(meta) => meta,
+            Err(_) => continue,
+        };
+        if metadata.file_type().is_symlink() {
+            continue;
+        }
+        if metadata.is_dir() {
+            let name = path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("");
+            if skip_sample_source_dir(name) {
+                continue;
+            }
+            if let Some(found) = find_sample_source_in(&path, language, depth + 1, visits) {
+                return Some(found);
+            }
+            continue;
+        }
+        if language_for_path(&path) == Some(language) {
+            return Some(path);
+        }
+    }
+    None
+}
+
+/// 对 TS/JS 在 tsserver 尚未建好项目时重试一次 workspace/symbol。
+async fn request_workspace_symbol(
+    server: &LanguageServer,
+    language: &str,
+    query: &str,
+) -> Result<Value, String> {
+    let params = json!({ "query": query });
+    let result = server.request("workspace/symbol", params.clone()).await;
+    if let Err(error) = &result {
+        if workspace_symbol_needs_open_document(language) && error.contains("No Project") {
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            return server.request("workspace/symbol", params).await;
+        }
+    }
+    result
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct LspTestResult {
     pub language: String,
@@ -725,11 +839,15 @@ pub async fn test_lsp_server(language: String) -> Result<LspTestResult, String> 
     let (server_name, server_version) = parse_server_info(&init_result);
     let mut warning = None;
     if supports_workspace_symbol(&init_result) {
-        if let Err(error) = server
-            .request("workspace/symbol", json!({ "query": "" }))
-            .await
-        {
-            warning = Some(error);
+        if let Some(source) = prepare_test_source(language, &root)? {
+            if let Err(error) = server.did_open(&source).await {
+                warning = Some(error);
+            }
+        }
+        if warning.is_none() {
+            if let Err(error) = request_workspace_symbol(&server, language, "").await {
+                warning = Some(error);
+            }
         }
     }
     server.close().await;
@@ -814,6 +932,95 @@ fn probe_command_stdout(program: &Path, args: &[&str]) -> Option<String> {
         None
     } else {
         Some(text)
+    }
+}
+
+/// 若该 typescript 包目录含有效 tsserver.js 则返回其路径。
+/// TypeScript 7 只有 tsc.js，这里会返回 None。
+fn tsserver_js_at_typescript_root(typescript_pkg: &Path) -> Option<PathBuf> {
+    let candidate = typescript_pkg.join("lib").join("tsserver.js");
+    candidate.is_file().then_some(candidate)
+}
+
+/// npm 全局 root（`npm root -g`）。只探测一次，避免每次启动 server 都 spawn。
+fn npm_global_root() -> Option<PathBuf> {
+    static CACHE: OnceLock<Option<PathBuf>> = OnceLock::new();
+    CACHE
+        .get_or_init(|| {
+            let npm = resolve_program("npm").ok()?;
+            let text = probe_command_stdout(&npm, &["root", "-g"])?;
+            let dir = PathBuf::from(text);
+            dir.is_dir().then_some(dir)
+        })
+        .clone()
+}
+
+/// 从 typescript-language-server 可执行文件向上反查 npm 布局里的 typescript 包。
+fn tsserver_near_server_binary() -> Option<PathBuf> {
+    let program = resolve_program("typescript-language-server").ok()?;
+    let program = std::fs::canonicalize(&program).unwrap_or(program);
+    let mut current = program.parent()?.to_path_buf();
+    for _ in 0..12 {
+        // `<...>/node_modules/` 布局：同级就有 typescript。
+        if current.file_name().and_then(|name| name.to_str()) == Some("node_modules") {
+            if let Some(found) = tsserver_js_at_typescript_root(&current.join("typescript")) {
+                return Some(found);
+            }
+        }
+        // npm prefix 布局：`<prefix>/bin/tsls` 对应 `<prefix>/lib/node_modules/typescript`。
+        let prefix_layout = current.join("lib").join("node_modules").join("typescript");
+        if let Some(found) = tsserver_js_at_typescript_root(&prefix_layout) {
+            return Some(found);
+        }
+        match current.parent() {
+            Some(parent) => current = parent.to_path_buf(),
+            None => break,
+        }
+    }
+    None
+}
+
+/// 为 typescript-language-server 解析可用的 tsserver.js：工作区版本优先，其次全局兜底。
+fn resolve_tsserver_path(root: &Path) -> Option<PathBuf> {
+    // 1. 工作区自带的 typescript 优先。
+    let workspace_typescript = root.join("node_modules").join("typescript");
+    if let Some(found) = tsserver_js_at_typescript_root(&workspace_typescript) {
+        return Some(found);
+    }
+    // 2. 由 tsls 可执行文件反查 npm 安装布局。
+    if let Some(found) = tsserver_near_server_binary() {
+        return Some(found);
+    }
+    // 3. npm 全局 root。
+    if let Some(prefix) = npm_global_root() {
+        if let Some(found) = tsserver_js_at_typescript_root(&prefix.join("typescript")) {
+            return Some(found);
+        }
+    }
+    // 4. 补全 PATH 里的各 bin 目录，按 `<bin>/../lib/node_modules/typescript` 再兜一次。
+    for dir in std::env::split_paths(&augmented_path()) {
+        let Some(parent) = dir.parent() else {
+            continue;
+        };
+        let candidate = parent.join("lib").join("node_modules").join("typescript");
+        if let Some(found) = tsserver_js_at_typescript_root(&candidate) {
+            return Some(found);
+        }
+    }
+    None
+}
+
+/// TS/JS 传给 tsls 的 initializationOptions；其他语言不传。
+/// 用 fallbackPath 而不是 path：工作区自带的 typescript 仍然优先。
+fn initialization_options(language: &str, root: &Path) -> Option<Value> {
+    match language {
+        "typescript" | "javascript" => {
+            let path = resolve_tsserver_path(root)?;
+            Some(json!({
+                "tsserver": { "fallbackPath": path.to_string_lossy() }
+            }))
+        }
+        _ => None,
     }
 }
 
@@ -954,6 +1161,23 @@ fn command_args(
     args
 }
 
+/// 启动失败的对外文案：TS/JS 缺 tsserver 时给出可操作的中文提示。
+fn format_server_start_error(language: &str, commands: &str, errors: &[String]) -> String {
+    let detail = errors.join("；");
+    let missing_tsserver = matches!(language, "typescript" | "javascript")
+        && (detail.contains("Could not find a valid TypeScript installation")
+            || detail.contains("tsserver.path"));
+    if missing_tsserver {
+        format!(
+            "未找到可用的 tsserver。typescript-language-server 需要 TypeScript 5.x（TypeScript 7 不再提供 tsserver.js）。请执行：npm install --global typescript@5 typescript-language-server。详情：{detail}"
+        )
+    } else {
+        format!(
+            "未找到或无法启动 {language} language server。尝试命令：{commands}。请安装对应 language server 并确保命令在 PATH 中。详情：{detail}"
+        )
+    }
+}
+
 impl LanguageServer {
     async fn start(root: &Path, language: &str, spec: ServerSpec) -> Result<Arc<Self>, String> {
         let mut errors = Vec::new();
@@ -977,10 +1201,7 @@ impl LanguageServer {
             .map(|item| item.command)
             .collect::<Vec<_>>()
             .join("、");
-        Err(format!(
-            "未找到或无法启动 {language} language server。尝试命令：{commands}。请安装对应 language server 并确保命令在 PATH 中。详情：{}",
-            errors.join("；")
-        ))
+        Err(format_server_start_error(language, &commands, &errors))
     }
 
     async fn start_command(
@@ -997,7 +1218,7 @@ impl LanguageServer {
             .current_dir(root)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::null())
+            .stderr(Stdio::piped())
             .kill_on_drop(true);
         let mut child = cmd
             .spawn()
@@ -1010,6 +1231,7 @@ impl LanguageServer {
             .stdout
             .take()
             .ok_or_else(|| "language server stdout 不可用".to_string())?;
+        let stderr = child.stderr.take();
         let server = Arc::new(Self {
             language: language.to_string(),
             language_id: spec.language_id.to_string(),
@@ -1020,42 +1242,57 @@ impl LanguageServer {
             diagnostics: Mutex::new(HashMap::new()),
             opened: Mutex::new(HashMap::new()),
             init_result: Mutex::new(None),
+            stderr_tail: Mutex::new(String::new()),
             child: Mutex::new(child),
         });
         let reader_server = server.clone();
         tauri::async_runtime::spawn(async move {
             read_loop(stdout, reader_server).await;
         });
+        if let Some(stderr) = stderr {
+            let stderr_server = server.clone();
+            tauri::async_runtime::spawn(async move {
+                drain_stderr(stderr, stderr_server).await;
+            });
+        }
         let root_uri = path_uri(root);
         let root_path = root.to_string_lossy().to_string();
         let root_name = root
             .file_name()
             .and_then(|name| name.to_str())
             .unwrap_or("workspace");
-        let init = server
-            .request(
-                "initialize",
-                json!({
-                    "processId": std::process::id(),
-                    "rootPath": root_path,
-                    "rootUri": root_uri.clone(),
-                    "workspaceFolders": [{ "uri": root_uri, "name": root_name }],
-                    "capabilities": {
-                        "textDocument": {
-                            "hover": { "contentFormat": ["markdown", "plaintext"] },
-                            "publishDiagnostics": {}
-                        },
-                        "workspace": { "symbol": {} }
-                    }
-                }),
-            )
-            .await;
+        let mut params = json!({
+            "processId": std::process::id(),
+            "rootPath": root_path,
+            "rootUri": root_uri.clone(),
+            "workspaceFolders": [{ "uri": root_uri, "name": root_name }],
+            "capabilities": {
+                "textDocument": {
+                    "hover": { "contentFormat": ["markdown", "plaintext"] },
+                    "publishDiagnostics": {}
+                },
+                "workspace": { "symbol": {} }
+            }
+        });
+        // 仅 TS/JS 会带 initializationOptions，其余语言保持原样。
+        if let Some(options) = initialization_options(language, root) {
+            params["initializationOptions"] = options;
+        }
+        let init = server.request("initialize", params).await;
         let init = match init {
             Ok(value) => value,
             Err(error) => {
-                // 握手失败时立刻回收进程，避免留下无法回收的 language server。
+                // 握手失败时先取 stderr 线索，再回收进程，避免留下无法回收的 language server。
+                let stderr_tail = server.stderr_snapshot().await;
                 server.terminate().await;
-                return Err(format!("{} 初始化失败: {error}", candidate.command));
+                return Err(if stderr_tail.is_empty() {
+                    format!("{} 初始化失败: {error}", candidate.command)
+                } else {
+                    format!(
+                        "{} 初始化失败: {error}；stderr: {stderr_tail}",
+                        candidate.command
+                    )
+                });
             }
         };
         *server.init_result.lock().await = Some(init);
@@ -1156,6 +1393,11 @@ impl LanguageServer {
         self.init_result.lock().await.clone().unwrap_or(Value::Null)
     }
 
+    /// 已捕获的 stderr 末尾内容（trim 过）。
+    async fn stderr_snapshot(&self) -> String {
+        self.stderr_tail.lock().await.trim().to_string()
+    }
+
     /// 关闭 language server：先 shutdown / exit，超时后强杀，避免残留进程。
     async fn close(&self) {
         let _ = self
@@ -1175,6 +1417,38 @@ impl LanguageServer {
     async fn terminate(&self) {
         let mut child = self.child.lock().await;
         let _ = child.kill().await;
+    }
+}
+
+/// stderr 保留的末尾长度，足以容纳一次完整报错。
+const STDERR_TAIL_LIMIT: usize = 8 * 1024;
+
+/// 持续读走 stderr 并保留末尾内容：既避免管道写满阻塞子进程，也便于握手失败时给出线索。
+/// kill 之后读到 EOF 自然退出，无需等待。
+async fn drain_stderr(stderr: tokio::process::ChildStderr, server: Arc<LanguageServer>) {
+    let mut reader = BufReader::new(stderr);
+    let mut line = String::new();
+    loop {
+        line.clear();
+        match reader.read_line(&mut line).await {
+            Ok(0) => break,
+            Ok(_) => {
+                let mut tail = server.stderr_tail.lock().await;
+                push_stderr_tail(&mut tail, &line);
+            }
+            Err(_) => break,
+        }
+    }
+}
+
+fn push_stderr_tail(tail: &mut String, line: &str) {
+    tail.push_str(line);
+    if tail.len() > STDERR_TAIL_LIMIT {
+        let mut cut = tail.len() - STDERR_TAIL_LIMIT;
+        while cut < tail.len() && !tail.is_char_boundary(cut) {
+            cut += 1;
+        }
+        *tail = tail[cut..].to_string();
     }
 }
 
@@ -1510,6 +1784,48 @@ mod tests {
         let _ = std::fs::remove_dir_all(&rust);
     }
 
+    #[test]
+    fn prepare_test_source_writes_js_and_ts_only() {
+        let root = unique_temp_dir("noxcode-lsp-test-source");
+        let js = prepare_test_source("javascript", &root)
+            .expect("js")
+            .expect("js file");
+        assert_eq!(
+            js.file_name().and_then(|name| name.to_str()),
+            Some("index.js")
+        );
+        assert!(std::fs::read_to_string(&js)
+            .expect("read js")
+            .contains("ping"));
+        let ts = prepare_test_source("typescript", &root)
+            .expect("ts")
+            .expect("ts file");
+        assert_eq!(
+            ts.file_name().and_then(|name| name.to_str()),
+            Some("index.ts")
+        );
+        assert!(prepare_test_source("rust", &root).expect("rust").is_none());
+        assert!(prepare_test_source("python", &root)
+            .expect("python")
+            .is_none());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn find_sample_source_skips_node_modules() {
+        let root = unique_temp_dir("noxcode-lsp-sample-source");
+        let src = root.join("src");
+        std::fs::create_dir_all(&src).expect("src");
+        std::fs::write(src.join("app.ts"), "export const n = 1;\n").expect("app.ts");
+        let nested = root.join("node_modules").join("pkg");
+        std::fs::create_dir_all(&nested).expect("node_modules");
+        std::fs::write(nested.join("index.js"), "module.exports = 1;\n").expect("js");
+        let found = find_sample_source(&root, "typescript").expect("ts sample");
+        assert_eq!(found, src.join("app.ts"));
+        assert!(find_sample_source(&root, "javascript").is_none());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
     #[cfg(unix)]
     #[tokio::test]
     async fn handshake_with_fake_server_reports_server_info() {
@@ -1623,5 +1939,72 @@ mod tests {
         let patch = "*** Begin Patch\n*** Update File: src/a.rs\n@@\n-a\n+b\n*** End Patch\n";
         let args = serde_json::json!({ "patch": patch }).to_string();
         assert!(mutation_paths("ApplyPatch", &args).contains(&"src/a.rs".to_string()));
+    }
+
+    /// 测试用唯一临时目录。
+    fn unique_temp_dir(prefix: &str) -> PathBuf {
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("time")
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("{prefix}-{stamp}"));
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        dir
+    }
+
+    /// 造一份有效的 typescript 包布局（含 lib/tsserver.js），返回 tsserver.js 路径。
+    fn write_fake_typescript_pkg(typescript_pkg: &Path) -> PathBuf {
+        let tsserver = typescript_pkg.join("lib").join("tsserver.js");
+        std::fs::create_dir_all(tsserver.parent().expect("parent")).expect("mkdir typescript");
+        std::fs::write(&tsserver, b"// fake tsserver\n").expect("write tsserver");
+        tsserver
+    }
+
+    #[test]
+    fn workspace_typescript_wins_over_global_install() {
+        let root = unique_temp_dir("noxcode-lsp-ts-workspace");
+        let expected = write_fake_typescript_pkg(&root.join("node_modules").join("typescript"));
+        assert_eq!(resolve_tsserver_path(&root), Some(expected));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn typescript_seven_layout_without_tsserver_is_rejected() {
+        let root = unique_temp_dir("noxcode-lsp-ts-seven");
+        let pkg = root.join("node_modules").join("typescript");
+        let lib = pkg.join("lib");
+        std::fs::create_dir_all(&lib).expect("mkdir ts7");
+        std::fs::write(lib.join("tsc.js"), b"// tsc\n").expect("write tsc");
+        assert_eq!(tsserver_js_at_typescript_root(&pkg), None);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn initialization_options_point_at_workspace_tsserver() {
+        let root = unique_temp_dir("noxcode-lsp-ts-init-options");
+        let tsserver = write_fake_typescript_pkg(&root.join("node_modules").join("typescript"));
+        for language in ["typescript", "javascript"] {
+            let options = initialization_options(language, &root).expect("fallbackPath");
+            let path = options
+                .pointer("/tsserver/fallbackPath")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            assert_eq!(Path::new(path), tsserver.as_path(), "{language}");
+            assert!(
+                options.pointer("/tsserver/path").is_none(),
+                "{language} 必须用 fallbackPath，不能用 path"
+            );
+        }
+        assert!(initialization_options("rust", &root).is_none());
+        assert!(initialization_options("go", &root).is_none());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn typescript_install_pins_version_five() {
+        for language in ["typescript", "javascript"] {
+            let text = install_command_text(language).expect("install command");
+            assert!(text.contains("typescript@5"), "{language}: {text}");
+        }
     }
 }
