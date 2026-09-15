@@ -1,4 +1,4 @@
-import { Bot, GitFork, Plug, Shield } from "lucide-react";
+import { AlertCircle, Bot, GitFork, Plug, Shield } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
@@ -9,6 +9,27 @@ import {
   permissionHint,
   stripAgentPrefix,
 } from "@/lib/sessionLines";
+
+export function ErrorStatusRow({ text }: { text: string }) {
+  const { t } = useTranslation("sessions");
+  return (
+    <div className="rounded-xl border border-rose-500/30 bg-rose-500/5 dark:bg-rose-500/[0.06]">
+      <div className="flex items-center gap-2 px-3 py-2 text-xs">
+        <span className="flex size-5 shrink-0 items-center justify-center rounded-md bg-rose-500/15 text-rose-600 dark:text-rose-400">
+          <AlertCircle className="size-3" />
+        </span>
+        <span className="font-medium tracking-tight text-rose-600 dark:text-rose-400">
+          {t("errorTitle")}
+        </span>
+      </div>
+      <div className="border-t border-rose-500/15 px-3 py-2.5">
+        <pre className="max-h-60 overflow-auto whitespace-pre-wrap font-mono text-code-sm leading-relaxed break-words text-foreground/90 select-text">
+          {text}
+        </pre>
+      </div>
+    </div>
+  );
+}
 
 export function PermissionStatusRow({ text }: { text: string }) {
   const hint = permissionHint(text);
