@@ -1,7 +1,6 @@
 import { useTranslation } from "react-i18next";
 
-import type { GroupedSessionItem, ParsedUsage } from "@/lib/sessionLines";
-import { parseUsageLine } from "@/lib/sessionLines";
+import type { ParsedUsage } from "@/lib/sessionLines";
 import { cn, formatTokenCount } from "@/lib/utils";
 
 export function UsageChips({ usage, className }: { usage: ParsedUsage; className?: string }) {
@@ -26,18 +25,12 @@ export function UsageChips({ usage, className }: { usage: ParsedUsage; className
       {items.map((entry) => (
         <span
           key={entry.label}
-          className="inline-flex items-center gap-1 rounded-md border border-border/40 bg-muted/20 px-1.5 py-0.5 font-mono text-[10.5px] text-muted-foreground/80"
+          className="inline-flex items-center gap-1 rounded-md border border-border/40 bg-muted/20 px-1.5 py-0.5 font-mono text-meta text-muted-foreground/80"
         >
-          <span className="text-[10px] font-sans text-muted-foreground/60">{entry.label}</span>
+          <span className="text-badge font-sans text-muted-foreground/60">{entry.label}</span>
           <span className="font-medium text-foreground/80 tabular-nums">{entry.count}</span>
         </span>
       ))}
     </div>
   );
-}
-
-export function UsageRow({ item, className }: { item: GroupedSessionItem; className?: string }) {
-  const parsed = parseUsageLine(item.text);
-  if (!parsed) return null;
-  return <UsageChips usage={parsed} className={className} />;
 }

@@ -221,7 +221,7 @@ export function SubagentRow({ segment, running, nowMs, sessionId }: SubagentRowP
               {t("subagentRunning")}
             </span>
           ) : isStopped ? (
-            <span className="text-[11px] text-muted-foreground">已停止</span>
+            <span className="text-meta text-muted-foreground">{t("subagentStopped")}</span>
           ) : isFailed ? (
             <span className="flex items-center gap-1 text-[11px] font-medium text-rose-600 dark:text-rose-400">
               <AlertCircle className="size-3" />

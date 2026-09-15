@@ -20,7 +20,7 @@ export function ToolCallLine({ item }: { item: GroupedSessionItem }) {
       >
         <span
           className={cn(
-            "inline-flex shrink-0 items-center rounded border px-1.5 py-0.5 text-[10px] font-medium leading-none",
+            "inline-flex shrink-0 items-center rounded border px-1.5 py-0.5 text-badge font-medium leading-none",
             parsed.badgeClass,
           )}
         >
@@ -28,7 +28,7 @@ export function ToolCallLine({ item }: { item: GroupedSessionItem }) {
         </span>
         <span
           className={cn(
-            "min-w-0 flex-1 truncate font-mono text-[11px]",
+            "min-w-0 flex-1 truncate font-mono text-code-sm",
             parsed.failed ? "text-red-600 dark:text-red-400" : "text-foreground/90",
           )}
           title={parsed.detail}
@@ -36,7 +36,7 @@ export function ToolCallLine({ item }: { item: GroupedSessionItem }) {
           {parsed.detail}
         </span>
         {parsed.failed ? (
-          <span className="shrink-0 text-[10px] font-medium text-red-600 dark:text-red-400">
+          <span className="shrink-0 text-badge font-medium text-red-600 dark:text-red-400">
             {t("toolFailed")}
           </span>
         ) : null}
@@ -48,12 +48,12 @@ export function ToolCallLine({ item }: { item: GroupedSessionItem }) {
         />
       </button>
       {open && item.result !== undefined ? (
-        <pre className="border-t border-border/30 bg-black/20 p-2 max-h-80 overflow-auto whitespace-pre-wrap font-mono text-[11px] text-foreground/80">
+        <pre className="border-t border-border/30 bg-black/20 p-2 max-h-80 overflow-auto whitespace-pre-wrap font-mono text-code-sm text-foreground/80">
           {item.result}
         </pre>
       ) : null}
       {open && item.result === undefined ? (
-        <p className="border-t border-border/30 p-2 text-[11px] text-muted-foreground">
+        <p className="border-t border-border/30 p-2 text-code-sm text-muted-foreground">
           {t("toolResult")}
         </p>
       ) : null}

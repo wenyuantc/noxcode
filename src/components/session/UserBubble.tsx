@@ -6,7 +6,7 @@ import { submitSessionPrompt } from "@/lib/sessionSubmission";
 import { resolveComposerPlanMode } from "@/lib/planMode";
 import { resolveSessionSelection } from "@/lib/sessionModel";
 import type { NativeToolImage } from "@/lib/types";
-import { cn } from "@/lib/utils";
+import { cn, formatClockTime, formatDate } from "@/lib/utils";
 import { SessionImageThumbs } from "./SessionImageThumbs";
 import { useChannelStore } from "@/stores/channelStore";
 import { useSessionStore } from "@/stores/sessionStore";
@@ -18,12 +18,14 @@ const COPIED_MS = 2000;
 export function UserBubble({
   text,
   images,
+  createdAt,
   sessionId,
   editable,
   working,
 }: {
   text: string;
   images?: NativeToolImage[];
+  createdAt?: string;
   sessionId: string;
   editable: boolean;
   working: boolean;
@@ -151,6 +153,14 @@ export function UserBubble({
             copied && "opacity-100",
           )}
         >
+          {createdAt && formatClockTime(createdAt) ? (
+            <span
+              className="px-1 font-mono text-meta text-muted-foreground/60 tabular-nums"
+              title={formatDate(createdAt)}
+            >
+              {formatClockTime(createdAt)}
+            </span>
+          ) : null}
           <div className="inline-flex items-center gap-0.5 rounded-lg border border-border/40 bg-background/80 p-0.5 shadow-2xs backdrop-blur-xs">
             <button
               type="button"
