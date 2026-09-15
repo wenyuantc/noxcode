@@ -259,7 +259,9 @@ impl ToolCtx {
     }
 
     fn allows_in_read_only(&self, contract: &ToolContract) -> bool {
-        contract.allowed_in_plan_mode || contract.name == "Bash"
+        contract.allowed_in_plan_mode
+            || contract.name == "Bash"
+            || (contract.name == "Agent" && self.is_plan_mode())
     }
 
     fn is_readonly_bash(&self, name: &str) -> bool {

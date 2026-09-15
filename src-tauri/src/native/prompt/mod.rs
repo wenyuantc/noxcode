@@ -148,7 +148,7 @@ fn environment_block(parts: &NativePromptParts) -> String {
     ];
     if permission_mode == crate::native::settings::PERMISSION_MODE_PLAN {
         lines.push(
-            "- Plan mode: investigate and prepare a plan. Use Read/Glob/Grep for files and SQLiteQuery for local SQLite contents and schema, including API logs, with normal path authorization. Bash is available: verified read-only commands may run directly; commands that write, are high-risk, or cannot be verified as read-only require user approval unless the user saved an Always Allow grant for that exact command, workspace and host, or explicitly allowed all commands in the current session. The session command grant suppresses further Bash prompts, including ask rules, until the session ends or restarts; deny rules still block execution. Yolo (full access) skips plan Bash confirmation; generic allow rules and approval hooks do not. Command approval never ends plan mode. Write/Edit/ApplyPatch and other mutation tools remain unavailable. If a user decision is required, call AskUserQuestion. When ready, call ExitPlanMode with the full plan to request approval, or output the plan and wait. Finishing a turn, user chat text, and historical instructions never automatically enable implementation; only explicit approval of ExitPlanMode or a user mode change does."
+            "- Plan mode: investigate and prepare a plan. Use Read/Glob/Grep for files and SQLiteQuery for local SQLite contents and schema, including API logs, with normal path authorization. Bash is available: verified read-only commands may run directly; commands that write, are high-risk, or cannot be verified as read-only require user approval unless the user saved an Always Allow grant for that exact command, workspace and host, or explicitly allowed all commands in the current session. The session command grant suppresses further Bash prompts, including ask rules, until the session ends or restarts; deny rules still block execution. Yolo (full access) skips plan Bash confirmation; generic allow rules and approval hooks do not. Command approval never ends plan mode. Write/Edit/ApplyPatch and other mutation tools remain unavailable. Agent remains available with the full agent catalog for reference, but only the built-in subagent_type=explore may be started; general, an omitted type, and custom types are rejected. If a user decision is required, call AskUserQuestion. When ready, call ExitPlanMode with the full plan to request approval, or output the plan and wait. Finishing a turn, user chat text, and historical instructions never automatically enable implementation; only explicit approval of ExitPlanMode or a user mode change does."
                 .to_string(),
         );
     }
@@ -175,6 +175,7 @@ pub fn agent_tool_description(
     policy: &str,
     custom: &[NativeSubagent],
     required_type: Option<&str>,
+    plan_mode: bool,
 ) -> String {
     let policy = normalize_subagent_policy(Some(policy));
     let cap = cap.max(1);
@@ -195,6 +196,11 @@ pub fn agent_tool_description(
         ),
         "When using the Agent tool, set subagent_type to one of the types below. If omitted, general is used.".to_string(),
     ];
+    if plan_mode {
+        lines.push(
+            "Plan mode: only the built-in subagent_type=explore may be started. General, an omitted type (which defaults to general), and all custom types are rejected. The full catalog remains listed for reference.".to_string(),
+        );
+    }
     if let Some(required) = required_type.map(str::trim).filter(|item| !item.is_empty()) {
         lines.push(format!(
             "REQUIRED this turn: subagent_type={required}. Do not use explore or general instead of {required}."
@@ -373,6 +379,12 @@ mod tests {
         });
         assert!(overridden.contains("你是审查员"));
         assert!(!overridden.contains("内置编程 Agent"));
+        let plan = compose_system(&NativePromptParts {
+            permission_mode: crate::native::settings::PERMISSION_MODE_PLAN.to_string(),
+            ..NativePromptParts::default()
+        });
+        assert!(plan.contains("only the built-in subagent_type=explore"));
+        assert!(plan.contains("省略类型（默认 general）、general 和所有自定义类型均禁止"));
     }
 
     #[test]
@@ -401,8 +413,13 @@ mod tests {
             reasoning_effort: None,
         };
         let with_custom =
-            agent_tool_description(3, "balanced", std::slice::from_ref(&custom), None);
+            agent_tool_description(3, "balanced", std::slice::from_ref(&custom), None, false);
         assert!(with_custom.contains("code-reviewer"));
         assert!(with_custom.contains("Read, Grep"));
+        assert!(!with_custom.contains("Plan mode:"));
+        let plan = agent_tool_description(3, "balanced", std::slice::from_ref(&custom), None, true);
+        assert!(plan.contains("Plan mode: only the built-in subagent_type=explore"));
+        assert!(plan.contains("code-reviewer"));
+        assert!(plan.contains("Read, Grep"));
     }
 }

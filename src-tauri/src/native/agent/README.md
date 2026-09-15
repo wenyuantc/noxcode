@@ -67,6 +67,7 @@
 `Agent` 工具调用经 `run_agent_batch`（`loop.rs:1940`）处理：
 
 - 类型：`general` / `explore` / `custom`（`subagent.rs` 的 `SubagentKind`）。`explore` 强制只读白名单；`custom` 按档案限工具、轮次、技能与权限模式。
+- 计划模式的顶层 runner 仍向模型提供 `Agent` 工具及完整类型目录，但 `run_agent_batch` 只接受显式的 `SubagentKind::Explore`；缺省 general、显式 general 与所有 custom 均拒绝。普通只读 runner 与子 Agent 仍不提供 `Agent`。
 - 派生（`spawn_child_with_quota`）：共享取消、权限放行、MCP 放行、代理环境与 artifact 存储；已读文件与待办独立（`fork_for_child`）；`depth + 1`，事件带 `[子 Agent N(kind) - 描述]` 前缀；子 Agent 不写父会话 transcript。
 - 嵌套拒绝：`depth > 0` 时子 Agent 再调 `Agent` 直接返回错误。
 - 后台任务（`run_in_background=true`）：立即返回 `task_id`，子 Agent 在独立任务里跑（`background.rs`）；父 Agent 用 `TaskOutput` 取结果、`TaskStop` 取消、`SendMessage` 追加指令，子 Agent 用 `RespondToCoordinator` 留言；完成 / 留言在父 Agent 下一次模型调用前以提醒注入（`prepare_model_call` 里的 `pending_notice`）。父会话取消时级联取消后台任务。

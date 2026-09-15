@@ -588,7 +588,7 @@ impl AgentRunner {
         }
         let read_only = self.ctx.is_read_only();
         let plan_mode = self.ctx.is_plan_mode();
-        if self.depth > 0 || read_only {
+        if self.depth > 0 || (read_only && !plan_mode) {
             tools.retain(|tool| tool.name != "Agent");
         }
         // 子 Agent 没有用户交互通道：不给提问与计划模式工具；后台任务管理只给主 Agent。
@@ -635,6 +635,7 @@ impl AgentRunner {
                     &self.subagent_policy,
                     &self.custom_subagents,
                     self.required_subagent_type.as_deref(),
+                    plan_mode,
                 );
             }
         }
@@ -647,7 +648,9 @@ impl AgentRunner {
         }
         if read_only {
             tools.retain(|tool| {
-                crate::native::tools::is_read_only_native_tool(&tool.name) || tool.name == "Bash"
+                crate::native::tools::is_read_only_native_tool(&tool.name)
+                    || tool.name == "Bash"
+                    || (plan_mode && tool.name == "Agent")
             });
         }
         tools
@@ -2042,6 +2045,17 @@ impl AgentRunner {
             call.arguments = prepared.arguments.clone();
             match parse_subagent_args_with(&call.arguments, &self.custom_subagents) {
                 Ok(spec) => {
+                    if self.ctx.is_plan_mode() && !matches!(&spec.kind, SubagentKind::Explore) {
+                        let output = finalize_tool(
+                            &self.ctx,
+                            prepared,
+                            Err("计划模式只能使用内置 explore 子智能体".to_string()),
+                        )
+                        .await
+                        .unwrap_or_else(ToolOutput::error);
+                        slot[pos] = Some((call, output));
+                        continue;
+                    }
                     self.subagent_seq = self.subagent_seq.saturating_add(1);
                     jobs.push((
                         pos,
@@ -2716,6 +2730,30 @@ mod tests {
             .allow_all_high_risk
             .store(true, std::sync::atomic::Ordering::SeqCst);
         (runner, root)
+    }
+
+    fn readonly_custom_subagent() -> NativeSubagent {
+        NativeSubagent {
+            id: "1".to_string(),
+            name: "reviewer".to_string(),
+            description: "review".to_string(),
+            model_mode: "inherit".to_string(),
+            channel_id: None,
+            model: None,
+            tool_mode: "custom".to_string(),
+            tools: vec!["Read".to_string(), "Grep".to_string()],
+            system_prompt: "你是审查员".to_string(),
+            inject_agents_md: false,
+            scope: "all".to_string(),
+            workspace_ids: Vec::new(),
+            permission_mode: None,
+            disallowed_tools: Vec::new(),
+            source: "json".to_string(),
+            path: None,
+            max_turns: None,
+            skills: Vec::new(),
+            reasoning_effort: None,
+        }
     }
 
     fn drain_events(rx: &mut mpsc::UnboundedReceiver<NativeEvent>) -> Vec<String> {
@@ -3734,27 +3772,7 @@ mod tests {
             .any(|name| name == "Write"));
         assert!(explore_child.tool_names().iter().any(|name| name == "Bash"));
         let mut custom_runner = AgentRunner::new(LocalWorkspace::new(root.clone()));
-        custom_runner.custom_subagents = vec![NativeSubagent {
-            id: "1".to_string(),
-            name: "reviewer".to_string(),
-            description: "review".to_string(),
-            model_mode: "inherit".to_string(),
-            channel_id: None,
-            model: None,
-            tool_mode: "custom".to_string(),
-            tools: vec!["Read".to_string(), "Grep".to_string()],
-            system_prompt: "你是审查员".to_string(),
-            inject_agents_md: false,
-            scope: "all".to_string(),
-            workspace_ids: Vec::new(),
-            permission_mode: None,
-            disallowed_tools: Vec::new(),
-            source: "json".to_string(),
-            path: None,
-            max_turns: None,
-            skills: Vec::new(),
-            reasoning_effort: None,
-        }];
+        custom_runner.custom_subagents = vec![readonly_custom_subagent()];
         custom_runner.workspace_context = "Working directory: /repo".to_string();
         custom_runner.project_agents = "secret agents".to_string();
         let custom = parse_subagent_args_with(
@@ -3797,11 +3815,29 @@ mod tests {
         extra.set_read_only(false);
         assert!(extra.tool_names().iter().any(|name| name == "Write"));
         let mut plan = AgentRunner::new(LocalWorkspace::new(root.clone()));
+        plan.custom_subagents = vec![readonly_custom_subagent()];
         plan.set_read_only(true);
         plan.set_plan_mode(true);
-        let plan_names = plan.tool_names();
+        let plan_tools = plan.combined_tools();
+        let plan_agent = plan_tools
+            .iter()
+            .find(|tool| tool.name == "Agent")
+            .expect("plan Agent tool");
+        assert!(plan_agent.description.contains("- general:"));
+        assert!(plan_agent.description.contains("- explore:"));
+        assert!(plan_agent
+            .description
+            .contains("- reviewer: review (Tools: Read, Grep)"));
+        assert!(plan_agent
+            .description
+            .contains("Plan mode: only the built-in subagent_type=explore"));
+        let plan_names = plan_tools
+            .iter()
+            .map(|tool| tool.name.clone())
+            .collect::<Vec<_>>();
         assert!(plan_names.iter().any(|name| name == "SQLiteQuery"));
         assert!(plan_names.iter().any(|name| name == "Bash"));
+        assert!(plan_names.iter().any(|name| name == "Agent"));
         assert!(plan_names.iter().any(|name| name == "AskUserQuestion"));
         assert!(plan_names.iter().any(|name| name == "ExitPlanMode"));
         assert!(!plan_names.iter().any(|name| name == "EnterPlanMode"));
@@ -4241,9 +4277,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn enter_plan_mode_blocks_agent_in_same_tool_batch() {
+    async fn enter_plan_mode_blocks_non_explore_agent_in_same_tool_batch() {
         let (mut runner, root) = temp_runner();
-        runner.subagent_stub = Some(Arc::new(|_| panic!("read-only Agent must not start")));
+        runner.subagent_stub = Some(Arc::new(|_| panic!("general Agent must not start")));
         runner
             .run_scripted(
                 "go",
@@ -4260,7 +4296,128 @@ mod tests {
         assert!(runner.is_plan_mode());
         assert_eq!(runner.diagnostics_snapshot().subagents_started, 0);
         assert!(runner.messages.iter().any(|message| {
-            message.role == Role::Tool && message.content.contains("只读规划模式禁止")
+            message.role == Role::Tool
+                && message
+                    .content
+                    .contains("计划模式只能使用内置 explore 子智能体")
+        }));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn enter_plan_mode_allows_explore_in_same_tool_batch() {
+        let (mut runner, root) = temp_runner();
+        runner.subagent_stub = Some(Arc::new(|spec| {
+            assert!(matches!(&spec.kind, SubagentKind::Explore));
+            "explored".to_string()
+        }));
+        runner
+            .run_scripted(
+                "go",
+                vec![
+                    assistant_tool_calls(&[
+                        ("plan", "EnterPlanMode", "{}"),
+                        (
+                            "agent",
+                            "Agent",
+                            r#"{"prompt":"inspect files","subagent_type":"explore"}"#,
+                        ),
+                    ]),
+                    Message::assistant_text("done"),
+                ],
+            )
+            .await
+            .unwrap();
+        assert!(runner.is_plan_mode());
+        assert_eq!(runner.diagnostics_snapshot().subagents_started, 1);
+        assert!(runner.messages.iter().any(|message| {
+            message.role == Role::Tool
+                && message.tool_call_id == "agent"
+                && message.content.contains("explored")
+        }));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn plan_mode_starts_only_builtin_explore() {
+        let (mut runner, root) = temp_runner();
+        runner.custom_subagents = vec![readonly_custom_subagent()];
+        runner.set_read_only(true);
+        runner.set_plan_mode(true);
+        runner.subagent_stub = Some(Arc::new(|spec| {
+            assert!(matches!(&spec.kind, SubagentKind::Explore));
+            "explored".to_string()
+        }));
+        runner
+            .run_scripted(
+                "go",
+                vec![
+                    assistant_tool_calls(&[
+                        (
+                            "explore",
+                            "Agent",
+                            r#"{"prompt":"inspect","subagent_type":"explore"}"#,
+                        ),
+                        ("default", "Agent", r#"{"prompt":"default"}"#),
+                        (
+                            "general",
+                            "Agent",
+                            r#"{"prompt":"general","subagent_type":"general"}"#,
+                        ),
+                        (
+                            "custom",
+                            "Agent",
+                            r#"{"prompt":"review","subagent_type":"reviewer"}"#,
+                        ),
+                    ]),
+                    Message::assistant_text("done"),
+                ],
+            )
+            .await
+            .unwrap();
+        assert_eq!(runner.diagnostics_snapshot().subagents_started, 1);
+        assert!(runner.messages.iter().any(|message| {
+            message.role == Role::Tool
+                && message.tool_call_id == "explore"
+                && message.content.contains("explored")
+        }));
+        for call_id in ["default", "general", "custom"] {
+            assert!(runner.messages.iter().any(|message| {
+                message.role == Role::Tool
+                    && message.tool_call_id == call_id
+                    && message
+                        .content
+                        .contains("计划模式只能使用内置 explore 子智能体")
+            }));
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn read_only_without_plan_still_rejects_agent_tool() {
+        let (mut runner, root) = temp_runner();
+        runner.set_read_only(true);
+        runner.subagent_stub = Some(Arc::new(|_| panic!("read-only Agent must not start")));
+        runner
+            .run_scripted(
+                "go",
+                vec![
+                    assistant_tool_call(
+                        "agent",
+                        "Agent",
+                        r#"{"prompt":"inspect","subagent_type":"explore"}"#,
+                    ),
+                    Message::assistant_text("done"),
+                ],
+            )
+            .await
+            .unwrap();
+        assert!(!runner.is_plan_mode());
+        assert_eq!(runner.diagnostics_snapshot().subagents_started, 0);
+        assert!(runner.messages.iter().any(|message| {
+            message.role == Role::Tool
+                && message.tool_call_id == "agent"
+                && message.content.contains("只读规划模式禁止调用工具 Agent")
         }));
         fs::remove_dir_all(root).unwrap();
     }
