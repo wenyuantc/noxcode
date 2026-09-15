@@ -21,6 +21,16 @@ export function formatDate(dateStr: string): string {
   return parsed ? parsed.toLocaleString(getDateLocale(getLocalePreference())) : dateStr;
 }
 
+export function formatClockTime(dateStr: string): string {
+  const parsed = parseDateValue(dateStr);
+  if (!parsed) return "";
+  return new Intl.DateTimeFormat(getDateLocale(getLocalePreference()), {
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+  }).format(parsed);
+}
+
 export function formatRelativeTime(dateStr: string, locale = "zh-CN"): string {
   const parsed = parseDateValue(dateStr);
   if (!parsed) return dateStr;
