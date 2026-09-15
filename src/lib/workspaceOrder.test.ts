@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   applyWorkspaceOrder,
   moveWorkspaceTo,
+  orderedWorkspaceSessions,
   workspaceDropIndex,
   workspaceIndicatorOffset,
   workspaceMoveTarget,
@@ -40,6 +41,16 @@ describe("applyWorkspaceOrder", () => {
   it("appends unknown items after the known ones, keeping their incoming order", () => {
     const items = [item("new-1"), item("a"), item("new-2"), item("b")];
     expect(ids(applyWorkspaceOrder(items, ["b", "a"]))).toEqual(["b", "a", "new-1", "new-2"]);
+  });
+
+  it("prepends unknown items before the known ones when requested", () => {
+    const items = [item("new-1"), item("a"), item("new-2"), item("b")];
+    expect(ids(applyWorkspaceOrder(items, ["b", "a"], "prepend"))).toEqual([
+      "new-1",
+      "new-2",
+      "b",
+      "a",
+    ]);
   });
 });
 
@@ -176,5 +187,59 @@ describe("workspaceIndicatorOffset", () => {
     expect(
       workspaceIndicatorOffset({ rows: [], index: 0, containerTop: 0, scrollTop: 0 }),
     ).toBeNull();
+  });
+});
+
+describe("orderedWorkspaceSessions", () => {
+  function session(
+    id: string,
+    extras: {
+      workspace_id?: string | null;
+      pinned?: number;
+      archived?: number;
+      started_at?: string;
+    } = {},
+  ) {
+    return {
+      id,
+      workspace_id: extras.workspace_id ?? "ws-a",
+      pinned: extras.pinned ?? 0,
+      archived: extras.archived ?? 0,
+      started_at: extras.started_at ?? "2026-01-01T00:00:00Z",
+    };
+  }
+
+  it("sorts by started_at descending when no order is persisted", () => {
+    const sessions = [
+      session("old", { started_at: "2026-01-01T00:00:00Z" }),
+      session("new", { started_at: "2026-01-03T00:00:00Z" }),
+      session("mid", { started_at: "2026-01-02T00:00:00Z" }),
+    ];
+    expect(ids(orderedWorkspaceSessions(sessions, "ws-a", []))).toEqual(["new", "mid", "old"]);
+  });
+
+  it("applies a custom order and prepends unknown ids in time order", () => {
+    const sessions = [
+      session("old", { started_at: "2026-01-01T00:00:00Z" }),
+      session("kept", { started_at: "2026-01-02T00:00:00Z" }),
+      session("fresh", { started_at: "2026-01-04T00:00:00Z" }),
+      session("newer", { started_at: "2026-01-03T00:00:00Z" }),
+    ];
+    expect(ids(orderedWorkspaceSessions(sessions, "ws-a", ["old", "kept"]))).toEqual([
+      "fresh",
+      "newer",
+      "old",
+      "kept",
+    ]);
+  });
+
+  it("omits pinned, archived, and other-workspace sessions", () => {
+    const sessions = [
+      session("keep", { started_at: "2026-01-01T00:00:00Z" }),
+      session("pin", { pinned: 1 }),
+      session("arch", { archived: 1 }),
+      session("other", { workspace_id: "ws-b" }),
+    ];
+    expect(ids(orderedWorkspaceSessions(sessions, "ws-a", ["keep", "pin"]))).toEqual(["keep"]);
   });
 });

@@ -1,6 +1,8 @@
 import {
   Archive,
   ArchiveRestore,
+  ArrowDown,
+  ArrowUp,
   Check,
   Copy,
   FolderOpen,
@@ -34,6 +36,7 @@ import { Input } from "@/components/ui/input";
 import { openAgentSessionDirectory } from "@/lib/backend";
 import { isSessionBusy, resolveSessionDirectory } from "@/lib/sessionActions";
 import { isMac } from "@/lib/shortcuts";
+import { orderedWorkspaceSessions, workspaceMoveTarget } from "@/lib/workspaceOrder";
 import type { AgentSession } from "@/lib/types";
 import { cn } from "@/lib/utils";
 import { useSessionStore } from "@/stores/sessionStore";
@@ -49,6 +52,8 @@ export function SessionMenu({
   const { t } = useTranslation(["layout", "common"]);
   const triggerId = useId();
   const workspaces = useWorkspaceStore((state) => state.workspaces);
+  const sessions = useWorkspaceStore((state) => state.sessions);
+  const sessionOrder = useWorkspaceStore((state) => state.sessionOrder);
   const pending = useWorkspaceStore((state) => Boolean(state.sessionMutations[session.id]));
   const working = useSessionStore((state) => isSessionBusy(session.id, state));
   const { path, remote } = resolveSessionDirectory(session, workspaces);
@@ -83,21 +88,31 @@ export function SessionMenu({
     setOpen(true);
   };
 
+  const workspaceId = session.workspace_id;
+  const canReorder = Boolean(workspaceId) && !pinned && !archived;
+  const reorderItems = workspaceId
+    ? orderedWorkspaceSessions(sessions, workspaceId, sessionOrder[workspaceId] ?? [])
+    : [];
+  const moveUpTarget = canReorder ? workspaceMoveTarget(reorderItems, session.id, "up") : null;
+  const moveDownTarget = canReorder ? workspaceMoveTarget(reorderItems, session.id, "down") : null;
+
   const button = (
-    <DropdownMenuTrigger
-      id={triggerId}
-      render={<Button size="icon-sm" variant="ghost" />}
-      className={cn(
-        "size-7 shrink-0 text-muted-foreground hover:text-foreground",
-        children &&
-          "size-5 opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 data-popup-open:opacity-100",
-      )}
-      title={t("sessionMenu.more")}
-      aria-label={t("sessionMenu.more")}
-      onClick={(event) => event.stopPropagation()}
-    >
-      <MoreHorizontal className="size-3.5" />
-    </DropdownMenuTrigger>
+    <span data-no-drag className="contents">
+      <DropdownMenuTrigger
+        id={triggerId}
+        render={<Button size="icon-sm" variant="ghost" />}
+        className={cn(
+          "size-7 shrink-0 text-muted-foreground hover:text-foreground",
+          children &&
+            "size-5 opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 data-popup-open:opacity-100",
+        )}
+        title={t("sessionMenu.more")}
+        aria-label={t("sessionMenu.more")}
+        onClick={(event) => event.stopPropagation()}
+      >
+        <MoreHorizontal className="size-3.5" />
+      </DropdownMenuTrigger>
+    </span>
   );
 
   const disabledReason = archived ? t("sessionMenu.restoreFirst") : t("sessionMenu.busy");
@@ -181,6 +196,30 @@ export function SessionMenu({
               {t(archived ? "sessionMenu.restore" : "sessionMenu.archive")}
             </DropdownMenuItem>
           </div>
+          {canReorder ? (
+            <>
+              <DropdownMenuItem
+                disabled={moveUpTarget === null}
+                onClick={() => {
+                  if (!workspaceId || moveUpTarget === null) return;
+                  useWorkspaceStore.getState().moveSession(workspaceId, session.id, moveUpTarget);
+                }}
+              >
+                <ArrowUp />
+                {t("moveWorkspaceUp")}
+              </DropdownMenuItem>
+              <DropdownMenuItem
+                disabled={moveDownTarget === null}
+                onClick={() => {
+                  if (!workspaceId || moveDownTarget === null) return;
+                  useWorkspaceStore.getState().moveSession(workspaceId, session.id, moveDownTarget);
+                }}
+              >
+                <ArrowDown />
+                {t("moveWorkspaceDown")}
+              </DropdownMenuItem>
+            </>
+          ) : null}
           <DropdownMenuSeparator />
           <div
             title={

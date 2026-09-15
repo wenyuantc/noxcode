@@ -32,9 +32,13 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { Input } from "@/components/ui/input";
 import { SessionMenu } from "@/components/session/SessionMenu";
-import { useWorkspaceDrag } from "@/hooks/useWorkspaceDrag";
+import {
+  usePointerReorder,
+  useWorkspaceDrag,
+  type PointerRowProps,
+} from "@/hooks/useWorkspaceDrag";
 import { displaySessionTitle } from "@/lib/sessionLines";
-import { workspaceMoveTarget } from "@/lib/workspaceOrder";
+import { orderedWorkspaceSessions, workspaceMoveTarget } from "@/lib/workspaceOrder";
 import { formatRelativeTime } from "@/lib/utils";
 import { getCurrentAppLocale, getDateLocale } from "@/lib/i18n/locale";
 import { useSessionStore } from "@/stores/sessionStore";
@@ -48,11 +52,13 @@ function SessionRow({
   selected,
   locale,
   indent,
+  drag,
 }: {
   session: AgentSession;
   selected: boolean;
   locale: string;
   indent?: boolean;
+  drag?: { dragging: boolean; props: PointerRowProps };
 }) {
   const { t } = useTranslation(["layout", "common"]);
   const loadHistory = useSessionStore((state) => state.loadHistory);
@@ -67,9 +73,15 @@ function SessionRow({
           data-session-row={session.id}
           tabIndex={0}
           title={session.title ?? undefined}
+          {...drag?.props}
           className={cn(
-            "group relative flex cursor-pointer items-center justify-between gap-2 rounded-lg px-2.5 py-1.5 select-none transition-all duration-150",
+            "group relative flex items-center justify-between gap-2 rounded-lg px-2.5 py-1.5 select-none transition-all duration-150",
             indent && "ml-2.5",
+            drag
+              ? drag.dragging
+                ? "cursor-grabbing opacity-60"
+                : "cursor-grab"
+              : "cursor-pointer",
             selected
               ? "bg-sidebar-accent text-sidebar-accent-foreground font-medium shadow-2xs before:absolute before:top-1.5 before:bottom-1.5 before:left-0 before:w-0.5 before:rounded-r before:bg-primary"
               : "text-sidebar-foreground/80 hover:bg-sidebar-accent/60 hover:text-sidebar-foreground",
@@ -134,6 +146,7 @@ export function SidebarTree() {
   const rename = useWorkspaceStore((state) => state.rename);
   const remove = useWorkspaceStore((state) => state.remove);
   const moveWorkspace = useWorkspaceStore((state) => state.moveWorkspace);
+  const sessionOrder = useWorkspaceStore((state) => state.sessionOrder);
   const activeWorkspaceId = useWorkspaceStore((state) => state.activeWorkspaceId);
   const [renameTarget, setRenameTarget] = useState<Workspace | null>(null);
   const [renameName, setRenameName] = useState("");
@@ -144,6 +157,21 @@ export function SidebarTree() {
     containerRef: listRef,
     onMove: moveWorkspace,
   });
+  const {
+    draggingId: sessionDraggingId,
+    indicatorY: sessionIndicatorY,
+    rowProps: sessionRowProps,
+  } = usePointerReorder({
+    containerRef: listRef,
+    onMove: (id, insertionIndex) => {
+      const session = useWorkspaceStore.getState().sessions.find((item) => item.id === id);
+      if (!session?.workspace_id) return;
+      useWorkspaceStore.getState().moveSession(session.workspace_id, id, insertionIndex);
+    },
+    rowAttr: "session-row",
+    scopeAttr: "workspace-block",
+  });
+  const dropIndicatorY = indicatorY ?? sessionIndicatorY;
   const locale = getDateLocale(getCurrentAppLocale());
   const pinnedSessions = sessions
     .filter((session) => session.pinned !== 0 && !session.archived)
@@ -218,12 +246,11 @@ export function SidebarTree() {
           </div>
         ) : null}
         {workspaces.map((workspace, workspaceIndex) => {
-          const items = sessions
-            .filter(
-              (session) =>
-                session.workspace_id === workspace.id && session.pinned === 0 && !session.archived,
-            )
-            .sort((a, b) => b.started_at.localeCompare(a.started_at));
+          const items = orderedWorkspaceSessions(
+            sessions,
+            workspace.id,
+            sessionOrder[workspace.id] ?? [],
+          );
           const limit = shownCount[workspace.id] ?? 5;
           const visible = items.slice(0, limit);
           const open = expanded[workspace.id] !== false;
@@ -231,7 +258,7 @@ export function SidebarTree() {
           const canMoveDown = workspaceIndex < workspaces.length - 1;
           const dragging = draggingId === workspace.id;
           return (
-            <div key={workspace.id} data-workspace-block className="mb-2">
+            <div key={workspace.id} data-workspace-block={workspace.id} className="mb-2">
               <div
                 {...rowProps(workspace.id)}
                 className={cn(
@@ -330,6 +357,10 @@ export function SidebarTree() {
                       selected={selectedSessionId === session.id}
                       locale={locale}
                       indent
+                      drag={{
+                        dragging: sessionDraggingId === session.id,
+                        props: sessionRowProps(session.id),
+                      }}
                     />
                   ))}
                   {items.length > limit ? (
@@ -347,11 +378,11 @@ export function SidebarTree() {
             </div>
           );
         })}
-        {indicatorY !== null ? (
+        {dropIndicatorY !== null ? (
           <div
             aria-hidden
             className="pointer-events-none absolute inset-x-2 h-0.5 rounded-full bg-primary"
-            style={{ top: indicatorY }}
+            style={{ top: dropIndicatorY }}
           />
         ) : null}
         <div className="mt-3 border-t border-sidebar-border/60 pt-2">

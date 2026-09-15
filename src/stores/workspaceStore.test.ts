@@ -21,11 +21,13 @@ import {
   setAgentSessionArchived,
 } from "@/lib/backend";
 import type { AgentSession, Workspace } from "@/lib/types";
+import { orderedWorkspaceSessions } from "@/lib/workspaceOrder";
 import { useSessionStore } from "./sessionStore";
 import { useWorkspaceStore } from "./workspaceStore";
 
 const EXPANDED_KEY = "noxcode:workspace-expanded";
 const ORDER_KEY = "noxcode:workspace-order";
+const SESSION_ORDER_KEY = "noxcode:session-order";
 let storageData: Map<string, string>;
 
 function workspace(id: string): Workspace {
@@ -358,5 +360,142 @@ describe("workspace order", () => {
       "ws-a",
       "ws-b",
     ]);
+  });
+});
+
+function openSession(id: string, workspaceId: string, startedAt: string): AgentSession {
+  return {
+    ...session(id),
+    workspace_id: workspaceId,
+    started_at: startedAt,
+    pinned: 0,
+    archived: 0,
+  };
+}
+
+describe("session order", () => {
+  it("drops a session at the given slot and persists the new order", () => {
+    useWorkspaceStore.setState({
+      sessions: [
+        openSession("s-old", "ws-a", "2026-01-01T00:00:00Z"),
+        openSession("s-new", "ws-a", "2026-01-03T00:00:00Z"),
+        openSession("s-mid", "ws-a", "2026-01-02T00:00:00Z"),
+      ],
+      sessionOrder: {},
+    });
+    useWorkspaceStore.getState().moveSession("ws-a", "s-old", 0);
+    expect(useWorkspaceStore.getState().sessionOrder["ws-a"]).toEqual(["s-old", "s-new", "s-mid"]);
+    expect(JSON.parse(storageData.get(SESSION_ORDER_KEY) ?? "{}")).toEqual({
+      "ws-a": ["s-old", "s-new", "s-mid"],
+    });
+  });
+
+  it("ignores a no-op drop and keeps storage untouched", () => {
+    useWorkspaceStore.setState({
+      sessions: [
+        openSession("s-a", "ws-a", "2026-01-03T00:00:00Z"),
+        openSession("s-b", "ws-a", "2026-01-02T00:00:00Z"),
+      ],
+      sessionOrder: {},
+    });
+    useWorkspaceStore.getState().moveSession("ws-a", "s-a", 0);
+    expect(useWorkspaceStore.getState().sessionOrder).toEqual({});
+    expect(storageData.get(SESSION_ORDER_KEY)).toBeUndefined();
+  });
+
+  it("keeps time order for a workspace that was never dragged", async () => {
+    vi.mocked(listWorkspaces).mockResolvedValue([workspace("ws-a")]);
+    vi.mocked(listAgentSessions).mockResolvedValue([
+      openSession("s-old", "ws-a", "2026-01-01T00:00:00Z"),
+      openSession("s-new", "ws-a", "2026-01-03T00:00:00Z"),
+    ]);
+    await useWorkspaceStore.getState().load();
+    expect(useWorkspaceStore.getState().sessionOrder["ws-a"]).toBeUndefined();
+    expect(storageData.get(SESSION_ORDER_KEY)).toBeUndefined();
+    expect(
+      orderedWorkspaceSessions(
+        useWorkspaceStore.getState().sessions,
+        "ws-a",
+        useWorkspaceStore.getState().sessionOrder["ws-a"] ?? [],
+      ).map((item) => item.id),
+    ).toEqual(["s-new", "s-old"]);
+  });
+
+  it("restores the moved order after a simulated app restart", async () => {
+    useWorkspaceStore.setState({
+      sessions: [
+        openSession("s-a", "ws-a", "2026-01-03T00:00:00Z"),
+        openSession("s-b", "ws-a", "2026-01-02T00:00:00Z"),
+        openSession("s-c", "ws-a", "2026-01-01T00:00:00Z"),
+      ],
+      sessionOrder: {},
+    });
+    useWorkspaceStore.getState().moveSession("ws-a", "s-c", 0);
+
+    useWorkspaceStore.setState(useWorkspaceStore.getInitialState(), true);
+    vi.mocked(listWorkspaces).mockResolvedValue([workspace("ws-a")]);
+    vi.mocked(listAgentSessions).mockResolvedValue([
+      openSession("s-a", "ws-a", "2026-01-03T00:00:00Z"),
+      openSession("s-b", "ws-a", "2026-01-02T00:00:00Z"),
+      openSession("s-c", "ws-a", "2026-01-01T00:00:00Z"),
+    ]);
+    await useWorkspaceStore.getState().load();
+
+    expect(useWorkspaceStore.getState().sessionOrder["ws-a"]).toEqual(["s-c", "s-a", "s-b"]);
+    expect(
+      orderedWorkspaceSessions(
+        useWorkspaceStore.getState().sessions,
+        "ws-a",
+        useWorkspaceStore.getState().sessionOrder["ws-a"] ?? [],
+      ).map((item) => item.id),
+    ).toEqual(["s-c", "s-a", "s-b"]);
+  });
+
+  it("prepends a new session in front of a persisted order", () => {
+    useWorkspaceStore.setState({
+      sessions: [
+        openSession("s-old", "ws-a", "2026-01-01T00:00:00Z"),
+        openSession("s-kept", "ws-a", "2026-01-02T00:00:00Z"),
+        openSession("s-fresh", "ws-a", "2026-01-04T00:00:00Z"),
+      ],
+      sessionOrder: { "ws-a": ["s-old", "s-kept"] },
+    });
+    expect(
+      orderedWorkspaceSessions(
+        useWorkspaceStore.getState().sessions,
+        "ws-a",
+        useWorkspaceStore.getState().sessionOrder["ws-a"] ?? [],
+      ).map((item) => item.id),
+    ).toEqual(["s-fresh", "s-old", "s-kept"]);
+  });
+
+  it("keeps a pinned id in storage after load so unpin can restore its slot", async () => {
+    storageData.set(SESSION_ORDER_KEY, JSON.stringify({ "ws-a": ["s-a", "s-pin", "s-b"] }));
+    vi.mocked(listWorkspaces).mockResolvedValue([workspace("ws-a")]);
+    vi.mocked(listAgentSessions).mockResolvedValue([
+      openSession("s-a", "ws-a", "2026-01-03T00:00:00Z"),
+      { ...openSession("s-pin", "ws-a", "2026-01-02T00:00:00Z"), pinned: 1 },
+      openSession("s-b", "ws-a", "2026-01-01T00:00:00Z"),
+    ]);
+    await useWorkspaceStore.getState().load();
+    expect(useWorkspaceStore.getState().sessionOrder["ws-a"]).toEqual(["s-a", "s-pin", "s-b"]);
+    expect(JSON.parse(storageData.get(SESSION_ORDER_KEY) ?? "{}")).toEqual({
+      "ws-a": ["s-a", "s-pin", "s-b"],
+    });
+    expect(
+      orderedWorkspaceSessions(
+        useWorkspaceStore.getState().sessions,
+        "ws-a",
+        useWorkspaceStore.getState().sessionOrder["ws-a"] ?? [],
+      ).map((item) => item.id),
+    ).toEqual(["s-a", "s-b"]);
+  });
+
+  it("drops deleted workspace keys from session order on load", async () => {
+    storageData.set(SESSION_ORDER_KEY, JSON.stringify({ "ws-gone": ["s-x"], "ws-a": ["s-a"] }));
+    vi.mocked(listWorkspaces).mockResolvedValue([workspace("ws-a")]);
+    await useWorkspaceStore.getState().load();
+    expect(useWorkspaceStore.getState().sessionOrder).toEqual({ "ws-a": ["s-a"] });
+    expect(JSON.parse(storageData.get(SESSION_ORDER_KEY) ?? "{}")).toEqual({ "ws-a": ["s-a"] });
   });
 });

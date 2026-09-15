@@ -25,42 +25,69 @@ interface DragState {
   startY: number;
   active: boolean;
   index: number;
+  scopeId: string | null;
   restoreBody: (() => void) | null;
 }
 
-export interface WorkspaceDrag {
+export type PointerRowProps = {
+  onPointerDown: (event: ReactPointerEvent<HTMLElement>) => void;
+  onPointerMove: (event: ReactPointerEvent<HTMLElement>) => void;
+  onPointerUp: (event: ReactPointerEvent<HTMLElement>) => void;
+  onPointerCancel: (event: ReactPointerEvent<HTMLElement>) => void;
+  onLostPointerCapture: (event: ReactPointerEvent<HTMLElement>) => void;
+  "data-workspace-row"?: string;
+  "data-session-row"?: string;
+};
+
+export interface PointerReorder {
   /** Id of the row being dragged, or `null` when idle. */
   draggingId: string | null;
   /** Y offset in pixels, relative to the scroll container, for the drop indicator. */
   indicatorY: number | null;
-  /** Spread onto each workspace row; the row element must keep `data-workspace-row={id}`. */
-  rowProps: (id: string) => {
-    "data-workspace-row": string;
-    onPointerDown: (event: ReactPointerEvent<HTMLElement>) => void;
-    onPointerMove: (event: ReactPointerEvent<HTMLElement>) => void;
-    onPointerUp: (event: ReactPointerEvent<HTMLElement>) => void;
-    onPointerCancel: (event: ReactPointerEvent<HTMLElement>) => void;
-    onLostPointerCapture: (event: ReactPointerEvent<HTMLElement>) => void;
-  };
+  /** Spread onto each row; the row element must keep `data-${rowAttr}={id}`. */
+  rowProps: (id: string) => PointerRowProps;
+}
+
+export interface WorkspaceDrag extends PointerReorder {
+  rowProps: (id: string) => PointerRowProps & { "data-workspace-row": string };
+}
+
+function datasetCamel(attr: string): string {
+  return attr.replace(/-([a-z])/g, (_, letter: string) => letter.toUpperCase());
+}
+
+function dataValue(element: HTMLElement, attr: string): string | undefined {
+  return element.dataset[datasetCamel(attr)];
 }
 
 /** Measures rows in viewport coordinates; re-read on every move so scrolling stays in sync. */
-function readRows(container: HTMLElement | null): WorkspaceRowBounds[] {
+function readRows(
+  container: HTMLElement | null,
+  rowAttr: string,
+  scopeAttr: string | undefined,
+  scopeId: string | null,
+): WorkspaceRowBounds[] {
   if (!container) return [];
-  return Array.from(container.querySelectorAll<HTMLElement>("[data-workspace-row]")).flatMap(
-    (element) => {
-      const id = element.dataset.workspaceRow;
-      if (!id) return [];
-      const rect = element.getBoundingClientRect();
-      return [{ id, top: rect.top, bottom: rect.bottom }];
-    },
-  );
+  const root =
+    scopeAttr && scopeId
+      ? container.querySelector<HTMLElement>(`[data-${scopeAttr}="${CSS.escape(scopeId)}"]`)
+      : container;
+  if (!root) return [];
+  return Array.from(root.querySelectorAll<HTMLElement>(`[data-${rowAttr}]`)).flatMap((element) => {
+    const id = dataValue(element, rowAttr);
+    if (!id) return [];
+    const rect = element.getBoundingClientRect();
+    return [{ id, top: rect.top, bottom: rect.bottom }];
+  });
 }
 
-/** Bottom edge of the last workspace block, used to anchor a trailing drop. */
-function readTailBottom(container: HTMLElement | null): number | undefined {
-  if (!container) return undefined;
-  const blocks = container.querySelectorAll<HTMLElement>("[data-workspace-block]");
+/** Bottom edge of the last matching node, used to anchor a trailing drop. */
+function readTailBottom(
+  container: HTMLElement | null,
+  tailSelector: string | undefined,
+): number | undefined {
+  if (!container || !tailSelector) return undefined;
+  const blocks = container.querySelectorAll<HTMLElement>(tailSelector);
   const last = blocks[blocks.length - 1];
   return last?.getBoundingClientRect().bottom;
 }
@@ -70,6 +97,7 @@ function indicatorFor(
   container: HTMLElement | null,
   rows: WorkspaceRowBounds[],
   index: number,
+  tailSelector: string | undefined,
 ): number | null {
   if (!container) return null;
   return workspaceIndicatorOffset({
@@ -77,24 +105,28 @@ function indicatorFor(
     index,
     containerTop: container.getBoundingClientRect().top,
     scrollTop: container.scrollTop,
-    tailBottom: readTailBottom(container),
+    tailBottom: readTailBottom(container, tailSelector),
   });
 }
 
 /**
- * Pointer-driven reordering for the workspace list.
+ * Pointer-driven reordering for a vertical list of rows.
  *
  * A press only becomes a drag after {@link DRAG_THRESHOLD} pixels of vertical
- * movement, which keeps plain clicks (expand / activate) working; pointer
- * capture is taken at that moment instead of on press, so the click target
- * stays the row's own button. The click that follows a drag is swallowed once,
- * so dropping a row never toggles its expansion.
+ * movement, which keeps plain clicks working; pointer capture is taken at that
+ * moment instead of on press, so the click target stays the row's own button.
+ * The click that follows a drag is swallowed once, so dropping a row never
+ * triggers the row action. When `scopeAttr` is set, only rows inside the
+ * dragged item's ancestor with that data attribute are measured.
  */
-export function useWorkspaceDrag(options: {
+export function usePointerReorder(options: {
   containerRef: RefObject<HTMLElement | null>;
   onMove: (id: string, insertionIndex: number) => void;
-}): WorkspaceDrag {
-  const { containerRef, onMove } = options;
+  rowAttr: "workspace-row" | "session-row";
+  scopeAttr?: "workspace-block";
+  tailSelector?: string;
+}): PointerReorder {
+  const { containerRef, onMove, rowAttr, scopeAttr, tailSelector } = options;
   const [draggingId, setDraggingId] = useState<string | null>(null);
   const [indicatorY, setIndicatorY] = useState<number | null>(null);
   const state = useRef<DragState | null>(null);
@@ -144,15 +176,22 @@ export function useWorkspaceDrag(options: {
   }, []);
 
   const rowProps = useCallback(
-    (id: string) => ({
-      "data-workspace-row": id,
+    (id: string): PointerRowProps => ({
+      ...(rowAttr === "workspace-row"
+        ? { "data-workspace-row": id }
+        : { "data-session-row": id }),
       onPointerDown: (event: ReactPointerEvent<HTMLElement>) => {
         if (event.button !== 0) return;
         const target = event.target;
         if (target instanceof Element && target.closest(NO_DRAG_SELECTOR)) return;
         // A second press while a gesture is pending must not leak its body styles.
         finish(false);
-        const rows = readRows(containerRef.current);
+        const scope = scopeAttr
+          ? event.currentTarget.closest<HTMLElement>(`[data-${scopeAttr}]`)
+          : null;
+        const scopeId = scope && scopeAttr ? (dataValue(scope, scopeAttr) ?? null) : null;
+        if (scopeAttr && !scopeId) return;
+        const rows = readRows(containerRef.current, rowAttr, scopeAttr, scopeId);
         if (!rows.some((row) => row.id === id)) return;
         state.current = {
           id,
@@ -160,6 +199,7 @@ export function useWorkspaceDrag(options: {
           startY: event.clientY,
           active: false,
           index: rows.findIndex((row) => row.id === id),
+          scopeId,
           restoreBody: null,
         };
       },
@@ -185,9 +225,9 @@ export function useWorkspaceDrag(options: {
           document.body.style.cursor = "grabbing";
         }
         const container = containerRef.current;
-        const rows = readRows(container);
+        const rows = readRows(container, rowAttr, scopeAttr, current.scopeId);
         current.index = workspaceDropIndex(rows, event.clientY);
-        setIndicatorY(indicatorFor(container, rows, current.index));
+        setIndicatorY(indicatorFor(container, rows, current.index, tailSelector));
       },
       onPointerUp: (event: ReactPointerEvent<HTMLElement>) => {
         const current = state.current;
@@ -195,7 +235,10 @@ export function useWorkspaceDrag(options: {
         // Re-resolve against the release position so a scroll mid-gesture cannot
         // commit a stale index.
         if (current.active) {
-          current.index = workspaceDropIndex(readRows(containerRef.current), event.clientY);
+          current.index = workspaceDropIndex(
+            readRows(containerRef.current, rowAttr, scopeAttr, current.scopeId),
+            event.clientY,
+          );
           armClickSuppressor();
         }
         finish(true);
@@ -213,8 +256,29 @@ export function useWorkspaceDrag(options: {
         finish(false);
       },
     }),
-    [armClickSuppressor, containerRef, finish],
+    [armClickSuppressor, containerRef, finish, rowAttr, scopeAttr, tailSelector],
   );
 
   return { draggingId, indicatorY, rowProps };
+}
+
+/**
+ * Pointer-driven reordering for the workspace list.
+ *
+ * A press only becomes a drag after {@link DRAG_THRESHOLD} pixels of vertical
+ * movement, which keeps plain clicks (expand / activate) working; pointer
+ * capture is taken at that moment instead of on press, so the click target
+ * stays the row's own button. The click that follows a drag is swallowed once,
+ * so dropping a row never toggles its expansion.
+ */
+export function useWorkspaceDrag(options: {
+  containerRef: RefObject<HTMLElement | null>;
+  onMove: (id: string, insertionIndex: number) => void;
+}): WorkspaceDrag {
+  return usePointerReorder({
+    containerRef: options.containerRef,
+    onMove: options.onMove,
+    rowAttr: "workspace-row",
+    tailSelector: "[data-workspace-block]",
+  }) as WorkspaceDrag;
 }

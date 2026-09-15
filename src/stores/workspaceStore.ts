@@ -12,13 +12,18 @@ import {
   updateWorkspace,
 } from "@/lib/backend";
 import { mergeSessions } from "@/lib/sessionActions";
-import { applyWorkspaceOrder, moveWorkspaceTo } from "@/lib/workspaceOrder";
+import {
+  applyWorkspaceOrder,
+  moveWorkspaceTo,
+  orderedWorkspaceSessions,
+} from "@/lib/workspaceOrder";
 import type { AgentSession, CreateWorkspaceInput, Workspace, WorkspaceHealth } from "@/lib/types";
 import { useSessionStore } from "@/stores/sessionStore";
 
 const ACTIVE_KEY = "noxcode:active-workspace";
 const EXPANDED_KEY = "noxcode:workspace-expanded";
 const ORDER_KEY = "noxcode:workspace-order";
+const SESSION_ORDER_KEY = "noxcode:session-order";
 const ARCHIVE_PAGE_SIZE = 50;
 let sessionRevision = 0;
 let sessionRequest = 0;
@@ -37,6 +42,7 @@ interface WorkspaceState {
   health: WorkspaceHealth | null;
   expanded: Record<string, boolean>;
   shownCount: Record<string, number>;
+  sessionOrder: Record<string, string[]>;
   loading: boolean;
   load: () => Promise<void>;
   setActive: (id: string | null) => Promise<void>;
@@ -44,6 +50,7 @@ interface WorkspaceState {
   rename: (id: string, name: string) => Promise<void>;
   remove: (id: string) => Promise<void>;
   moveWorkspace: (id: string, insertionIndex: number) => void;
+  moveSession: (workspaceId: string, sessionId: string, insertionIndex: number) => void;
   toggleExpand: (id: string) => void;
   showMore: (id: string) => void;
   refreshSessions: () => Promise<void>;
@@ -91,6 +98,48 @@ function readWorkspaceOrder(): string[] {
 function persistWorkspaceOrder(ids: string[]) {
   if (typeof window === "undefined") return;
   window.localStorage.setItem(ORDER_KEY, JSON.stringify(ids));
+}
+
+function readSessionOrder(): Record<string, string[]> {
+  if (typeof window === "undefined") return {};
+  try {
+    const raw = window.localStorage.getItem(SESSION_ORDER_KEY);
+    if (!raw) return {};
+    const parsed = JSON.parse(raw) as unknown;
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return {};
+    const result: Record<string, string[]> = {};
+    for (const [id, value] of Object.entries(parsed)) {
+      if (!Array.isArray(value)) continue;
+      result[id] = value.filter(
+        (item): item is string => typeof item === "string" && item.length > 0,
+      );
+    }
+    return result;
+  } catch {
+    return {};
+  }
+}
+
+function persistSessionOrder(order: Record<string, string[]>) {
+  if (typeof window === "undefined") return;
+  window.localStorage.setItem(SESSION_ORDER_KEY, JSON.stringify(order));
+}
+
+function pruneSessionOrder(
+  order: Record<string, string[]>,
+  workspaceIds: Iterable<string>,
+): Record<string, string[]> {
+  const allowed = new Set(workspaceIds);
+  let changed = false;
+  const next: Record<string, string[]> = {};
+  for (const [id, ids] of Object.entries(order)) {
+    if (!allowed.has(id)) {
+      changed = true;
+      continue;
+    }
+    next[id] = ids;
+  }
+  return changed ? next : order;
 }
 
 function mergeExpanded(
@@ -143,6 +192,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
   health: null,
   expanded: readExpanded(),
   shownCount: {},
+  sessionOrder: readSessionOrder(),
   loading: false,
   load: async () => {
     set({ loading: true });
@@ -157,6 +207,12 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
     const expanded = mergeExpanded(workspaces, { ...readExpanded(), ...get().expanded });
     persistExpanded(expanded);
     persistWorkspaceOrder(workspaces.map((item) => item.id));
+    const storedSessionOrder = readSessionOrder();
+    const sessionOrder = pruneSessionOrder(
+      storedSessionOrder,
+      workspaces.map((item) => item.id),
+    );
+    if (sessionOrder !== storedSessionOrder) persistSessionOrder(sessionOrder);
     set({
       workspaces,
       sessions: get().sessions.filter(
@@ -166,6 +222,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
       activeWorkspaceId: active,
       loading: false,
       expanded,
+      sessionOrder,
     });
     await get().refreshSessions();
     if (active) {
@@ -201,6 +258,18 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
     if (next === get().workspaces) return;
     persistWorkspaceOrder(next.map((item) => item.id));
     set({ workspaces: next });
+  },
+  moveSession: (workspaceId, sessionId, insertionIndex) => {
+    const items = orderedWorkspaceSessions(
+      get().sessions,
+      workspaceId,
+      get().sessionOrder[workspaceId] ?? [],
+    );
+    const next = moveWorkspaceTo(items, sessionId, insertionIndex);
+    if (next === items) return;
+    const sessionOrder = { ...get().sessionOrder, [workspaceId]: next.map((item) => item.id) };
+    persistSessionOrder(sessionOrder);
+    set({ sessionOrder });
   },
   toggleExpand: (id) => {
     const next = { ...get().expanded, [id]: !(get().expanded[id] !== false) };

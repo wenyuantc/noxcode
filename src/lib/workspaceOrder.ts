@@ -4,15 +4,22 @@ export interface WorkspaceRowBounds {
   bottom: number;
 }
 
+export type UnknownPlacement = "append" | "prepend";
+
 /**
  * Reorders `items` to match the persisted `order` of ids.
  *
  * Ids missing from `items` (deleted workspaces) are dropped; items whose id is
  * not in `order` (newly created workspaces) keep their incoming order and are
- * appended after the known ones. Returns the input array when no reordering is
- * needed, so callers can compare references.
+ * placed according to `unknownPlacement` (default: appended after the known
+ * ones). Returns the input array when no reordering is needed, so callers can
+ * compare references.
  */
-export function applyWorkspaceOrder<T extends { id: string }>(items: T[], order: string[]): T[] {
+export function applyWorkspaceOrder<T extends { id: string }>(
+  items: T[],
+  order: string[],
+  unknownPlacement: UnknownPlacement = "append",
+): T[] {
   if (order.length === 0) return items;
   const rank = new Map(order.map((id, index) => [id, index]));
   const known = items
@@ -23,7 +30,30 @@ export function applyWorkspaceOrder<T extends { id: string }>(items: T[], order:
     return unchanged ? items : known;
   }
   const unknown = items.filter((item) => !rank.has(item.id));
-  return [...known, ...unknown];
+  return unknownPlacement === "prepend" ? [...unknown, ...known] : [...known, ...unknown];
+}
+
+/**
+ * Unpinned, unarchived sessions for one workspace, in sidebar order.
+ *
+ * An empty `order` keeps `started_at` descending. After a custom order exists,
+ * unknown ids (new sessions) are prepended in that same time order so a new
+ * chat stays at the top until the user drags it.
+ */
+export function orderedWorkspaceSessions<
+  T extends {
+    id: string;
+    workspace_id: string | null;
+    pinned: number;
+    archived: number;
+    started_at: string;
+  },
+>(sessions: T[], workspaceId: string, order: string[]): T[] {
+  const items = sessions.filter(
+    (session) => session.workspace_id === workspaceId && session.pinned === 0 && !session.archived,
+  );
+  const timed = [...items].sort((left, right) => right.started_at.localeCompare(left.started_at));
+  return applyWorkspaceOrder(timed, order, "prepend");
 }
 
 /**
