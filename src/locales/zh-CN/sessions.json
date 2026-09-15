@@ -45,7 +45,6 @@
   "thinkingForBrief": "思考 · 持续了几秒",
   "lookup": "查阅",
   "lookupRunning": "查阅 · 正在执行",
-  "lookupSummary": "查阅 · {{parts}}",
   "lookupFile": "{{count}} 文件",
   "lookupList": "{{count}} 列表",
   "lookupSearch": "{{count}} 搜索",

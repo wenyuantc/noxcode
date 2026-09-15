@@ -45,7 +45,6 @@
   "thinkingForBrief": "Thinking · a few seconds",
   "lookup": "Lookup",
   "lookupRunning": "Lookup · running",
-  "lookupSummary": "Lookup · {{parts}}",
   "lookupFile": "{{count}} files",
   "lookupList": "{{count}} lists",
   "lookupSearch": "{{count}} searches",
