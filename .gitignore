@@ -26,3 +26,4 @@ dist-ssr
 .noxcode
 .workflow
 .playwright-mcp
+.zcode/plans
