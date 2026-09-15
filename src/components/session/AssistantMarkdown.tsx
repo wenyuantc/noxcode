@@ -132,9 +132,11 @@ function markdownComponents(variant: "default" | "plan", codeFontSize: number): 
 export const AssistantMarkdown = memo(function AssistantMarkdown({
   text,
   variant = "default",
+  live = false,
 }: {
   text: string;
   variant?: "default" | "plan";
+  live?: boolean;
 }) {
   const codeFontSize = useUiStore((state) => state.codeFontSize);
   const components = useMemo(
@@ -146,6 +148,12 @@ export const AssistantMarkdown = memo(function AssistantMarkdown({
       <Markdown remarkPlugins={[remarkGfm]} components={components}>
         {text}
       </Markdown>
+      {live ? (
+        <span
+          aria-hidden
+          className="mt-1.5 inline-block h-3.5 w-2 animate-pulse rounded-[2px] bg-foreground/60"
+        />
+      ) : null}
     </div>
   );
 });

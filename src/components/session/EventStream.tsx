@@ -4,12 +4,14 @@ import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useStat
 import { useTranslation } from "react-i18next";
 
 import {
+  aggregateUsages,
   buildTurnBlocks,
   changedFilesFromItems,
   groupSessionLines,
   hasToolResult,
   lineToneClass,
   parseTodoList,
+  parseUsageLine,
   sessionLineBody,
   toolsStillRunning,
   type RawSessionLine,
@@ -33,6 +35,7 @@ import { GoalRow } from "./GoalRow";
 import { RetryRow } from "./RetryRow";
 import {
   AgentStatusRow,
+  ErrorStatusRow,
   McpStatusRow,
   PermissionStatusRow,
   WorktreeStatusRow,
@@ -45,11 +48,10 @@ import { SubagentRow } from "./SubagentRow";
 import { TerminalRow } from "./TerminalRow";
 import { ThinkingRow } from "./ThinkingRow";
 import { ToolSummaryRow } from "./ToolSummaryRow";
-import { TurnActionBar } from "./TurnActionBar";
 import { TurnFilesChanged } from "./TurnFilesChanged";
-import { UsageRow } from "./UsageRow";
+import { TurnFooter } from "./TurnFooter";
+import { TurnHeader } from "./TurnHeader";
 import { UserBubble } from "./UserBubble";
-import { WorkSummaryBar } from "./WorkSummaryBar";
 
 const EMPTY_LINES: RawSessionLine[] = [];
 const VIRTUALIZE_AFTER = 24;
@@ -105,9 +107,12 @@ function renderSegment(
         <SubagentRow segment={segment} running={running} nowMs={nowMs} sessionId={sessionId} />
       );
     case "assistant":
-      return <AssistantMarkdown text={segment.items.map((item) => item.text).join("\n\n")} />;
-    case "usage":
-      return <UsageRow item={segment.items[0]!} />;
+      return (
+        <AssistantMarkdown
+          text={segment.items.map((item) => item.text).join("\n\n")}
+          live={live && running}
+        />
+      );
     case "background_notice":
       return <BackgroundNoticeRow items={segment.items} sessionId={sessionId} />;
     default:
@@ -115,6 +120,9 @@ function renderSegment(
         <div className="space-y-1">
           {segment.items.map((item) => {
             const body = sessionLineBody(item.text);
+            if (item.kind === "error" || body.startsWith("[ERROR]")) {
+              return <ErrorStatusRow key={item.id} text={item.text} />;
+            }
             if (body.startsWith("[PERMISSION]")) {
               return <PermissionStatusRow key={item.id} text={item.text} />;
             }
@@ -426,7 +434,10 @@ export const EventStream = memo(function EventStream({
                   data-index={virtual.index}
                   data-block-id={blocks[virtual.index]?.id}
                   ref={virtualizer.measureElement}
-                  className="absolute top-0 left-0 w-full"
+                  className={cn(
+                    "absolute top-0 left-0 w-full",
+                    virtual.index > 0 && "border-t border-border/40 pt-4",
+                  )}
                   style={{ transform: `translateY(${virtual.start}px)` }}
                 >
                   {renderBlock(blocks[virtual.index]!, virtual.index)}
@@ -436,7 +447,11 @@ export const EventStream = memo(function EventStream({
           ) : (
             <div className="mx-auto flex max-w-3xl flex-col gap-4">
               {blocks.map((block, index) => (
-                <div key={block.id} data-block-id={block.id}>
+                <div
+                  key={block.id}
+                  data-block-id={block.id}
+                  className={cn(index > 0 && "border-t border-border/40 pt-4")}
+                >
                   {renderBlock(block, index)}
                 </div>
               ))}
@@ -480,11 +495,19 @@ const TurnBlockView = memo(function TurnBlockView({
   editableUser: boolean;
   showAsk?: boolean;
 }) {
+  const { t } = useTranslation("sessions");
   const showWork =
     (Boolean(block.user) || working) &&
     (working || block.segments.length > 0 || block.tools.length > 0);
   const assistantText = block.assistant.map((item) => item.text).join("\n\n");
   const changedPaths = changedFilesFromItems(block.tools);
+  const visibleSegments = block.segments.filter((segment) => segment.kind !== "usage");
+  const turnUsage = useMemo(() => {
+    const usages = block.segments
+      .filter((segment) => segment.kind === "usage")
+      .map((segment) => parseUsageLine(segment.items[0]?.text ?? ""));
+    return aggregateUsages(usages);
+  }, [block.segments]);
 
   return (
     <div className="space-y-2">
@@ -492,37 +515,42 @@ const TurnBlockView = memo(function TurnBlockView({
         <UserBubble
           text={block.user.text}
           images={block.user.images}
+          createdAt={block.user.createdAt}
           sessionId={sessionId}
           editable={editableUser}
           working={working}
         />
       ) : null}
       {showWork ? (
-        <WorkSummaryBar block={block} tools={block.tools} working={working} nowMs={nowMs} />
+        <TurnHeader block={block} tools={block.tools} working={working} nowMs={nowMs} />
       ) : null}
-      {block.segments.map((segment, index) => (
-        <div key={turnSegmentReactKey(block.id, segment, index, block.segments)}>
+      {visibleSegments.map((segment, index) => (
+        <div key={turnSegmentReactKey(block.id, segment, index, visibleSegments)}>
           {renderSegment(
             segment,
             working,
             working ? nowMs : undefined,
-            index === block.segments.length - 1,
+            index === visibleSegments.length - 1,
             sessionId,
           )}
         </div>
       ))}
       {showAsk ? <PlanAskCard sessionId={sessionId} /> : null}
-      {!working && assistantText ? (
-        <TurnActionBar
+      {!working && (assistantText || turnUsage) ? (
+        <TurnFooter
           sessionId={sessionId}
           userText={block.user?.text}
           assistantText={assistantText}
+          usage={turnUsage}
           endedAt={block.endedAt}
         />
       ) : null}
       {!working && changedPaths.length > 0 ? <TurnFilesChanged paths={changedPaths} /> : null}
       {working && !showAsk ? (
-        <Loader2 className="size-4 animate-spin text-muted-foreground" />
+        <div className="flex items-center gap-2 pt-1 text-xs text-muted-foreground">
+          <Loader2 className="size-3.5 animate-spin" />
+          <span className="animate-pulse">{t("generating")}</span>
+        </div>
       ) : null}
     </div>
   );
