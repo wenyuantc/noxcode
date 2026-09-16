@@ -397,7 +397,7 @@ describe("native interaction rendering", () => {
     const html = renderToStaticMarkup(<SubagentRow segment={segment!} running />);
     expect(html).not.toContain("subagentRunning");
     expect(html).not.toContain("subagentCompleted");
-    expect(html).toContain(status === "失败" ? "subagentFailed" : "已停止");
+    expect(html).toContain(status === "失败" ? "subagentFailed" : "subagentStopped");
   });
   it("freezes a completed subagent duration while the parent turn is still working", () => {
     const items = groupSessionLines([
