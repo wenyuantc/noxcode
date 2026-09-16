@@ -84,18 +84,38 @@ export function SubagentDrawer({ sessionId }: { sessionId: string }) {
     return { currentSegment: found ?? null, peerSegments: found ? [found] : [] };
   }, [activeSubagent, blocks, sessionId]);
 
-  const handleOpenChange = (open: boolean) => {
-    if (!open) {
+  // Root 常驻挂载，open 响应式切换，进入/退出过渡动画才能正常播放
+  const open = Boolean(isOpen && currentSegment && activeSubagent);
+
+  // 缓存最近一次有效内容，保证关闭滑出动画期间内容不消失
+  const lastContentRef = useRef<{
+    segment: TurnSegment;
+    peerSegments: TurnSegment[];
+    identity: string;
+  } | null>(null);
+  useEffect(() => {
+    if (open && currentSegment && activeSubagent) {
+      lastContentRef.current = {
+        segment: currentSegment,
+        peerSegments,
+        identity: activeSubagent.identity,
+      };
+    }
+  });
+
+  const content =
+    open && currentSegment && activeSubagent
+      ? { segment: currentSegment, peerSegments, identity: activeSubagent.identity }
+      : lastContentRef.current;
+
+  const handleOpenChange = (nextOpen: boolean) => {
+    if (!nextOpen) {
       setActiveSubagent(null);
     }
   };
 
-  if (!isOpen || !currentSegment || !activeSubagent) {
-    return null;
-  }
-
   return (
-    <SheetPrimitive.Root open={isOpen} onOpenChange={handleOpenChange}>
+    <SheetPrimitive.Root open={open} onOpenChange={handleOpenChange}>
       <SheetPrimitive.Portal>
         {/* Backdrop Overlay */}
         <SheetPrimitive.Backdrop
@@ -114,15 +134,17 @@ export function SubagentDrawer({ sessionId }: { sessionId: string }) {
             "data-ending-style:translate-x-full data-starting-style:translate-x-full",
           )}
         >
-          <SubagentDrawerContent
-            segment={currentSegment}
-            peerSegments={peerSegments}
-            sessionId={sessionId}
-            activeIdentity={activeSubagent.identity}
-            isWorking={isWorking}
-            onClose={() => setActiveSubagent(null)}
-            onSelectPeer={(identity) => setActiveSubagent({ sessionId, identity })}
-          />
+          {content ? (
+            <SubagentDrawerContent
+              segment={content.segment}
+              peerSegments={content.peerSegments}
+              sessionId={sessionId}
+              activeIdentity={content.identity}
+              isWorking={isWorking}
+              onClose={() => setActiveSubagent(null)}
+              onSelectPeer={(identity) => setActiveSubagent({ sessionId, identity })}
+            />
+          ) : null}
         </SheetPrimitive.Popup>
       </SheetPrimitive.Portal>
     </SheetPrimitive.Root>
