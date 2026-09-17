@@ -306,6 +306,8 @@
     "completed": "已完成"
   },
   "subagentTag": "子智能体",
+  "subagentsPopoverTitle": "子智能体运行状态",
+  "subagentsCount": "{{count}} 个子智能体",
   "subagentRunning": "正在执行",
   "subagentCompleted": "已完成",
   "subagentFailed": "执行失败",

@@ -1,8 +1,8 @@
 import { create } from "zustand";
 
-import { getAgentSessionLogLines } from "@/lib/backend";
+import { getAgentSessionLogLines, getSessionSubagents } from "@/lib/backend";
 import { resolveHistoricalUsage, resolveHistoryLimitTokens } from "@/lib/contextUsage";
-import { hydrateSessionLine, type RawSessionLine } from "@/lib/sessionLines";
+import { hydrateSessionLine, parseSubagentTag, type RawSessionLine } from "@/lib/sessionLines";
 import {
   applyTextDelta,
   pruneCoveredFragments,
@@ -26,6 +26,7 @@ import type {
   NativeInputQueue,
   NativeSessionConfigurationEvent,
   PendingSessionConfiguration,
+  SessionSubagentInfo,
   WorktreeMergePrompt,
 } from "@/lib/types";
 import { useChannelStore } from "@/stores/channelStore";
@@ -83,6 +84,8 @@ interface SessionState {
   pendingAiMergeResolveBySession: Record<string, boolean>;
   hasMoreEarlier: Record<string, boolean>;
   loadingEarlier: Record<string, boolean>;
+  subagentsBySession: Record<string, SessionSubagentInfo[]>;
+  fetchSubagents: (sessionId: string) => Promise<void>;
   selectSession: (id: string | null) => void;
   ensureHistory: (sessionId: string) => Promise<void>;
   loadHistory: (sessionId: string) => Promise<void>;
@@ -140,6 +143,20 @@ export const useSessionStore = create<SessionState>((set, get) => ({
   mergedWorktreeBySession: {},
   autoPromptedWorktreeBySession: {},
   pendingAiMergeResolveBySession: {},
+  subagentsBySession: {},
+  fetchSubagents: async (sessionId: string) => {
+    try {
+      const subagents = await getSessionSubagents(sessionId);
+      set((state) => ({
+        subagentsBySession: {
+          ...state.subagentsBySession,
+          [sessionId]: subagents,
+        },
+      }));
+    } catch (error) {
+      console.error("Failed to fetch session subagents:", error);
+    }
+  },
   selectSession: (id) => {
     const session = id
       ? useWorkspaceStore.getState().sessions.find((item) => item.id === id)
@@ -200,6 +217,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
       await request;
     }
     hydrateUsage(sessionId);
+    void get().fetchSubagents(sessionId);
   },
   loadEarlierHistory: async (sessionId: string) => {
     const state = get();
@@ -314,6 +332,48 @@ export const useSessionStore = create<SessionState>((set, get) => ({
       return;
     const parts = get().stream[output.session_record_id];
     const pruned = parts?.length ? pruneCoveredFragments(parts, output.line) : parts;
+    const subagentTag = parseSubagentTag(output.line);
+    let nextSubagents = get().subagentsBySession[output.session_record_id];
+    if (subagentTag) {
+      const list = [...(nextSubagents ?? [])];
+      const idx = list.findIndex((item) => item.id === subagentTag.raw);
+      const isEndFailed = output.line.includes("结束 失败");
+      const isEndSuccess = output.line.includes("结束 成功");
+      const isEndStopped = output.line.includes("结束 停止") || output.line.includes("结束 已停止");
+      const status: "running" | "completed" | "failed" | "stopped" = isEndFailed
+        ? "failed"
+        : isEndSuccess
+          ? "completed"
+          : isEndStopped
+            ? "stopped"
+            : "running";
+      const now = Date.now();
+      if (idx >= 0) {
+        const existing = list[idx]!;
+        const nextStatus = status === "running" ? existing.status : status;
+        list[idx] = {
+          ...existing,
+          status: nextStatus,
+          duration_ms:
+            nextStatus !== "running" && existing.start_time_ms
+              ? Math.max(0, now - existing.start_time_ms)
+              : existing.duration_ms,
+          error_message: isEndFailed ? output.line : existing.error_message,
+        };
+      } else {
+        list.push({
+          id: subagentTag.raw,
+          index: subagentTag.index,
+          kind: subagentTag.kind,
+          description: subagentTag.description,
+          status,
+          start_time_ms: now,
+          duration_ms: null,
+          error_message: isEndFailed ? output.line : null,
+        });
+      }
+      nextSubagents = list;
+    }
     set({
       lines: {
         ...get().lines,
@@ -333,6 +393,9 @@ export const useSessionStore = create<SessionState>((set, get) => ({
         pruned && pruned !== parts
           ? { ...get().stream, [output.session_record_id]: pruned }
           : get().stream,
+      subagentsBySession: nextSubagents
+        ? { ...get().subagentsBySession, [output.session_record_id]: nextSubagents }
+        : get().subagentsBySession,
     });
   },
   onDelta: (delta) => {
@@ -416,6 +479,13 @@ export const useSessionStore = create<SessionState>((set, get) => ({
         ...get().processesBySession,
         [exit.session_record_id]: (get().processesBySession[exit.session_record_id] ?? []).map(
           (process) => (process.status === "running" ? { ...process, status: "stopped" } : process),
+        ),
+      },
+      subagentsBySession: {
+        ...get().subagentsBySession,
+        [exit.session_record_id]: (get().subagentsBySession[exit.session_record_id] ?? []).map(
+          (subagent) =>
+            subagent.status === "running" ? { ...subagent, status: "stopped" } : subagent,
         ),
       },
       turnState: { ...get().turnState, [exit.session_record_id]: "ended" },

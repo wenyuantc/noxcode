@@ -141,6 +141,7 @@ pub fn run() {
             native::session::remove_native_queued_input,
             native::session::finish_native_input,
             native::session::list_native_background_tasks,
+            native::session::get_session_subagents,
             native::session::list_native_background_processes,
             native::session::stop_native_background_process,
             native::session::send_native_background_message,

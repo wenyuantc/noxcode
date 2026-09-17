@@ -63,6 +63,7 @@ import type {
   NativeBackgroundTask,
   NativeBackgroundTasks,
   NativeInputQueue,
+  SessionSubagentInfo,
   NativeRequestResolved,
   NativeContextUsage,
   CreateNativeSkillInput,
@@ -654,6 +655,10 @@ export function listNativeBackgroundTasks(
   sessionRecordId: string,
 ): Promise<NativeBackgroundTask[]> {
   return invoke("list_native_background_tasks", { sessionRecordId });
+}
+
+export function getSessionSubagents(sessionId: string): Promise<SessionSubagentInfo[]> {
+  return invoke("get_session_subagents", { sessionId });
 }
 
 export function sendNativeBackgroundMessage(

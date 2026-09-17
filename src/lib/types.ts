@@ -1348,6 +1348,17 @@ export interface GeneratedNativeSubagent {
   workspace_ids: string[];
 }
 
+export interface SessionSubagentInfo {
+  id: string;
+  index: number;
+  kind: string;
+  description: string;
+  status: "running" | "completed" | "failed" | "stopped";
+  start_time_ms?: number | null;
+  duration_ms?: number | null;
+  error_message?: string | null;
+}
+
 export interface McpEnvVar {
   key: string;
   value: string;

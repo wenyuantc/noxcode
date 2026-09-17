@@ -4602,6 +4602,145 @@ pub async fn resume_native_session(
     start_native_with_manager(app, state.inner().clone(), payload).await
 }
 
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct SessionSubagentInfo {
+    pub id: String,
+    pub index: u32,
+    pub kind: String,
+    pub description: String,
+    pub status: String,
+    pub start_time_ms: Option<i64>,
+    pub duration_ms: Option<i64>,
+    pub error_message: Option<String>,
+}
+
+fn extract_event_line(raw: &str) -> String {
+    let trimmed = raw.trim();
+    if trimmed.starts_with('{') {
+        if let Ok(val) = serde_json::from_str::<serde_json::Value>(trimmed) {
+            if let Some(line) = val.get("line").and_then(|l| l.as_str()) {
+                return line.to_string();
+            }
+        }
+    }
+    trimmed.to_string()
+}
+
+pub fn extract_session_subagents(
+    events: &[(String, Option<String>, String)],
+    is_session_active: bool,
+) -> Vec<SessionSubagentInfo> {
+    use std::collections::BTreeMap;
+
+    struct SubagentEntry {
+        id: String,
+        index: u32,
+        kind: String,
+        description: String,
+        status: String,
+        start_time_ms: Option<i64>,
+        end_time_ms: Option<i64>,
+        error_message: Option<String>,
+    }
+
+    let mut map: BTreeMap<String, SubagentEntry> = BTreeMap::new();
+
+    for (_event_id, raw_message, created_at) in events {
+        let Some(raw_msg) = raw_message else {
+            continue;
+        };
+        let line = extract_event_line(raw_msg);
+        let Some((tag, index, kind, desc)) =
+            crate::native::agent::subagent::parse_subagent_log_tag(&line)
+        else {
+            continue;
+        };
+
+        let time_ms = chrono::NaiveDateTime::parse_from_str(
+            created_at,
+            crate::app::shared::SQLITE_DATETIME_FORMAT,
+        )
+        .ok()
+        .map(|dt| dt.and_utc().timestamp_millis());
+
+        let entry = map.entry(tag.clone()).or_insert_with(|| SubagentEntry {
+            id: tag.clone(),
+            index,
+            kind: kind.clone(),
+            description: desc.clone(),
+            status: if is_session_active {
+                "running".to_string()
+            } else {
+                "stopped".to_string()
+            },
+            start_time_ms: time_ms,
+            end_time_ms: None,
+            error_message: None,
+        });
+
+        if line.contains("结束 失败") {
+            entry.status = "failed".to_string();
+            entry.end_time_ms = time_ms;
+            if entry.error_message.is_none() {
+                entry.error_message = Some(line.clone());
+            }
+        } else if line.contains("结束 成功") {
+            entry.status = "completed".to_string();
+            entry.end_time_ms = time_ms;
+        } else if line.contains("结束 停止") || line.contains("结束 已停止") {
+            entry.status = "stopped".to_string();
+            entry.end_time_ms = time_ms;
+        }
+    }
+
+    let mut result: Vec<SessionSubagentInfo> = map
+        .into_values()
+        .map(|entry| {
+            let duration_ms = match (entry.start_time_ms, entry.end_time_ms) {
+                (Some(start), Some(end)) => Some((end - start).max(0)),
+                _ => None,
+            };
+            SessionSubagentInfo {
+                id: entry.id,
+                index: entry.index,
+                kind: entry.kind,
+                description: entry.description,
+                status: entry.status,
+                start_time_ms: entry.start_time_ms,
+                duration_ms,
+                error_message: entry.error_message,
+            }
+        })
+        .collect();
+
+    result.sort_by(|a, b| {
+        a.index
+            .cmp(&b.index)
+            .then_with(|| a.start_time_ms.cmp(&b.start_time_ms))
+    });
+
+    result
+}
+
+#[tauri::command]
+pub async fn get_session_subagents(
+    app: AppHandle,
+    state: State<'_, Arc<Mutex<NativeAgentManager>>>,
+    session_id: String,
+) -> Result<Vec<SessionSubagentInfo>, String> {
+    let is_active = state.lock().await.get_session(&session_id).is_some();
+    let pool = sqlite_pool(&app).await?;
+    let rows = sqlx::query_as::<_, (String, Option<String>, String)>(
+        "SELECT id, message, created_at FROM agent_session_events WHERE session_id = $1 AND event_type = 'stdout' ORDER BY created_at ASC, rowid ASC",
+    )
+    .bind(&session_id)
+    .fetch_all(&pool)
+    .await
+    .map_err(|e| format!("查询子 Agent 状态失败: {e}"))?;
+
+    Ok(extract_session_subagents(&rows, is_active))
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
@@ -5680,5 +5819,66 @@ mod tests {
                 .await
                 .expect("status");
         assert_eq!(status, "running");
+    }
+
+    #[test]
+    fn extract_session_subagents_correctly_groups_and_resolves_status() {
+        let events = vec![
+            (
+                "evt-1".to_string(),
+                Some("[子 Agent 1(general) - 构建代码] 启动（general）".to_string()),
+                "2026-09-17 10:00:00".to_string(),
+            ),
+            (
+                "evt-2".to_string(),
+                Some(
+                    r#"{"nox":1,"line":"[子 Agent 1(general) - 构建代码] 正在编译"}"#.to_string(),
+                ),
+                "2026-09-17 10:00:05".to_string(),
+            ),
+            (
+                "evt-3".to_string(),
+                Some("[子 Agent 1(general) - 构建代码] 结束 成功".to_string()),
+                "2026-09-17 10:00:10".to_string(),
+            ),
+            (
+                "evt-4".to_string(),
+                Some("[子 Agent 2(explore) - 探索架构] 启动（explore）".to_string()),
+                "2026-09-17 10:00:15".to_string(),
+            ),
+            (
+                "evt-5".to_string(),
+                Some("[子 Agent 2(explore) - 探索架构] 结束 失败: 文件不存在".to_string()),
+                "2026-09-17 10:00:20".to_string(),
+            ),
+            (
+                "evt-6".to_string(),
+                Some("[子 Agent 3(explore) - 运行中任务] 启动（explore）".to_string()),
+                "2026-09-17 10:00:25".to_string(),
+            ),
+        ];
+
+        let subagents = super::extract_session_subagents(&events, true);
+        assert_eq!(subagents.len(), 3);
+
+        assert_eq!(subagents[0].index, 1);
+        assert_eq!(subagents[0].kind, "general");
+        assert_eq!(subagents[0].description, "构建代码");
+        assert_eq!(subagents[0].status, "completed");
+        assert_eq!(subagents[0].duration_ms, Some(10_000));
+
+        assert_eq!(subagents[1].index, 2);
+        assert_eq!(subagents[1].kind, "explore");
+        assert_eq!(subagents[1].status, "failed");
+        assert_eq!(subagents[1].duration_ms, Some(5_000));
+        assert!(subagents[1].error_message.is_some());
+
+        assert_eq!(subagents[2].index, 3);
+        assert_eq!(subagents[2].status, "running");
+        assert_eq!(subagents[2].duration_ms, None);
+
+        // When session is inactive, non-finished subagents become stopped
+        let inactive = super::extract_session_subagents(&events, false);
+        assert_eq!(inactive[2].status, "stopped");
     }
 }

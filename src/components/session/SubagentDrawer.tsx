@@ -65,12 +65,25 @@ export function SubagentDrawer({ sessionId }: { sessionId: string }) {
       return { currentSegment: null, peerSegments: [] };
     }
 
+    const matchSegment = (s: TurnSegment) => {
+      const first = s.items[0] ?? {};
+      const segIdent = subagentSegmentIdentity(first);
+      const target = activeSubagent.identity;
+      if (segIdent === target) return true;
+      const rawTag = first.subagentTag ?? first.tool?.subagent_tag;
+      if (rawTag && rawTag === target) return true;
+      if (subagentSegmentIdentity({ subagentTag: target }) === segIdent) return true;
+      const parsedTag = parseSubagentTag(rawTag);
+      if (parsedTag && `index:${parsedTag.index}` === target) return true;
+      const parsedTarget = parseSubagentTag(target);
+      if (parsedTag && parsedTarget && parsedTag.index === parsedTarget.index) return true;
+      return false;
+    };
+
     // Try finding in turn blocks first
     for (const block of blocks) {
       const subSegments = block.segments.filter((s) => s.kind === "subagent");
-      const found = subSegments.find(
-        (s) => subagentSegmentIdentity(s.items[0] ?? {}) === activeSubagent.identity,
-      );
+      const found = subSegments.find(matchSegment);
       if (found) {
         return { currentSegment: found, peerSegments: subSegments };
       }
@@ -78,10 +91,47 @@ export function SubagentDrawer({ sessionId }: { sessionId: string }) {
 
     // Fallback across all subagent segments
     const all = blocks.flatMap((b) => b.segments.filter((s) => s.kind === "subagent"));
-    const found = all.find(
-      (s) => subagentSegmentIdentity(s.items[0] ?? {}) === activeSubagent.identity,
-    );
-    return { currentSegment: found ?? null, peerSegments: found ? [found] : [] };
+    const found = all.find(matchSegment);
+    if (found) {
+      return { currentSegment: found, peerSegments: [found] };
+    }
+
+    // Fallback 2: if lines didn't yield a segment yet, synthesize from subagentsBySession
+    const sessionSubagents = useSessionStore.getState().subagentsBySession[sessionId] ?? [];
+    const targetSub = sessionSubagents.find((item) => {
+      if (item.id === activeSubagent.identity) return true;
+      if (`index:${item.index}` === activeSubagent.identity) return true;
+      if (String(item.index) === activeSubagent.identity) return true;
+      const parsed = parseSubagentTag(item.id);
+      if (parsed && `index:${parsed.index}` === activeSubagent.identity) return true;
+      return false;
+    });
+
+    if (targetSub) {
+      const statusText =
+        targetSub.status === "running"
+          ? `启动（${targetSub.kind}）`
+          : targetSub.status === "failed"
+            ? `结束 失败：${targetSub.error_message || "执行失败"}`
+            : targetSub.status === "stopped"
+              ? "结束 停止"
+              : "结束 成功";
+      const syntheticSegment: TurnSegment = {
+        kind: "subagent",
+        items: [
+          {
+            id: `fallback-${targetSub.id}`,
+            kind: "assistant",
+            text: `${targetSub.id} ${statusText}`,
+            createdAt: new Date(targetSub.start_time_ms ?? Date.now()).toISOString(),
+            subagentTag: targetSub.id,
+          },
+        ],
+      };
+      return { currentSegment: syntheticSegment, peerSegments: [syntheticSegment] };
+    }
+
+    return { currentSegment: null, peerSegments: [] };
   }, [activeSubagent, blocks, sessionId]);
 
   // Root 常驻挂载，open 响应式切换，进入/退出过渡动画才能正常播放
@@ -465,9 +515,18 @@ export function SubagentDrawerContent({
             </span>
             {peerSegments.map((peer, idx) => {
               const peerTag = parseSubagentTag(peer.items[0]?.subagentTag);
+              const currentTag = parseSubagentTag(segment.items[0]?.subagentTag);
               const peerIdentity =
                 subagentSegmentIdentity(peer.items[0] ?? {}) ?? String(peerTag?.index ?? idx + 1);
-              const isSelected = peerIdentity === activeIdentity;
+              const currentIdentity = subagentSegmentIdentity(segment.items[0] ?? {});
+              const isSelected =
+                peer === segment ||
+                (peerTag && currentTag && peerTag.index === currentTag.index) ||
+                (currentIdentity && peerIdentity === currentIdentity) ||
+                peerIdentity === activeIdentity ||
+                (peer.items[0]?.subagentTag && peer.items[0]?.subagentTag === activeIdentity) ||
+                (peerTag && `index:${peerTag.index}` === activeIdentity) ||
+                (peerTag && String(peerTag.index) === activeIdentity);
               const peerCompleted = peer.items.some((it) =>
                 /^(?:后台任务 \S+ )?结束/.test(sessionLineBody(it.text)),
               );

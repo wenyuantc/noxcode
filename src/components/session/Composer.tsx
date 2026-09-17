@@ -113,6 +113,7 @@ import { ComposerPlusMenu } from "./ComposerPlusMenu";
 import { ContextCapacity } from "./ContextCapacity";
 import { ModelEffortPicker } from "./ModelEffortPicker";
 import { PermissionModePicker } from "./PermissionModePicker";
+import { SubagentPopover } from "./SubagentPopover";
 import { WorkspacePicker } from "./WorkspacePicker";
 import { WorktreeToggle } from "./WorktreeToggle";
 import { QueuedInputs } from "./QueuedInputs";
@@ -1197,6 +1198,7 @@ export function Composer({ compact = false }: { compact?: boolean }) {
               onInsertTrigger={insertTrigger}
             />
             <PermissionModePicker disabled={working || sending} onError={setError} />
+            <SubagentPopover sessionId={selectedSessionId ?? ""} />
           </div>
           <div className="flex shrink-0 items-center gap-1.5 self-end">
             <ModelEffortPicker

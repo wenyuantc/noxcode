@@ -306,6 +306,8 @@
     "completed": "completed"
   },
   "subagentTag": "Subagent",
+  "subagentsPopoverTitle": "Subagents Status",
+  "subagentsCount": "{{count}} subagents",
   "subagentRunning": "Running",
   "subagentCompleted": "Completed",
   "subagentFailed": "Failed",

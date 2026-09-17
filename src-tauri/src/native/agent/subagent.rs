@@ -97,6 +97,23 @@ pub fn format_subagent_log_tag(index: u32, kind: &SubagentKind, description: &st
     )
 }
 
+/// 解析形如 `[子 Agent 1(general) - 描述]` 的标签。
+/// 返回 `(完整tag, index, kind, description)`。
+pub fn parse_subagent_log_tag(text: &str) -> Option<(String, u32, String, String)> {
+    let start = text.find("[子 Agent ")?;
+    let close_bracket = text[start..].find(']')?;
+    let full_tag = &text[start..=start + close_bracket];
+    let inner = &full_tag["[子 Agent ".len()..full_tag.len() - 1];
+    let paren_open = inner.find('(')?;
+    let index = inner[..paren_open].trim().parse::<u32>().ok()?;
+    let rest = &inner[paren_open + 1..];
+    let paren_close = rest.find(')')?;
+    let kind = rest[..paren_close].trim().to_string();
+    let rest2 = &rest[paren_close + 1..];
+    let desc = rest2.strip_prefix(" - ")?.trim().to_string();
+    Some((full_tag.to_string(), index, kind, desc))
+}
+
 fn sanitize_subagent_label(description: &str) -> String {
     let collapsed = description
         .split_whitespace()
@@ -267,5 +284,21 @@ mod tests {
         assert!(long.starts_with("[子 Agent 1(explore) - "));
         assert!(long.contains('…'));
         assert!(!long.contains("测".repeat(40).as_str()));
+    }
+
+    #[test]
+    fn parse_subagent_log_tag_works() {
+        let tag = "[子 Agent 3(explore) - 查阅架构文档]";
+        let line = format!("{tag} 启动（explore）");
+        let parsed = parse_subagent_log_tag(&line);
+        assert!(parsed.is_some());
+        let (full, idx, kind, desc) = parsed.unwrap();
+        assert_eq!(full, tag);
+        assert_eq!(idx, 3);
+        assert_eq!(kind, "explore");
+        assert_eq!(desc, "查阅架构文档");
+
+        assert!(parse_subagent_log_tag("普通日志输出无标签").is_none());
+        assert!(parse_subagent_log_tag("[子 Agent 非数字(general) - 描述]").is_none());
     }
 }

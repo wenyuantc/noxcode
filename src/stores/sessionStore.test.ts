@@ -10,6 +10,7 @@ import { resolveComposerPlanMode } from "@/lib/planMode";
 
 vi.mock("@/lib/backend", () => ({
   getAgentSessionLogLines: vi.fn(),
+  getSessionSubagents: vi.fn().mockResolvedValue([]),
 }));
 
 import { getAgentSessionLogLines } from "@/lib/backend";
@@ -745,5 +746,37 @@ describe("sessionStore history", () => {
       error: "渠道已停用",
     });
     expect(useSessionStore.getState().pendingConfigurationBySession.s1).toBeUndefined();
+  });
+
+  it("updates subagentsBySession on stdout subagent lines and stops them on exit", () => {
+    const store = useSessionStore.getState();
+    store.onStdout({
+      profile_id: "p",
+      workspace_id: null,
+      session_kind: "agent",
+      session_record_id: "s1",
+      session_event_id: "e1",
+      line: "[子 Agent 1(general) - 构建代码] 启动（general）",
+    });
+
+    const subagents = useSessionStore.getState().subagentsBySession.s1;
+    expect(subagents).toBeDefined();
+    expect(subagents).toHaveLength(1);
+    expect(subagents[0].id).toBe("[子 Agent 1(general) - 构建代码]");
+    expect(subagents[0].kind).toBe("general");
+    expect(subagents[0].description).toBe("构建代码");
+    expect(subagents[0].status).toBe("running");
+
+    // Exit marks running subagents as stopped
+    store.onExit({
+      profile_id: "p",
+      workspace_id: null,
+      session_kind: "agent",
+      session_record_id: "s1",
+      code: 0,
+    });
+
+    const exitedSubagents = useSessionStore.getState().subagentsBySession.s1;
+    expect(exitedSubagents[0].status).toBe("stopped");
   });
 });
