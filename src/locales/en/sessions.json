@@ -140,6 +140,7 @@
   "model": "Model",
   "effort": "Reasoning",
   "permissionMode": "Permission",
+  "computerControlOn": "Computer control on",
   "permission": {
     "default": {
       "title": "Confirm before change",

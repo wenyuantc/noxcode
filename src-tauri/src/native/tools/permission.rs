@@ -24,6 +24,8 @@ pub enum NativeToolRiskKind {
     /// 创建 / 删除定时自动化。
     Automation,
     ExternalPath,
+    /// 本机桌面截屏与键鼠注入。
+    Computer,
 }
 
 impl NativeToolRiskKind {
@@ -38,6 +40,7 @@ impl NativeToolRiskKind {
             Self::Rule => "权限规则",
             Self::Automation => "自动化",
             Self::ExternalPath => "工作区外访问",
+            Self::Computer => "电脑控制",
         }
     }
 }
@@ -93,6 +96,10 @@ pub fn classify_native_tool_risk(
             }
         }
         "Bash" => classify_bash(&arg_string(arguments, "command")),
+        "Computer" => NativeToolRisk::High {
+            kind: NativeToolRiskKind::Computer,
+            summary: super::desktop::risk_summary(arguments),
+        },
         _ => NativeToolRisk::Low,
     }
 }
@@ -230,6 +237,7 @@ fn risk_rank(kind: NativeToolRiskKind) -> u8 {
         NativeToolRiskKind::Opaque => 3,
         NativeToolRiskKind::Delete => 4,
         NativeToolRiskKind::Push => 5,
+        NativeToolRiskKind::Computer => 5,
         NativeToolRiskKind::ForceGit => 6,
     }
 }
@@ -1551,5 +1559,17 @@ mod tests {
             classify_native_tool_risk("Skill", r#"{"name":"demo"}"#, None, false),
             NativeToolRisk::Low
         );
+        assert!(matches!(
+            classify_native_tool_risk(
+                "Computer",
+                r#"{"action":"click","x":10,"y":20}"#,
+                None,
+                false
+            ),
+            NativeToolRisk::High {
+                kind: NativeToolRiskKind::Computer,
+                summary,
+            } if summary.contains("点击") && summary.contains("10")
+        ));
     }
 }

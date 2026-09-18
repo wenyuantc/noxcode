@@ -1653,6 +1653,8 @@ async fn configure_local_tool_runtime(
             true,
         )));
     }
+    runner.ctx.computer_control_enabled =
+        settings.computer_control_enabled && runner.ctx.ssh.is_none();
     let processes = Arc::new(crate::native::tools::processes::ProcessRegistry::new());
     let emit_app = app.clone();
     let emit_session = session_record_id.to_string();
@@ -5831,9 +5833,7 @@ mod tests {
             ),
             (
                 "evt-2".to_string(),
-                Some(
-                    r#"{"nox":1,"line":"[子 Agent 1(general) - 构建代码] 正在编译"}"#.to_string(),
-                ),
+                Some(r#"{"nox":1,"line":"[子 Agent 1(general) - 构建代码] 正在编译"}"#.to_string()),
                 "2026-09-17 10:00:05".to_string(),
             ),
             (

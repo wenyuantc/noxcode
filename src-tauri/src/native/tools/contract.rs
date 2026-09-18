@@ -54,6 +54,7 @@ pub enum PermissionCapability {
     Lsp,
     Process,
     Worktree,
+    Computer,
 }
 
 impl PermissionCapability {
@@ -80,6 +81,7 @@ impl PermissionCapability {
             Self::Lsp => "lsp",
             Self::Process => "process",
             Self::Worktree => "worktree",
+            Self::Computer => "computer",
         }
     }
 }
@@ -339,5 +341,6 @@ mod tests {
             PermissionCapability::SessionContextRead.as_str(),
             "session.context.read"
         );
+        assert_eq!(PermissionCapability::Computer.as_str(), "computer");
     }
 }

@@ -6,6 +6,7 @@ import {
   FileText,
   Laptop,
   Loader2,
+  Monitor,
   Server,
   Square,
   WandSparkles,
@@ -978,6 +979,12 @@ export function Composer({ compact = false }: { compact?: boolean }) {
               </>
             )}
           </div>
+          {native?.computer_control_enabled && !sessionWorkspace?.ssh_config_id ? (
+            <div className="inline-flex h-7 items-center gap-1.5 rounded-lg border border-border/70 bg-background/80 px-2 text-xs font-medium text-foreground/80 shadow-2xs">
+              <Monitor className="size-3.5 text-muted-foreground" />
+              <span>{t("sessions:computerControlOn")}</span>
+            </div>
+          ) : null}
           <BranchPicker />
           <WorktreeToggle />
         </div>

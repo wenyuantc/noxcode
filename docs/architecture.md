@@ -162,4 +162,4 @@ P6 打包  ←  P5 前端  ←  P4.5 ← P4.4 ← P4.3 ← P4.2 ← P4.1
 
 P2 必须在 tools/ssh 之前；P3 必须在 model 客户端测通之前；P2.5 必须在 session 接线之前。当前仓库已完成 P0、P1、P2、P2.5、P3、P4、P5、P6。
 
-第一版不做：斜杠命令完整版、插件打包、PTY、内置 ripgrep、浏览器 / CUA、OpenTelemetry。见 `plan.md` §6。
+第一版不做：斜杠命令完整版、插件打包、PTY、内置 ripgrep、浏览器自动化 / Playwright、OpenTelemetry。本机电脑控制（截屏 + 键鼠）已作为 Native Agent 的 `Computer` 工具提供，默认关闭。见 [`native.md`](native.md)。

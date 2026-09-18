@@ -81,7 +81,11 @@ export function NativeRuntimeSection() {
   const persist = useCallback(
     async (value: NativeSettings) => {
       try {
-        const { lsp_enabled: _lspEnabled, ...runtimeUpdates } = value;
+        const {
+          lsp_enabled: _lspEnabled,
+          computer_control_enabled: _computerControlEnabled,
+          ...runtimeUpdates
+        } = value;
         const updated = await updateNativeSettings(runtimeUpdates);
         setNative(updated);
       } catch {

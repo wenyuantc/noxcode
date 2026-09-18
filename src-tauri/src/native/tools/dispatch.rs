@@ -176,6 +176,8 @@ pub struct ToolCtx {
     pub app_config_dir: Option<std::path::PathBuf>,
     pub worktree_root: String,
     pub worktree_fetch_before_create: bool,
+    /// 设置页总开关；关闭时即使用户或模型误调用也拒绝。
+    pub computer_control_enabled: bool,
 }
 
 impl ToolCtx {
@@ -222,6 +224,7 @@ impl ToolCtx {
             app_config_dir: None,
             worktree_root: String::new(),
             worktree_fetch_before_create: false,
+            computer_control_enabled: false,
         }
     }
 
@@ -427,6 +430,7 @@ impl ToolCtx {
         child.on_plan_mode_change = None;
         child.background = None;
         child.coordinator = None;
+        child.computer_control_enabled = false;
         child
     }
 
@@ -668,6 +672,7 @@ async fn dispatch(ctx: &ToolCtx, name: &str, arguments: &str) -> Result<ToolOutp
             .await
             .map(ToolOutput::text),
         "ExitWorktree" => call_exit_worktree(ctx).await.map(ToolOutput::text),
+        "Computer" => super::desktop::execute(ctx, arguments).await,
         other if ctx.mcp.has_tool(other).await => {
             ctx.mcp.call(other, arguments).await.map(ToolOutput::text)
         }
@@ -3684,5 +3689,26 @@ mod tests {
         assert_eq!(restored.path, worktree.to_string_lossy());
         assert_eq!(ctx.active_workspace_root(), worktree);
         assert!(!ctx.restore_isolation_worktree().expect("again").switched);
+    }
+
+    #[tokio::test]
+    async fn computer_is_rejected_when_disabled_or_in_plan_mode() {
+        let root = temp_root("computer-gate");
+        let mut ctx = ctx_for(&root);
+        let err = execute_tool(&ctx, "Computer", r#"{"action":"screenshot"}"#)
+            .await
+            .expect_err("disabled");
+        assert!(err.contains("电脑控制未开启"), "{err}");
+
+        ctx.computer_control_enabled = true;
+        ctx.set_plan_mode(true);
+        let err = execute_tool(&ctx, "Computer", r#"{"action":"screenshot"}"#)
+            .await
+            .expect_err("plan");
+        assert!(
+            err.contains("只读规划模式禁止") || err.contains("计划模式"),
+            "{err}"
+        );
+        let _ = std::fs::remove_dir_all(root);
     }
 }
