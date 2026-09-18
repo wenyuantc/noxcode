@@ -13,6 +13,7 @@
     "ssh": "SSH connections",
     "runtime": "Native runtime",
     "lsp": "LSP",
+    "computer": "Computer control",
     "subagents": "Subagents",
     "mcp": "MCP servers",
     "skills": "Skills",
@@ -329,6 +330,20 @@
         "testSuccess": "{{label}} ready · {{detail}}",
     "testWarning": "workspace/symbol call failed: {{detail}}",
     "loadFailed": "Could not detect language servers: {{detail}}"
+  },
+  "computer": {
+    "hint": "Let the Native Agent screenshot this machine and operate the mouse and keyboard by coordinates. Off by default; unavailable over SSH, in plan mode, or for sub-agents.",
+    "enabled": "Enable computer control",
+    "enabledHint": "When on, local execution sessions advertise the Computer tool. The model can see the screen and click, type, or scroll. Off by default.",
+    "permissionTitle": "System permissions",
+    "permissionHint": "Screenshot and input injection need OS permission. Missing grants return a Chinese error instead of crashing.",
+    "openSettings": "Open system settings",
+    "loading": "Reading system permission status…",
+    "screenshot": "Screen recording / capture",
+    "input": "Accessibility / input injection",
+    "statusFailed": "Could not read system permissions: {{detail}}",
+    "riskTitle": "Risk",
+    "riskHint": "When enabled, the model can see the current screen and operate the mouse and keyboard. Use it only with a trusted channel and workspace. SSH workspaces and plan mode do not get this tool."
   },
   "usage": {
     "title": "Usage",
@@ -834,7 +849,8 @@
       "skill": "Skill",
       "todo_read": "Read todos",
       "todo_write": "Write todos",
-      "ask_user": "Ask user"
+      "ask_user": "Ask user",
+      "computer": "Computer control"
     },
     "source": {
       "command": "Command",

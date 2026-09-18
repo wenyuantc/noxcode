@@ -21,6 +21,7 @@ import {
   Wrench,
   Zap,
   GitFork,
+  Monitor,
 } from "lucide-react";
 
 import { formatAppVersionLabel, getAppVersion, packageAppVersion } from "@/lib/appUpdate";
@@ -35,6 +36,7 @@ import { DatabaseSection } from "./DatabaseSection";
 import { GeneralSection } from "./GeneralSection";
 import { AiChannelsSettingsTab } from "./AiChannelsSettingsTab";
 import { McpSettingsTab } from "./McpSettingsTab";
+import { ComputerSection } from "./ComputerSection";
 import { LspSection } from "./LspSection";
 import { MemorySection } from "./MemorySection";
 import { NativeHooksSettingsCard } from "./NativeHooksSettingsCard";
@@ -59,6 +61,7 @@ const SECTION_META: Record<string, SectionMeta> = {
   ssh: { icon: Terminal, descriptionKey: "ssh.description" },
   runtime: { icon: Zap, descriptionKey: "runtime.hint" },
   lsp: { icon: Code2, descriptionKey: "lsp.hint" },
+  computer: { icon: Monitor, descriptionKey: "computer.hint" },
   permissions: { icon: ShieldCheck, descriptionKey: "permissions.description" },
   memory: { icon: Brain, descriptionKey: "memory.description" },
   automations: { icon: Clock, descriptionKey: "automations.hint" },
@@ -82,6 +85,7 @@ const GROUPS = [
     items: [
       "runtime",
       "lsp",
+      "computer",
       "permissions",
       "memory",
       "automations",
@@ -97,6 +101,8 @@ const GROUPS = [
     items: ["usage", "database", "about"],
   },
 ] as const;
+
+export const SETTINGS_NAV_GROUPS = GROUPS;
 
 export function SettingsBrandFooter({ version }: { version: string }) {
   const label = formatAppVersionLabel(version);
@@ -243,6 +249,7 @@ export function SettingsLayout() {
             {current === "ssh" ? <SshSettingsSection /> : null}
             {current === "runtime" ? <NativeRuntimeSection /> : null}
             {current === "lsp" ? <LspSection /> : null}
+            {current === "computer" ? <ComputerSection /> : null}
             {current === "permissions" ? <PermissionRulesSection /> : null}
             {current === "memory" ? <MemorySection /> : null}
             {current === "automations" ? <AutomationsSection /> : null}

@@ -401,6 +401,21 @@ pub fn tool_contracts() -> Vec<ToolContract> {
             budget(64_000, ResultStrategy::Artifact, PreviewDirection::Head),
             ToolTimeout::none(),
         ),
+        contract(
+            "Computer",
+            "截取本机桌面并按坐标点击、输入、滚动；高风险，默认关闭",
+            false,
+            true,
+            false,
+            SideEffectScope::System,
+            RiskLevel::High,
+            true,
+            false,
+            PermissionCapability::Computer,
+            &[ToolName, Input],
+            budget(8_000, ResultStrategy::Truncate, PreviewDirection::Head),
+            ToolTimeout::fixed(15_000),
+        ),
     ];
     for name in ["AskUserQuestion", "AskQuestion"] {
         let mut ask = contract(
@@ -998,6 +1013,45 @@ fn core_tool_specs() -> Vec<ToolSpec> {
                 "required": ["description", "prompt"]
             }),
         ),
+        spec(
+            "Computer",
+            "Control the user's local desktop. First take a screenshot, then send click / double_click / move / drag / scroll / type / keypress using coordinates in pixels from the top-left of that screenshot. After a write action the tool returns a fresh screenshot (images) plus display, width, height, scale_x, scale_y. If the image was downscaled, multiply model coordinates by those scales before assuming physical pixels. keys uses names such as ctrl, super, enter; super is Command on macOS and Win on Windows. Not available over SSH, in plan mode, for sub-agents, or when computer_control_enabled is off. Requires OS screen-recording / accessibility (or portal) permission.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "action": {
+                        "type": "string",
+                        "enum": ["screenshot", "click", "double_click", "move", "drag", "scroll", "type", "keypress", "wait"]
+                    },
+                    "x": {"type": "number", "description": "Pixel X relative to the latest screenshot top-left."},
+                    "y": {"type": "number", "description": "Pixel Y relative to the latest screenshot top-left."},
+                    "button": {"type": "string", "enum": ["left", "right", "middle"]},
+                    "path": {
+                        "type": "array",
+                        "description": "Drag points [{x,y}, ...].",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "x": {"type": "number"},
+                                "y": {"type": "number"}
+                            },
+                            "required": ["x", "y"]
+                        }
+                    },
+                    "scroll_x": {"type": "integer"},
+                    "scroll_y": {"type": "integer"},
+                    "text": {"type": "string"},
+                    "keys": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Key combo such as [\"ctrl\",\"s\"] or [\"super\",\"q\"]."
+                    },
+                    "duration_ms": {"type": "integer", "description": "Wait duration; only for action=wait."},
+                    "display": {"type": "integer", "description": "Display index; default is the primary display."}
+                },
+                "required": ["action"]
+            }),
+        ),
     ]
 }
 
@@ -1030,6 +1084,7 @@ mod tests {
         assert!(!is_read_only_native_tool("Bash"));
         assert!(!is_read_only_native_tool("ApplyPatch"));
         assert!(!is_read_only_native_tool("Agent"));
+        assert!(!is_read_only_native_tool("Computer"));
         let names = read_only_tool_names();
         assert_eq!(
             names,
@@ -1084,6 +1139,15 @@ mod tests {
         assert!(!bash.allowed_in_plan_mode);
         assert_eq!(bash.result_budget.strategy, ResultStrategy::Artifact);
         assert_eq!(bash.result_budget.preview, PreviewDirection::Tail);
+        let computer = builtin_contract("Computer").expect("computer contract");
+        assert_eq!(computer.permission, PermissionCapability::Computer);
+        assert_eq!(computer.side_effect_scope, SideEffectScope::System);
+        assert_eq!(computer.risk_level, RiskLevel::High);
+        assert!(computer.needs_approval);
+        assert!(computer.destructive);
+        assert!(!computer.concurrent_safe);
+        assert!(!computer.allowed_in_plan_mode);
+        assert_eq!(computer.timeout.default_ms, 15_000);
     }
 
     #[test]
@@ -1110,6 +1174,7 @@ mod tests {
             "Monitor",
             "EnterWorktree",
             "ExitWorktree",
+            "Computer",
         ] {
             assert!(names.contains(&expected.to_string()), "missing {expected}");
         }

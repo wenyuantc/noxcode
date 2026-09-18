@@ -150,6 +150,8 @@ struct RawNativeSettings {
     #[serde(default)]
     lsp_enabled: Option<bool>,
     #[serde(default)]
+    computer_control_enabled: Option<bool>,
+    #[serde(default)]
     bash_sandbox_enabled: Option<bool>,
     #[serde(default)]
     auto_compact_threshold_percent: Option<i32>,
@@ -497,6 +499,7 @@ fn default_settings() -> NativeSettings {
         shell_snapshot_enabled: true,
         rg_sidecar_enabled: true,
         lsp_enabled: true,
+        computer_control_enabled: false,
         bash_sandbox_enabled: false,
         auto_compact_threshold_percent: DEFAULT_NATIVE_AUTO_COMPACT_THRESHOLD_PERCENT,
         microcompact_enabled: true,
@@ -535,6 +538,7 @@ fn normalize_settings(raw: RawNativeSettings) -> NativeSettings {
         shell_snapshot_enabled: raw.shell_snapshot_enabled.unwrap_or(true),
         rg_sidecar_enabled: raw.rg_sidecar_enabled.unwrap_or(true),
         lsp_enabled: raw.lsp_enabled.unwrap_or(true),
+        computer_control_enabled: raw.computer_control_enabled.unwrap_or(false),
         bash_sandbox_enabled: raw.bash_sandbox_enabled.unwrap_or(false),
         auto_compact_threshold_percent: normalize_native_auto_compact_threshold_percent(
             raw.auto_compact_threshold_percent,
@@ -634,6 +638,7 @@ fn save_native_settings<R: Runtime>(
         shell_snapshot_enabled: Some(settings.shell_snapshot_enabled),
         rg_sidecar_enabled: Some(settings.rg_sidecar_enabled),
         lsp_enabled: Some(settings.lsp_enabled),
+        computer_control_enabled: Some(settings.computer_control_enabled),
         bash_sandbox_enabled: Some(settings.bash_sandbox_enabled),
         auto_compact_threshold_percent: Some(normalize_native_auto_compact_threshold_percent(
             Some(settings.auto_compact_threshold_percent),
@@ -804,6 +809,9 @@ async fn merge_native_settings<R: Runtime>(
     if let Some(lsp_enabled) = updates.lsp_enabled {
         next.lsp_enabled = lsp_enabled;
     }
+    if let Some(computer_control_enabled) = updates.computer_control_enabled {
+        next.computer_control_enabled = computer_control_enabled;
+    }
     if let Some(bash_sandbox_enabled) = updates.bash_sandbox_enabled {
         next.bash_sandbox_enabled = bash_sandbox_enabled;
     }
@@ -846,7 +854,7 @@ async fn merge_native_settings<R: Runtime>(
 
 fn native_settings_activity_details(settings: &NativeSettings) -> String {
     format!(
-        "{}；{}；权限模式：{}；确认超时：{}；同轮子 Agent 上限：{}；子 Agent 策略：{}；子 Agent 预算占比：{}%；上下文窗口：{} token；自定义上下文：{}；会话预算：{}；单条工具结果：{} token；工具后自动检查点：{}；检查点保留：{} 天；桌面通知：{}；钩子：{} 条",
+        "{}；{}；权限模式：{}；确认超时：{}；同轮子 Agent 上限：{}；子 Agent 策略：{}；子 Agent 预算占比：{}%；上下文窗口：{} token；自定义上下文：{}；会话预算：{}；单条工具结果：{} token；工具后自动检查点：{}；检查点保留：{} 天；桌面通知：{}；电脑控制：{}；钩子：{} 条",
         max_turns_activity_details(settings.max_turns),
         max_subagent_turns_activity_details(settings.max_subagent_turns),
         permission_mode_label_zh(&settings.permission_mode),
@@ -877,6 +885,11 @@ fn native_settings_activity_details(settings: &NativeSettings) -> String {
         },
         settings.checkpoint_retention_days,
         if settings.desktop_notifications {
+            "开"
+        } else {
+            "关"
+        },
+        if settings.computer_control_enabled {
             "开"
         } else {
             "关"
@@ -1146,6 +1159,7 @@ mod tests {
         assert!(settings.shell_snapshot_enabled);
         assert!(settings.rg_sidecar_enabled);
         assert!(settings.lsp_enabled);
+        assert!(!settings.computer_control_enabled);
         assert!(!settings.bash_sandbox_enabled);
         assert!(settings.hooks.is_empty());
         assert!(settings.global_prompt_template.is_empty());

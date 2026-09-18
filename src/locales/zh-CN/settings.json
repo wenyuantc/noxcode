@@ -13,6 +13,7 @@
     "ssh": "SSH 连接",
     "runtime": "内置 Agent 运行时",
     "lsp": "LSP",
+    "computer": "电脑控制",
     "subagents": "子智能体",
     "mcp": "MCP 服务器",
     "skills": "技能",
@@ -329,6 +330,20 @@
         "testSuccess": "{{label}} 可用 · {{detail}}",
     "testWarning": "workspace/symbol 调用异常：{{detail}}",
     "loadFailed": "无法检测 language server：{{detail}}"
+  },
+  "computer": {
+    "hint": "让 Native Agent 截取本机屏幕并按坐标操作键鼠。默认关闭；SSH、计划模式与子 Agent 不可用。",
+    "enabled": "启用电脑控制",
+    "enabledHint": "开启后，本地执行会话会提供 Computer 工具。模型能看到屏幕并点击、输入、滚动。默认关闭。",
+    "permissionTitle": "系统权限",
+    "permissionHint": "截屏与键鼠注入依赖操作系统授权。未授权时工具返回中文错误，不会崩溃。",
+    "openSettings": "打开系统设置",
+    "loading": "正在读取系统权限状态…",
+    "screenshot": "屏幕录制 / 截屏",
+    "input": "辅助功能 / 键鼠注入",
+    "statusFailed": "无法读取系统权限：{{detail}}",
+    "riskTitle": "风险说明",
+    "riskHint": "开启后模型能看到当前屏幕并操作鼠标键盘。请只在信任当前渠道与工作区时使用；SSH 工作区和计划模式不会提供该工具。"
   },
   "usage": {
     "title": "使用统计",
@@ -834,7 +849,8 @@
       "skill": "技能",
       "todo_read": "读待办",
       "todo_write": "写待办",
-      "ask_user": "提问"
+      "ask_user": "提问",
+      "computer": "电脑控制"
     },
     "source": {
       "command": "命令",

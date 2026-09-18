@@ -45,6 +45,12 @@ tauri-plugin-updater = "2.11.0"
 tauri-plugin-process = "2.3.1"
 russh = { version = "0.63", default-features = false, features = ["ring", "flate2", "rsa"] }
 ssh2-config = "0.8"
+# xcap 0.6+ 需要 edition 2024 / 更新的 rustc；0.4.1 覆盖 X11 / Wayland / macOS / Windows。
+xcap = "=0.4.1"
+# 默认 feature `xdo` 会链 libxdo（运行时外部依赖）。Linux 改走纯 Rust 的 x11rb。
+enigo = { version = "=0.3.0", default-features = false, features = ["x11rb"] }
+# 0.25.8+ 抬高 MSRV；钉在 1.83 可编译的 0.25.6。
+image = { version = "=0.25.6", default-features = false, features = ["png"] }
 
 [dev-dependencies]
 rand = "0.10"

@@ -140,6 +140,7 @@
   "model": "模型",
   "effort": "思考等级",
   "permissionMode": "权限",
+  "computerControlOn": "电脑控制已开启",
   "permission": {
     "default": {
       "title": "变更前确认",
