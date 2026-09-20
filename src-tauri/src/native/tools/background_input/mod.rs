@@ -28,9 +28,15 @@ impl BackgroundError {
     }
 
     pub fn into_message(self) -> String {
+        self.to_string()
+    }
+}
+
+impl std::fmt::Display for BackgroundError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Unavailable(reason) => format_background_unavailable(&reason),
-            Self::Failed(reason) => reason,
+            Self::Unavailable(reason) => write!(f, "{}", format_background_unavailable(reason)),
+            Self::Failed(reason) => f.write_str(reason),
         }
     }
 }
