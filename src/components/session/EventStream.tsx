@@ -30,6 +30,7 @@ import { useSessionStore } from "@/stores/sessionStore";
 import { AssistantMarkdown } from "./AssistantMarkdown";
 import { BackgroundNoticeRow } from "./BackgroundNoticeRow";
 import { CompactBoundaryRow } from "./CompactBoundaryRow";
+import { ComputerControlRow } from "./ComputerControlRow";
 import { FileChangeRow } from "./FileChangeRow";
 import { GoalRow } from "./GoalRow";
 import { RetryRow } from "./RetryRow";
@@ -86,6 +87,13 @@ function renderSegment(
         <TerminalRow
           item={segment.items[0]!}
           running={running && !hasToolResult(segment.items[0]!)}
+        />
+      );
+    case "computer":
+      return (
+        <ComputerControlRow
+          items={segment.items}
+          running={running && toolsStillRunning(segment.items)}
         />
       );
     case "file":

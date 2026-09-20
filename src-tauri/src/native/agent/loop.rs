@@ -2539,6 +2539,9 @@ fn tool_args_summary(name: &str, arguments: &str) -> String {
         "WebFetch" => json_opt(&args, "url").unwrap_or_default(),
         "WebSearch" => json_opt(&args, "query").unwrap_or_default(),
         "TaskOutput" | "TaskStop" | "SendMessage" => json_opt(&args, "task_id").unwrap_or_default(),
+        "Computer" => crate::native::tools::desktop::parse_computer_args(arguments)
+            .map(|parsed| parsed.zh_brief())
+            .unwrap_or_else(|_| json_string(&args, "action")),
         _ => compact_args(&args),
     }
 }
@@ -3625,6 +3628,25 @@ mod tests {
             "[MCP工具] fs.tools / list-files /tmp"
         );
         assert_eq!(tool_event_title("[读取] src/main.ts"), "读取 src/main.ts");
+    }
+
+    #[test]
+    fn tool_args_summary_covers_computer() {
+        assert_eq!(
+            tool_args_summary("Computer", r#"{"action":"wait","duration_ms":500}"#),
+            "等待 500 ms"
+        );
+        assert_eq!(
+            tool_args_summary("Computer", r#"{"action":"click","x":100,"y":200}"#),
+            "点击 (100, 200)"
+        );
+        assert_eq!(
+            tool_args_summary(
+                "Computer",
+                r#"{"action":"get_app_state","app":"Safari"}"#
+            ),
+            "读取状态 Safari"
+        );
     }
 
     #[test]

@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   buildTurnBlocks,
+  buildTurnSegments,
   changedFilesFromItems,
   classifyLine,
   commandText,
@@ -11,6 +12,9 @@ import {
   groupSessionLines,
   hydrateSessionLine,
   isCommandTool,
+  isComputerTool,
+  parseComputerStep,
+  summarizeComputerActions,
   isHiddenSessionCeremonyLine,
   type RawSessionLine,
   latestTodos,
@@ -1330,6 +1334,139 @@ describe("sessionLines", () => {
       expect(lineToneClass("tool", "[工具] Glob src/")).not.toContain("cyan");
       expect(lineToneClass("tool_result", "[工具结果] ok")).not.toContain("cyan");
       expect(lineToneClass("tool", "[工具] Glob src/")).toContain("text-foreground");
+    });
+  });
+
+  describe("computer control", () => {
+    it("classifies [电脑控制] as tool", () => {
+      expect(classifyLine("[电脑控制] 截图")).toBe("tool");
+      expect(classifyLine("[电脑控制] 点击 (551, 100)")).toBe("tool");
+      expect(classifyLine("[电脑控制] 等待 500 ms")).toBe("tool");
+    });
+
+    it("pairs computer control start with tool result and image", () => {
+      const img = {
+        name: "win.png",
+        mime_type: "image/png",
+        data_url: "data:image/png;base64,abc",
+      };
+      const startLine = {
+        id: "1",
+        sessionId: "s",
+        text: "[电脑控制] 截图",
+        createdAt: "2026-09-20T00:00:00Z",
+        tool: {
+          phase: "start" as const,
+          call_id: "call_1",
+          name: "Computer",
+          title: "电脑控制 截图",
+          args_summary: "截图",
+          image_names: [],
+        },
+      };
+      const resultLine = {
+        id: "2",
+        sessionId: "s",
+        text: "[工具结果]\n电脑控制 · 读取状态 Safari\n[#1] 窗口: 百度一下",
+        createdAt: "2026-09-20T00:00:01Z",
+        tool: {
+          phase: "result" as const,
+          call_id: "call_1",
+          name: "Computer",
+          title: "电脑控制 截图",
+          args_summary: "截图",
+          ok: true,
+          duration_ms: 350,
+          image_names: ["win.png"],
+        },
+        images: [img],
+      };
+
+      const grouped = groupSessionLines([startLine, resultLine]);
+      expect(grouped).toHaveLength(1);
+      expect(grouped[0]!.kind).toBe("tool");
+      expect(grouped[0]!.text).toBe("[电脑控制] 截图");
+      expect(grouped[0]!.result).toContain("电脑控制 · 读取状态 Safari");
+      expect(grouped[0]!.images).toEqual([img]);
+      expect(grouped[0]!.tool?.duration_ms).toBe(350);
+      expect(isComputerTool(grouped[0]!)).toBe(true);
+    });
+
+    it("merges consecutive computer tools into a single computer segment", () => {
+      const step1 = {
+        id: "1",
+        sessionId: "s",
+        text: "[电脑控制] 截图",
+        createdAt: "2026-09-20T00:00:00Z",
+        tool: {
+          phase: "start" as const,
+          call_id: "c1",
+          name: "Computer",
+          title: "电脑控制 截图",
+          image_names: [],
+        },
+      };
+      const step2 = {
+        id: "2",
+        sessionId: "s",
+        text: "[电脑控制] 点击 (551, 100)",
+        createdAt: "2026-09-20T00:00:01Z",
+        tool: {
+          phase: "start" as const,
+          call_id: "c2",
+          name: "Computer",
+          title: "电脑控制 点击 (551, 100)",
+          image_names: [],
+        },
+      };
+      const step3 = {
+        id: "3",
+        sessionId: "s",
+        text: "[电脑控制] 等待 500 ms",
+        createdAt: "2026-09-20T00:00:02Z",
+        tool: {
+          phase: "start" as const,
+          call_id: "c3",
+          name: "Computer",
+          title: "电脑控制 等待 500 ms",
+          image_names: [],
+        },
+      };
+
+      const grouped = groupSessionLines([step1, step2, step3]);
+      const segments = buildTurnSegments(grouped);
+      expect(segments).toHaveLength(1);
+      expect(segments[0]!.kind).toBe("computer");
+      expect(segments[0]!.items).toHaveLength(3);
+
+      const summary = summarizeComputerActions(segments[0]!.items);
+      expect(summary.count).toBe(3);
+      expect(summary.actions).toEqual(["截图", "点击", "等待"]);
+    });
+
+    it("parses computer tool headers with computer category and purple styling", () => {
+      const parsed = parseToolHeader({
+        id: "1",
+        kind: "tool",
+        text: "[电脑控制] 点击 (551, 100)",
+        createdAt: "2026-09-20T00:00:00Z",
+      });
+      expect(parsed.category).toBe("computer");
+      expect(parsed.badge).toBe("电脑控制");
+      expect(parsed.detail).toBe("点击 (551, 100)");
+      expect(parsed.badgeClass).toContain("purple");
+      expect(parsed.failed).toBe(false);
+    });
+
+    it("parses computer step action and verb", () => {
+      const step = parseComputerStep({
+        id: "1",
+        kind: "tool",
+        text: "[电脑控制] 截图",
+        createdAt: "2026-09-20T00:00:00Z",
+      });
+      expect(step.actionType).toBe("screenshot");
+      expect(step.verb).toBe("截图");
     });
   });
 });

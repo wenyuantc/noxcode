@@ -5,13 +5,13 @@ use std::ptr;
 
 use core_foundation::base::{CFRelease, CFTypeRef, TCFType};
 use core_foundation::string::{CFString, CFStringRef};
+use foreign_types::ForeignType;
 use core_graphics::display::{
     kCGWindowImageBoundsIgnoreFraming, kCGWindowListOptionIncludingWindow, CGWindowListCreateImage,
 };
 use core_graphics::event::{CGEvent, CGEventFlags, CGEventTapLocation, CGEventType, CGMouseButton};
 use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
 use core_graphics::geometry::{CGPoint, CGRect, CGSize};
-use foreign_types::ForeignType;
 use image::RgbaImage;
 
 use super::{window_root_element, BackgroundError, ResolvedAction};
@@ -568,7 +568,7 @@ fn ns_event_mouse(window_id: u32, x: f64, y: f64) -> Option<()> {
         x,
         y,
         CString::new("NSEvent"),
-        CStr::from_bytes_with_nul(b"\0"),
+        c"",
     );
     None
 }

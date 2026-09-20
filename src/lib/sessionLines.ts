@@ -19,7 +19,8 @@ export type TurnSegmentKind =
   | "compact"
   | "goal"
   | "plan"
-  | "background_notice";
+  | "background_notice"
+  | "computer";
 
 export type CompactTrigger = "auto" | "manual" | "reactive" | "downshift";
 
@@ -310,6 +311,7 @@ const TOOL_PREFIXES = [
   "[待办]",
   "[补丁]",
   "[MCP工具]",
+  "[电脑控制]",
 ];
 const SYSTEM_PREFIXES = [
   "[思考]",
@@ -618,7 +620,8 @@ export function classifyLine(text: string): SessionLineKind {
   return "assistant";
 }
 
-export type ToolHeaderCategory = "read" | "skill" | "search" | "sqlite" | "command" | "tool";
+export type ToolHeaderCategory =
+  "read" | "skill" | "search" | "sqlite" | "command" | "computer" | "tool";
 
 export interface ParsedToolHeader {
   category: ToolHeaderCategory;
@@ -632,6 +635,26 @@ export function parseToolHeader(item: GroupedSessionItem): ParsedToolHeader {
   const failed = item.ok === false || item.text.startsWith("[ERROR]");
   const body = sessionLineBody(item.text).trim();
   const firstLine = (body.split("\n")[0] ?? body).trim();
+
+  // 0. Computer control check
+  if (
+    firstLine.startsWith("[电脑控制]") ||
+    item.tool?.name === "Computer" ||
+    item.toolName?.startsWith("电脑控制")
+  ) {
+    const detail =
+      item.tool?.args_summary ||
+      (firstLine.startsWith("[电脑控制]")
+        ? firstLine.replace(/^\[电脑控制\]\s*/, "")
+        : (item.toolName?.replace(/^电脑控制\s*[·:]?\s*/, "") ?? ""));
+    return {
+      category: "computer",
+      badge: "电脑控制",
+      detail: detail.trim(),
+      badgeClass: "border-purple-500/30 bg-purple-500/10 text-purple-700 dark:text-purple-400",
+      failed,
+    };
+  }
 
   // 1. Skill check
   if (
@@ -1097,6 +1120,138 @@ export function isFileChangeTool(item: GroupedSessionItem): boolean {
   return body.startsWith("[写入]") || body.startsWith("[编辑]") || body.startsWith("[补丁]");
 }
 
+export function isComputerTool(item: GroupedSessionItem): boolean {
+  if (item.kind !== "tool" && item.kind !== "tool_result") return false;
+  if (item.tool?.name === "Computer") return true;
+  const body = sessionLineBody(item.text);
+  if (body.startsWith("[电脑控制]")) return true;
+  if (item.toolName?.startsWith("电脑控制")) return true;
+  return false;
+}
+
+export type ComputerActionType =
+  "screenshot" | "click" | "type" | "keypress" | "wait" | "scroll" | "drag" | "list_apps" | "other";
+
+export interface ParsedComputerStep {
+  actionType: ComputerActionType;
+  verb: string;
+  label: string;
+  app?: string;
+  durationMs?: number;
+  failed: boolean;
+  images: NativeToolImage[];
+  rawText: string;
+  result?: string;
+}
+
+export interface ComputerSummary {
+  count: number;
+  app?: string;
+  actions: string[];
+  lastAction?: string;
+  running: boolean;
+}
+
+export function parseComputerStep(item: GroupedSessionItem): ParsedComputerStep {
+  const failed = item.ok === false || item.tool?.ok === false || item.text.startsWith("[ERROR]");
+  const body = sessionLineBody(item.text).trim();
+  const line = (body.split("\n")[0] ?? body).trim();
+  const cleanLine = line
+    .replace(/^\[(?:电脑控制|工具)\]\s*/, "")
+    .replace(/^电脑控制\s*[·:]?\s*/, "");
+  const summary = item.tool?.args_summary || cleanLine;
+
+  let actionType: ComputerActionType = "other";
+  let verb = "操作";
+
+  if (
+    summary.includes("截图") ||
+    summary.includes("读取状态") ||
+    summary.toLowerCase().includes("screenshot") ||
+    summary.toLowerCase().includes("get_app_state")
+  ) {
+    actionType = "screenshot";
+    verb = "截图";
+  } else if (summary.includes("点击") || summary.toLowerCase().includes("click")) {
+    actionType = "click";
+    verb = "点击";
+  } else if (
+    summary.includes("输入") ||
+    summary.includes("设值") ||
+    summary.toLowerCase().includes("type") ||
+    summary.toLowerCase().includes("set_value")
+  ) {
+    actionType = "type";
+    verb = "输入";
+  } else if (summary.includes("按键") || summary.toLowerCase().includes("key")) {
+    actionType = "keypress";
+    verb = "按键";
+  } else if (summary.includes("等待") || summary.toLowerCase().includes("wait")) {
+    actionType = "wait";
+    verb = "等待";
+  } else if (summary.includes("滚动") || summary.toLowerCase().includes("scroll")) {
+    actionType = "scroll";
+    verb = "滚动";
+  } else if (summary.includes("拖拽") || summary.toLowerCase().includes("drag")) {
+    actionType = "drag";
+    verb = "拖拽";
+  } else if (summary.includes("列出应用") || summary.toLowerCase().includes("list_apps")) {
+    actionType = "list_apps";
+    verb = "列出应用";
+  }
+
+  let app: string | undefined;
+  const appMatch = summary.match(
+    /(?:读取状态|点击|输入|设值|在)\s+([A-Za-z0-9_\u4e00-\u9fa5]+)(?:\s+#[0-9]+|\s*\(|\s*$)/,
+  );
+  if (appMatch) {
+    const candidate = appMatch[1]?.trim();
+    if (candidate && !["前台", "后台", "坐标", "窗口", "屏幕"].includes(candidate)) {
+      app = candidate;
+    }
+  }
+
+  return {
+    actionType,
+    verb,
+    label: summary,
+    app,
+    durationMs: item.tool?.duration_ms ?? undefined,
+    failed,
+    images: item.images ?? [],
+    rawText: item.text,
+    result: item.result,
+  };
+}
+
+export function summarizeComputerActions(
+  items: GroupedSessionItem[],
+  running?: boolean,
+): ComputerSummary {
+  const steps = items.map(parseComputerStep);
+  const verbs: string[] = [];
+  let detectedApp: string | undefined;
+
+  for (const step of steps) {
+    if (!verbs.includes(step.verb)) {
+      verbs.push(step.verb);
+    }
+    if (!detectedApp && step.app) {
+      detectedApp = step.app;
+    }
+  }
+
+  const lastStep = steps[steps.length - 1];
+
+  return {
+    count: items.length,
+    app: detectedApp,
+    actions: verbs,
+    lastAction: lastStep?.label,
+    running: Boolean(running && toolsStillRunning(items)),
+  };
+}
+
 export function summarizeTools(items: GroupedSessionItem[]): ToolSummary {
   const summary: ToolSummary = { files: 0, lists: 0, searches: 0, queries: 0 };
   for (const item of items) {
@@ -1288,9 +1443,13 @@ function normalizeOrphanToolResults(items: GroupedSessionItem[]): GroupedSession
         ? item.tool.args_summary
           ? `[命令] ${item.tool.args_summary}`
           : `[命令] ${title}`
-        : item.tool.title
-          ? `[工具] ${item.tool.title}`
-          : item.text;
+        : item.tool.name === "Computer"
+          ? item.tool.args_summary
+            ? `[电脑控制] ${item.tool.args_summary}`
+            : `[电脑控制] ${title}`
+          : item.tool.title
+            ? `[工具] ${item.tool.title}`
+            : item.text;
     return {
       ...item,
       kind: "tool",
@@ -1347,6 +1506,7 @@ function segmentKey(item: GroupedSessionItem): TurnSegmentKind | "skip" | "file_
   if (isCommandTool(item)) return "terminal";
   if (parseTodoList(body)) return "todo";
   if (isFileChangeTool(item)) return "file_change";
+  if (isComputerTool(item)) return "computer";
   if (item.kind === "tool" || item.kind === "tool_result") return "tools";
   if (item.kind === "assistant") return "assistant";
   return "system";

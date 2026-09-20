@@ -100,25 +100,15 @@ pub fn capture_app_window(target: &AppTarget) -> Result<super::app_target::Windo
     #[cfg(target_os = "macos")]
     {
         match macos::capture_window_image(target) {
-            Ok(image) => return Ok(image),
-            Err(error) => {
-                if let Ok(fallback) = super::app_target::capture_window(target) {
-                    return Ok(fallback);
-                }
-                return Err(error);
-            }
+            Ok(image) => Ok(image),
+            Err(error) => super::app_target::capture_window(target).map_err(|_| error),
         }
     }
     #[cfg(target_os = "windows")]
     {
         match windows::capture_window_image(target) {
-            Ok(image) => return Ok(image),
-            Err(error) => {
-                if let Ok(fallback) = super::app_target::capture_window(target) {
-                    return Ok(fallback);
-                }
-                return Err(error);
-            }
+            Ok(image) => Ok(image),
+            Err(error) => super::app_target::capture_window(target).map_err(|_| error),
         }
     }
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]

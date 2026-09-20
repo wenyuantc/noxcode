@@ -12,6 +12,8 @@ export function SegmentCard({
   running = false,
   tone = "default",
   defaultOpen = false,
+  open: controlledOpen,
+  onOpenChange,
   contentClassName,
   children,
 }: {
@@ -22,12 +24,24 @@ export function SegmentCard({
   running?: boolean;
   tone?: "default" | "danger";
   defaultOpen?: boolean;
+  open?: boolean;
+  onOpenChange?: (open: boolean) => void;
   contentClassName?: string;
   children: ReactNode;
 }) {
   const { t } = useTranslation("sessions");
-  const [open, setOpen] = useState(defaultOpen);
+  const [internalOpen, setInternalOpen] = useState(defaultOpen);
+  const isControlled = controlledOpen !== undefined;
+  const open = isControlled ? controlledOpen : internalOpen;
   const danger = tone === "danger";
+
+  const handleToggle = () => {
+    const next = !open;
+    if (!isControlled) {
+      setInternalOpen(next);
+    }
+    onOpenChange?.(next);
+  };
 
   return (
     <div
@@ -42,7 +56,7 @@ export function SegmentCard({
         type="button"
         aria-expanded={open}
         className="flex w-full cursor-pointer items-center gap-2 px-3 py-2 text-left text-xs"
-        onClick={() => setOpen((value) => !value)}
+        onClick={handleToggle}
       >
         <span
           className={cn(
