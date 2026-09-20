@@ -420,6 +420,8 @@ pub struct NativeSettings {
     #[serde(default = "default_true")]
     pub lsp_enabled: bool,
     #[serde(default)]
+    pub computer_control_enabled: bool,
+    #[serde(default)]
     pub bash_sandbox_enabled: bool,
     #[serde(default = "default_auto_compact_threshold_percent")]
     pub auto_compact_threshold_percent: i32,
@@ -577,6 +579,8 @@ pub struct UpdateNativeSettings {
     pub rg_sidecar_enabled: Option<bool>,
     #[serde(default)]
     pub lsp_enabled: Option<bool>,
+    #[serde(default)]
+    pub computer_control_enabled: Option<bool>,
     #[serde(default)]
     pub bash_sandbox_enabled: Option<bool>,
     #[serde(default)]

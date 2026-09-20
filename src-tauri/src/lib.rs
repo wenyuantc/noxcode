@@ -170,6 +170,8 @@ pub fn run() {
             native::tools::lsp::list_lsp_servers,
             native::tools::lsp::install_lsp_server,
             native::tools::lsp::test_lsp_server,
+            native::tools::desktop::get_computer_permission_status,
+            native::tools::desktop::open_computer_privacy_settings,
             native::skills::list_native_global_skills,
             native::skills::list_native_skills,
             native::skills::open_native_skills_dir,

@@ -48,6 +48,7 @@ const CAPABILITIES: PermissionCapability[] = [
   "web_search",
   "subagent",
   "skill",
+  "computer",
 ];
 const SOURCES: PermissionPatternSource[] = ["command", "path", "tool_name", "input"];
 const EFFECTS: PermissionRuleEffect[] = ["allow", "deny", "ask"];

@@ -1,11 +1,20 @@
 import { renderToStaticMarkup } from "react-dom/server";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-import type { NativeSettings } from "@/lib/types";
+import type { ComputerPermissionStatus, NativeSettings } from "@/lib/types";
 import { useSettingsStore } from "@/stores/settingsStore";
-import { NativeRuntimeSection } from "./NativeRuntimeSection";
+import { ComputerSection, computerFlagLabel } from "./ComputerSection";
 
 vi.mock("@/lib/backend", () => ({
+  getComputerPermissionStatus: vi.fn().mockResolvedValue({
+    platform: "linux",
+    session_type: "x11",
+    screenshot: { granted: null, label: "X11 截屏", detail: "X11" },
+    input: { granted: null, label: "X11 键鼠注入", detail: "X11" },
+    can_open_settings: false,
+    hint: "risk",
+  } satisfies ComputerPermissionStatus),
+  openComputerPrivacySettings: vi.fn(),
   updateNativeSettings: vi.fn(),
 }));
 
@@ -67,17 +76,25 @@ function sampleNative(): NativeSettings {
   };
 }
 
-describe("NativeRuntimeSection", () => {
+describe("ComputerSection", () => {
   beforeEach(() => {
     useSettingsStore.setState({ native: sampleNative() });
   });
 
-  it("no longer hosts LSP toggle or install UI", () => {
-    const html = renderToStaticMarkup(<NativeRuntimeSection />);
-    expect(html).toContain("settings:runtime.toolRuntime");
-    expect(html).toContain("settings:runtime.bashSandbox");
-    expect(html).not.toContain("settings:runtime.lsp");
-    expect(html).not.toContain("settings:lsp.");
-    expect(html).not.toContain('id="native-lsp-enabled"');
+  it("renders the master switch and permission cards", () => {
+    const html = renderToStaticMarkup(<ComputerSection />);
+    expect(html).toContain("settings:computer.enabled");
+    expect(html).toContain("settings:computer.enabledHint");
+    expect(html).toContain("settings:computer.permissionTitle");
+    expect(html).toContain("settings:computer.riskTitle");
+    expect(html).toContain('id="native-computer-enabled"');
+  });
+});
+
+describe("computerFlagLabel", () => {
+  it("uses the backend label", () => {
+    expect(computerFlagLabel({ granted: false, label: "未授权屏幕录制", detail: "need" })).toBe(
+      "未授权屏幕录制",
+    );
   });
 });

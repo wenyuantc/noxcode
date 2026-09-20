@@ -586,6 +586,14 @@ impl AgentRunner {
         if self.ctx.ssh.is_some() {
             tools.retain(|tool| tool.name != "SQLiteQuery");
         }
+        let advertise_computer = self.ctx.computer_control_enabled
+            && self.ctx.ssh.is_none()
+            && !self.ctx.is_read_only()
+            && !self.ctx.is_plan_mode()
+            && self.depth == 0;
+        if !advertise_computer {
+            tools.retain(|tool| tool.name != "Computer");
+        }
         let read_only = self.ctx.is_read_only();
         let plan_mode = self.ctx.is_plan_mode();
         if self.depth > 0 || (read_only && !plan_mode) {
@@ -2463,6 +2471,12 @@ fn tool_start_line_ex(
             "[工具] ReadSessionContext {}",
             first_of(&args, &["session_id", "query"])
         ),
+        "Computer" => format!(
+            "[电脑控制] {}",
+            crate::native::tools::desktop::parse_computer_args(arguments)
+                .map(|parsed| parsed.zh_brief())
+                .unwrap_or_else(|_| json_string(&args, "action"))
+        ),
         other => format_generic_tool_line(other, &args, mcp_server, mcp_tool),
     }
 }
@@ -3844,6 +3858,7 @@ mod tests {
         assert!(plan_names.iter().any(|name| name == "Skill"));
         assert!(!plan_names.iter().any(|name| name == "Write"));
         assert!(!plan_names.iter().any(|name| name == "ApplyPatch"));
+        assert!(!plan_names.iter().any(|name| name == "Computer"));
         plan.set_plan_mode(false);
         plan.set_read_only(false);
         let exec_names = plan.tool_names();
@@ -4179,6 +4194,23 @@ mod tests {
             .iter()
             .any(|message| message.content.contains("done two")));
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn computer_is_advertised_only_for_local_enabled_parent() {
+        let (mut runner, root) = temp_runner();
+        assert!(!runner.tool_names().iter().any(|name| name == "Computer"));
+        runner.ctx.computer_control_enabled = true;
+        assert!(runner.tool_names().iter().any(|name| name == "Computer"));
+        runner.set_plan_mode(true);
+        runner.set_read_only(true);
+        assert!(!runner.tool_names().iter().any(|name| name == "Computer"));
+        runner.set_plan_mode(false);
+        runner.set_read_only(false);
+        let spec = parse_subagent_args(r#"{"prompt":"go","description":"child"}"#).unwrap();
+        let child = runner.spawn_child_runner(&spec, 1);
+        assert!(!child.tool_names().iter().any(|name| name == "Computer"));
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]

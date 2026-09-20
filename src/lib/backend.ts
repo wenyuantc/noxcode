@@ -84,6 +84,7 @@ import type {
   NativeSessionConfigurationEvent,
   NativeSessionTitle,
   NativeSettings,
+  ComputerPermissionStatus,
   LspServerStatus,
   LspTestResult,
   ManagedWorktreeList,
@@ -881,6 +882,14 @@ export function installLspServer(language: string): Promise<string> {
 
 export function testLspServer(language: string): Promise<LspTestResult> {
   return invoke("test_lsp_server", { language });
+}
+
+export function getComputerPermissionStatus(): Promise<ComputerPermissionStatus> {
+  return invoke("get_computer_permission_status");
+}
+
+export function openComputerPrivacySettings(): Promise<void> {
+  return invoke("open_computer_privacy_settings");
 }
 
 export function listNativeGlobalSkills(): Promise<NativeGlobalSkills> {

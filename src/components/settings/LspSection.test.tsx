@@ -55,6 +55,7 @@ function sampleNative(): NativeSettings {
     shell_snapshot_enabled: true,
     rg_sidecar_enabled: true,
     lsp_enabled: true,
+    computer_control_enabled: false,
     bash_sandbox_enabled: false,
     auto_compact_threshold_percent: 85,
     microcompact_enabled: true,

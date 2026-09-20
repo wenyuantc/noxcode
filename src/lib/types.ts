@@ -754,7 +754,8 @@ export type NativeToolRiskKind =
   | "opaque"
   | "rule"
   | "automation"
-  | "external_path";
+  | "external_path"
+  | "computer";
 
 export type NativePermissionDecision =
   | "allow_session"
@@ -782,7 +783,8 @@ export type PermissionCapability =
   | "agent_message_respond"
   | "session_context_read"
   | "goal_read"
-  | "workflow";
+  | "workflow"
+  | "computer";
 
 export type PermissionPatternSource = "command" | "path" | "input" | "tool_name";
 
@@ -1045,6 +1047,7 @@ export interface NativeSettings {
   shell_snapshot_enabled: boolean;
   rg_sidecar_enabled: boolean;
   lsp_enabled: boolean;
+  computer_control_enabled: boolean;
   bash_sandbox_enabled: boolean;
   auto_compact_threshold_percent: number;
   microcompact_enabled: boolean;
@@ -1056,6 +1059,21 @@ export interface NativeSettings {
   worktree_fetch_before_create: boolean;
   worktree_auto_prune: boolean;
   worktree_auto_prune_limit: number;
+}
+
+export interface ComputerPermissionFlag {
+  granted: boolean | null;
+  label: string;
+  detail: string;
+}
+
+export interface ComputerPermissionStatus {
+  platform: string;
+  session_type: string | null;
+  screenshot: ComputerPermissionFlag;
+  input: ComputerPermissionFlag;
+  can_open_settings: boolean;
+  hint: string;
 }
 
 export interface LspServerStatus {
@@ -1101,6 +1119,7 @@ export interface UpdateNativeSettingsInput {
   shell_snapshot_enabled?: boolean;
   rg_sidecar_enabled?: boolean;
   lsp_enabled?: boolean;
+  computer_control_enabled?: boolean;
   bash_sandbox_enabled?: boolean;
   auto_compact_threshold_percent?: number;
   microcompact_enabled?: boolean;
