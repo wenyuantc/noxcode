@@ -178,6 +178,9 @@ pub struct ToolCtx {
     pub worktree_fetch_before_create: bool,
     /// 设置页总开关；关闭时即使用户或模型误调用也拒绝。
     pub computer_control_enabled: bool,
+    /// 本会话最近一次 `get_app_state` 的窗口树；元素下标只对这一轮有效。
+    pub computer_app_state:
+        std::sync::Arc<std::sync::Mutex<Option<super::app_target::ComputerAppState>>>,
 }
 
 impl ToolCtx {
@@ -225,6 +228,7 @@ impl ToolCtx {
             worktree_root: String::new(),
             worktree_fetch_before_create: false,
             computer_control_enabled: false,
+            computer_app_state: std::sync::Arc::new(std::sync::Mutex::new(None)),
         }
     }
 
@@ -431,6 +435,7 @@ impl ToolCtx {
         child.background = None;
         child.coordinator = None;
         child.computer_control_enabled = false;
+        child.computer_app_state = std::sync::Arc::new(std::sync::Mutex::new(None));
         child
     }
 
@@ -1215,7 +1220,7 @@ async fn enforce_permissions(
 
 fn call_brief(name: &str, arguments: &str) -> String {
     let args = serde_json::from_str::<Value>(arguments).unwrap_or(Value::Null);
-    for key in ["command", "file_path", "path", "url", "query"] {
+    for key in ["command", "file_path", "path", "url", "query", "app"] {
         if let Some(value) = args.get(key).and_then(Value::as_str) {
             let trimmed = value.trim();
             if !trimmed.is_empty() {
@@ -3695,14 +3700,14 @@ mod tests {
     async fn computer_is_rejected_when_disabled_or_in_plan_mode() {
         let root = temp_root("computer-gate");
         let mut ctx = ctx_for(&root);
-        let err = execute_tool(&ctx, "Computer", r#"{"action":"screenshot"}"#)
+        let err = execute_tool(&ctx, "Computer", r#"{"action":"list_apps"}"#)
             .await
             .expect_err("disabled");
         assert!(err.contains("电脑控制未开启"), "{err}");
 
         ctx.computer_control_enabled = true;
         ctx.set_plan_mode(true);
-        let err = execute_tool(&ctx, "Computer", r#"{"action":"screenshot"}"#)
+        let err = execute_tool(&ctx, "Computer", r#"{"action":"list_apps"}"#)
             .await
             .expect_err("plan");
         assert!(

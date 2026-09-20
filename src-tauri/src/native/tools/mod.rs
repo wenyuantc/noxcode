@@ -1,6 +1,8 @@
 //! Tool runtime is consumed by the agent loop / engine child tasks.
 #![allow(dead_code, unused_imports)]
 
+pub mod app_target;
+pub mod background_input;
 pub mod cancel;
 pub mod catalog;
 pub mod command_path;

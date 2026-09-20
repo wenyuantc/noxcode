@@ -1,24 +1,25 @@
-//! Native Agent `Computer` 工具：截取本机桌面并按坐标注入键鼠。
+//! Native Agent `Computer` 工具：按应用读取状态并默认后台投递。
 //!
-//! 实际截屏 / 注入依赖显示器与 OS 权限；参数解析、坐标缩放与开关门闸
-//! 可以在无显示器环境单测。
+//! 默认 `dispatch=background`，不会悄悄回退到全局 enigo。参数解析、状态校验
+//! 与按应用规则可以在无显示器环境单测。
 
-use std::io::Cursor;
 use std::sync::LazyLock;
 use std::thread;
 use std::time::Duration;
 
-use base64::engine::general_purpose::STANDARD as BASE64;
-use base64::Engine;
-use image::{DynamicImage, ImageFormat};
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
 
+use super::app_target::{
+    format_app_list, format_app_tree, list_apps, resolve_app, ComputerAppState,
+};
+use super::background_input::{
+    apply_action, capture_app_window, collect_tree, format_background_unavailable, resolve_action,
+};
 use super::dispatch::{ToolCtx, ToolOutput};
-use crate::native::model::types::NativeImage;
 
-/// 送给模型的截图最长边（像素）。
-pub const MAX_IMAGE_EDGE: u32 = 1280;
+pub use super::app_target::{fit_long_edge, scale_model_point, MAX_IMAGE_EDGE};
+
 pub const DEFAULT_WAIT_MS: u64 = 500;
 pub const MAX_WAIT_MS: u64 = 10_000;
 
@@ -27,48 +28,80 @@ static DESKTOP_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ComputerAction {
-    Screenshot,
+    ListApps,
+    #[serde(alias = "screenshot")]
+    GetAppState,
     Click,
-    DoubleClick,
-    Move,
-    Drag,
+    SetValue,
+    #[serde(alias = "type")]
+    TypeText,
+    #[serde(alias = "keypress")]
+    PressKey,
     Scroll,
-    Type,
-    Keypress,
+    Drag,
     Wait,
 }
 
 impl ComputerAction {
     pub fn as_str(self) -> &'static str {
         match self {
-            Self::Screenshot => "screenshot",
+            Self::ListApps => "list_apps",
+            Self::GetAppState => "get_app_state",
             Self::Click => "click",
-            Self::DoubleClick => "double_click",
-            Self::Move => "move",
-            Self::Drag => "drag",
+            Self::SetValue => "set_value",
+            Self::TypeText => "type_text",
+            Self::PressKey => "press_key",
             Self::Scroll => "scroll",
-            Self::Type => "type",
-            Self::Keypress => "keypress",
+            Self::Drag => "drag",
             Self::Wait => "wait",
         }
     }
 
     pub fn zh_label(self) -> &'static str {
         match self {
-            Self::Screenshot => "截图",
+            Self::ListApps => "列出应用",
+            Self::GetAppState => "读取状态",
             Self::Click => "点击",
-            Self::DoubleClick => "双击",
-            Self::Move => "移动",
-            Self::Drag => "拖拽",
+            Self::SetValue => "设值",
+            Self::TypeText => "输入",
+            Self::PressKey => "按键",
             Self::Scroll => "滚动",
-            Self::Type => "输入",
-            Self::Keypress => "按键",
+            Self::Drag => "拖拽",
             Self::Wait => "等待",
         }
     }
 
+    pub fn needs_app_state(self) -> bool {
+        matches!(
+            self,
+            Self::Click
+                | Self::SetValue
+                | Self::TypeText
+                | Self::PressKey
+                | Self::Scroll
+                | Self::Drag
+        )
+    }
+
     pub fn is_write(self) -> bool {
-        !matches!(self, Self::Screenshot | Self::Wait)
+        self.needs_app_state()
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ComputerDispatch {
+    #[default]
+    Background,
+    Foreground,
+}
+
+impl ComputerDispatch {
+    pub fn zh_label(self) -> &'static str {
+        match self {
+            Self::Background => "后台",
+            Self::Foreground => "前台",
+        }
     }
 }
 
@@ -91,6 +124,12 @@ pub enum ComputerButton {
 pub struct ComputerArgs {
     pub action: ComputerAction,
     #[serde(default)]
+    pub app: Option<String>,
+    #[serde(default)]
+    pub dispatch: ComputerDispatch,
+    #[serde(default)]
+    pub element_index: Option<u32>,
+    #[serde(default)]
     pub x: Option<f64>,
     #[serde(default)]
     pub y: Option<f64>,
@@ -105,11 +144,11 @@ pub struct ComputerArgs {
     #[serde(default)]
     pub text: Option<String>,
     #[serde(default)]
+    pub value: Option<String>,
+    #[serde(default)]
     pub keys: Option<Vec<String>>,
     #[serde(default)]
     pub duration_ms: Option<u64>,
-    #[serde(default)]
-    pub display: Option<u32>,
 }
 
 impl ComputerArgs {
@@ -117,26 +156,39 @@ impl ComputerArgs {
         self.button.unwrap_or_default()
     }
 
-    pub fn display_index(&self) -> Option<u32> {
-        self.display
+    pub fn dispatch(&self) -> ComputerDispatch {
+        self.dispatch
+    }
+
+    pub fn app_label(&self) -> Option<&str> {
+        self.app
+            .as_deref()
+            .map(str::trim)
+            .filter(|item| !item.is_empty())
     }
 
     pub fn zh_brief(&self) -> String {
-        match self.action {
-            ComputerAction::Click | ComputerAction::DoubleClick | ComputerAction::Move => {
-                match (self.x, self.y) {
-                    (Some(x), Some(y)) => {
-                        format!(
-                            "{} ({}, {})",
-                            self.action.zh_label(),
-                            fmt_coord(x),
-                            fmt_coord(y)
-                        )
-                    }
-                    _ => self.action.zh_label().to_string(),
+        let dispatch = match self.dispatch {
+            ComputerDispatch::Background => None,
+            ComputerDispatch::Foreground => Some("前台（会移动光标）"),
+        };
+        let app = self.app_label();
+        let core = match self.action {
+            ComputerAction::Click => {
+                if let Some(index) = self.element_index {
+                    format!("{} #{}", self.action.zh_label(), index)
+                } else if let (Some(x), Some(y)) = (self.x, self.y) {
+                    format!(
+                        "{} ({}, {})",
+                        self.action.zh_label(),
+                        fmt_coord(x),
+                        fmt_coord(y)
+                    )
+                } else {
+                    self.action.zh_label().to_string()
                 }
             }
-            ComputerAction::Keypress => {
+            ComputerAction::PressKey => {
                 let keys = self
                     .keys
                     .as_ref()
@@ -148,10 +200,11 @@ impl ComputerArgs {
                     format!("{} {keys}", self.action.zh_label())
                 }
             }
-            ComputerAction::Type => {
+            ComputerAction::TypeText | ComputerAction::SetValue => {
                 let preview = self
                     .text
                     .as_deref()
+                    .or(self.value.as_deref())
                     .unwrap_or("")
                     .chars()
                     .take(24)
@@ -167,7 +220,16 @@ impl ComputerArgs {
                 self.action.zh_label(),
                 self.duration_ms.unwrap_or(DEFAULT_WAIT_MS).min(MAX_WAIT_MS)
             ),
-            other => other.zh_label().to_string(),
+            ComputerAction::GetAppState
+            | ComputerAction::ListApps
+            | ComputerAction::Scroll
+            | ComputerAction::Drag => self.action.zh_label().to_string(),
+        };
+        match (app, dispatch) {
+            (Some(app), Some(mode)) => format!("{mode}{core} {app}"),
+            (Some(app), None) => format!("{core} {app}"),
+            (None, Some(mode)) => format!("{mode}{core}"),
+            (None, None) => core,
         }
     }
 
@@ -184,7 +246,7 @@ fn fmt_coord(value: f64) -> String {
     }
 }
 
-/// 权限弹窗摘要：`电脑控制：点击 (x, y)`。
+/// 权限弹窗摘要：`电脑控制：点击 Safari #3`。
 pub fn risk_summary(arguments: &str) -> String {
     match parse_computer_args(arguments) {
         Ok(args) => format!("电脑控制：{}", args.zh_brief()),
@@ -206,8 +268,31 @@ pub fn parse_computer_args(arguments: &str) -> Result<ComputerArgs, String> {
 
 pub fn validate_computer_args(args: &ComputerArgs) -> Result<(), String> {
     match args.action {
-        ComputerAction::Click | ComputerAction::DoubleClick | ComputerAction::Move => {
-            require_point(args.x, args.y)?;
+        ComputerAction::GetAppState => {
+            if args.app_label().is_none() {
+                return Err(
+                    "get_app_state 需要 app（名称、bundle id 或可执行文件路径）".to_string()
+                );
+            }
+        }
+        ComputerAction::Click => {
+            if args.element_index.is_none() {
+                require_point(args.x, args.y)?;
+            }
+        }
+        ComputerAction::SetValue => {
+            if args.element_index.is_none() {
+                return Err("set_value 需要 element_index".to_string());
+            }
+            if args
+                .text
+                .as_deref()
+                .or(args.value.as_deref())
+                .unwrap_or("")
+                .is_empty()
+            {
+                return Err("set_value 需要 text".to_string());
+            }
         }
         ComputerAction::Drag => {
             let path = args
@@ -226,12 +311,12 @@ pub fn validate_computer_args(args: &ComputerArgs) -> Result<(), String> {
                 return Err("滚动需要 scroll_x 或 scroll_y".to_string());
             }
         }
-        ComputerAction::Type => {
+        ComputerAction::TypeText => {
             if args.text.as_deref().unwrap_or("").is_empty() {
                 return Err("输入动作需要 text".to_string());
             }
         }
-        ComputerAction::Keypress => {
+        ComputerAction::PressKey => {
             let keys = args
                 .keys
                 .as_ref()
@@ -240,7 +325,7 @@ pub fn validate_computer_args(args: &ComputerArgs) -> Result<(), String> {
                 return Err("按键动作需要 keys".to_string());
             }
         }
-        ComputerAction::Wait | ComputerAction::Screenshot => {}
+        ComputerAction::Wait | ComputerAction::ListApps => {}
     }
     Ok(())
 }
@@ -248,25 +333,8 @@ pub fn validate_computer_args(args: &ComputerArgs) -> Result<(), String> {
 fn require_point(x: Option<f64>, y: Option<f64>) -> Result<(f64, f64), String> {
     match (x, y) {
         (Some(x), Some(y)) if x.is_finite() && y.is_finite() => Ok((x, y)),
-        _ => Err("该动作需要 x / y 坐标（相对本次截图左上角）".to_string()),
+        _ => Err("该动作需要 element_index 或 x / y（相对本次窗口截图左上角）".to_string()),
     }
-}
-
-/// 按最长边缩放后的目标尺寸。
-pub fn fit_long_edge(width: u32, height: u32, max_edge: u32) -> (u32, u32) {
-    let long = width.max(height);
-    if long == 0 || long <= max_edge {
-        return (width.max(1), height.max(1));
-    }
-    let scale = f64::from(max_edge) / f64::from(long);
-    let next_w = (f64::from(width) * scale).round().max(1.0) as u32;
-    let next_h = (f64::from(height) * scale).round().max(1.0) as u32;
-    (next_w, next_h)
-}
-
-/// 把模型坐标（相对已缩放截图）乘回物理 / 输入坐标系。
-pub fn scale_model_point(x: f64, y: f64, scale_x: f64, scale_y: f64) -> (i32, i32) {
-    ((x * scale_x).round() as i32, (y * scale_y).round() as i32)
 }
 
 pub fn unavailable_reason(ctx: &ToolCtx) -> Option<String> {
@@ -282,18 +350,43 @@ pub fn unavailable_reason(ctx: &ToolCtx) -> Option<String> {
     None
 }
 
+pub fn require_existing_state(
+    state: Option<&ComputerAppState>,
+    args: &ComputerArgs,
+) -> Result<ComputerAppState, String> {
+    if !args.action.needs_app_state() {
+        return Err("该动作不需要 get_app_state".to_string());
+    }
+    let Some(state) = state else {
+        return Err("请先调用 get_app_state 再执行该动作；元素下标只对这一轮有效".to_string());
+    };
+    if let Some(app) = args.app_label() {
+        if !state.target.matches_query(app) {
+            return Err(format!(
+                "get_app_state 的应用是 {}，与当前动作 {app} 不一致，请先刷新状态",
+                state.target.identifier
+            ));
+        }
+    }
+    Ok(state.clone())
+}
+
 pub async fn execute(ctx: &ToolCtx, arguments: &str) -> Result<ToolOutput, String> {
     if let Some(reason) = unavailable_reason(ctx) {
         return Err(reason);
     }
     let args = parse_computer_args(arguments)?;
+    let state = ctx.computer_app_state.clone();
     let _guard = DESKTOP_LOCK.lock().await;
-    tokio::task::spawn_blocking(move || run_computer_action(args))
+    tokio::task::spawn_blocking(move || run_computer_action(args, &state))
         .await
         .map_err(|error| format!("电脑控制任务失败: {error}"))?
 }
 
-fn run_computer_action(args: ComputerArgs) -> Result<ToolOutput, String> {
+fn run_computer_action(
+    args: ComputerArgs,
+    state: &std::sync::Arc<std::sync::Mutex<Option<ComputerAppState>>>,
+) -> Result<ToolOutput, String> {
     match args.action {
         ComputerAction::Wait => {
             let ms = args
@@ -306,305 +399,83 @@ fn run_computer_action(args: ComputerArgs) -> Result<ToolOutput, String> {
                 args.zh_title()
             )))
         }
-        ComputerAction::Screenshot => capture_output(&args),
+        ComputerAction::ListApps => {
+            let apps = list_apps()?;
+            Ok(ToolOutput::text(format!(
+                "{}\n{}",
+                args.zh_title(),
+                format_app_list(&apps)
+            )))
+        }
+        ComputerAction::GetAppState => {
+            let snapshot = snapshot_app(args.app_label().unwrap_or_default())?;
+            if let Ok(mut slot) = state.lock() {
+                *slot = Some(snapshot.clone());
+            }
+            Ok(state_output(&args, &snapshot))
+        }
         _ => {
-            apply_input(&args)?;
-            capture_output(&args)
+            let current = {
+                let guard = state.lock().map_err(|_| "电脑控制状态锁损坏".to_string())?;
+                require_existing_state(guard.as_ref(), &args)?
+            };
+            let resolved = resolve_action(&args, &current)?;
+            apply_action(args.dispatch(), &args, &current, &resolved)?;
+            match snapshot_app(&current.target.identifier) {
+                Ok(fresh) => {
+                    if let Ok(mut slot) = state.lock() {
+                        *slot = Some(fresh.clone());
+                    }
+                    Ok(state_output(&args, &fresh))
+                }
+                Err(error) => Ok(ToolOutput::text(format!(
+                    "{}\n动作已执行，但刷新窗口状态失败：{error}",
+                    args.zh_title()
+                ))),
+            }
         }
     }
 }
 
-fn capture_output(args: &ComputerArgs) -> Result<ToolOutput, String> {
-    let shot = capture_screenshot(args.display_index())?;
-    let text = format!(
-        "{}\ndisplay={} width={} height={} scale_x={:.4} scale_y={:.4}",
-        args.zh_title(),
-        shot.display,
-        shot.width,
-        shot.height,
-        shot.scale_x,
-        shot.scale_y
-    );
-    Ok(ToolOutput {
-        text,
-        images: vec![shot.image],
-        ok: true,
-    })
-}
-
-struct ScreenshotPayload {
-    image: NativeImage,
-    display: u32,
-    width: u32,
-    height: u32,
-    scale_x: f64,
-    scale_y: f64,
-    monitor_x: i32,
-    monitor_y: i32,
-    monitor_width: u32,
-    monitor_height: u32,
-}
-
-fn capture_screenshot(display: Option<u32>) -> Result<ScreenshotPayload, String> {
-    let (monitor, display_index) = select_monitor(display)?;
-    let rgba = monitor.capture_image().map_err(map_screenshot_error)?;
-    let capture_width = rgba.width();
-    let capture_height = rgba.height();
-    if capture_width == 0 || capture_height == 0 {
-        return Err("截图为空".to_string());
-    }
-    let (width, height) = fit_long_edge(capture_width, capture_height, MAX_IMAGE_EDGE);
-    let dynamic = DynamicImage::ImageRgba8(rgba);
-    let resized = if width != capture_width || height != capture_height {
-        dynamic.resize_exact(width, height, image::imageops::FilterType::Triangle)
-    } else {
-        dynamic
+fn snapshot_app(query: &str) -> Result<ComputerAppState, String> {
+    let target = resolve_app(query)?;
+    let (elements, mut notes) = collect_tree(&target);
+    let image = match capture_app_window(&target) {
+        Ok(image) => Some(image),
+        Err(error) => {
+            notes.push(error);
+            None
+        }
     };
-    let mut png = Cursor::new(Vec::new());
-    resized
-        .write_to(&mut png, ImageFormat::Png)
-        .map_err(|error| format!("编码截图失败: {error}"))?;
-    let image = NativeImage {
-        name: format!("screenshot-{display_index}.png"),
-        mime_type: "image/png".to_string(),
-        data_base64: BASE64.encode(png.into_inner()),
-    };
-    let monitor_width = monitor_metric(monitor.width(), "宽度")?;
-    let monitor_height = monitor_metric(monitor.height(), "高度")?;
-    let monitor_x = monitor_metric_i32(monitor.x(), "原点 X")?;
-    let monitor_y = monitor_metric_i32(monitor.y(), "原点 Y")?;
-    Ok(ScreenshotPayload {
+    Ok(ComputerAppState {
+        target,
+        elements,
+        width: image.as_ref().map(|item| item.width).unwrap_or(1),
+        height: image.as_ref().map(|item| item.height).unwrap_or(1),
+        scale_x: image.as_ref().map(|item| item.scale_x).unwrap_or(1.0),
+        scale_y: image.as_ref().map(|item| item.scale_y).unwrap_or(1.0),
+        notes,
         image,
-        display: display_index,
-        width,
-        height,
-        scale_x: f64::from(capture_width) / f64::from(width),
-        scale_y: f64::from(capture_height) / f64::from(height),
-        monitor_x,
-        monitor_y,
-        monitor_width,
-        monitor_height,
     })
 }
 
-fn monitor_metric<T, E: std::fmt::Display>(value: Result<T, E>, label: &str) -> Result<T, String> {
-    value.map_err(|error| format!("无法读取显示器{label}：{error}"))
-}
-
-fn monitor_metric_i32<E: std::fmt::Display>(
-    value: Result<i32, E>,
-    label: &str,
-) -> Result<i32, String> {
-    value.map_err(|error| format!("无法读取显示器{label}：{error}"))
-}
-
-fn select_monitor(display: Option<u32>) -> Result<(xcap::Monitor, u32), String> {
-    let mut monitors = xcap::Monitor::all().map_err(|error| format!("无法枚举显示器：{error}"))?;
-    if monitors.is_empty() {
-        return Err("未找到可用显示器".to_string());
+fn state_output(args: &ComputerArgs, state: &ComputerAppState) -> ToolOutput {
+    let mut text = format!("{}\n{}", args.zh_title(), format_app_tree(state));
+    if args.dispatch() == ComputerDispatch::Foreground {
+        text.push_str("\nnote: 已使用 dispatch=foreground，会移动用户光标");
     }
-    let index = if let Some(index) = display {
-        if (index as usize) >= monitors.len() {
-            return Err(format!("显示器序号 {index} 不存在"));
-        }
-        index as usize
-    } else {
-        monitors.iter().position(monitor_is_primary).unwrap_or(0)
-    };
-    Ok((monitors.swap_remove(index), index as u32))
-}
-
-fn monitor_is_primary(monitor: &xcap::Monitor) -> bool {
-    monitor.is_primary().unwrap_or(false)
-}
-
-fn map_screenshot_error(error: impl std::fmt::Display) -> String {
-    let text = error.to_string();
-    #[cfg(target_os = "macos")]
-    {
-        format!("无法截取屏幕，请在系统设置中授予屏幕录制权限：{text}")
-    }
-    #[cfg(target_os = "linux")]
-    {
-        if linux_session_type().as_deref() == Some("wayland") {
-            format!("无法截取屏幕。Wayland 需要授权屏幕共享 portal，或改用 X11 会话：{text}")
-        } else {
-            format!("无法截取屏幕：{text}")
-        }
-    }
-    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
-    {
-        format!("无法截取屏幕：{text}")
+    ToolOutput {
+        text,
+        images: state
+            .image
+            .as_ref()
+            .map(|image| vec![image.image.clone()])
+            .unwrap_or_default(),
+        ok: true,
     }
 }
 
-fn map_input_error(error: impl std::fmt::Display) -> String {
-    let text = error.to_string();
-    #[cfg(target_os = "windows")]
-    {
-        let lower = text.to_ascii_lowercase();
-        if lower.contains("uac")
-            || lower.contains("secure desktop")
-            || lower.contains("elevation")
-            || text.contains("安全桌面")
-        {
-            format!("无法向安全桌面注入输入（可能处于 UAC 提示）：{text}")
-        } else {
-            format!("无法注入键鼠：{text}")
-        }
-    }
-    #[cfg(target_os = "macos")]
-    {
-        format!("无法注入键鼠，请在系统设置中授予辅助功能权限：{text}")
-    }
-    #[cfg(target_os = "linux")]
-    {
-        if linux_session_type().as_deref() == Some("wayland") {
-            format!("无法注入键鼠。Wayland 需要授权远程桌面 portal，或改用 X11 会话：{text}")
-        } else {
-            format!("无法注入键鼠：{text}")
-        }
-    }
-    #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
-    {
-        format!("无法注入键鼠：{text}")
-    }
-}
-
-fn apply_input(args: &ComputerArgs) -> Result<(), String> {
-    use enigo::{Axis, Coordinate, Direction, Enigo, Keyboard, Mouse, Settings};
-
-    let shot = capture_screenshot(args.display_index()).ok();
-    let mapping = InputMapping::from_screenshot(shot.as_ref());
-    let mut enigo = Enigo::new(&Settings::default()).map_err(map_input_error)?;
-    match args.action {
-        ComputerAction::Move => {
-            let (x, y) = require_point(args.x, args.y)?;
-            let (abs_x, abs_y) = mapping.to_abs(x, y);
-            enigo
-                .move_mouse(abs_x, abs_y, Coordinate::Abs)
-                .map_err(map_input_error)?;
-        }
-        ComputerAction::Click => {
-            let (x, y) = require_point(args.x, args.y)?;
-            let (abs_x, abs_y) = mapping.to_abs(x, y);
-            enigo
-                .move_mouse(abs_x, abs_y, Coordinate::Abs)
-                .map_err(map_input_error)?;
-            enigo
-                .button(enigo_button(args.button()), Direction::Click)
-                .map_err(map_input_error)?;
-        }
-        ComputerAction::DoubleClick => {
-            let (x, y) = require_point(args.x, args.y)?;
-            let (abs_x, abs_y) = mapping.to_abs(x, y);
-            enigo
-                .move_mouse(abs_x, abs_y, Coordinate::Abs)
-                .map_err(map_input_error)?;
-            let button = enigo_button(args.button());
-            enigo
-                .button(button, Direction::Click)
-                .map_err(map_input_error)?;
-            thread::sleep(Duration::from_millis(50));
-            enigo
-                .button(button, Direction::Click)
-                .map_err(map_input_error)?;
-        }
-        ComputerAction::Drag => {
-            let path = args.path.as_ref().expect("validated");
-            let (start_x, start_y) = mapping.to_abs(path[0].x, path[0].y);
-            enigo
-                .move_mouse(start_x, start_y, Coordinate::Abs)
-                .map_err(map_input_error)?;
-            let button = enigo_button(args.button());
-            enigo
-                .button(button, Direction::Press)
-                .map_err(map_input_error)?;
-            for point in path.iter().skip(1) {
-                let (abs_x, abs_y) = mapping.to_abs(point.x, point.y);
-                enigo
-                    .move_mouse(abs_x, abs_y, Coordinate::Abs)
-                    .map_err(map_input_error)?;
-            }
-            enigo
-                .button(button, Direction::Release)
-                .map_err(map_input_error)?;
-        }
-        ComputerAction::Scroll => {
-            if let (Some(x), Some(y)) = (args.x, args.y) {
-                let (abs_x, abs_y) = mapping.to_abs(x, y);
-                enigo
-                    .move_mouse(abs_x, abs_y, Coordinate::Abs)
-                    .map_err(map_input_error)?;
-            }
-            if let Some(dx) = args.scroll_x.filter(|value| *value != 0) {
-                enigo
-                    .scroll(dx, Axis::Horizontal)
-                    .map_err(map_input_error)?;
-            }
-            if let Some(dy) = args.scroll_y.filter(|value| *value != 0) {
-                enigo.scroll(dy, Axis::Vertical).map_err(map_input_error)?;
-            }
-        }
-        ComputerAction::Type => {
-            let text = args.text.as_deref().unwrap_or("");
-            enigo.text(text).map_err(map_input_error)?;
-        }
-        ComputerAction::Keypress => {
-            press_keys(&mut enigo, args.keys.as_deref().unwrap_or(&[]))?;
-        }
-        ComputerAction::Screenshot | ComputerAction::Wait => {}
-    }
-    Ok(())
-}
-
-#[derive(Debug, Clone, Copy)]
-struct InputMapping {
-    monitor_x: i32,
-    monitor_y: i32,
-    scale_x: f64,
-    scale_y: f64,
-}
-
-impl InputMapping {
-    fn from_screenshot(shot: Option<&ScreenshotPayload>) -> Self {
-        match shot {
-            Some(shot) => Self {
-                monitor_x: shot.monitor_x,
-                monitor_y: shot.monitor_y,
-                // 模型坐标相对已缩放图；先还原到截图像素，再映射到显示器逻辑坐标。
-                scale_x: f64::from(shot.monitor_width) / f64::from(shot.width.max(1)),
-                scale_y: f64::from(shot.monitor_height) / f64::from(shot.height.max(1)),
-            },
-            None => Self {
-                monitor_x: 0,
-                monitor_y: 0,
-                scale_x: 1.0,
-                scale_y: 1.0,
-            },
-        }
-    }
-
-    fn to_abs(self, x: f64, y: f64) -> (i32, i32) {
-        let (dx, dy) = scale_model_point(x, y, self.scale_x, self.scale_y);
-        (
-            self.monitor_x.saturating_add(dx),
-            self.monitor_y.saturating_add(dy),
-        )
-    }
-}
-
-fn enigo_button(button: ComputerButton) -> enigo::Button {
-    match button {
-        ComputerButton::Left => enigo::Button::Left,
-        ComputerButton::Right => enigo::Button::Right,
-        ComputerButton::Middle => enigo::Button::Middle,
-    }
-}
-
-fn press_keys(enigo: &mut enigo::Enigo, keys: &[String]) -> Result<(), String> {
-    use enigo::{Direction, Keyboard};
-
+pub fn map_keys(keys: &[String]) -> Result<Vec<enigo::Key>, String> {
     let mut mapped = Vec::new();
     for raw in keys {
         for part in raw.split(['+', '-']) {
@@ -614,22 +485,7 @@ fn press_keys(enigo: &mut enigo::Enigo, keys: &[String]) -> Result<(), String> {
             }
         }
     }
-    if mapped.is_empty() {
-        return Err("按键动作需要 keys".to_string());
-    }
-    let last = mapped.len() - 1;
-    for key in &mapped[..last] {
-        enigo.key(*key, Direction::Press).map_err(map_input_error)?;
-    }
-    enigo
-        .key(mapped[last], Direction::Click)
-        .map_err(map_input_error)?;
-    for key in mapped[..last].iter().rev() {
-        enigo
-            .key(*key, Direction::Release)
-            .map_err(map_input_error)?;
-    }
-    Ok(())
+    Ok(mapped)
 }
 
 pub fn map_key(name: &str) -> Result<enigo::Key, String> {
@@ -677,22 +533,6 @@ pub fn map_key(name: &str) -> Result<enigo::Key, String> {
     })
 }
 
-fn linux_session_type() -> Option<String> {
-    std::env::var("XDG_SESSION_TYPE")
-        .ok()
-        .map(|value| value.trim().to_ascii_lowercase())
-        .filter(|value| !value.is_empty())
-        .or_else(|| {
-            if std::env::var_os("WAYLAND_DISPLAY").is_some() {
-                Some("wayland".to_string())
-            } else if std::env::var_os("DISPLAY").is_some() {
-                Some("x11".to_string())
-            } else {
-                None
-            }
-        })
-}
-
 #[derive(Debug, Clone, Serialize)]
 pub struct ComputerPermissionFlag {
     pub granted: Option<bool>,
@@ -711,6 +551,7 @@ pub struct ComputerPermissionStatus {
 }
 
 pub fn query_permission_status() -> ComputerPermissionStatus {
+    let hint = "默认后台控制已打开的应用，不移动用户光标。后台做不到时返回 background_unavailable，不会悄悄改用全局键鼠。请只在信任当前渠道与工作区时开启。".to_string();
     #[cfg(target_os = "macos")]
     {
         let screen = macos_screen_granted();
@@ -725,7 +566,7 @@ pub fn query_permission_status() -> ComputerPermissionStatus {
                 } else {
                     "未授权屏幕录制".to_string()
                 },
-                detail: "截屏需要系统设置 → 隐私与安全性 → 屏幕录制。".to_string(),
+                detail: "按窗口截图需要系统设置 → 隐私与安全性 → 屏幕录制。窗口在其他 Space 上时没有像素。".to_string(),
             },
             input: ComputerPermissionFlag {
                 granted: Some(input),
@@ -734,10 +575,10 @@ pub fn query_permission_status() -> ComputerPermissionStatus {
                 } else {
                     "未授权辅助功能".to_string()
                 },
-                detail: "键鼠注入需要系统设置 → 隐私与安全性 → 辅助功能。".to_string(),
+                detail: "后台 AX / CGEventPostToPid 需要系统设置 → 隐私与安全性 → 辅助功能。".to_string(),
             },
             can_open_settings: true,
-            hint: "模型能看到屏幕并操作键鼠。请只在信任当前渠道与工作区时开启。".to_string(),
+            hint,
         }
     }
     #[cfg(target_os = "windows")]
@@ -747,21 +588,21 @@ pub fn query_permission_status() -> ComputerPermissionStatus {
             session_type: None,
             screenshot: ComputerPermissionFlag {
                 granted: None,
-                label: "按显示器 DPI 映射坐标".to_string(),
-                detail: "截屏通常无需额外授权；UAC 安全桌面无法注入。".to_string(),
+                label: "PrintWindow 按窗口截图".to_string(),
+                detail: "截窗走 PrintWindow，并用 DWM 扩展边框。UAC 安全桌面无法注入。".to_string(),
             },
             input: ComputerPermissionFlag {
                 granted: None,
-                label: "键鼠注入可用".to_string(),
-                detail: "遇到 UAC 或其他安全桌面时会明确失败，不会静默点偏。".to_string(),
+                label: "UIA + PostMessage 后台投递".to_string(),
+                detail: "部分 Chromium / UWP 会丢弃后台消息并返回 background_unavailable，不会改用 SendInput。".to_string(),
             },
             can_open_settings: true,
-            hint: "模型能看到屏幕并操作键鼠。请只在信任当前渠道与工作区时开启。".to_string(),
+            hint,
         }
     }
     #[cfg(target_os = "linux")]
     {
-        let session = linux_session_type();
+        let session = super::background_input::linux_session_type();
         let wayland = session.as_deref() == Some("wayland");
         ComputerPermissionStatus {
             platform: "linux".to_string(),
@@ -769,31 +610,23 @@ pub fn query_permission_status() -> ComputerPermissionStatus {
             screenshot: ComputerPermissionFlag {
                 granted: None,
                 label: if wayland {
-                    "Wayland 截屏走 portal".to_string()
+                    "Wayland 可能只能返回树".to_string()
                 } else {
-                    "X11 截屏".to_string()
+                    "X11 按窗口截图".to_string()
                 },
                 detail: if wayland {
-                    "Wayland 需要授权屏幕共享 portal；失败时请改用 X11。".to_string()
+                    "Wayland 能抓到的窗口才有像素；否则只返回 AT-SPI 树。".to_string()
                 } else {
-                    "X11 会话可直接截取屏幕。".to_string()
+                    "X11 按 window id 抓 backing store。".to_string()
                 },
             },
             input: ComputerPermissionFlag {
                 granted: None,
-                label: if wayland {
-                    "Wayland 注入需远程桌面 portal".to_string()
-                } else {
-                    "X11 键鼠注入".to_string()
-                },
-                detail: if wayland {
-                    "注入失败时请授权 Remote Desktop portal，或使用 X11。".to_string()
-                } else {
-                    "X11 可注入键鼠；不会在失败时静默点偏。".to_string()
-                },
+                label: "AT-SPI / 窗口消息".to_string(),
+                detail: "后台使用 AT-SPI 或 XSendEvent，不会使用全局 XTEST / enigo。".to_string(),
             },
             can_open_settings: false,
-            hint: "模型能看到屏幕并操作键鼠。请只在信任当前渠道与工作区时开启。".to_string(),
+            hint,
         }
     }
     #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
@@ -812,7 +645,7 @@ pub fn query_permission_status() -> ComputerPermissionStatus {
                 detail: "当前系统未实现电脑控制权限探测。".to_string(),
             },
             can_open_settings: false,
-            hint: "模型能看到屏幕并操作键鼠。请只在信任当前渠道与工作区时开启。".to_string(),
+            hint,
         }
     }
 }
@@ -882,33 +715,114 @@ pub async fn open_computer_privacy_settings<R: tauri::Runtime>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::native::tools::app_target::{AppElement, AppTarget, WindowBounds};
     use crate::native::tools::dispatch::ToolCtx;
     use crate::native::tools::local::LocalWorkspace;
 
+    fn sample_state() -> ComputerAppState {
+        ComputerAppState {
+            target: AppTarget {
+                name: "Safari".into(),
+                identifier: "com.apple.Safari".into(),
+                pid: 12,
+                window_id: 34,
+                window_title: "Start".into(),
+                bounds: WindowBounds {
+                    x: 10,
+                    y: 20,
+                    width: 800,
+                    height: 600,
+                },
+                class_name: None,
+                focused: true,
+            },
+            elements: vec![AppElement {
+                index: 0,
+                role: "window".into(),
+                title: "Start".into(),
+                value: String::new(),
+                bounds: WindowBounds {
+                    x: 0,
+                    y: 0,
+                    width: 800,
+                    height: 600,
+                },
+                actions: vec!["press".into()],
+            }],
+            width: 400,
+            height: 300,
+            scale_x: 2.0,
+            scale_y: 2.0,
+            notes: Vec::new(),
+            image: None,
+        }
+    }
+
     #[test]
-    fn parse_click_and_scale_back_to_physical() {
-        let args =
-            parse_computer_args(r#"{"action":"click","x":100,"y":50,"button":"left","display":0}"#)
-                .expect("parse");
-        assert_eq!(args.action, ComputerAction::Click);
-        assert_eq!(args.x, Some(100.0));
-        assert_eq!(args.y, Some(50.0));
+    fn parse_app_centric_actions_and_aliases() {
+        let listed = parse_computer_args(r#"{"action":"list_apps"}"#).expect("list");
+        assert_eq!(listed.action, ComputerAction::ListApps);
+        assert_eq!(listed.dispatch, ComputerDispatch::Background);
+        let state =
+            parse_computer_args(r#"{"action":"screenshot","app":"Safari"}"#).expect("alias");
+        assert_eq!(state.action, ComputerAction::GetAppState);
+        let click = parse_computer_args(
+            r#"{"action":"click","app":"Safari","element_index":3,"dispatch":"background"}"#,
+        )
+        .expect("click");
+        assert_eq!(click.element_index, Some(3));
+        let typed = parse_computer_args(r#"{"action":"type","text":"hi"}"#).expect("type");
+        assert_eq!(typed.action, ComputerAction::TypeText);
+        let keys = parse_computer_args(r#"{"action":"keypress","keys":["enter"]}"#).expect("keys");
+        assert_eq!(keys.action, ComputerAction::PressKey);
         let (w, h) = fit_long_edge(2560, 1440, MAX_IMAGE_EDGE);
         assert_eq!((w, h), (1280, 720));
-        let scale_x = 2560.0 / f64::from(w);
-        let scale_y = 1440.0 / f64::from(h);
-        assert_eq!(scale_model_point(100.0, 50.0, scale_x, scale_y), (200, 100));
+        assert_eq!(scale_model_point(100.0, 50.0, 2.0, 2.0), (200, 100));
     }
 
     #[test]
     fn parse_rejects_incomplete_actions() {
         assert!(parse_computer_args(r#"{"action":"click"}"#).is_err());
+        assert!(parse_computer_args(r#"{"action":"get_app_state"}"#).is_err());
         assert!(parse_computer_args(r#"{"action":"drag","path":[{"x":1,"y":1}]}"#).is_err());
         assert!(parse_computer_args(r#"{"action":"scroll"}"#).is_err());
-        assert!(parse_computer_args(r#"{"action":"type","text":""}"#).is_err());
-        assert!(parse_computer_args(r#"{"action":"keypress","keys":[]}"#).is_err());
-        assert!(parse_computer_args(r#"{"action":"screenshot"}"#).is_ok());
+        assert!(parse_computer_args(r#"{"action":"type_text","text":""}"#).is_err());
+        assert!(parse_computer_args(r#"{"action":"press_key","keys":[]}"#).is_err());
+        assert!(parse_computer_args(r#"{"action":"set_value","element_index":0}"#).is_err());
+        assert!(parse_computer_args(r#"{"action":"list_apps"}"#).is_ok());
         assert!(parse_computer_args(r#"{"action":"wait","duration_ms":200}"#).is_ok());
+        assert!(parse_computer_args(r#"{"action":"click","x":1,"y":2}"#).is_ok());
+    }
+
+    #[tokio::test]
+    async fn execute_click_without_state_does_not_touch_os() {
+        let mut ctx = ToolCtx::new(LocalWorkspace::new(std::env::temp_dir()));
+        ctx.computer_control_enabled = true;
+        let err = execute(&ctx, r#"{"action":"click","element_index":0}"#)
+            .await
+            .expect_err("need state");
+        assert!(err.contains("get_app_state"), "{err}");
+    }
+
+    #[test]
+    fn actions_require_fresh_get_app_state() {
+        let args = parse_computer_args(r#"{"action":"click","element_index":0,"app":"Safari"}"#)
+            .expect("parse");
+        assert!(args.action.needs_app_state());
+        let missing = require_existing_state(None, &args).expect_err("no state");
+        assert!(missing.contains("get_app_state"), "{missing}");
+        let ok = require_existing_state(Some(&sample_state()), &args).expect("ok");
+        assert_eq!(ok.target.identifier, "com.apple.Safari");
+        let mismatch = parse_computer_args(r#"{"action":"click","element_index":0,"app":"Notes"}"#)
+            .expect("parse");
+        assert!(require_existing_state(Some(&sample_state()), &mismatch).is_err());
+    }
+
+    #[test]
+    fn background_failure_never_looks_like_success() {
+        let message = format_background_unavailable("Chromium 会丢弃后台消息");
+        assert!(message.starts_with("background_unavailable:"));
+        assert!(!message.contains("enigo"));
     }
 
     #[test]
@@ -933,10 +847,11 @@ mod tests {
     }
 
     #[test]
-    fn risk_summary_includes_action() {
-        let summary = risk_summary(r#"{"action":"click","x":12,"y":8}"#);
+    fn risk_summary_includes_app_and_action() {
+        let summary = risk_summary(r#"{"action":"click","app":"Safari","element_index":12}"#);
         assert!(summary.contains("电脑控制"));
         assert!(summary.contains("点击"));
+        assert!(summary.contains("Safari"));
         assert!(summary.contains("12"));
     }
 }
