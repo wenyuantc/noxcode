@@ -1,16 +1,16 @@
 //! Windows：UIA 树 + PrintWindow 截窗；后台输入走 UIA / PostMessage，不默认 SendInput。
 
+use std::ffi::c_void;
 use std::mem::size_of;
 
 use image::RgbaImage;
-use windows::core::{Interface, PCWSTR};
-use windows::Win32::Foundation::{BOOL, HWND, LPARAM, RECT, WPARAM};
+use windows::Win32::Foundation::{HWND, LPARAM, RECT, WPARAM};
 use windows::Win32::Graphics::Dwm::{DwmGetWindowAttribute, DWMWA_EXTENDED_FRAME_BOUNDS};
 use windows::Win32::Graphics::Gdi::{
     CreateCompatibleBitmap, CreateCompatibleDC, DeleteDC, DeleteObject, GetDC, GetDIBits,
-    ReleaseDC, SelectObject, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS, HBITMAP, HDC,
-    HGDIOBJ,
+    ReleaseDC, SelectObject, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS, HGDIOBJ,
 };
+use windows::Win32::Storage::Xps::{PrintWindow, PRINT_WINDOW_FLAGS};
 use windows::Win32::System::Com::{
     CoCreateInstance, CoInitializeEx, CLSCTX_INPROC_SERVER, COINIT_MULTITHREADED,
 };
@@ -20,9 +20,9 @@ use windows::Win32::UI::Accessibility::{
     UIA_InvokePatternId, UIA_ValuePatternId,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    GetClassNameW, GetWindowRect, PostMessageW, PrintWindow, PW_RENDERFULLCONTENT, WM_CHAR,
-    WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MBUTTONUP,
-    WM_MOUSEWHEEL, WM_RBUTTONDOWN, WM_RBUTTONUP,
+    GetClassNameW, GetWindowRect, PostMessageW, PW_RENDERFULLCONTENT, WM_CHAR, WM_KEYDOWN,
+    WM_KEYUP, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MBUTTONUP, WM_MOUSEWHEEL,
+    WM_RBUTTONDOWN, WM_RBUTTONUP,
 };
 
 use super::{window_root_element, BackgroundError, ResolvedAction};
@@ -46,7 +46,7 @@ pub fn collect_tree(target: &AppTarget) -> (Vec<AppElement>, Vec<String>) {
 }
 
 pub fn capture_window_image(target: &AppTarget) -> Result<WindowImage, String> {
-    let hwnd = HWND(target.window_id as isize);
+    let hwnd = target_hwnd(target);
     let rect = extended_bounds(hwnd).map_err(|error| error.to_string())?;
     let width = (rect.right - rect.left).max(1);
     let height = (rect.bottom - rect.top).max(1);
@@ -58,7 +58,7 @@ pub fn capture_window_image(target: &AppTarget) -> Result<WindowImage, String> {
         let mem_dc = CreateCompatibleDC(window_dc);
         let bitmap = CreateCompatibleBitmap(window_dc, width, height);
         let old = SelectObject(mem_dc, HGDIOBJ(bitmap.0));
-        let printed = PrintWindow(hwnd, mem_dc, PW_RENDERFULLCONTENT);
+        let printed = PrintWindow(hwnd, mem_dc, PRINT_WINDOW_FLAGS(PW_RENDERFULLCONTENT));
         let mut info = BITMAPINFO {
             bmiHeader: BITMAPINFOHEADER {
                 biSize: size_of::<BITMAPINFOHEADER>() as u32,
@@ -135,7 +135,7 @@ pub fn apply_background(
 }
 
 fn would_drop_post_message(target: &AppTarget) -> bool {
-    let class = window_class(HWND(target.window_id as isize)).unwrap_or_default();
+    let class = window_class(target_hwnd(target)).unwrap_or_default();
     let hay = format!(
         "{} {} {}",
         class,
@@ -187,10 +187,13 @@ fn walk_uia(target: &AppTarget) -> Result<Vec<AppElement>, String> {
             CoCreateInstance(&CUIAutomation, None, CLSCTX_INPROC_SERVER)
                 .map_err(|error| format!("无法创建 UI Automation：{error}"))?;
         let root = automation
-            .ElementFromHandle(HWND(target.window_id as isize))
+            .ElementFromHandle(target_hwnd(target))
             .map_err(|error| format!("无法取得窗口 UIA 元素：{error}"))?;
         let mut elements = vec![uia_to_element(&root, 0, target)?];
-        if let Ok(array) = root.FindAll(TreeScope_Descendants, automation.CreateTrueCondition()?) {
+        let condition = automation
+            .CreateTrueCondition()
+            .map_err(|error| format!("无法创建 UIA 条件：{error}"))?;
+        if let Ok(array) = root.FindAll(TreeScope_Descendants, &condition) {
             let count = array.Length().unwrap_or(0);
             for index in 0..count {
                 if elements.len() >= MAX_TREE_NODES {
@@ -221,9 +224,10 @@ fn uia_to_element(
             .map(|value| value.to_string())
             .unwrap_or_else(|_| "unknown".to_string());
         let value = element
-            .GetCurrentPropertyValue(UIA_ValuePatternId.0 as i32)
+            .GetCurrentPatternAs::<IUIAutomationValuePattern>(UIA_ValuePatternId)
             .ok()
-            .and_then(|item| item.to_string())
+            .and_then(|pattern| pattern.CurrentValue().ok())
+            .map(|value| value.to_string())
             .unwrap_or_default();
         let rect = element.CurrentBoundingRectangle().unwrap_or_default();
         let mut actions = Vec::new();
@@ -261,15 +265,14 @@ fn try_uia_action(
                 BackgroundError::failed(format!("无法创建 UI Automation：{error}"))
             })?;
         let root = automation
-            .ElementFromHandle(HWND(target.window_id as isize))
+            .ElementFromHandle(target_hwnd(target))
             .map_err(|error| BackgroundError::failed(error.to_string()))?;
         let found = uia_element_at(&automation, &root, element.index)
             .ok_or_else(|| BackgroundError::failed(format!("找不到 UIA 元素 {}", element.index)))?;
         match resolved.action {
             ComputerAction::Click => {
                 let pattern: IUIAutomationInvokePattern = found
-                    .GetCurrentPattern(UIA_InvokePatternId)
-                    .and_then(|unknown| unknown.cast())
+                    .GetCurrentPatternAs(UIA_InvokePatternId)
                     .map_err(|error| {
                         BackgroundError::failed(format!("元素不支持 Invoke：{error}"))
                     })?;
@@ -279,8 +282,7 @@ fn try_uia_action(
             }
             ComputerAction::SetValue | ComputerAction::TypeText => {
                 let pattern: IUIAutomationValuePattern = found
-                    .GetCurrentPattern(UIA_ValuePatternId)
-                    .and_then(|unknown| unknown.cast())
+                    .GetCurrentPatternAs(UIA_ValuePatternId)
                     .map_err(|error| {
                         BackgroundError::failed(format!("元素不支持 Value：{error}"))
                     })?;
@@ -304,24 +306,21 @@ fn uia_element_at(
         return Some(root.clone());
     }
     unsafe {
-        let array: IUIAutomationElementArray = root
-            .FindAll(
-                TreeScope_Descendants,
-                automation.CreateTrueCondition().ok()?,
-            )
-            .ok()?;
+        let condition = automation.CreateTrueCondition().ok()?;
+        let array: IUIAutomationElementArray =
+            root.FindAll(TreeScope_Descendants, &condition).ok()?;
         array.GetElement((index as i32) - 1).ok()
     }
 }
 
 fn post_pointer(target: &AppTarget, resolved: &ResolvedAction) -> Result<(), BackgroundError> {
-    let hwnd = HWND(target.window_id as isize);
+    let hwnd = target_hwnd(target);
     match resolved.action {
         ComputerAction::Click => {
             let (x, y) = resolved.point.unwrap_or((0, 0));
             let (down, up) = button_messages(resolved.button);
-            post(hwnd, down, 0, lparam(x, y))?;
-            post(hwnd, up, 0, lparam(x, y))?;
+            post(hwnd, down, WPARAM(0), lparam(x, y))?;
+            post(hwnd, up, WPARAM(0), lparam(x, y))?;
         }
         ComputerAction::Scroll => {
             let (x, y) = resolved.point.unwrap_or((0, 0));
@@ -333,7 +332,7 @@ fn post_pointer(target: &AppTarget, resolved: &ResolvedAction) -> Result<(), Bac
             post(
                 hwnd,
                 WM_MOUSEWHEEL,
-                WPARAM((delta as u16 as u32) << 16),
+                WPARAM(((delta as u16 as u32) << 16) as usize),
                 lparam(x, y),
             )?;
         }
@@ -346,12 +345,12 @@ fn post_pointer(target: &AppTarget, resolved: &ResolvedAction) -> Result<(), Bac
                 resolved.path[0].1 - target.bounds.y,
             );
             let (down, up) = button_messages(resolved.button);
-            post(hwnd, down, 0, lparam(start.0, start.1))?;
+            post(hwnd, down, WPARAM(0), lparam(start.0, start.1))?;
             for (abs_x, abs_y) in resolved.path.iter().skip(1) {
                 post(
                     hwnd,
                     WM_LBUTTONDOWN,
-                    0,
+                    WPARAM(0),
                     lparam(abs_x - target.bounds.x, abs_y - target.bounds.y),
                 )?;
             }
@@ -359,7 +358,7 @@ fn post_pointer(target: &AppTarget, resolved: &ResolvedAction) -> Result<(), Bac
             post(
                 hwnd,
                 up,
-                0,
+                WPARAM(0),
                 lparam(last.0 - target.bounds.x, last.1 - target.bounds.y),
             )?;
         }
@@ -369,7 +368,7 @@ fn post_pointer(target: &AppTarget, resolved: &ResolvedAction) -> Result<(), Bac
 }
 
 fn post_chars(target: &AppTarget, text: &str) -> Result<(), BackgroundError> {
-    let hwnd = HWND(target.window_id as isize);
+    let hwnd = target_hwnd(target);
     for ch in text.encode_utf16() {
         post(hwnd, WM_CHAR, WPARAM(ch as usize), LPARAM(0))?;
     }
@@ -377,7 +376,7 @@ fn post_chars(target: &AppTarget, text: &str) -> Result<(), BackgroundError> {
 }
 
 fn post_keys(target: &AppTarget, keys: &[String]) -> Result<(), BackgroundError> {
-    let hwnd = HWND(target.window_id as isize);
+    let hwnd = target_hwnd(target);
     for key in keys {
         let vk = virtual_key(key).ok_or_else(|| {
             BackgroundError::unavailable(format!("后台无法投递按键 {key}，且不会改用 SendInput"))
@@ -419,22 +418,11 @@ fn lparam(x: i32, y: i32) -> LPARAM {
     LPARAM(((y as u16 as u32) << 16 | (x as u16 as u32)) as isize)
 }
 
-fn post(
-    hwnd: HWND,
-    msg: u32,
-    wparam: impl Into<WPARAM>,
-    lparam: LPARAM,
-) -> Result<(), BackgroundError> {
-    let posted = unsafe { PostMessageW(hwnd, msg, wparam.into(), lparam) };
+fn post(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> Result<(), BackgroundError> {
+    let posted = unsafe { PostMessageW(hwnd, msg, wparam, lparam) };
     posted.map_err(|error| BackgroundError::unavailable(format!("PostMessage 被丢弃：{error}")))
 }
 
-#[allow(dead_code)]
-fn unused_pcwstr() -> PCWSTR {
-    PCWSTR::null()
-}
-
-#[allow(dead_code)]
-fn unused_bool() -> BOOL {
-    BOOL(1)
+fn target_hwnd(target: &AppTarget) -> HWND {
+    HWND(target.window_id as isize as *mut c_void)
 }

@@ -11,6 +11,7 @@ use core_graphics::display::{
 use core_graphics::event::{CGEvent, CGEventFlags, CGEventTapLocation, CGEventType, CGMouseButton};
 use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
 use core_graphics::geometry::{CGPoint, CGRect, CGSize};
+use foreign_types::ForeignType;
 use image::RgbaImage;
 
 use super::{window_root_element, BackgroundError, ResolvedAction};
