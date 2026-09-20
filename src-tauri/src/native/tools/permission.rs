@@ -24,7 +24,7 @@ pub enum NativeToolRiskKind {
     /// 创建 / 删除定时自动化。
     Automation,
     ExternalPath,
-    /// 本机桌面截屏与键鼠注入。
+    /// 本机已打开应用的后台电脑控制。
     Computer,
 }
 
@@ -847,6 +847,8 @@ pub struct RuleCandidates {
     pub command: Option<String>,
     pub paths: Vec<String>,
     pub input: String,
+    pub apps: Vec<String>,
+    pub action: Option<String>,
 }
 
 impl RuleCandidates {
@@ -886,11 +888,25 @@ impl RuleCandidates {
                 }
             }
         }
+        let apps = args
+            .get("app")
+            .and_then(Value::as_str)
+            .map(|item| item.trim().to_string())
+            .filter(|item| !item.is_empty())
+            .map(|item| vec![item])
+            .unwrap_or_default();
+        let action = args
+            .get("action")
+            .and_then(Value::as_str)
+            .map(|item| item.trim().to_string())
+            .filter(|item| !item.is_empty());
         Self {
             tool_name: tool_name.to_string(),
             command,
             paths,
             input: arguments.to_string(),
+            apps,
+            action,
         }
     }
 }
@@ -940,8 +956,23 @@ fn rule_matches(
             .paths
             .iter()
             .any(|path| glob_or_exact(pattern, path)),
-        PatternSource::Input => glob_or_exact(pattern, &candidates.input),
+        PatternSource::Input => {
+            glob_or_exact(pattern, &candidates.input)
+                || candidates
+                    .apps
+                    .iter()
+                    .any(|app| computer_app_matches(pattern, app))
+                || candidates
+                    .action
+                    .as_deref()
+                    .is_some_and(|action| glob_or_exact(pattern, action))
+        }
     }
+}
+
+pub fn computer_app_matches(pattern: &str, candidate: &str) -> bool {
+    crate::native::tools::app_target::identity_matches(pattern, candidate)
+        || glob_or_exact(pattern.trim(), candidate.trim())
 }
 
 fn glob_or_exact(pattern: &str, candidate: &str) -> bool {
@@ -1005,6 +1036,20 @@ pub fn suggest_rule(
                 capability: PermissionCapability::Edit,
                 pattern: path,
                 source: PatternSource::Path,
+                plan_bash: None,
+            })
+        }
+        PermissionCapability::Computer => {
+            let pattern = candidates
+                .apps
+                .first()
+                .cloned()
+                .or_else(|| candidates.action.clone())
+                .unwrap_or_else(|| tool_name.to_string());
+            Some(PermissionRuleSuggestion {
+                capability: PermissionCapability::Computer,
+                pattern,
+                source: PatternSource::Input,
                 plan_bash: None,
             })
         }
@@ -1562,14 +1607,61 @@ mod tests {
         assert!(matches!(
             classify_native_tool_risk(
                 "Computer",
-                r#"{"action":"click","x":10,"y":20}"#,
+                r#"{"action":"click","app":"Safari","element_index":10}"#,
                 None,
                 false
             ),
             NativeToolRisk::High {
                 kind: NativeToolRiskKind::Computer,
                 summary,
-            } if summary.contains("点击") && summary.contains("10")
+            } if summary.contains("点击") && summary.contains("Safari") && summary.contains("10")
         ));
+    }
+
+    #[test]
+    fn computer_allow_rule_matches_app_identity() {
+        let contract = super::super::contract::builtin_contract("Computer").expect("computer");
+        let mut rules = PermissionRules::default();
+        rules.push(
+            RuleEffect::Allow,
+            PermissionRule {
+                id: "safari".into(),
+                capability: PermissionCapability::Computer,
+                pattern: "com.apple.Safari".into(),
+                source: PatternSource::Input,
+                scope: RuleScope::Workspace,
+                note: String::new(),
+                external_path: None,
+                plan_bash: None,
+            },
+        );
+        assert!(matches!(
+            rules.evaluate(
+                contract,
+                "Computer",
+                r#"{"action":"click","app":"Safari","element_index":0}"#,
+                None
+            ),
+            RuleDecision::Allow(_)
+        ));
+        assert_eq!(
+            rules.evaluate(
+                contract,
+                "Computer",
+                r#"{"action":"click","app":"Notes","element_index":0}"#,
+                None
+            ),
+            RuleDecision::NoMatch
+        );
+        let suggestion = suggest_rule(
+            contract,
+            "Computer",
+            r#"{"action":"get_app_state","app":"com.apple.Safari"}"#,
+            None,
+        )
+        .expect("suggestion");
+        assert_eq!(suggestion.pattern, "com.apple.Safari");
+        assert_eq!(suggestion.source, PatternSource::Input);
+        assert_eq!(suggestion.capability, PermissionCapability::Computer);
     }
 }

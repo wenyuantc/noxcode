@@ -403,7 +403,7 @@ pub fn tool_contracts() -> Vec<ToolContract> {
         ),
         contract(
             "Computer",
-            "截取本机桌面并按坐标点击、输入、滚动；高风险，默认关闭",
+            "后台控制本机已打开的应用；默认不抢光标，高风险，默认关闭",
             false,
             true,
             false,
@@ -412,8 +412,8 @@ pub fn tool_contracts() -> Vec<ToolContract> {
             true,
             false,
             PermissionCapability::Computer,
-            &[ToolName, Input],
-            budget(8_000, ResultStrategy::Truncate, PreviewDirection::Head),
+            &[Input, ToolName],
+            budget(32_000, ResultStrategy::Truncate, PreviewDirection::Head),
             ToolTimeout::fixed(15_000),
         ),
     ];
@@ -1015,20 +1015,23 @@ fn core_tool_specs() -> Vec<ToolSpec> {
         ),
         spec(
             "Computer",
-            "Control the user's local desktop. First take a screenshot, then send click / double_click / move / drag / scroll / type / keypress using coordinates in pixels from the top-left of that screenshot. After a write action the tool returns a fresh screenshot (images) plus display, width, height, scale_x, scale_y. If the image was downscaled, multiply model coordinates by those scales before assuming physical pixels. keys uses names such as ctrl, super, enter; super is Command on macOS and Win on Windows. Not available over SSH, in plan mode, for sub-agents, or when computer_control_enabled is off. Requires OS screen-recording / accessibility (or portal) permission.",
+            "Control an already-open app on the user's machine without stealing the cursor. Default dispatch=background. Typical flow: list_apps → get_app_state(app) → click / set_value / type_text / press_key / scroll / drag using element_index from that state (indices are only valid until the next get_app_state). get_app_state returns one window screenshot plus a numbered accessibility tree (role / title / value / bounds / actions) with width, height, scale_x, scale_y, and app. Background uses accessibility actions or process-targeted events and never silently falls back to global mouse injection. If background cannot deliver the event, the tool returns background_unavailable. Pass dispatch=foreground only when you must inject into the user's live cursor (this steals focus). Not available over SSH, in plan mode, for sub-agents, or when computer_control_enabled is off.",
             json!({
                 "type": "object",
                 "properties": {
                     "action": {
                         "type": "string",
-                        "enum": ["screenshot", "click", "double_click", "move", "drag", "scroll", "type", "keypress", "wait"]
+                        "enum": ["list_apps", "get_app_state", "click", "set_value", "type_text", "press_key", "scroll", "drag", "wait"]
                     },
-                    "x": {"type": "number", "description": "Pixel X relative to the latest screenshot top-left."},
-                    "y": {"type": "number", "description": "Pixel Y relative to the latest screenshot top-left."},
+                    "app": {"type": "string", "description": "App name, bundle id, or executable path. Required for get_app_state."},
+                    "dispatch": {"type": "string", "enum": ["background", "foreground"], "description": "Default background. foreground moves the user's cursor."},
+                    "element_index": {"type": "integer", "description": "Index from the latest get_app_state tree."},
+                    "x": {"type": "number", "description": "Pixel X relative to the latest window screenshot top-left."},
+                    "y": {"type": "number", "description": "Pixel Y relative to the latest window screenshot top-left."},
                     "button": {"type": "string", "enum": ["left", "right", "middle"]},
                     "path": {
                         "type": "array",
-                        "description": "Drag points [{x,y}, ...].",
+                        "description": "Drag points [{x,y}, ...] relative to the latest window screenshot.",
                         "items": {
                             "type": "object",
                             "properties": {
@@ -1041,13 +1044,13 @@ fn core_tool_specs() -> Vec<ToolSpec> {
                     "scroll_x": {"type": "integer"},
                     "scroll_y": {"type": "integer"},
                     "text": {"type": "string"},
+                    "value": {"type": "string"},
                     "keys": {
                         "type": "array",
                         "items": {"type": "string"},
                         "description": "Key combo such as [\"ctrl\",\"s\"] or [\"super\",\"q\"]."
                     },
-                    "duration_ms": {"type": "integer", "description": "Wait duration; only for action=wait."},
-                    "display": {"type": "integer", "description": "Display index; default is the primary display."}
+                    "duration_ms": {"type": "integer", "description": "Wait duration; only for action=wait."}
                 },
                 "required": ["action"]
             }),

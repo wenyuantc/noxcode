@@ -56,6 +56,7 @@ const EFFECTS: PermissionRuleEffect[] = ["allow", "deny", "ask"];
 function defaultSourceFor(capability: PermissionCapability): PermissionPatternSource {
   if (capability === "bash") return "command";
   if (capability === "edit" || capability === "read") return "path";
+  if (capability === "computer") return "input";
   return "tool_name";
 }
 

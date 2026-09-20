@@ -16,6 +16,12 @@ vi.mock("@/lib/backend", () => ({
   } satisfies ComputerPermissionStatus),
   openComputerPrivacySettings: vi.fn(),
   updateNativeSettings: vi.fn(),
+  getNativePermissionRules: vi.fn().mockResolvedValue({
+    global: { allow: [], deny: [], ask: [] },
+    workspace: { allow: [], deny: [], ask: [] },
+    workspace_root: null,
+  }),
+  deleteNativePermissionRule: vi.fn(),
 }));
 
 vi.mock("react-i18next", () => ({
@@ -23,6 +29,11 @@ vi.mock("react-i18next", () => ({
     t: (key: string) => key,
     i18n: { language: "zh-CN" },
   }),
+}));
+
+vi.mock("@/stores/workspaceStore", () => ({
+  useWorkspaceStore: (selector: (state: { activeWorkspaceId: string | null }) => unknown) =>
+    selector({ activeWorkspaceId: null }),
 }));
 
 vi.mock("@/stores/settingsStore", async (importOriginal) => {
@@ -86,7 +97,10 @@ describe("ComputerSection", () => {
     expect(html).toContain("settings:computer.enabled");
     expect(html).toContain("settings:computer.enabledHint");
     expect(html).toContain("settings:computer.permissionTitle");
+    expect(html).toContain("settings:computer.approvedTitle");
+    expect(html).toContain("settings:computer.platformTitle");
     expect(html).toContain("settings:computer.riskTitle");
+    expect(html).toContain("settings:computer.backgroundHint");
     expect(html).toContain('id="native-computer-enabled"');
   });
 });
