@@ -3,7 +3,13 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { ComputerPermissionStatus, NativeSettings } from "@/lib/types";
 import { useSettingsStore } from "@/stores/settingsStore";
-import { ComputerSection, computerFlagLabel } from "./ComputerSection";
+import {
+  ComputerSection,
+  computerFlagLabel,
+  computerProcessIdentityValues,
+  computerStatusShouldRefreshOnFocus,
+  requestComputerPermissionStatus,
+} from "./ComputerSection";
 
 vi.mock("@/lib/backend", () => ({
   getComputerPermissionStatus: vi.fn().mockResolvedValue({
@@ -13,6 +19,10 @@ vi.mock("@/lib/backend", () => ({
     input: { granted: null, label: "X11 键鼠注入", detail: "X11" },
     can_open_settings: false,
     hint: "risk",
+    bundle_id: "com.wenyuan.noxcode",
+    executable_path: "/tmp/noxcode",
+    process_identity:
+      "当前进程 bundle id com.wenyuan.noxcode，可执行文件 /tmp/noxcode。系统设置里请勾选同一行；tauri dev 与正式 .app 是不同条目。",
   } satisfies ComputerPermissionStatus),
   openComputerPrivacySettings: vi.fn(),
   updateNativeSettings: vi.fn(),
@@ -101,7 +111,46 @@ describe("ComputerSection", () => {
     expect(html).toContain("settings:computer.platformTitle");
     expect(html).toContain("settings:computer.riskTitle");
     expect(html).toContain("settings:computer.backgroundHint");
+    expect(html).toContain("settings:computer.recheck");
+    expect(html).toContain("settings:computer.recheckHint");
     expect(html).toContain('id="native-computer-enabled"');
+  });
+});
+
+describe("requestComputerPermissionStatus", () => {
+  it("invokes the backend again on recheck", async () => {
+    const backend = await import("@/lib/backend");
+    vi.mocked(backend.getComputerPermissionStatus).mockClear();
+    await requestComputerPermissionStatus();
+    await requestComputerPermissionStatus();
+    expect(backend.getComputerPermissionStatus).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe("computerStatusShouldRefreshOnFocus", () => {
+  it("refreshes when the window is visible", () => {
+    expect(computerStatusShouldRefreshOnFocus({ visibilityState: "visible" })).toBe(true);
+    expect(computerStatusShouldRefreshOnFocus({})).toBe(true);
+    expect(computerStatusShouldRefreshOnFocus({ visibilityState: "hidden" })).toBe(false);
+  });
+});
+
+describe("computerProcessIdentityValues", () => {
+  it("exposes bundle id and executable path for the TCC row", () => {
+    const values = computerProcessIdentityValues({
+      platform: "macos",
+      session_type: null,
+      screenshot: { granted: true, label: "已授权屏幕录制", detail: "ok" },
+      input: { granted: false, label: "未授权辅助功能", detail: "need" },
+      can_open_settings: true,
+      hint: "risk",
+      bundle_id: "com.wenyuan.noxcode",
+      executable_path: "/Applications/noxcode.app/Contents/MacOS/noxcode",
+      process_identity: "当前进程 bundle id com.wenyuan.noxcode",
+    });
+    expect(values.bundle).toBe("com.wenyuan.noxcode");
+    expect(values.path).toContain("noxcode.app");
+    expect(values.fallback).toContain("com.wenyuan.noxcode");
   });
 });
 

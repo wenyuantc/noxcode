@@ -1074,6 +1074,9 @@ export interface ComputerPermissionStatus {
   input: ComputerPermissionFlag;
   can_open_settings: boolean;
   hint: string;
+  bundle_id: string | null;
+  executable_path: string | null;
+  process_identity: string;
 }
 
 export interface LspServerStatus {

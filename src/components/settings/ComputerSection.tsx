@@ -1,4 +1,12 @@
-import { AlertTriangle, Layers, Loader2, Monitor, ShieldCheck, Trash2 } from "lucide-react";
+import {
+  AlertTriangle,
+  Layers,
+  Loader2,
+  Monitor,
+  RefreshCw,
+  ShieldCheck,
+  Trash2,
+} from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 
@@ -21,6 +29,28 @@ export function computerFlagLabel(flag: ComputerPermissionFlag): string {
   return flag.label;
 }
 
+export async function requestComputerPermissionStatus(
+  loader: () => Promise<ComputerPermissionStatus> = getComputerPermissionStatus,
+): Promise<ComputerPermissionStatus> {
+  return loader();
+}
+
+export function computerStatusShouldRefreshOnFocus(options: { visibilityState?: string }): boolean {
+  return options.visibilityState !== "hidden";
+}
+
+export function computerProcessIdentityValues(status: ComputerPermissionStatus): {
+  bundle: string | null;
+  path: string | null;
+  fallback: string;
+} {
+  return {
+    bundle: status.bundle_id,
+    path: status.executable_path,
+    fallback: status.process_identity,
+  };
+}
+
 function computerAllowRules(
   rules: { allow: PermissionRule[] } | null | undefined,
 ): PermissionRule[] {
@@ -39,15 +69,19 @@ export function ComputerSection() {
   const [approved, setApproved] = useState<PermissionRule[]>([]);
   const [approvedError, setApprovedError] = useState<string | null>(null);
 
-  const refreshStatus = useCallback(async () => {
-    setStatusLoading(true);
+  const refreshStatus = useCallback(async (options?: { silent?: boolean }) => {
+    if (!options?.silent) {
+      setStatusLoading(true);
+    }
     try {
-      setStatus(await getComputerPermissionStatus());
+      setStatus(await requestComputerPermissionStatus());
       setStatusError(null);
     } catch (error) {
       setStatusError(errorMessage(error));
     } finally {
-      setStatusLoading(false);
+      if (!options?.silent) {
+        setStatusLoading(false);
+      }
     }
   }, []);
 
@@ -63,6 +97,35 @@ export function ComputerSection() {
 
   useEffect(() => {
     void refreshStatus();
+  }, [refreshStatus]);
+
+  useEffect(() => {
+    const onFocus = () => {
+      const visibilityState =
+        typeof document === "undefined" ? "visible" : document.visibilityState;
+      if (computerStatusShouldRefreshOnFocus({ visibilityState })) {
+        void refreshStatus({ silent: true });
+      }
+    };
+    const onVisibility = () => {
+      if (typeof document !== "undefined" && document.visibilityState === "visible") {
+        void refreshStatus({ silent: true });
+      }
+    };
+    if (typeof window !== "undefined") {
+      window.addEventListener("focus", onFocus);
+    }
+    if (typeof document !== "undefined") {
+      document.addEventListener("visibilitychange", onVisibility);
+    }
+    return () => {
+      if (typeof window !== "undefined") {
+        window.removeEventListener("focus", onFocus);
+      }
+      if (typeof document !== "undefined") {
+        document.removeEventListener("visibilitychange", onVisibility);
+      }
+    };
   }, [refreshStatus]);
 
   useEffect(() => {
@@ -123,6 +186,18 @@ export function ComputerSection() {
     [t],
   );
 
+  const processIdentityNote = useMemo(() => {
+    if (!status) return null;
+    const identity = computerProcessIdentityValues(status);
+    if (identity.bundle || identity.path) {
+      return t("settings:computer.processIdentity", {
+        bundle: identity.bundle || t("settings:computer.unknownBundle"),
+        path: identity.path || t("settings:computer.unknownPath"),
+      });
+    }
+    return identity.fallback;
+  }, [status, t]);
+
   if (!native) return null;
 
   return (
@@ -156,19 +231,36 @@ export function ComputerSection() {
         title={t("settings:computer.permissionTitle")}
         description={t("settings:computer.permissionHint")}
         headerAction={
-          status?.can_open_settings ? (
+          <div className="flex flex-wrap items-center justify-end gap-1.5">
             <Button
               type="button"
               variant="outline"
               size="sm"
               className="h-7 text-xs"
-              disabled={opening}
-              onClick={() => void handleOpenSettings()}
+              disabled={statusLoading}
+              onClick={() => void refreshStatus()}
             >
-              {opening ? <Loader2 className="mr-1.5 size-3 animate-spin" /> : null}
-              {t("settings:computer.openSettings")}
+              {statusLoading ? (
+                <Loader2 className="mr-1.5 size-3 animate-spin" />
+              ) : (
+                <RefreshCw className="mr-1.5 size-3" />
+              )}
+              {t("settings:computer.recheck")}
             </Button>
-          ) : null
+            {status?.can_open_settings ? (
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                className="h-7 text-xs"
+                disabled={opening}
+                onClick={() => void handleOpenSettings()}
+              >
+                {opening ? <Loader2 className="mr-1.5 size-3 animate-spin" /> : null}
+                {t("settings:computer.openSettings")}
+              </Button>
+            ) : null}
+          </div>
         }
         divided
       >
@@ -202,10 +294,18 @@ export function ComputerSection() {
                     {computerFlagLabel(status.input)}
                   </span>
                 </SettingRow>
+                {processIdentityNote ? (
+                  <p className="px-5 py-3 text-xs leading-relaxed text-muted-foreground">
+                    {processIdentityNote}
+                  </p>
+                ) : null}
               </>
             ) : null}
           </>
         )}
+        <p className="px-5 py-3 text-xs leading-relaxed text-muted-foreground">
+          {t("settings:computer.recheckHint")}
+        </p>
       </SettingCard>
 
       <SettingCard
