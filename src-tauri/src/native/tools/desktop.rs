@@ -548,37 +548,106 @@ pub struct ComputerPermissionStatus {
     pub input: ComputerPermissionFlag,
     pub can_open_settings: bool,
     pub hint: String,
+    pub bundle_id: Option<String>,
+    pub executable_path: Option<String>,
+    pub process_identity: String,
+}
+
+/// macOS TCC 探测：preflight 或主线程功能兜底任一成功即视为已授权。
+pub fn resolve_macos_granted(preflight: bool, functional: bool) -> bool {
+    preflight || functional
+}
+
+pub fn macos_screen_label(granted: bool) -> &'static str {
+    if granted {
+        "已授权屏幕录制"
+    } else {
+        "未授权屏幕录制"
+    }
+}
+
+pub fn macos_input_label(granted: bool) -> &'static str {
+    if granted {
+        "已授权辅助功能"
+    } else {
+        "未授权辅助功能"
+    }
+}
+
+pub fn format_process_identity(bundle_id: Option<&str>, executable_path: Option<&str>) -> String {
+    let bundle = bundle_id.map(str::trim).filter(|item| !item.is_empty());
+    let path = executable_path
+        .map(str::trim)
+        .filter(|item| !item.is_empty());
+    match (bundle, path) {
+        (Some(bundle), Some(path)) => format!(
+            "当前进程 bundle id {bundle}，可执行文件 {path}。系统设置里请勾选同一行；tauri dev 与正式 .app 是不同条目。"
+        ),
+        (None, Some(path)) => format!(
+            "当前进程可执行文件 {path}。系统设置里请勾选同一行；tauri dev 与正式 .app 是不同条目。"
+        ),
+        (Some(bundle), None) => format!(
+            "当前进程 bundle id {bundle}。系统设置里请勾选同一行；tauri dev 与正式 .app 是不同条目。"
+        ),
+        (None, None) => {
+            "无法读取当前进程身份。系统设置里请勾选正在运行的 noxcode；tauri dev 与正式 .app 是不同条目。".to_string()
+        }
+    }
+}
+
+fn current_executable_path() -> Option<String> {
+    std::env::current_exe()
+        .ok()
+        .map(|path| path.display().to_string())
+        .filter(|path| !path.trim().is_empty())
+}
+
+fn current_bundle_id(configured: Option<String>) -> Option<String> {
+    #[cfg(target_os = "macos")]
+    {
+        if let Some(bundle_id) = macos_permission::bundle_identifier() {
+            return Some(bundle_id);
+        }
+    }
+    configured
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
 }
 
 pub fn query_permission_status() -> ComputerPermissionStatus {
+    query_permission_status_with_identity(None)
+}
+
+pub fn query_permission_status_with_identity(
+    configured_bundle_id: Option<String>,
+) -> ComputerPermissionStatus {
+    let bundle_id = current_bundle_id(configured_bundle_id);
+    let executable_path = current_executable_path();
+    let process_identity =
+        format_process_identity(bundle_id.as_deref(), executable_path.as_deref());
     let hint = "默认后台控制已打开的应用，不移动用户光标。后台做不到时返回 background_unavailable，不会悄悄改用全局键鼠。请只在信任当前渠道与工作区时开启。".to_string();
     #[cfg(target_os = "macos")]
     {
-        let screen = macos_screen_granted();
-        let input = macos_input_granted();
+        let screen = macos_permission::screen_granted();
+        let input = macos_permission::input_granted();
         ComputerPermissionStatus {
             platform: "macos".to_string(),
             session_type: None,
             screenshot: ComputerPermissionFlag {
                 granted: Some(screen),
-                label: if screen {
-                    "已授权屏幕录制".to_string()
-                } else {
-                    "未授权屏幕录制".to_string()
-                },
+                label: macos_screen_label(screen).to_string(),
                 detail: "按窗口截图需要系统设置 → 隐私与安全性 → 屏幕录制。窗口在其他 Space 上时没有像素。".to_string(),
             },
             input: ComputerPermissionFlag {
                 granted: Some(input),
-                label: if input {
-                    "已授权辅助功能".to_string()
-                } else {
-                    "未授权辅助功能".to_string()
-                },
+                label: macos_input_label(input).to_string(),
                 detail: "后台 AX / CGEventPostToPid 需要系统设置 → 隐私与安全性 → 辅助功能。".to_string(),
             },
             can_open_settings: true,
             hint,
+            bundle_id,
+            executable_path,
+            process_identity,
         }
     }
     #[cfg(target_os = "windows")]
@@ -598,6 +667,9 @@ pub fn query_permission_status() -> ComputerPermissionStatus {
             },
             can_open_settings: true,
             hint,
+            bundle_id,
+            executable_path,
+            process_identity,
         }
     }
     #[cfg(target_os = "linux")]
@@ -627,6 +699,9 @@ pub fn query_permission_status() -> ComputerPermissionStatus {
             },
             can_open_settings: false,
             hint,
+            bundle_id,
+            executable_path,
+            process_identity,
         }
     }
     #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
@@ -646,26 +721,268 @@ pub fn query_permission_status() -> ComputerPermissionStatus {
             },
             can_open_settings: false,
             hint,
+            bundle_id,
+            executable_path,
+            process_identity,
         }
     }
 }
 
-#[cfg(target_os = "macos")]
-fn macos_screen_granted() -> bool {
-    #[link(name = "CoreGraphics", kind = "framework")]
-    extern "C" {
-        fn CGPreflightScreenCaptureAccess() -> bool;
-    }
-    unsafe { CGPreflightScreenCaptureAccess() }
+/// 调用方必须把 `query` 放到 AppKit 主线程执行；测试可用替身验证这条路径。
+pub fn read_permission_status_via<F>(
+    configured_bundle_id: Option<String>,
+    run_on_main: F,
+) -> Result<ComputerPermissionStatus, String>
+where
+    F: FnOnce(&dyn Fn() -> ComputerPermissionStatus) -> Result<ComputerPermissionStatus, String>,
+{
+    run_on_main(&|| query_permission_status_with_identity(configured_bundle_id.clone()))
 }
 
 #[cfg(target_os = "macos")]
-fn macos_input_granted() -> bool {
+mod macos_permission {
+    use std::ffi::c_void;
+    use std::ptr;
+
+    use core_foundation::base::{CFRelease, CFTypeRef, TCFType};
+    use core_foundation::string::{CFString, CFStringRef};
+    use core_graphics::display::{
+        kCGWindowImageBoundsIgnoreFraming, kCGWindowListOptionIncludingWindow,
+        CGWindowListCreateImage,
+    };
+    use core_graphics::geometry::CGRect;
+
+    use super::resolve_macos_granted;
+
+    type AXUIElementRef = *mut c_void;
+    type AXError = i32;
+    const AX_OK: AXError = 0;
+    const KCG_WINDOW_LIST_OPTION_ON_SCREEN_ONLY: u32 = 1;
+    const KCG_WINDOW_LIST_EXCLUDE_DESKTOP: u32 = 1 << 4;
+    const KCG_NULL_WINDOW_ID: u32 = 0;
+    const CF_NUMBER_SINT32_TYPE: i32 = 3;
+    const CF_NUMBER_SINT64_TYPE: i32 = 4;
+    const MAX_CAPTURE_PROBES: usize = 3;
+
+    #[link(name = "CoreGraphics", kind = "framework")]
+    extern "C" {
+        fn CGPreflightScreenCaptureAccess() -> bool;
+        fn CGWindowListCopyWindowInfo(option: u32, relative_to_window: u32) -> *const c_void;
+        fn CGImageGetWidth(image: *mut c_void) -> usize;
+        fn CGImageGetHeight(image: *mut c_void) -> usize;
+        fn CGImageRelease(image: *mut c_void);
+        static CGRectNull: CGRect;
+        static kCGWindowName: CFStringRef;
+        static kCGWindowOwnerPID: CFStringRef;
+        static kCGWindowNumber: CFStringRef;
+        static kCGWindowLayer: CFStringRef;
+    }
+
     #[link(name = "ApplicationServices", kind = "framework")]
     extern "C" {
         fn AXIsProcessTrusted() -> bool;
+        fn AXUIElementCreateSystemWide() -> AXUIElementRef;
+        fn AXUIElementCopyAttributeValue(
+            element: AXUIElementRef,
+            attribute: CFStringRef,
+            value: *mut CFTypeRef,
+        ) -> AXError;
     }
-    unsafe { AXIsProcessTrusted() }
+
+    #[link(name = "CoreFoundation", kind = "framework")]
+    extern "C" {
+        fn CFArrayGetCount(the_array: *const c_void) -> isize;
+        fn CFArrayGetValueAtIndex(the_array: *const c_void, idx: isize) -> *const c_void;
+        fn CFDictionaryGetValue(the_dict: *const c_void, key: *const c_void) -> *const c_void;
+        fn CFNumberGetValue(number: *const c_void, the_type: i32, value_ptr: *mut c_void) -> bool;
+        fn CFBundleGetMainBundle() -> *mut c_void;
+        fn CFBundleGetIdentifier(bundle: *mut c_void) -> CFStringRef;
+    }
+
+    struct WindowProbe {
+        owner_pid: u32,
+        window_id: u32,
+        name: String,
+        layer: i64,
+    }
+
+    pub fn screen_granted() -> bool {
+        resolve_macos_granted(preflight_screen(), functional_screen())
+    }
+
+    pub fn input_granted() -> bool {
+        resolve_macos_granted(preflight_input(), functional_input())
+    }
+
+    pub fn bundle_identifier() -> Option<String> {
+        unsafe {
+            let bundle = CFBundleGetMainBundle();
+            if bundle.is_null() {
+                return None;
+            }
+            cf_string(CFBundleGetIdentifier(bundle) as *const c_void)
+        }
+    }
+
+    fn preflight_screen() -> bool {
+        unsafe { CGPreflightScreenCaptureAccess() }
+    }
+
+    fn preflight_input() -> bool {
+        unsafe { AXIsProcessTrusted() }
+    }
+
+    fn functional_screen() -> bool {
+        let self_pid = std::process::id();
+        let windows = copy_on_screen_windows();
+        if windows
+            .iter()
+            .any(|window| window.owner_pid != self_pid && !window.name.trim().is_empty())
+        {
+            return true;
+        }
+        let mut candidates: Vec<&WindowProbe> = windows
+            .iter()
+            .filter(|window| window.owner_pid != self_pid && window.window_id != 0)
+            .collect();
+        candidates.sort_by_key(|window| (window.layer != 0, window.layer.unsigned_abs()));
+        candidates
+            .into_iter()
+            .take(MAX_CAPTURE_PROBES)
+            .any(|window| capture_other_app_window(window.window_id))
+    }
+
+    fn functional_input() -> bool {
+        unsafe {
+            let system = AXUIElementCreateSystemWide();
+            if system.is_null() {
+                return false;
+            }
+            let granted =
+                ax_attr_ok(system, "AXFocusedApplication") || ax_attr_ok(system, "AXRole");
+            CFRelease(system as CFTypeRef);
+            granted
+        }
+    }
+
+    fn copy_on_screen_windows() -> Vec<WindowProbe> {
+        unsafe {
+            let info = CGWindowListCopyWindowInfo(
+                KCG_WINDOW_LIST_OPTION_ON_SCREEN_ONLY | KCG_WINDOW_LIST_EXCLUDE_DESKTOP,
+                KCG_NULL_WINDOW_ID,
+            );
+            if info.is_null() {
+                return Vec::new();
+            }
+            let count = CFArrayGetCount(info);
+            let mut out = Vec::new();
+            for index in 0..count {
+                let dict = CFArrayGetValueAtIndex(info, index);
+                if dict.is_null() {
+                    continue;
+                }
+                let owner_pid = cf_dict_i64(dict, kCGWindowOwnerPID as *const c_void)
+                    .unwrap_or(0)
+                    .max(0) as u32;
+                let window_id = cf_dict_i64(dict, kCGWindowNumber as *const c_void)
+                    .unwrap_or(0)
+                    .max(0) as u32;
+                let layer = cf_dict_i64(dict, kCGWindowLayer as *const c_void).unwrap_or(0);
+                let name = cf_dict_string(dict, kCGWindowName as *const c_void).unwrap_or_default();
+                out.push(WindowProbe {
+                    owner_pid,
+                    window_id,
+                    name,
+                    layer,
+                });
+            }
+            CFRelease(info as CFTypeRef);
+            out
+        }
+    }
+
+    fn capture_other_app_window(window_id: u32) -> bool {
+        if window_id == 0 {
+            return false;
+        }
+        let image = unsafe {
+            CGWindowListCreateImage(
+                CGRectNull,
+                kCGWindowListOptionIncludingWindow,
+                window_id,
+                kCGWindowImageBoundsIgnoreFraming,
+            )
+        };
+        if image.is_null() {
+            return false;
+        }
+        let width = unsafe { CGImageGetWidth(image as *mut c_void) };
+        let height = unsafe { CGImageGetHeight(image as *mut c_void) };
+        unsafe { CGImageRelease(image as *mut c_void) };
+        width > 0 && height > 0
+    }
+
+    fn ax_attr_ok(element: AXUIElementRef, name: &str) -> bool {
+        unsafe {
+            let attr = CFString::new(name);
+            let mut value: CFTypeRef = ptr::null();
+            let status =
+                AXUIElementCopyAttributeValue(element, attr.as_concrete_TypeRef(), &mut value);
+            let ok = status == AX_OK && !value.is_null();
+            if !value.is_null() {
+                CFRelease(value);
+            }
+            ok
+        }
+    }
+
+    fn cf_dict_string(dict: *const c_void, key: *const c_void) -> Option<String> {
+        unsafe { cf_string(CFDictionaryGetValue(dict, key)) }
+    }
+
+    fn cf_dict_i64(dict: *const c_void, key: *const c_void) -> Option<i64> {
+        unsafe { cf_number(CFDictionaryGetValue(dict, key)) }
+    }
+
+    fn cf_string(value: *const c_void) -> Option<String> {
+        if value.is_null() {
+            return None;
+        }
+        let text = unsafe { CFString::wrap_under_get_rule(value as CFStringRef) }.to_string();
+        let trimmed = text.trim();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(text)
+        }
+    }
+
+    fn cf_number(value: *const c_void) -> Option<i64> {
+        if value.is_null() {
+            return None;
+        }
+        let mut out64: i64 = 0;
+        if unsafe {
+            CFNumberGetValue(
+                value,
+                CF_NUMBER_SINT64_TYPE,
+                &mut out64 as *mut i64 as *mut c_void,
+            )
+        } {
+            return Some(out64);
+        }
+        let mut out32: i32 = 0;
+        if unsafe {
+            CFNumberGetValue(
+                value,
+                CF_NUMBER_SINT32_TYPE,
+                &mut out32 as *mut i32 as *mut c_void,
+            )
+        } {
+            return Some(i64::from(out32));
+        }
+        None
+    }
 }
 
 fn open_privacy_settings<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> Result<(), String> {
@@ -701,8 +1018,17 @@ fn open_privacy_settings<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> Result
 }
 
 #[tauri::command]
-pub async fn get_computer_permission_status() -> Result<ComputerPermissionStatus, String> {
-    Ok(query_permission_status())
+pub async fn get_computer_permission_status<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
+) -> Result<ComputerPermissionStatus, String> {
+    let configured = Some(app.config().identifier.clone());
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    app.run_on_main_thread(move || {
+        let _ = tx.send(query_permission_status_with_identity(configured));
+    })
+    .map_err(|error| format!("无法在主线程检测系统权限: {error}"))?;
+    rx.await
+        .map_err(|error| format!("主线程权限检测中断: {error}"))
 }
 
 #[tauri::command]
@@ -853,5 +1179,67 @@ mod tests {
         assert!(summary.contains("点击"));
         assert!(summary.contains("Safari"));
         assert!(summary.contains("12"));
+    }
+
+    #[test]
+    fn macos_probe_uses_preflight_or_functional_fallback() {
+        assert!(resolve_macos_granted(true, false));
+        assert!(resolve_macos_granted(false, true));
+        assert!(!resolve_macos_granted(false, false));
+        assert_eq!(macos_screen_label(true), "已授权屏幕录制");
+        assert_eq!(macos_screen_label(false), "未授权屏幕录制");
+        assert_eq!(macos_input_label(true), "已授权辅助功能");
+        assert_eq!(macos_input_label(false), "未授权辅助功能");
+    }
+
+    #[test]
+    fn process_identity_includes_bundle_and_executable() {
+        let note = format_process_identity(Some("com.wenyuan.noxcode"), Some("/tmp/noxcode"));
+        assert!(note.contains("com.wenyuan.noxcode"), "{note}");
+        assert!(note.contains("/tmp/noxcode"), "{note}");
+        assert!(note.contains("tauri dev"), "{note}");
+        assert!(format_process_identity(None, None).contains("无法读取当前进程身份"));
+    }
+
+    #[test]
+    fn permission_status_serializes_process_identity() {
+        let status = query_permission_status();
+        let json = serde_json::to_value(&status).expect("json");
+        assert!(json.get("bundle_id").is_some());
+        assert!(json.get("executable_path").is_some());
+        let identity = json["process_identity"]
+            .as_str()
+            .expect("process_identity string");
+        assert!(
+            identity.contains("可执行文件") || identity.contains("无法读取当前进程身份"),
+            "{identity}"
+        );
+        #[cfg(target_os = "macos")]
+        {
+            assert!(json["screenshot"]["granted"].is_boolean());
+            assert!(json["input"]["granted"].is_boolean());
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            assert_eq!(json["screenshot"]["granted"], serde_json::Value::Null);
+            assert_eq!(json["input"]["granted"], serde_json::Value::Null);
+        }
+    }
+
+    #[test]
+    fn permission_status_reads_through_main_thread_standin() {
+        let mut hops = 0;
+        let status = read_permission_status_via(Some("com.wenyuan.noxcode".into()), |query| {
+            hops += 1;
+            Ok(query())
+        })
+        .expect("standin");
+        assert_eq!(hops, 1);
+        assert!(!status.process_identity.is_empty());
+        #[cfg(not(target_os = "macos"))]
+        {
+            assert_eq!(status.bundle_id.as_deref(), Some("com.wenyuan.noxcode"));
+            assert!(status.process_identity.contains("com.wenyuan.noxcode"));
+        }
     }
 }
