@@ -31,15 +31,16 @@ use super::openai::{
     build_openai_body, parse_max_output_token_limit, parse_openai_json, parse_openai_sse,
     OpenAiStreamState,
 };
+use super::response::{provider_error, FinishReason, ModelError, ModelErrorKind, ModelResponse};
 use super::responses::{
-    build_responses_body, parse_responses_json, parse_responses_json_with_id, parse_responses_sse,
-    parse_responses_sse_with_id, responses_input, ResponsesStreamState,
+    build_responses_body, parse_responses_json, parse_responses_sse, responses_input,
+    ResponsesStreamState,
 };
 use super::retry::{
     format_http_error, format_retry_line, is_retryable_error, parse_retry_after, redact_secrets,
     RetryConfig,
 };
-use super::sse::{parse_sse, SseEvent, SseStreamParser};
+use super::sse::{SseEvent, SseStreamParser};
 use super::types::{Message, StreamDelta, ToolSpec, Usage};
 
 /// Once the body is known to be SSE the retained text is only used for the
@@ -49,7 +50,7 @@ use super::types::{Message, StreamDelta, ToolSpec, Usage};
 const SSE_TEXT_BUFFER_LIMIT: usize = 256 * 1024;
 const BODY_TEXT_BUFFER_LIMIT: usize = 8 * 1024 * 1024;
 
-type ParsedResponse = (Message, Usage, Option<String>);
+type ParsedResponse = ModelResponse;
 
 #[derive(Default)]
 struct StreamScan {
@@ -70,7 +71,7 @@ struct TimedHttpBody {
     /// `Some` when the body arrived as SSE and was consumed incrementally by
     /// the protocol state machine. `None` means the text fallback still owns
     /// parsing (complete JSON payloads, empty bodies, gateway errors).
-    parsed: Option<Result<ParsedResponse, String>>,
+    parsed: Option<Result<ParsedResponse, ModelError>>,
 }
 
 enum ProtocolStreamState {
@@ -97,15 +98,11 @@ impl ProtocolStreamState {
         }
     }
 
-    fn finish(self) -> Result<ParsedResponse, String> {
+    fn finish(self) -> Result<ParsedResponse, ModelError> {
         match self {
             Self::Responses(state) => state.finish(),
-            Self::OpenAi(state) => state
-                .finish()
-                .map(|(message, usage)| (message, usage, None)),
-            Self::Anthropic(state) => state
-                .finish()
-                .map(|(message, usage)| (message, usage, None)),
+            Self::OpenAi(state) => state.finish(),
+            Self::Anthropic(state) => state.finish(),
         }
     }
 }
@@ -441,17 +438,21 @@ impl ModelClient {
         }
     }
 
-    pub fn parse_sse(&self, text: &str) -> Result<(Message, Usage), String> {
+    pub fn parse_sse(&self, text: &str) -> Result<ModelResponse, ModelError> {
         match self.config.protocol.as_str() {
             PROTOCOL_ANTHROPIC => parse_anthropic_sse(text),
             PROTOCOL_CODEX => parse_responses_sse(text),
             PROTOCOL_OPENAI => parse_openai_sse(text),
-            other => Err(format!("不支持的渠道协议: {other}")),
+            other => Err(ModelError::new(
+                ModelErrorKind::InvalidResponse,
+                format!("不支持的渠道协议: {other}"),
+            )),
         }
     }
 
-    pub async fn chat(&self, request: ChatRequest<'_>) -> Result<(Message, Usage), String> {
-        let url = channel_chat_url(&self.config.base_url, &self.config.protocol)?;
+    pub async fn chat(&self, request: ChatRequest<'_>) -> Result<ModelResponse, ModelError> {
+        let url = channel_chat_url(&self.config.base_url, &self.config.protocol)
+            .map_err(|error| ModelError::new(ModelErrorKind::InvalidResponse, error))?;
         let mut max_output_tokens = request.max_output_tokens;
         let mut limit_retries = 0u8;
         let mut retried_continuation = false;
@@ -466,20 +467,37 @@ impl ModelClient {
                 thinking_enabled: request.thinking_enabled,
             };
             let continuation = self.continuation_for(&conversation_key, request.messages);
-            let body = self.build_body_with_continuation(
-                &adjusted,
-                true,
-                continuation.as_ref().map(|item| item.response_id.as_str()),
-            )?;
+            let body = self
+                .build_body_with_continuation(
+                    &adjusted,
+                    true,
+                    continuation.as_ref().map(|item| item.response_id.as_str()),
+                )
+                .map_err(|error| ModelError::new(ModelErrorKind::InvalidResponse, error))?;
             match self.post_stream(&url, &body).await {
-                Ok((message, usage, response_id)) => {
-                    self.update_continuation(&conversation_key, request.messages, response_id);
-                    return Ok((message, usage));
+                Ok(response) => {
+                    if matches!(
+                        response.finish_reason,
+                        FinishReason::OutputLimit
+                            | FinishReason::ContextLimit
+                            | FinishReason::Refusal
+                    ) {
+                        // The canonical transcript discards partial/refused tools. Never
+                        // resume server-side state that may still contain those tools.
+                        self.clear_continuation(&conversation_key);
+                    } else {
+                        self.update_continuation(
+                            &conversation_key,
+                            request.messages,
+                            response.response_id.clone(),
+                        );
+                    }
+                    return Ok(response);
                 }
                 Err(error)
                     if continuation.is_some()
                         && !retried_continuation
-                        && is_continuation_rejection(&error) =>
+                        && is_continuation_rejection(&error.message) =>
                 {
                     self.continuation_unsupported.store(true, Ordering::SeqCst);
                     self.clear_continuation(&conversation_key);
@@ -487,7 +505,7 @@ impl ModelClient {
                     continue;
                 }
                 Err(error) if limit_retries < MAX_OUTPUT_LIMIT_RETRIES => {
-                    let Some(limit) = parse_max_output_token_limit(&error) else {
+                    let Some(limit) = parse_max_output_token_limit(&error.message) else {
                         return Err(error);
                     };
                     let current = max_output_tokens.unwrap_or(u32::MAX);
@@ -570,14 +588,10 @@ impl ModelClient {
         Err(format_http_error(timed.status, &url, &timed.text))
     }
 
-    async fn post_stream(
-        &self,
-        url: &str,
-        body: &Value,
-    ) -> Result<(Message, Usage, Option<String>), String> {
+    async fn post_stream(&self, url: &str, body: &Value) -> Result<ModelResponse, ModelError> {
         let attempts = self.config.retry.max_retries.saturating_add(1);
         let call_id = new_id();
-        let mut last_error = "模型请求失败".to_string();
+        let mut last_error = ModelError::new(ModelErrorKind::Transport, "模型请求失败");
         for attempt in 0..attempts {
             let mut retry_after_hint: Option<Duration> = None;
             if self.is_cancelled() {
@@ -591,7 +605,7 @@ impl ModelClient {
                     None,
                     Some("已取消"),
                 );
-                return Err("已取消".to_string());
+                return Err(ModelError::new(ModelErrorKind::Cancelled, "已取消"));
             }
             match self.post_raw(url, body).await {
                 Ok(timed) if timed.cancelled => {
@@ -605,7 +619,7 @@ impl ModelClient {
                         Some(i64::from(timed.status)),
                         Some("已取消"),
                     );
-                    return Err("已取消".to_string());
+                    return Err(ModelError::new(ModelErrorKind::Cancelled, "已取消"));
                 }
                 Ok(mut timed) if (200..300).contains(&timed.status) => {
                     match self.take_parsed_response(&mut timed) {
@@ -615,14 +629,21 @@ impl ModelClient {
                                 i64::from(attempt.saturating_add(1)),
                                 body,
                                 Some(&timed),
-                                Some(&result.1),
+                                Some(&result.usage),
                                 CALL_STATUS_SUCCESS,
                                 Some(i64::from(timed.status)),
                                 None,
                             );
                             return Ok(result);
                         }
-                        Err(error) => last_error = error,
+                        Err(mut error) => {
+                            error.message = if error.kind == ModelErrorKind::Provider {
+                                format_gateway_error(&error.message)
+                            } else {
+                                redact_secrets(&error.message)
+                            };
+                            last_error = error;
+                        }
                     }
                     self.emit_call_log(
                         &call_id,
@@ -632,14 +653,25 @@ impl ModelClient {
                         None,
                         CALL_STATUS_FAILED,
                         Some(i64::from(timed.status)),
-                        Some(&last_error),
+                        Some(&last_error.message),
                     );
-                    if self.should_stop_retry(&last_error, Some(timed.status), attempt, attempts) {
+                    if self.should_stop_retry(
+                        &last_error.message,
+                        Some(timed.status),
+                        attempt,
+                        attempts,
+                    ) {
                         return Err(last_error);
                     }
                 }
                 Ok(timed) => {
-                    last_error = format_http_error(timed.status, url, &timed.text);
+                    let kind = serde_json::from_str::<Value>(&timed.text)
+                        .ok()
+                        .and_then(|value| provider_error(&value))
+                        .map(|error| error.kind)
+                        .unwrap_or(ModelErrorKind::Provider);
+                    last_error =
+                        ModelError::new(kind, format_http_error(timed.status, url, &timed.text));
                     retry_after_hint = timed.retry_after;
                     self.emit_call_log(
                         &call_id,
@@ -649,15 +681,27 @@ impl ModelClient {
                         None,
                         CALL_STATUS_FAILED,
                         Some(i64::from(timed.status)),
-                        Some(&last_error),
+                        Some(&last_error.message),
                     );
-                    if self.should_stop_retry(&last_error, Some(timed.status), attempt, attempts) {
+                    if self.should_stop_retry(
+                        &last_error.message,
+                        Some(timed.status),
+                        attempt,
+                        attempts,
+                    ) {
                         return Err(last_error);
                     }
                 }
                 Err(error) => {
-                    last_error = error;
-                    let cancelled = self.is_cancelled() || last_error == "已取消";
+                    let cancelled = self.is_cancelled() || error == "已取消";
+                    last_error = ModelError::new(
+                        if cancelled {
+                            ModelErrorKind::Cancelled
+                        } else {
+                            ModelErrorKind::Transport
+                        },
+                        error,
+                    );
                     self.emit_call_log(
                         &call_id,
                         i64::from(attempt.saturating_add(1)),
@@ -670,12 +714,12 @@ impl ModelClient {
                             CALL_STATUS_FAILED
                         },
                         None,
-                        Some(&last_error),
+                        Some(&last_error.message),
                     );
                     if cancelled {
-                        return Err("已取消".to_string());
+                        return Err(ModelError::new(ModelErrorKind::Cancelled, "已取消"));
                     }
-                    if self.should_stop_retry(&last_error, None, attempt, attempts) {
+                    if self.should_stop_retry(&last_error.message, None, attempt, attempts) {
                         return Err(last_error);
                     }
                 }
@@ -687,7 +731,7 @@ impl ModelClient {
             // The next attempt regenerates the answer from scratch, so
             // anything already streamed into the live view is stale.
             self.emit_delta(StreamDelta::Reset);
-            self.emit_retry(&last_error, attempt.saturating_add(1), delay);
+            self.emit_retry(&last_error.message, attempt.saturating_add(1), delay);
             if let Err(error) = self.wait_before_retry(delay).await {
                 self.emit_call_log(
                     &call_id,
@@ -699,7 +743,7 @@ impl ModelClient {
                     None,
                     Some(&error),
                 );
-                return Err(error);
+                return Err(ModelError::new(ModelErrorKind::Cancelled, error));
             }
         }
         Err(last_error)
@@ -900,10 +944,13 @@ impl ModelClient {
     /// Prefer the incrementally parsed stream and keep the buffered-text
     /// parser as the fallback for complete JSON payloads, empty bodies and
     /// gateway errors.
-    fn take_parsed_response(&self, timed: &mut TimedHttpBody) -> Result<ParsedResponse, String> {
+    fn take_parsed_response(
+        &self,
+        timed: &mut TimedHttpBody,
+    ) -> Result<ParsedResponse, ModelError> {
         match timed.parsed.take() {
-            Some(Ok(parsed)) => Ok(parsed),
-            Some(Err(_)) | None => self.parse_success_body_with_id(&timed.text),
+            Some(parsed) => parsed,
+            None => self.parse_success_body_with_id(&timed.text),
         }
     }
 
@@ -974,46 +1021,48 @@ impl ModelClient {
         });
     }
 
-    fn parse_success_body_with_id(
-        &self,
-        text: &str,
-    ) -> Result<(Message, Usage, Option<String>), String> {
+    fn parse_success_body_with_id(&self, text: &str) -> Result<ModelResponse, ModelError> {
         let trimmed = text.trim_start_matches('\u{feff}').trim();
         if trimmed.is_empty() {
-            return Err("模型返回空响应：正文为空".to_string());
-        }
-        if let Some(error) = extract_gateway_error(trimmed) {
-            return Err(format_gateway_error(&error));
-        }
-        if self.config.protocol == PROTOCOL_CODEX {
-            if let Ok(parsed) = parse_responses_sse_with_id(trimmed) {
-                return Ok(parsed);
-            }
-        } else if let Ok(parsed) = self.parse_sse(trimmed) {
-            return Ok((parsed.0, parsed.1, None));
+            return Err(ModelError::new(
+                ModelErrorKind::InvalidResponse,
+                "模型返回空响应：正文为空",
+            ));
         }
         if let Ok(value) = serde_json::from_str::<Value>(trimmed) {
             let payload = unwrap_gateway_payload(&value);
+            if let Some(error) = provider_error(payload).or_else(|| provider_error(&value)) {
+                return Err(error);
+            }
             if let Some(error) = json_error_message(payload) {
-                return Err(format_gateway_error(&error));
+                return Err(ModelError::new(
+                    ModelErrorKind::Provider,
+                    format_gateway_error(&error),
+                ));
             }
-            if self.config.protocol == PROTOCOL_CODEX {
-                if let Ok(parsed) = parse_responses_json_with_id(payload) {
-                    return Ok(parsed);
-                }
-            } else if let Ok(parsed) = self.parse_complete_json(payload) {
-                return Ok((parsed.0, parsed.1, None));
-            }
+            return self.parse_complete_json(payload);
         }
-        Err(empty_response_error(trimmed))
+        if trimmed
+            .lines()
+            .any(|line| line.starts_with("data:") || line.starts_with("event:"))
+        {
+            return self.parse_sse(trimmed);
+        }
+        Err(ModelError::new(
+            ModelErrorKind::InvalidResponse,
+            empty_response_error(trimmed),
+        ))
     }
 
-    fn parse_complete_json(&self, value: &Value) -> Result<(Message, Usage), String> {
+    fn parse_complete_json(&self, value: &Value) -> Result<ModelResponse, ModelError> {
         match self.config.protocol.as_str() {
             PROTOCOL_ANTHROPIC => parse_anthropic_json(value),
             PROTOCOL_CODEX => parse_responses_json(value),
             PROTOCOL_OPENAI => parse_openai_json(value),
-            other => Err(format!("不支持的渠道协议: {other}")),
+            other => Err(ModelError::new(
+                ModelErrorKind::InvalidResponse,
+                format!("不支持的渠道协议: {other}"),
+            )),
         }
     }
 
@@ -1136,26 +1185,6 @@ fn is_continuation_rejection(error: &str) -> bool {
     ]
     .iter()
     .any(|needle| lower.contains(needle))
-}
-
-fn extract_gateway_error(text: &str) -> Option<String> {
-    if let Ok(value) = serde_json::from_str::<Value>(text) {
-        return json_error_message(&value)
-            .or_else(|| json_error_message(unwrap_gateway_payload(&value)));
-    }
-    for event in parse_sse(text) {
-        let Ok(value) = serde_json::from_str::<Value>(&event.data) else {
-            continue;
-        };
-        // `response.failed` nests the reason one level down instead of
-        // reporting a top-level `error` object.
-        if let Some(error) = json_error_message(&value)
-            .or_else(|| value.get("response").and_then(json_error_message))
-        {
-            return Some(error);
-        }
-    }
-    None
 }
 
 fn json_error_message(value: &Value) -> Option<String> {
@@ -1392,7 +1421,7 @@ mod tests {
         .expect("client")
     }
 
-    async fn chat_hi_on(client: ModelClient) -> Result<(Message, Usage), String> {
+    async fn chat_hi_on(client: ModelClient) -> Result<ModelResponse, ModelError> {
         client
             .chat(ChatRequest {
                 messages: &[Message::user("hi")],
@@ -1408,7 +1437,7 @@ mod tests {
     #[tokio::test]
     async fn chat_parses_mock_openai_sse() {
         let base = serve_once(200, OK_SSE).await;
-        let (message, _) = chat_hi_on(client(base)).await.expect("chat");
+        let ModelResponse { message, .. } = chat_hi_on(client(base)).await.expect("chat");
         assert_eq!(message.content, "ok");
     }
 
@@ -1504,7 +1533,7 @@ mod tests {
             [StreamDelta::Text("hi ".to_string())],
             "the first delta must arrive while the response is still open"
         );
-        let (message, _) = task.await.expect("join").expect("chat");
+        let ModelResponse { message, .. } = task.await.expect("join").expect("chat");
         assert_eq!(message.content, "hi there");
         assert_eq!(
             deltas.lock().expect("deltas").as_slice(),
@@ -1524,7 +1553,7 @@ mod tests {
         );
         let base = serve_once(200, sse).await;
         let (hook, deltas) = capturing_delta_hook();
-        let (message, _) = client_with_protocol(base, PROTOCOL_CODEX)
+        let ModelResponse { message, .. } = client_with_protocol(base, PROTOCOL_CODEX)
             .with_delta_hook(hook)
             .chat(ChatRequest {
                 messages: &[Message::user("hi")],
@@ -1551,9 +1580,10 @@ mod tests {
     async fn chat_resets_deltas_before_retrying() {
         let base = serve_sequence(vec![(503, "busy".to_string()), (200, OK_SSE.to_string())]).await;
         let (hook, deltas) = capturing_delta_hook();
-        let (message, _) = chat_hi_on(client_with_retry(base, fast_retry()).with_delta_hook(hook))
-            .await
-            .expect("retry then success");
+        let ModelResponse { message, .. } =
+            chat_hi_on(client_with_retry(base, fast_retry()).with_delta_hook(hook))
+                .await
+                .expect("retry then success");
         assert_eq!(message.content, "ok");
         assert_eq!(
             deltas.lock().expect("deltas").as_slice(),
@@ -1566,7 +1596,7 @@ mod tests {
         let body = r#"{"choices":[{"message":{"role":"assistant","content":"json ok"}}]}"#;
         let base = serve_once(200, body).await;
         let (hook, deltas) = capturing_delta_hook();
-        let (message, _) = chat_hi_on(client(base).with_delta_hook(hook))
+        let ModelResponse { message, .. } = chat_hi_on(client(base).with_delta_hook(hook))
             .await
             .expect("json chat");
         assert_eq!(message.content, "json ok");
@@ -1588,7 +1618,7 @@ mod tests {
     async fn chat_retries_when_max_tokens_exceeds_gateway_limit() {
         let error = r#"{"error":{"message":"max_tokens is too large: 384000. This model supports at most 131072 completion tokens."}}"#;
         let base = serve_sequence(vec![(400, error.to_string()), (200, OK_SSE.to_string())]).await;
-        let (message, _) = client(base)
+        let ModelResponse { message, .. } = client(base)
             .chat(ChatRequest {
                 messages: &[Message::user("hi")],
                 tools: &[],
@@ -1612,7 +1642,7 @@ mod tests {
             (200, OK_SSE.to_string()),
         ])
         .await;
-        let (message, _) = client(base)
+        let ModelResponse { message, .. } = client(base)
             .chat(ChatRequest {
                 messages: &[Message::user("hi")],
                 tools: &[],
@@ -1626,14 +1656,14 @@ mod tests {
         assert_eq!(message.content, "ok");
     }
 
-    async fn chat_hi(base: String) -> Result<(Message, Usage), String> {
+    async fn chat_hi(base: String) -> Result<ModelResponse, ModelError> {
         chat_hi_on(client(base)).await
     }
 
     #[tokio::test]
     async fn chat_parses_non_stream_json() {
         let body = r#"{"choices":[{"message":{"role":"assistant","content":"json ok"}}],"usage":{"prompt_tokens":1,"completion_tokens":2}}"#;
-        let (message, usage) = chat_hi(serve_once(200, body).await)
+        let ModelResponse { message, usage, .. } = chat_hi(serve_once(200, body).await)
             .await
             .expect("json chat");
         assert_eq!(message.content, "json ok");
@@ -1643,7 +1673,7 @@ mod tests {
     #[tokio::test]
     async fn chat_parses_wrapped_gateway_json() {
         let body = r#"{"data":{"choices":[{"message":{"content":"wrapped"}}]}}"#;
-        let (message, _) = chat_hi(serve_once(200, body).await)
+        let ModelResponse { message, .. } = chat_hi(serve_once(200, body).await)
             .await
             .expect("wrapped json");
         assert_eq!(message.content, "wrapped");
@@ -1655,10 +1685,10 @@ mod tests {
         let error = chat_hi(serve_once(200, body).await)
             .await
             .expect_err("json error should fail");
-        assert!(error.contains("模型返回错误"));
-        assert!(error.contains("insufficient quota"));
-        assert!(!error.contains("空响应"));
-        assert!(!error.contains("sk-secret-key"));
+        assert!(error.message.contains("模型返回错误"));
+        assert!(error.message.contains("insufficient quota"));
+        assert!(!error.message.contains("空响应"));
+        assert!(!error.message.contains("sk-secret-key"));
     }
 
     #[tokio::test]
@@ -1666,24 +1696,25 @@ mod tests {
         let error = chat_hi(serve_once(200, "").await)
             .await
             .expect_err("empty body");
-        assert!(error.contains("模型返回空响应"));
-        assert!(error.contains("正文为空"));
+        assert!(error.message.contains("模型返回空响应"));
+        assert!(error.message.contains("正文为空"));
     }
 
     #[tokio::test]
     async fn chat_parses_responses_completed_json() {
         let body = r#"{"output":[{"type":"message","content":[{"type":"output_text","text":"done plan"}]}],"usage":{"input_tokens":2,"output_tokens":1}}"#;
-        let (message, _) = client_with_protocol(serve_once(200, body).await, PROTOCOL_CODEX)
-            .chat(ChatRequest {
-                messages: &[Message::user("hi")],
-                tools: &[],
-                model: "gpt-5.4",
-                effort: None,
-                max_output_tokens: None,
-                thinking_enabled: false,
-            })
-            .await
-            .expect("responses json");
+        let ModelResponse { message, .. } =
+            client_with_protocol(serve_once(200, body).await, PROTOCOL_CODEX)
+                .chat(ChatRequest {
+                    messages: &[Message::user("hi")],
+                    tools: &[],
+                    model: "gpt-5.4",
+                    effort: None,
+                    max_output_tokens: None,
+                    thinking_enabled: false,
+                })
+                .await
+                .expect("responses json");
         assert_eq!(message.content, "done plan");
     }
 
@@ -1756,7 +1787,7 @@ mod tests {
             .expect("first response");
         messages.push(Message::assistant_text("first"));
         messages.push(Message::tool_result("call_1", "tool output"));
-        let (message, _) = client
+        let ModelResponse { message, .. } = client
             .chat(ChatRequest {
                 messages: &messages,
                 tools: &[],
@@ -1802,7 +1833,7 @@ mod tests {
             .expect("first response");
         messages.push(Message::assistant_text("first"));
         messages.push(Message::tool_result("call_1", "tool output"));
-        let (message, _) = client
+        let ModelResponse { message, .. } = client
             .chat(ChatRequest {
                 messages: &messages,
                 tools: &[],
@@ -1942,7 +1973,7 @@ mod tests {
             .expect("fallback response");
         messages.push(Message::assistant_text("fallback"));
         messages.push(Message::user("continue"));
-        let (message, _) = client
+        let ModelResponse { message, .. } = client
             .chat(ChatRequest {
                 messages: &messages,
                 tools: &[],
@@ -2088,11 +2119,11 @@ mod tests {
         .await;
         let lines = Arc::new(Mutex::new(Vec::new()));
         let captured = lines.clone();
-        let (message, _) = chat_hi_on(client_with_retry(base, fast_retry()).with_retry_hook(
-            Arc::new(move |line: &str| {
+        let ModelResponse { message, .. } = chat_hi_on(
+            client_with_retry(base, fast_retry()).with_retry_hook(Arc::new(move |line: &str| {
                 captured.lock().expect("retry lines").push(line.to_string());
-            }),
-        ))
+            })),
+        )
         .await
         .expect("503 then success");
         assert_eq!(message.content, "ok");
@@ -2108,7 +2139,7 @@ mod tests {
     async fn chat_retries_http_200_gateway_error_then_succeeds() {
         let error = r#"{"error":{"message":"overloaded"}}"#;
         let base = serve_sequence(vec![(200, error.to_string()), (200, OK_SSE.to_string())]).await;
-        let (message, _) = chat_hi_on(client_with_retry(base, fast_retry()))
+        let ModelResponse { message, .. } = chat_hi_on(client_with_retry(base, fast_retry()))
             .await
             .expect("gateway error then success");
         assert_eq!(message.content, "ok");
@@ -2117,7 +2148,7 @@ mod tests {
     #[tokio::test]
     async fn chat_retries_http_200_empty_then_succeeds() {
         let base = serve_sequence(vec![(200, String::new()), (200, OK_SSE.to_string())]).await;
-        let (message, _) = chat_hi_on(client_with_retry(base, fast_retry()))
+        let ModelResponse { message, .. } = chat_hi_on(client_with_retry(base, fast_retry()))
             .await
             .expect("empty then success");
         assert_eq!(message.content, "ok");
@@ -2131,7 +2162,7 @@ mod tests {
         let error = chat_hi_on(client_with_retry(base, RetryConfig::none()))
             .await
             .expect_err("none should fail immediately");
-        assert!(error.contains("HTTP 503"));
+        assert!(error.message.contains("HTTP 503"));
         assert_eq!(counter.load(Ordering::SeqCst), 1);
     }
 
@@ -2169,7 +2200,7 @@ mod tests {
         )
         .await
         .expect_err("401 should fail");
-        assert!(error.contains("HTTP 401"));
+        assert!(error.message.contains("HTTP 401"));
         assert_eq!(counter.load(Ordering::SeqCst), 1);
         assert!(lines.lock().expect("retry lines").is_empty());
     }
@@ -2183,7 +2214,7 @@ mod tests {
             Some(counter.clone()),
         )
         .await;
-        let (message, _) = client_with_retry(base, fast_retry())
+        let ModelResponse { message, .. } = client_with_retry(base, fast_retry())
             .chat(ChatRequest {
                 messages: &[Message::user("hi")],
                 tools: &[],
@@ -2211,7 +2242,8 @@ mod tests {
             .await
             .expect("join")
             .expect_err("retry wait should cancel");
-        assert_eq!(error, "已取消");
+        assert_eq!(error.kind, ModelErrorKind::Cancelled);
+        assert_eq!(error.message, "已取消");
     }
 
     fn capturing_sink() -> (CallLogSink, Arc<Mutex<Vec<NativeApiCallLogInsert>>>) {
@@ -2323,7 +2355,8 @@ mod tests {
             .await
             .expect("join")
             .expect_err("retry wait should cancel");
-        assert_eq!(error, "已取消");
+        assert_eq!(error.kind, ModelErrorKind::Cancelled);
+        assert_eq!(error.message, "已取消");
         let records = records.lock().expect("call logs");
         assert!(
             records.len() >= 2,
@@ -2362,7 +2395,8 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(200)).await;
         cancel.cancel();
         let error = task.await.expect("join").expect_err("stream cancel");
-        assert_eq!(error, "已取消");
+        assert_eq!(error.kind, ModelErrorKind::Cancelled);
+        assert_eq!(error.message, "已取消");
         let records = records.lock().expect("call logs");
         assert_eq!(records.len(), 1);
         assert_eq!(records[0].status, CALL_STATUS_CANCELLED);
@@ -2424,7 +2458,7 @@ mod tests {
         .expect("live client");
         let listed = client.list_models().await.expect("list_models");
         assert!(!listed.models.is_empty(), "真实渠道应至少返回一个模型");
-        let (message, _) = client
+        let ModelResponse { message, .. } = client
             .chat(ChatRequest {
                 messages: &[Message::user("回复一个字：好")],
                 tools: &[],
@@ -2439,5 +2473,121 @@ mod tests {
             !message.content.trim().is_empty() || !message.reasoning_content.trim().is_empty(),
             "真实渠道 chat 应返回文本或思考内容"
         );
+    }
+
+    #[test]
+    fn failed_incremental_stream_is_never_reparsed_as_successful_buffer() {
+        let client = client("http://localhost".to_string());
+        let mut timed = TimedHttpBody {
+            status: 200,
+            text: r#"{"choices":[{"message":{"content":"false success"}}]}"#.into(),
+            first_token_ms: None,
+            duration_ms: 0,
+            cancelled: false,
+            usage_reported: false,
+            retry_after: None,
+            parsed: Some(Err(ModelError::new(
+                ModelErrorKind::IncompleteStream,
+                "missing terminal",
+            ))),
+        };
+        assert_eq!(
+            client.take_parsed_response(&mut timed).unwrap_err().kind,
+            ModelErrorKind::IncompleteStream
+        );
+    }
+
+    #[tokio::test]
+    async fn http_partial_stream_errors_keep_their_structured_kind() {
+        for (protocol, body, kind) in [
+            (PROTOCOL_OPENAI, "data: {\"choices\":[{\"delta\":{\"content\":\"partial\"}}]}\n\n", ModelErrorKind::IncompleteStream),
+            (PROTOCOL_ANTHROPIC, "data: {\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"text\":\"partial\"}}\n\n", ModelErrorKind::IncompleteStream),
+            (PROTOCOL_CODEX, "data: {\"type\":\"response.output_text.delta\",\"delta\":\"partial\"}\n\n", ModelErrorKind::IncompleteStream),
+            (PROTOCOL_OPENAI, "data: {\"choices\":[{\"delta\":{\"content\":\"partial\"}}]}\n\ndata: {\"error\":{\"message\":\"server failed\"}}\n\n", ModelErrorKind::Provider),
+        ] {
+            let error = chat_hi_on(client_with_protocol(serve_once(200,body).await, protocol)).await.unwrap_err();
+            assert_eq!(error.kind, kind);
+        }
+    }
+
+    #[tokio::test]
+    async fn partial_responses_clear_server_continuation_with_discarded_tool_state() {
+        for reason in [
+            "max_output_tokens",
+            "model_context_window_exceeded",
+            "content_filter",
+        ] {
+            let first =
+                serde_json::json!({"id":"valid","status":"completed","output_text":"first"})
+                    .to_string();
+            let partial = serde_json::json!({"id":"partial","status":"incomplete","incomplete_details":{"reason":reason},"output":[{"type":"message","content":[{"type":"output_text","text":"kept"}]},{"type":"function_call","call_id":"unfinished","name":"Write","arguments":"{"}]}).to_string();
+            let last = serde_json::json!({"id":"last","status":"completed","output_text":"last"})
+                .to_string();
+            let (base, requests) =
+                serve_capture_sequence(vec![(200, first), (200, partial), (200, last)]).await;
+            let client = client_with_protocol(base, PROTOCOL_CODEX);
+            let mut messages = vec![Message::system("rules"), Message::user("begin")];
+            for turn in 0..3 {
+                let response = client
+                    .chat(ChatRequest {
+                        messages: &messages,
+                        tools: &[],
+                        model: "test",
+                        effort: None,
+                        max_output_tokens: None,
+                        thinking_enabled: false,
+                    })
+                    .await
+                    .unwrap();
+                assert!(response.message.tool_calls.is_empty());
+                messages.push(response.message);
+                messages.push(Message::user(format!("continue {turn}")));
+            }
+            let requests = requests.lock().unwrap();
+            assert_eq!(requests.len(), 3);
+            assert_eq!(requests[1]["previous_response_id"], "valid");
+            assert!(requests[2].get("previous_response_id").is_none());
+            assert!(!requests[2].to_string().contains("unfinished"));
+        }
+    }
+
+    #[tokio::test]
+    async fn invalid_responses_never_advance_server_continuation_id() {
+        let invalid = serde_json::json!({"id":"invalid","status":"completed","output":[{"type":"function_call","call_id":"x","name":"Read","arguments":"{"}]}).to_string();
+        let valid =
+            serde_json::json!({"id":"valid","status":"completed","output_text":"ok"}).to_string();
+        let (base, requests) = serve_capture_sequence(vec![(200, invalid), (200, valid)]).await;
+        let client = client_with_protocol(base, PROTOCOL_CODEX);
+        let messages = [Message::user("go")];
+        let request = || ChatRequest {
+            messages: &messages,
+            tools: &[],
+            model: "test",
+            effort: None,
+            max_output_tokens: None,
+            thinking_enabled: false,
+        };
+        assert_eq!(
+            client.chat(request()).await.unwrap_err().kind,
+            ModelErrorKind::InvalidResponse
+        );
+        assert!(client.chat(request()).await.is_ok());
+        assert!(requests.lock().unwrap()[1]
+            .get("previous_response_id")
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn transport_disconnect_after_partial_text_is_classified() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            read_http_request(&mut stream).await;
+            stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: 10000\r\nConnection: close\r\n\r\ndata: {\"choices\":[{\"delta\":{\"content\":\"partial\"}}]}\n\n").await.unwrap();
+            stream.shutdown().await.unwrap();
+        });
+        let error = chat_hi(format!("http://{address}")).await.unwrap_err();
+        assert_eq!(error.kind, ModelErrorKind::Transport);
     }
 }

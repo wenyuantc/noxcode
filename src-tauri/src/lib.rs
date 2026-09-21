@@ -136,6 +136,8 @@ pub fn run() {
             native::session::resume_native_session,
             native::session::update_native_session_configuration,
             native::session::send_native_input,
+            native::session::submit_native_steer,
+            native::session::get_native_steer_snapshot,
             native::session::list_native_queued_inputs,
             native::session::update_native_queued_input,
             native::session::remove_native_queued_input,

@@ -22,6 +22,7 @@ import { resolveSessionRequest } from "@/lib/nativeRequestResolution";
 import type { NativePermissionDecision, PermissionRuleScope } from "@/lib/types";
 import { useSessionStore } from "@/stores/sessionStore";
 import { useWorkspaceStore } from "@/stores/workspaceStore";
+import { PermissionSteerEditor } from "./PermissionSteerEditor";
 
 export interface ParsedPermissionSummary {
   riskReason: string | null;
@@ -80,6 +81,8 @@ export function NativePermissionDialog() {
     );
   });
   const [busy, setBusy] = useState(false);
+  const [editingSteer, setEditingSteer] = useState<string | null>(null);
+  const steering = Boolean(pending && editingSteer === pending.request_id);
   const [copied, setCopied] = useState(false);
   const [selection, setSelection] = useState<{
     requestId: string;
@@ -114,6 +117,8 @@ export function NativePermissionDialog() {
       if (
         decision === "allow_session" &&
         current.kind !== "mcp" &&
+        current.kind !== "network_origin" &&
+        current.kind !== "network_proxy" &&
         !current.file_access &&
         current.tool_name !== "WorkspaceHooks"
       ) {
@@ -134,6 +139,7 @@ export function NativePermissionDialog() {
 
   const suggestion = pending?.suggested_rule ?? null;
   const isRule = pending?.kind === "rule";
+  const isNetwork = pending?.kind === "network_origin" || pending?.kind === "network_proxy";
   const access = pending?.file_access;
   const updateSelection = (nextDirectories: Record<number, boolean>, nextScope = scope) => {
     if (pending)
@@ -160,7 +166,10 @@ export function NativePermissionDialog() {
     <Dialog
       open={Boolean(pending)}
       onOpenChange={(open) => {
-        if (!open) void resolve("deny");
+        if (!open) {
+          if (steering) setEditingSteer(null);
+          else void resolve("deny");
+        }
       }}
     >
       <DialogContent className="flex max-h-[85dvh] w-[calc(100vw-2rem)] flex-col gap-0 overflow-hidden p-0 sm:max-w-xl md:max-w-2xl">
@@ -190,7 +199,15 @@ export function NativePermissionDialog() {
               </Badge>
             ) : null}
             <Badge variant="secondary" className="h-5 px-1.5 py-0 text-[11px]">
-              {access ? t("permissionFileTitle") : pending?.kind}
+              {access
+                ? t("permissionFileTitle")
+                : isNetwork
+                  ? t(
+                      pending?.kind === "network_proxy"
+                        ? "permissionNetworkProxy"
+                        : "permissionNetworkOrigin",
+                    )
+                  : pending?.kind}
             </Badge>
           </div>
         </DialogHeader>
@@ -317,6 +334,19 @@ export function NativePermissionDialog() {
             </div>
           ) : null}
 
+          {pending ? (
+            <PermissionSteerEditor
+              key={pending.request_id}
+              sessionId={pending.session_record_id}
+              editing={steering}
+              label={requestSession?.title || pending.session_record_id}
+              onEditingChange={(editing) =>
+                setEditingSteer((current) =>
+                  editing ? pending.request_id : current === pending.request_id ? null : current,
+                )
+              }
+            />
+          ) : null}
           {error?.requestId === pending?.request_id ? (
             <p role="alert" className="text-xs text-destructive whitespace-pre-wrap break-all">
               {error?.message}
@@ -325,7 +355,7 @@ export function NativePermissionDialog() {
         </div>
 
         <DialogFooter className="m-0 shrink-0 border-t border-border/50 bg-muted/20 px-5 py-3.5 sm:justify-end">
-          <fieldset disabled={busy} className="flex w-full flex-col gap-2">
+          <fieldset disabled={busy || steering} className="flex w-full flex-col gap-2">
             <Button variant="outline" onClick={() => resolve("allow_once")}>
               {t("permissionAllowOnce")}
             </Button>
@@ -337,7 +367,13 @@ export function NativePermissionDialog() {
               <Button onClick={() => resolve("allow_server")}>{t("permissionAllowServer")}</Button>
             ) : (
               <Button onClick={() => resolve("allow_session")}>
-                {t("permissionAllowSession")}
+                {t(
+                  pending?.kind === "network_proxy"
+                    ? "permissionProxyAllowSession"
+                    : isNetwork
+                      ? "permissionNetworkAllowSession"
+                      : "permissionAllowSession",
+                )}
               </Button>
             )}
             {(access || suggestion) &&

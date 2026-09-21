@@ -108,9 +108,19 @@
   "permissionScopeWorkspace": "Current workspace",
   "permissionScopeGlobal": "Global",
   "permissionOperation": {
-    "read": "Read", "search": "Search", "write": "Write", "edit": "Edit",
-    "create": "Create", "delete": "Delete", "move_source": "Move source", "move_destination": "Move destination"
+    "read": "Read",
+    "search": "Search",
+    "write": "Write",
+    "edit": "Edit",
+    "create": "Create",
+    "delete": "Delete",
+    "move_source": "Move source",
+    "move_destination": "Move destination"
   },
+  "permissionNetworkOrigin": "Nonpublic origin",
+  "permissionNetworkProxy": "Proxy trust",
+  "permissionProxyAllowSession": "Trust this proxy for this session",
+  "permissionNetworkAllowSession": "Trust this target for this session",
   "permissionAllowSession": "Allow this session",
   "permissionAllowSessionCommands": "Allow all commands in this session",
   "permissionAllowServer": "Allow this server",
@@ -124,6 +134,7 @@
   "planApprovalHint": "Approving starts implementation; when sending it back you can note what to change.",
   "planApprovalFeedbackPlaceholder": "Optional feedback or extra requirements for the agent",
   "planApprovalApprove": "Approve and implement",
+  "planApprovalRetry": "Retry save and implement",
   "planApprovalReject": "Send back",
   "planCopy": "Copy plan",
   "planCopied": "Copied",
@@ -259,27 +270,90 @@
   "slashPluginsNone": "No plugins yet.",
   "slashContextEmpty": "No context usage for this session.",
   "slashBuiltin": {
-    "init": { "description": "Generate or update AGENTS.md", "hint": "[notes]" },
-    "fork": { "description": "Fork this session", "hint": "[checkpoint]" },
-    "compact": { "description": "Compact context", "hint": "[instructions]" },
-    "new": { "description": "Start a new session", "hint": "" },
-    "clear": { "description": "Clear and start a new session", "hint": "" },
-    "mode": { "description": "Switch permission mode", "hint": "[default|edit|build|plan|yolo]" },
-    "model": { "description": "Switch model", "hint": "[model]" },
-    "effort": { "description": "Switch reasoning level", "hint": "[low|medium|high|…]" },
-    "plan": { "description": "Enter plan mode", "hint": "[task]" },
-    "permissions": { "description": "Open permission rules", "hint": "" },
-    "memory": { "description": "Open workspace memory", "hint": "" },
-    "mcp": { "description": "Open MCP settings", "hint": "" },
-    "plugins": { "description": "List plugins and open their folder", "hint": "" },
-    "skill": { "description": "Invoke a skill", "hint": "<name> [args]" },
-    "diff": { "description": "Open Git changes", "hint": "" },
-    "context": { "description": "Show context usage", "hint": "" },
-    "help": { "description": "List slash commands", "hint": "" },
-    "goal": { "description": "Set or clear the session goal", "hint": "[set|clear] [title]" },
-    "review": { "description": "Review the working-tree diff", "hint": "[scope]" },
-    "create-skill": { "description": "Create a SKILL.md", "hint": "[name] [notes]" },
-    "create-subagent": { "description": "Create a subagent profile", "hint": "[name] [notes]" }
+    "init": {
+      "description": "Generate or update AGENTS.md",
+      "hint": "[notes]"
+    },
+    "fork": {
+      "description": "Fork this session",
+      "hint": "[checkpoint]"
+    },
+    "compact": {
+      "description": "Compact context",
+      "hint": "[instructions]"
+    },
+    "new": {
+      "description": "Start a new session",
+      "hint": ""
+    },
+    "clear": {
+      "description": "Clear and start a new session",
+      "hint": ""
+    },
+    "mode": {
+      "description": "Switch permission mode",
+      "hint": "[default|edit|build|plan|yolo]"
+    },
+    "model": {
+      "description": "Switch model",
+      "hint": "[model]"
+    },
+    "effort": {
+      "description": "Switch reasoning level",
+      "hint": "[low|medium|high|…]"
+    },
+    "plan": {
+      "description": "Enter plan mode",
+      "hint": "[task]"
+    },
+    "permissions": {
+      "description": "Open permission rules",
+      "hint": ""
+    },
+    "memory": {
+      "description": "Open workspace memory",
+      "hint": ""
+    },
+    "mcp": {
+      "description": "Open MCP settings",
+      "hint": ""
+    },
+    "plugins": {
+      "description": "List plugins and open their folder",
+      "hint": ""
+    },
+    "skill": {
+      "description": "Invoke a skill",
+      "hint": "<name> [args]"
+    },
+    "diff": {
+      "description": "Open Git changes",
+      "hint": ""
+    },
+    "context": {
+      "description": "Show context usage",
+      "hint": ""
+    },
+    "help": {
+      "description": "List slash commands",
+      "hint": ""
+    },
+    "goal": {
+      "description": "Set or clear the session goal",
+      "hint": "[set|clear] [title]"
+    },
+    "review": {
+      "description": "Review the working-tree diff",
+      "hint": "[scope]"
+    },
+    "create-skill": {
+      "description": "Create a SKILL.md",
+      "hint": "[name] [notes]"
+    },
+    "create-subagent": {
+      "description": "Create a subagent profile",
+      "hint": "[name] [notes]"
+    }
   },
   "noSkills": "No skills yet",
   "noFiles": "No matching files",
@@ -423,5 +497,25 @@
       "step3": "3. Use Write or Edit to write the files back to the main workspace, without leaving conflict markers.",
       "step4": "4. Briefly explain the tradeoffs for each file in English. Do not call EnterWorktree; the session returns to the isolated worktree automatically at the end of this turn."
     }
+  },
+  "steer": {
+    "action": "Steer current turn",
+    "help": "Apply at the next safe boundary in this turn. Enter still queues the next turn.",
+    "history": "Current-turn instructions",
+    "accepted": "Pending",
+    "applied": "Applied",
+    "rejected": "Rejected",
+    "cancelled": "Cancelled / interrupted",
+    "images": "{{count}} image(s)",
+    "reselect": "Reselect images before submitting again.",
+    "restore": "Restore text draft",
+    "noTurn": "This turn has ended. Your draft is preserved.",
+    "limit": "Maximum: 200 KiB text and 8 images, up to 8 MiB each.",
+    "target": "Steer session: {{name}}",
+    "editor": "Current-turn instruction",
+    "attach": "Attach images",
+    "removeImage": "Remove {{name}}",
+    "submitting": "Submitting…",
+    "back": "Back to authorization"
   }
 }

@@ -17,15 +17,18 @@ import { useTranslation } from "react-i18next";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
-import { resolveNativePlanApproval } from "@/lib/backend";
 import { resolveSessionRequest } from "@/lib/nativeRequestResolution";
-import { parsePendingPlan, planApprovalResumeInput } from "@/lib/planApproval";
+import {
+  authorizedPlanRetry,
+  parseApprovedPlan,
+  parsePendingPlan,
+  submitPlanApproval,
+} from "@/lib/planApproval";
 import {
   planApprovalModelArgs,
   resolvePlanApprovalThinking,
   resolveSessionSelection,
 } from "@/lib/sessionModel";
-import { submitSessionPrompt } from "@/lib/sessionSubmission";
 import type { GroupedSessionItem, PlanLineStatus } from "@/lib/sessionLines";
 import { parsePlanLine, planTitleFromBody } from "@/lib/sessionLines";
 import type { NativePlanApprovalRequest } from "@/lib/types";
@@ -118,6 +121,18 @@ export function PlanRow({ item, sessionId }: { item: GroupedSessionItem; session
   const { t } = useTranslation("sessions");
   const parsed = parsePlanLine(item.text);
   const pendingApproval = usePlanApproval(sessionId);
+  const planSession = useWorkspaceStore((state) =>
+    state.sessions.find((session) => session.id === sessionId),
+  );
+  const savedPlan = useMemo(() => parseApprovedPlan(planSession), [planSession]);
+  const planPath =
+    savedPlan &&
+    savedPlan.cwd_resolved !== false &&
+    (!savedPlan.saved_path || savedPlan.saved_path === savedPlan.path) &&
+    savedPlan.body.trim() === parsed?.body.trim() &&
+    savedPlan.saved_hash === savedPlan.content_hash
+      ? savedPlan.path
+      : null;
   const pendingAsk = useSessionStore(
     (state) => Object.values(state.planQuestions[sessionId] ?? {})[0],
   );
@@ -200,6 +215,9 @@ export function PlanRow({ item, sessionId }: { item: GroupedSessionItem; session
       </div>
 
       <div className="p-4">
+        {planPath ? (
+          <p className="mb-3 break-all text-xs text-muted-foreground">{planPath}</p>
+        ) : null}
         <div className={cn(!expanded && isLong && "relative max-h-[360px] overflow-hidden")}>
           <AssistantMarkdown text={cleanBody || parsed.body} variant="plan" />
           {!expanded && isLong ? (
@@ -239,20 +257,24 @@ export function PendingPlanApproval({ sessionId }: { sessionId: string }) {
   const session = useWorkspaceStore((state) =>
     state.sessions.find((item) => item.id === sessionId),
   );
+  const savedPlan = useMemo(() => parseApprovedPlan(session), [session]);
+  const retryPlan = authorizedPlanRetry(pendingApproval, savedPlan);
   const channels = useChannelStore((state) => state.channels);
   const activeChannelId = useChannelStore((state) => state.activeChannelId);
   const activeModelId = useChannelStore((state) => state.activeModelId);
   const setChannelSelection = useChannelStore((state) => state.setSelection);
   const composerThinkingLevel = useUiStore((state) => state.composerThinkingLevel);
   const setComposerThinkingLevel = useUiStore((state) => state.setComposerThinkingLevel);
-  const defaultSelection = resolveSessionSelection({
-    sessionId,
-    runtime,
-    session,
-    fallbackChannelId: activeChannelId,
-    fallbackModelId: activeModelId,
-  });
-  const [feedback, setFeedback] = useState("");
+  const defaultSelection = retryPlan
+    ? { channelId: retryPlan.ai_channel_id, modelId: retryPlan.model }
+    : resolveSessionSelection({
+        sessionId,
+        runtime,
+        session,
+        fallbackChannelId: activeChannelId,
+        fallbackModelId: activeModelId,
+      });
+  const [feedback, setFeedback] = useState(retryPlan?.feedback ?? "");
   const [showFeedback, setShowFeedback] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -264,7 +286,8 @@ export function PendingPlanApproval({ sessionId }: { sessionId: string }) {
       resolvePlanApprovalThinking({
         channels,
         selection: defaultSelection,
-        preferredEffort: runtime?.reasoning_effort ?? composerThinkingLevel,
+        preferredEffort:
+          retryPlan?.reasoning_effort ?? runtime?.reasoning_effort ?? composerThinkingLevel,
       }).effort,
   );
   const copyTimerRef = useRef<number | undefined>(undefined);
@@ -273,19 +296,30 @@ export function PendingPlanApproval({ sessionId }: { sessionId: string }) {
   const defaultModelId = defaultSelection.modelId;
 
   useEffect(() => {
-    setFeedback("");
+    setFeedback(retryPlan?.feedback ?? "");
     setShowFeedback(false);
     setError(null);
     setExpanded(false);
-    setSelection({ channelId: defaultChannelId, modelId: defaultModelId });
-  }, [pendingApproval?.request_id, defaultChannelId, defaultModelId]);
+    setSelection({
+      channelId: retryPlan?.ai_channel_id ?? defaultChannelId,
+      modelId: retryPlan?.model ?? defaultModelId,
+    });
+  }, [
+    pendingApproval?.request_id,
+    defaultChannelId,
+    defaultModelId,
+    retryPlan?.feedback,
+    retryPlan?.ai_channel_id,
+    retryPlan?.model,
+  ]);
 
   useEffect(() => {
     setThinkingLevel(
       resolvePlanApprovalThinking({
         channels,
         selection: { channelId: defaultChannelId, modelId: defaultModelId },
-        preferredEffort: runtime?.reasoning_effort ?? composerThinkingLevel,
+        preferredEffort:
+          retryPlan?.reasoning_effort ?? runtime?.reasoning_effort ?? composerThinkingLevel,
       }).effort,
     );
   }, [
@@ -294,6 +328,7 @@ export function PendingPlanApproval({ sessionId }: { sessionId: string }) {
     defaultModelId,
     channels,
     runtime?.reasoning_effort,
+    retryPlan?.reasoning_effort,
     composerThinkingLevel,
   ]);
 
@@ -313,6 +348,14 @@ export function PendingPlanApproval({ sessionId }: { sessionId: string }) {
     preferredEffort: thinkingLevel,
   });
 
+  const canRetry = Boolean(
+    retryPlan &&
+    retryPlan.feedback === feedback.trim() &&
+    retryPlan.ai_channel_id === selection.channelId &&
+    retryPlan.model === selection.modelId &&
+    (!thinking.enabled || retryPlan.reasoning_effort === thinking.effort),
+  );
+
   const handleCopy = async () => {
     try {
       await navigator.clipboard.writeText(planText);
@@ -324,27 +367,6 @@ export function PendingPlanApproval({ sessionId }: { sessionId: string }) {
     }
   };
 
-  /** 会话已结束：挂起的 ExitPlanMode 早已失效，用续聊新一轮来实施或重新规划。 */
-  const continueDetached = async (approved: boolean) => {
-    if (!session?.workspace_id || !selection.channelId) {
-      throw new Error(t("planContinueNeedChannel"));
-    }
-    const started = await submitSessionPrompt(
-      planApprovalResumeInput({
-        approved,
-        sessionId,
-        workspaceId: session.workspace_id,
-        channelId: selection.channelId,
-        modelId: selection.modelId,
-        reasoningEffort: thinking.enabled ? thinking.effort : null,
-        permissionMode: runtime?.permission_mode,
-        plan: pendingApproval.plan,
-        feedback,
-      }),
-    );
-    if (started) useSessionStore.getState().onStarted(started);
-  };
-
   const resolve = async (approved: boolean) => {
     if (busy) return;
     const current = pendingApproval;
@@ -352,25 +374,15 @@ export function PendingPlanApproval({ sessionId }: { sessionId: string }) {
       approved,
       selection,
       thinking.enabled ? thinking.effort : null,
+      Boolean(current.detached),
     );
     setBusy(true);
     setError(null);
     try {
-      if (current.detached) {
-        await continueDetached(approved);
-      } else {
-        await resolveSessionRequest({ ...current, kind: "plan_approval" }, () =>
-          resolveNativePlanApproval(
-            current.session_record_id,
-            current.request_id,
-            approved,
-            feedback.trim() || undefined,
-            modelArgs.aiChannelId,
-            modelArgs.model,
-            modelArgs.reasoningEffort,
-          ),
-        );
-      }
+      await resolveSessionRequest({ ...current, kind: "plan_approval" }, async () => {
+        const started = await submitPlanApproval(current, approved, feedback, modelArgs);
+        if (started) useSessionStore.getState().onStarted(started);
+      });
       if (approved && modelArgs.aiChannelId && modelArgs.model) {
         setChannelSelection(modelArgs.aiChannelId, modelArgs.model);
       }
@@ -380,6 +392,10 @@ export function PendingPlanApproval({ sessionId }: { sessionId: string }) {
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : String(reason));
     } finally {
+      await useWorkspaceStore
+        .getState()
+        .refreshSessions()
+        .catch(() => undefined);
       setBusy(false);
     }
   };
@@ -488,10 +504,13 @@ export function PendingPlanApproval({ sessionId }: { sessionId: string }) {
           </div>
         ) : null}
 
-        {error ? (
+        {retryPlan?.path ? (
+          <p className="mt-3 break-all text-xs text-muted-foreground">{retryPlan.path}</p>
+        ) : null}
+        {error || retryPlan?.error ? (
           <div className="mt-3 flex items-center gap-2 rounded-lg border border-destructive/20 bg-destructive/10 px-3 py-2 text-xs text-destructive">
             <AlertCircle className="size-4 shrink-0" />
-            <span>{error}</span>
+            <span>{error ?? retryPlan?.error}</span>
           </div>
         ) : null}
 
@@ -508,6 +527,7 @@ export function PendingPlanApproval({ sessionId }: { sessionId: string }) {
               value={feedback}
               rows={3}
               placeholder={t("planApprovalFeedbackPlaceholder")}
+              disabled={busy}
               onChange={(event) => setFeedback(event.target.value)}
               onKeyDown={handleKeyDown}
               className="min-h-[70px] resize-y bg-background/70 text-xs"
@@ -576,7 +596,7 @@ export function PendingPlanApproval({ sessionId }: { sessionId: string }) {
               ) : (
                 <Play className="size-3.5 fill-current" />
               )}
-              <span>{t("planApprovalApprove")}</span>
+              <span>{canRetry ? t("planApprovalRetry") : t("planApprovalApprove")}</span>
             </Button>
           </div>
         </div>

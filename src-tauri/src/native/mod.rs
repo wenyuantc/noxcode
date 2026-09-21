@@ -18,6 +18,7 @@ pub(crate) mod memory;
 pub(crate) mod model;
 pub(crate) mod model_catalog;
 pub(crate) mod permission_rules;
+pub(crate) mod plans;
 pub(crate) mod plugins;
 pub(crate) mod prompt;
 pub(crate) mod protocol;
@@ -28,3 +29,5 @@ pub(crate) mod skills;
 pub(crate) mod subagents;
 pub(crate) mod tools;
 pub(crate) mod transcript;
+
+pub mod steer;

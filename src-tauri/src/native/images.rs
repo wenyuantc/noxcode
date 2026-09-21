@@ -2,6 +2,7 @@
 
 use std::collections::HashSet;
 use std::fs;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use base64::engine::general_purpose::STANDARD as BASE64;
@@ -65,6 +66,60 @@ pub fn load_native_images(paths: Option<&[String]>) -> NativeImageLoad {
         }
     }
     loaded
+}
+
+/// Steer must be accepted with all requested attachments or rejected intact.
+/// Cleanup is the caller's responsibility after durable input acceptance.
+pub fn load_steer_images(paths: &[String]) -> Result<NativeImageLoad, String> {
+    let mut seen = HashSet::new();
+    let mut unique = Vec::new();
+    for raw in paths {
+        let raw = raw.trim();
+        if raw.is_empty() {
+            return Err("图片路径不能为空".into());
+        }
+        if seen.insert(raw) {
+            unique.push(raw);
+        }
+    }
+    if unique.len() > MAX_NATIVE_IMAGES {
+        return Err(format!("每条转向最多附带 {MAX_NATIVE_IMAGES} 张图片"));
+    }
+    let mut loaded = NativeImageLoad::default();
+    for raw in unique {
+        let path = Path::new(raw);
+        if !is_allowed_image_path(path) {
+            return Err(format!("不支持的图片类型：{raw}"));
+        }
+        let metadata =
+            fs::metadata(path).map_err(|error| format!("无法读取图片 {raw}：{error}"))?;
+        if !metadata.is_file() || metadata.len() == 0 {
+            return Err(format!("图片不是有效的非空文件：{raw}"));
+        }
+        if metadata.len() > MAX_NATIVE_IMAGE_BYTES {
+            return Err(format!("图片超过 8MB：{raw}"));
+        }
+        let file = fs::File::open(path).map_err(|error| format!("无法读取图片 {raw}：{error}"))?;
+        let mut bytes = Vec::new();
+        // Metadata may change between inspection and reading. Bound the actual
+        // read as well, so a growing file cannot bypass the attachment limit.
+        file.take(MAX_NATIVE_IMAGE_BYTES + 1)
+            .read_to_end(&mut bytes)
+            .map_err(|error| format!("读取图片失败 {raw}：{error}"))?;
+        if bytes.is_empty() || bytes.len() as u64 > MAX_NATIVE_IMAGE_BYTES {
+            return Err(format!("图片为空或超过 8MB：{raw}"));
+        }
+        loaded.images.push(NativeImage {
+            name: path
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_else(|| raw.to_string()),
+            mime_type: image_mime_type(path).to_string(),
+            data_base64: BASE64.encode(bytes),
+        });
+        loaded.loaded_paths.push(raw.to_string());
+    }
+    Ok(loaded)
 }
 
 pub fn image_log_lines(loaded: &NativeImageLoad) -> Vec<String> {
@@ -241,6 +296,58 @@ pub fn delete_composer_images(app: AppHandle, paths: Vec<String>) -> Result<(), 
 mod tests {
     use super::*;
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn steer_rejects_missing_or_unsupported_attachments_without_cleanup() {
+        let root = tempfile::tempdir().unwrap();
+        let valid = stage_image_bytes(root.path(), "valid.png", b"\x89PNG\r\n").unwrap();
+        for other in [
+            root.path().join("missing.png"),
+            root.path().join("document.pdf"),
+        ] {
+            if other.extension().unwrap() == "pdf" {
+                fs::write(&other, b"document").unwrap();
+            }
+            assert!(load_steer_images(&[
+                valid.to_string_lossy().into_owned(),
+                other.to_string_lossy().into_owned(),
+            ])
+            .is_err());
+            assert!(valid.exists(), "a rejected input must retain staged images");
+        }
+    }
+
+    #[test]
+    fn steer_rejects_empty_oversized_and_excess_attachments() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("large.png");
+        let file = fs::File::create(&path).unwrap();
+        let input = [path.to_string_lossy().into_owned()];
+        assert!(load_steer_images(&input).is_err());
+        file.set_len(MAX_NATIVE_IMAGE_BYTES + 1).unwrap();
+        assert!(load_steer_images(&input).is_err());
+        let inputs: Vec<String> = (0..=MAX_NATIVE_IMAGES)
+            .map(|index| {
+                let path = root.path().join(format!("{index}.png"));
+                fs::write(&path, b"\x89PNG\r\n").unwrap();
+                path.to_string_lossy().into_owned()
+            })
+            .collect();
+        assert!(load_steer_images(&inputs).is_err());
+    }
+
+    #[test]
+    fn steer_loads_supported_unique_images_without_removing_staging() {
+        let root = tempfile::tempdir().unwrap();
+        let path = stage_image_bytes(root.path(), "valid.PNG", b"\x89PNG\r\n").unwrap();
+        let raw = path.to_string_lossy().into_owned();
+        let loaded = load_steer_images(&[raw.clone(), raw.clone()]).unwrap();
+        assert_eq!(loaded.images.len(), 1);
+        assert_eq!(loaded.loaded_paths, vec![raw]);
+        assert_eq!(loaded.images[0].mime_type, "image/png");
+        assert!(loaded.skipped.is_empty() && loaded.missing.is_empty());
+        assert!(path.exists());
+    }
 
     fn temp_png() -> std::path::PathBuf {
         let stamp = SystemTime::now()

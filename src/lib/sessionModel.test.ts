@@ -102,6 +102,16 @@ describe("mergeSessionRuntime", () => {
 });
 
 describe("planApprovalModelArgs", () => {
+  it("keeps the visible replacement channel and thinking level for detached rejection", () => {
+    expect(
+      planApprovalModelArgs(
+        false,
+        { channelId: "replacement", modelId: "chosen-model" },
+        "high",
+        true,
+      ),
+    ).toEqual({ aiChannelId: "replacement", model: "chosen-model", reasoningEffort: "high" });
+  });
   it("passes the selected channel and model only when approving", () => {
     expect(
       planApprovalModelArgs(true, { channelId: "ch-1", modelId: "deepseek-v4-flash" }),

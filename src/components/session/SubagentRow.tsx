@@ -54,6 +54,7 @@ export function SubagentRow({ segment, running, nowMs, sessionId }: SubagentRowP
   const endItem = useMemo(
     () =>
       items.find((item) => {
+        if (item.assistant) return false;
         const body = sessionLineBody(item.text);
         return /^(?:后台任务 \S+ )?结束 (?:成功|失败|停止|已停止)/.test(body);
       }),
@@ -82,6 +83,7 @@ export function SubagentRow({ segment, running, nowMs, sessionId }: SubagentRowP
   // Filter regular assistant / process text
   const processItems = useMemo(() => {
     return items.filter((item) => {
+      if (item.assistant) return item.text.length > 0;
       if (item.kind !== "assistant" && item.kind !== "system") return false;
       const body = sessionLineBody(item.text).trim();
       if (body.startsWith("启动（") || body.startsWith("结束 ")) return false;
@@ -94,12 +96,13 @@ export function SubagentRow({ segment, running, nowMs, sessionId }: SubagentRowP
   // Try to find delivery report
   const deliveryReport = useMemo(() => {
     for (let i = items.length - 1; i >= 0; i -= 1) {
+      if (items[i]?.assistant) continue;
       const parsed = parseSubagentResult(items[i]?.result ?? items[i]?.text ?? "");
       if (parsed?.report) return parsed.report;
     }
     if (isCompleted && processItems.length > 0) {
       const last = processItems[processItems.length - 1];
-      const body = sessionLineBody(last?.text ?? "").trim();
+      const body = last?.assistant ? last.text : sessionLineBody(last?.text ?? "").trim();
       if (body.length > 40) return body;
     }
     return null;

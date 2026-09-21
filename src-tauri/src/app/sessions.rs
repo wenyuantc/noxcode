@@ -166,7 +166,7 @@ pub(crate) async fn get_agent_session_log_lines_with(
         sqlx::query_as::<_, AgentSessionEvent>(
             r#"
             SELECT id, session_id, event_type, message, created_at FROM agent_session_events
-            WHERE session_id = $1
+            WHERE session_id = $1 AND event_type != 'native_steer'
               AND (created_at, rowid) > (
                   SELECT created_at, rowid FROM agent_session_events WHERE id = $2
               )
@@ -188,7 +188,7 @@ pub(crate) async fn get_agent_session_log_lines_with(
             r#"
             SELECT id, session_id, event_type, message, created_at FROM (
                 SELECT rowid, * FROM agent_session_events
-                WHERE session_id = $1
+                WHERE session_id = $1 AND event_type != 'native_steer'
                   AND (created_at, rowid) < (
                       SELECT created_at, rowid FROM agent_session_events WHERE id = $2
                   )
@@ -209,7 +209,7 @@ pub(crate) async fn get_agent_session_log_lines_with(
             r#"
             SELECT id, session_id, event_type, message, created_at FROM (
                 SELECT rowid, * FROM agent_session_events
-                WHERE session_id = $1
+                WHERE session_id = $1 AND event_type != 'native_steer'
                 ORDER BY created_at DESC, rowid DESC
                 LIMIT $2
             ) AS recent

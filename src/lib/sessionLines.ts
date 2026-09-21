@@ -1,4 +1,4 @@
-import type { NativeToolEvent, NativeToolImage } from "@/lib/types";
+import type { NativeAssistantFragment, NativeToolEvent, NativeToolImage } from "@/lib/types";
 
 export type { NativeToolEvent, NativeToolImage };
 
@@ -248,6 +248,7 @@ export interface RawSessionLine {
   createdAt: string;
   tool?: NativeToolEvent;
   images?: NativeToolImage[];
+  assistant?: NativeAssistantFragment;
 }
 
 export interface GroupedSessionItem {
@@ -261,6 +262,9 @@ export interface GroupedSessionItem {
   tool?: NativeToolEvent;
   images?: NativeToolImage[];
   subagentTag?: string;
+  endedAt?: string;
+  streaming?: boolean;
+  assistant?: NativeAssistantFragment;
 }
 
 export interface TurnSegment {
@@ -474,9 +478,12 @@ function parseEnvelopeImages(value: unknown): NativeToolImage[] | undefined {
   return images.length > 0 ? images : undefined;
 }
 
-export function parseStdoutEnvelope(
-  message: string | null | undefined,
-): { line: string; tool?: NativeToolEvent; images?: NativeToolImage[] } | null {
+export function parseStdoutEnvelope(message: string | null | undefined): {
+  line: string;
+  tool?: NativeToolEvent;
+  images?: NativeToolImage[];
+  assistant?: NativeAssistantFragment;
+} | null {
   if (!message) return null;
   const trimmed = message.trim();
   if (!trimmed.startsWith("{")) return null;
@@ -488,15 +495,34 @@ export function parseStdoutEnvelope(
       line?: unknown;
       tool?: NativeToolEvent;
       images?: unknown;
+      assistant?: NativeAssistantFragment;
     };
     if (record.nox !== 1 || typeof record.line !== "string") return null;
-    return { line: record.line, tool: record.tool, images: parseEnvelopeImages(record.images) };
+    return {
+      line: record.line,
+      tool: record.tool,
+      images: parseEnvelopeImages(record.images),
+      assistant: validAssistantFragment(record.assistant),
+    };
   } catch {
     return null;
   }
 }
 
+function validAssistantFragment(
+  value: NativeAssistantFragment | undefined,
+): NativeAssistantFragment | undefined {
+  return value &&
+    typeof value.chain_id === "string" &&
+    value.chain_id.length > 0 &&
+    Number.isInteger(value.part) &&
+    value.part >= 0
+    ? value
+    : undefined;
+}
+
 export function hydrateSessionLine(input: RawSessionLine): RawSessionLine {
+  if (input.assistant) return input;
   const envelope = parseStdoutEnvelope(input.text);
   if (!envelope) return input;
   return {
@@ -504,6 +530,7 @@ export function hydrateSessionLine(input: RawSessionLine): RawSessionLine {
     text: envelope.line,
     tool: input.tool ?? envelope.tool,
     images: input.images ?? envelope.images,
+    assistant: input.assistant ?? envelope.assistant,
   };
 }
 
@@ -971,7 +998,7 @@ export function parseUsageLine(text: string): ParsedUsage | null {
 }
 
 export function isUsageItem(item: GroupedSessionItem): boolean {
-  return sessionLineBody(item.text).startsWith("[用量]");
+  return !item.assistant && sessionLineBody(item.text).startsWith("[用量]");
 }
 
 export function aggregateUsages(usages: (ParsedUsage | null | undefined)[]): ParsedUsage | null {
@@ -1063,7 +1090,7 @@ export function fileActionKey(text: string): "fileWrite" | "fileEdit" | "filePat
 }
 
 export function isThinkingItem(item: GroupedSessionItem): boolean {
-  return sessionLineBody(item.text).startsWith("[思考]");
+  return !item.assistant && sessionLineBody(item.text).startsWith("[思考]");
 }
 
 const THINKING_DURATION_RE = /^\[思考\]\s*(\d+)秒(?:\s|$)/;
@@ -1465,9 +1492,11 @@ export function groupSessionLines(lines: RawSessionLine[]): GroupedSessionItem[]
   const grouped: GroupedSessionItem[] = [];
   for (const raw of lines) {
     const line = hydrateSessionLine(raw);
-    if (isHiddenSessionCeremonyLine(line.text)) continue;
-    const kind = classifyLine(line.text);
-    const tag = stripSubagentPrefix(line.text).prefix ?? line.tool?.subagent_tag ?? undefined;
+    if (!line.assistant && isHiddenSessionCeremonyLine(line.text)) continue;
+    const kind = line.assistant ? "assistant" : classifyLine(line.text);
+    const tag = line.assistant
+      ? line.assistant.subagent_tag
+      : (stripSubagentPrefix(line.text).prefix ?? line.tool?.subagent_tag ?? undefined);
     if (kind === "tool_result") {
       const result = sessionLineBody(line.text).replace(/^\[工具结果\]\s*/, "");
       if (pairToolResult(grouped, line, result)) continue;
@@ -1481,6 +1510,7 @@ export function groupSessionLines(lines: RawSessionLine[]): GroupedSessionItem[]
       ok: line.tool?.ok ?? undefined,
       tool: line.tool,
       images: line.images,
+      assistant: line.assistant,
       subagentTag: tag ?? undefined,
     };
     if (kind === "tool") {
@@ -1489,12 +1519,46 @@ export function groupSessionLines(lines: RawSessionLine[]): GroupedSessionItem[]
     grouped.push(item);
   }
   const attached = attachOrphanAgentCalls(grouped);
-  return normalizeOrphanToolResults(attached);
+  return coalesceAssistantItems(normalizeOrphanToolResults(attached));
+}
+
+/** Merge only provider fragments with an explicit shared identity; bytes are never trimmed. */
+export function coalesceAssistantItems(items: readonly GroupedSessionItem[]): GroupedSessionItem[] {
+  const merged: GroupedSessionItem[] = [];
+  const chains = new Map<string, number>();
+  for (const item of items) {
+    if (item.kind === "user") chains.clear();
+    const identity = item.kind === "assistant" ? item.assistant : undefined;
+    const index = identity ? chains.get(identity.chain_id) : undefined;
+    if (identity && index !== undefined) {
+      const previous = merged[index]!;
+      if (identity.part > previous.assistant!.part) {
+        merged[index] = {
+          ...previous,
+          text: previous.text + item.text,
+          assistant: identity,
+          endedAt: item.endedAt ?? item.createdAt,
+        };
+      }
+    } else {
+      if (identity) chains.set(identity.chain_id, merged.length);
+      merged.push(item);
+    }
+  }
+  return merged;
+}
+
+export function assistantItemsText(items: readonly GroupedSessionItem[]): string {
+  return coalesceAssistantItems(items)
+    .map((item) => item.text)
+    .filter((text) => text.length > 0)
+    .join("\n\n");
 }
 
 function segmentKey(item: GroupedSessionItem): TurnSegmentKind | "skip" | "file_change" {
   if (item.kind === "user") return "skip";
   if (item.subagentTag) return "subagent";
+  if (item.assistant) return "assistant";
   const body = sessionLineBody(item.text);
   if (isCompactBoundaryLine(body)) return "compact";
   if (isGoalLine(body)) return "goal";
@@ -1653,7 +1717,8 @@ export function buildTurnBlocks(items: GroupedSessionItem[]): SessionTurnBlock[]
   };
 
   const append = (block: SessionTurnBlock, item: GroupedSessionItem) => {
-    block.endedAt = item.createdAt;
+    const endedAt = item.endedAt ?? item.createdAt;
+    if (endedAt > block.endedAt) block.endedAt = endedAt;
     currentItems.push(item);
     if (item.kind === "user") block.user = item;
     else if (item.kind === "tool") block.tools.push(item);

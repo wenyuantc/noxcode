@@ -17,8 +17,9 @@ import {
   onNativeBackgroundProcesses,
   onNativeRequestResolved,
   onNativeInputQueue,
+  onNativeSteer,
 } from "@/lib/backend";
-import { maybeFinishAiMergeResolve, maybeOpenWorktreeMerge } from "@/lib/worktreeMergePrompt";
+import { handleNativeTurnState, handleNativeExit } from "@/lib/nativeLifecycle";
 import { useChannelStore } from "@/stores/channelStore";
 import { useSessionStore } from "@/stores/sessionStore";
 import { useUiStore } from "@/stores/uiStore";
@@ -39,8 +40,7 @@ export function useNativeEvents() {
     const store = useSessionStore.getState();
     track(
       onNativeSession((session) => {
-        store.onStarted(session);
-        void useWorkspaceStore.getState().refreshSessions();
+        if (store.onStarted(session)) void useWorkspaceStore.getState().refreshSessions();
       }),
     );
     track(
@@ -50,7 +50,7 @@ export function useNativeEvents() {
     );
     track(
       onNativeSessionConfiguration((payload) => {
-        useSessionStore.getState().onConfiguration(payload);
+        if (!useSessionStore.getState().onConfiguration(payload)) return;
         if (payload.runtime && !payload.error) {
           if (useSessionStore.getState().selectedSessionId === payload.session_record_id) {
             useChannelStore
@@ -65,6 +65,7 @@ export function useNativeEvents() {
       }),
     );
     track(onNativeStdout((output) => useSessionStore.getState().onStdout(output)));
+    track(onNativeSteer((payload) => useSessionStore.getState().onSteerSnapshot(payload)));
     track(onNativeInputQueue((payload) => useSessionStore.getState().onInputQueue(payload)));
     track(
       onNativeBackgroundTasks((payload) => useSessionStore.getState().onBackgroundTasks(payload)),
@@ -77,31 +78,7 @@ export function useNativeEvents() {
     track(onNativeRequestResolved((payload) => useSessionStore.getState().resolveRequest(payload)));
     track(onNativeTextDelta((delta) => useSessionStore.getState().onDelta(delta)));
     track(onNativeContextUsage((usage) => useSessionStore.getState().onUsage(usage)));
-    track(
-      onNativeTurnState((payload) => {
-        const previous = useSessionStore.getState().turnState[payload.session_record_id];
-        useSessionStore.getState().onTurnState(payload.session_record_id, payload.state);
-        if (payload.state === "waiting_input" && previous === "working") {
-          const session = useWorkspaceStore
-            .getState()
-            .sessions.find((item) => item.id === payload.session_record_id);
-          const runtime =
-            useSessionStore.getState().configurationBySession[payload.session_record_id];
-          void maybeFinishAiMergeResolve({
-            sessionId: payload.session_record_id,
-            workspaceId: session?.workspace_id,
-          }).then((finished) => {
-            if (finished) return;
-            void maybeOpenWorktreeMerge({
-              sessionId: payload.session_record_id,
-              workspaceId: session?.workspace_id,
-              worktreePath: runtime?.worktree_path ?? session?.working_dir,
-              reason: "turn",
-            });
-          });
-        }
-      }),
-    );
+    track(onNativeTurnState(handleNativeTurnState));
     track(
       onNativePlanMode((payload) =>
         useSessionStore
@@ -109,24 +86,7 @@ export function useNativeEvents() {
           .onPlanMode(payload.session_record_id, payload.plan_mode, payload.input_queue_id),
       ),
     );
-    track(
-      onNativeExit((exit) => {
-        useSessionStore.getState().onExit(exit);
-        void useWorkspaceStore.getState().refreshSessions();
-        void maybeFinishAiMergeResolve({
-          sessionId: exit.session_record_id,
-          workspaceId: exit.workspace_id,
-        }).then((finished) => {
-          if (finished) return;
-          void maybeOpenWorktreeMerge({
-            sessionId: exit.session_record_id,
-            workspaceId: exit.workspace_id,
-            worktreePath: exit.worktree_path,
-            reason: "exit",
-          });
-        });
-      }),
-    );
+    track(onNativeExit(handleNativeExit));
     track(
       onNativePermissionRequest((request) => useSessionStore.getState().setPermission(request)),
     );

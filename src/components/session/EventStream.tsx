@@ -5,6 +5,7 @@ import { useTranslation } from "react-i18next";
 
 import {
   aggregateUsages,
+  assistantItemsText,
   buildTurnBlocks,
   changedFilesFromItems,
   groupSessionLines,
@@ -115,12 +116,7 @@ function renderSegment(
         <SubagentRow segment={segment} running={running} nowMs={nowMs} sessionId={sessionId} />
       );
     case "assistant":
-      return (
-        <AssistantMarkdown
-          text={segment.items.map((item) => item.text).join("\n\n")}
-          live={live && running}
-        />
-      );
+      return <AssistantMarkdown text={assistantItemsText(segment.items)} live={live && running} />;
     case "background_notice":
       return <BackgroundNoticeRow items={segment.items} sessionId={sessionId} />;
     default:
@@ -507,7 +503,7 @@ const TurnBlockView = memo(function TurnBlockView({
   const showWork =
     (Boolean(block.user) || working) &&
     (working || block.segments.length > 0 || block.tools.length > 0);
-  const assistantText = block.assistant.map((item) => item.text).join("\n\n");
+  const assistantText = assistantItemsText(block.assistant);
   const changedPaths = changedFilesFromItems(block.tools);
   const visibleSegments = block.segments.filter((segment) => segment.kind !== "usage");
   const turnUsage = useMemo(() => {

@@ -437,6 +437,12 @@ pub fn get_all_migrations() -> Vec<Migration> {
             "#,
             kind: tauri_plugin_sql::MigrationKind::Up,
         },
+        Migration {
+            version: 13,
+            description: "agent_sessions.approved_plan_json durable approved plans",
+            sql: "ALTER TABLE agent_sessions ADD COLUMN approved_plan_json TEXT;",
+            kind: tauri_plugin_sql::MigrationKind::Up,
+        },
     ]
 }
 
@@ -478,11 +484,34 @@ mod tests {
     }
 
     #[test]
+    fn approved_plan_migration_preserves_existing_sessions() {
+        tauri::async_runtime::block_on(async {
+            let pool = SqlitePool::connect("sqlite::memory:").await.unwrap();
+            let migrations = get_all_migrations();
+            for migration in migrations.iter().take(12) {
+                sqlx::raw_sql(migration.sql).execute(&pool).await.unwrap();
+            }
+            sqlx::query(
+                "INSERT INTO agent_sessions (id, pending_plan_json) VALUES ('existing', 'pending')",
+            )
+            .execute(&pool)
+            .await
+            .unwrap();
+            sqlx::raw_sql(migrations[12].sql)
+                .execute(&pool)
+                .await
+                .unwrap();
+            let row: (String, Option<String>) = sqlx::query_as("SELECT pending_plan_json, approved_plan_json FROM agent_sessions WHERE id = 'existing'").fetch_one(&pool).await.unwrap();
+            assert_eq!(row, ("pending".into(), None));
+        });
+    }
+
+    #[test]
     fn migration_versions_are_contiguous() {
         for (index, migration) in get_all_migrations().iter().enumerate() {
             assert_eq!(migration.version, index as i64 + 1);
         }
-        assert_eq!(latest_migration_version(), 12);
+        assert_eq!(latest_migration_version(), 13);
         assert_eq!(
             get_all_migrations()
                 .last()

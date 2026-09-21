@@ -302,6 +302,8 @@ pub struct AgentSessionRecord {
     pub context_usage_json: Option<String>,
     /// 等待批准的计划快照（`PendingPlanSnapshot`）。会话停止或应用退出时保留，供重新打开后继续实施。
     pub pending_plan_json: Option<String>,
+    /// 授权实施的计划及文件保存状态；续聊不会删除。
+    pub approved_plan_json: Option<String>,
     /// 上次实际使用的模型，来自 `native_session_transcripts`；内部 `SELECT *` 时为空。
     #[sqlx(default)]
     #[serde(default)]
@@ -813,6 +815,15 @@ pub struct NativeToolImage {
     pub data_url: String,
 }
 
+/// Stable identity for one model answer and its exact continuation fragments.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NativeAssistantFragment {
+    pub chain_id: String,
+    pub part: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subagent_tag: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentSessionOutput {
     pub profile_id: String,
@@ -825,10 +836,13 @@ pub struct AgentSessionOutput {
     pub tool: Option<NativeToolEvent>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub images: Option<Vec<NativeToolImage>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub assistant: Option<NativeAssistantFragment>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentSessionExit {
+    pub instance_id: String,
     pub profile_id: String,
     pub workspace_id: Option<String>,
     pub session_kind: String,
@@ -840,11 +854,15 @@ pub struct AgentSessionExit {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NativeTextDelta {
+    pub instance_id: String,
+    pub turn_id: Option<String>,
     pub session_record_id: String,
     pub kind: String,
     pub text: String,
     #[serde(default)]
     pub clear: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub assistant: Option<NativeAssistantFragment>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -874,6 +892,10 @@ pub struct NativeContextUsage {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NativeTurnState {
+    pub steer_turn_id: Option<String>,
+    pub instance_id: String,
+    pub turn_id: String,
+    pub revision: u64,
     pub session_record_id: String,
     pub state: String,
 }

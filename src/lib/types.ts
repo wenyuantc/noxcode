@@ -567,6 +567,7 @@ export interface AgentSession {
   context_usage_json?: string | null;
   /** 等待批准的计划快照（`PendingPlanSnapshot` JSON）。会话停止或应用退出后仍保留，用于继续实施。 */
   pending_plan_json?: string | null;
+  approved_plan_json?: string | null;
   model?: string | null;
 }
 
@@ -718,6 +719,12 @@ export interface NativeToolImage {
   data_url: string;
 }
 
+export interface NativeAssistantFragment {
+  chain_id: string;
+  part: number;
+  subagent_tag?: string | null;
+}
+
 export interface AgentSessionOutput {
   profile_id: string;
   workspace_id: string | null;
@@ -727,9 +734,11 @@ export interface AgentSessionOutput {
   line: string;
   tool?: NativeToolEvent | null;
   images?: NativeToolImage[] | null;
+  assistant?: NativeAssistantFragment | null;
 }
 
 export interface AgentSessionExit {
+  instance_id: string;
   profile_id: string;
   workspace_id: string | null;
   session_kind: string;
@@ -739,10 +748,13 @@ export interface AgentSessionExit {
 }
 
 export interface NativeTextDelta {
+  instance_id?: string;
+  turn_id?: string | null;
   session_record_id: string;
   kind: string;
   text: string;
   clear: boolean;
+  assistant?: NativeAssistantFragment | null;
 }
 
 export type NativeToolRiskKind =
@@ -755,7 +767,9 @@ export type NativeToolRiskKind =
   | "rule"
   | "automation"
   | "external_path"
-  | "computer";
+  | "computer"
+  | "network_origin"
+  | "network_proxy";
 
 export type NativePermissionDecision =
   | "allow_session"
@@ -856,6 +870,7 @@ export interface NativePermissionRulesView {
 }
 
 export interface NativePermissionRequest {
+  instance_id?: string | null;
   session_record_id: string;
   request_id: string;
   profile_id: string;
@@ -872,14 +887,33 @@ export interface NativePermissionRequest {
 }
 
 export interface NativePlanApprovalRequest {
+  instance_id?: string | null;
   session_record_id: string;
   request_id: string;
   profile_id: string;
   workspace_id: string | null;
   session_kind: string;
   plan: string;
-  /** 会话已结束、原挂起的 ExitPlanMode 已失效；批准或退回要以续聊新一轮的方式继续。 */
+  /** 会话已结束；仍通过同一个后端审批命令恢复。 */
   detached?: boolean;
+}
+
+export interface ApprovedPlanSnapshot {
+  authorization_id: string;
+  request_id: string;
+  body: string;
+  feedback: string;
+  cwd: string;
+  path: string;
+  cwd_resolved?: boolean;
+  content_hash: string;
+  saved_hash: string | null;
+  saved_path?: string | null;
+  status: "saving" | "failed" | "saved" | "cancelled";
+  ai_channel_id: string;
+  model: string;
+  reasoning_effort: string | null;
+  error: string | null;
 }
 
 export interface NativePlanQuestion {
@@ -888,6 +922,7 @@ export interface NativePlanQuestion {
 }
 
 export interface NativePlanQuestionRequest {
+  instance_id?: string | null;
   session_record_id: string;
   request_id: string;
   profile_id: string;
@@ -915,6 +950,10 @@ export interface NativeContextUsage {
 export type NativeTurnStateKind = "waiting_input" | "working";
 
 export interface NativeTurnState {
+  steer_turn_id?: string | null;
+  instance_id: string;
+  turn_id: string;
+  revision: number;
   session_record_id: string;
   state: NativeTurnStateKind | string;
 }
@@ -1538,4 +1577,25 @@ export interface NativeUsageAnalytics {
   stats: NativeApiCallLogStats;
   daily: NativeUsageDailyBucket[];
   models: NativeUsageModelBucket[];
+}
+
+export interface NativeSteerReceipt {
+  session_record_id: string;
+  instance_id: string;
+  turn_id: string;
+  input_id: string;
+  text: string;
+  image_count: number;
+  generation: number;
+  status: "accepted" | "applied" | "rejected" | "cancelled";
+  error: string | null;
+}
+
+export interface NativeSteerSnapshot {
+  lifecycle?: NativeTurnState | null;
+  session_record_id: string;
+  instance_id: string;
+  turn_id: string | null;
+  revision: number;
+  receipts: NativeSteerReceipt[];
 }

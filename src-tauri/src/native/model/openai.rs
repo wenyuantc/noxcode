@@ -1,5 +1,6 @@
 use serde_json::{json, Value};
 
+use super::response::{provider_error, FinishReason, ModelError, ModelErrorKind, ModelResponse};
 use super::sse::{parse_sse, SseEvent};
 use super::types::{Message, Role, StreamDelta, ToolCall, ToolSpec, Usage};
 use super::usage::parse_usage;
@@ -132,7 +133,7 @@ pub fn openai_tools(tools: &[ToolSpec]) -> Vec<Value> {
         .collect()
 }
 
-pub fn parse_openai_sse(text: &str) -> Result<(Message, Usage), String> {
+pub fn parse_openai_sse(text: &str) -> Result<ModelResponse, ModelError> {
     let mut state = OpenAiStreamState::new();
     for event in parse_sse(text) {
         state.apply(&event);
@@ -149,6 +150,10 @@ pub struct OpenAiStreamState {
     usage: Usage,
     tools: Vec<(i64, ToolCall)>,
     done: bool,
+    refused: bool,
+    raw_finish_reason: Option<String>,
+    response_id: Option<String>,
+    error: Option<ModelError>,
 }
 
 impl Default for OpenAiStreamState {
@@ -158,6 +163,10 @@ impl Default for OpenAiStreamState {
             usage: Usage::default(),
             tools: Vec::new(),
             done: false,
+            refused: false,
+            raw_finish_reason: None,
+            response_id: None,
+            error: None,
         }
     }
 }
@@ -168,16 +177,34 @@ impl OpenAiStreamState {
     }
 
     pub fn apply(&mut self, event: &SseEvent) -> Vec<StreamDelta> {
-        if self.done {
-            return Vec::new();
-        }
         if event.data == "[DONE]" {
             self.done = true;
             return Vec::new();
         }
         let Ok(chunk) = serde_json::from_str::<Value>(&event.data) else {
+            self.error = Some(ModelError::new(
+                ModelErrorKind::InvalidResponse,
+                "无效的 OpenAI SSE JSON",
+            ));
             return Vec::new();
         };
+        if let Some(error) = provider_error(&chunk) {
+            self.error = Some(error);
+            return Vec::new();
+        }
+        if event.event == "error" {
+            self.error = Some(ModelError::new(
+                ModelErrorKind::Provider,
+                event.data.clone(),
+            ));
+            return Vec::new();
+        }
+        if self.done {
+            return Vec::new();
+        }
+        if let Some(id) = chunk.get("id").and_then(Value::as_str) {
+            self.response_id = Some(id.to_string());
+        }
         if let Some(raw_usage) = chunk.get("usage") {
             self.usage = parse_usage(raw_usage);
         }
@@ -188,20 +215,50 @@ impl OpenAiStreamState {
         else {
             return Vec::new();
         };
+        if let Some(reason) = choice.get("finish_reason").and_then(Value::as_str) {
+            self.raw_finish_reason = Some(reason.to_string());
+        }
+        if choice
+            .pointer("/delta/refusal")
+            .or_else(|| choice.pointer("/message/refusal"))
+            .and_then(Value::as_str)
+            .is_some_and(|s| !s.is_empty())
+        {
+            self.refused = true;
+        }
         apply_openai_choice(&mut self.message, &mut self.tools, choice)
     }
 
-    pub fn finish(mut self) -> Result<(Message, Usage), String> {
+    pub fn finish(mut self) -> Result<ModelResponse, ModelError> {
         self.tools.sort_by_key(|(index, _)| *index);
         self.message.tool_calls = self.tools.into_iter().map(|(_, call)| call).collect();
-        if message_is_empty(&self.message) {
-            return Err("模型返回空响应".to_string());
+        if let Some(error) = self.error {
+            return Err(error);
         }
-        Ok((self.message, self.usage))
+        if !self.done && self.raw_finish_reason.is_none() {
+            return Err(ModelError::new(
+                ModelErrorKind::IncompleteStream,
+                "OpenAI 响应流缺少结束事件",
+            ));
+        }
+        ModelResponse::from_parts(
+            self.message,
+            self.usage,
+            if self.refused {
+                FinishReason::Refusal
+            } else {
+                FinishReason::from_raw(self.raw_finish_reason.as_deref())
+            },
+            self.raw_finish_reason,
+            self.response_id,
+        )
     }
 }
 
-pub fn parse_openai_json(value: &Value) -> Result<(Message, Usage), String> {
+pub fn parse_openai_json(value: &Value) -> Result<ModelResponse, ModelError> {
+    if let Some(error) = provider_error(value) {
+        return Err(error);
+    }
     let mut message = Message::assistant_text("");
     let usage = value.get("usage").map(parse_usage).unwrap_or_default();
     let mut tools: Vec<(i64, ToolCall)> = Vec::new();
@@ -210,21 +267,36 @@ pub fn parse_openai_json(value: &Value) -> Result<(Message, Usage), String> {
         .and_then(Value::as_array)
         .and_then(|items| items.first())
     else {
-        return Err("模型返回空响应".to_string());
+        return Err(ModelError::new(
+            ModelErrorKind::InvalidResponse,
+            "模型返回空响应",
+        ));
     };
     apply_openai_choice(&mut message, &mut tools, choice);
     tools.sort_by_key(|(index, _)| *index);
     message.tool_calls = tools.into_iter().map(|(_, call)| call).collect();
-    if message_is_empty(&message) {
-        return Err("模型返回空响应".to_string());
-    }
-    Ok((message, usage))
-}
-
-fn message_is_empty(message: &Message) -> bool {
-    message.content.is_empty()
-        && message.reasoning_content.is_empty()
-        && message.tool_calls.is_empty()
+    let reason = choice
+        .get("finish_reason")
+        .and_then(Value::as_str)
+        .map(ToOwned::to_owned);
+    let refused = choice
+        .pointer("/message/refusal")
+        .and_then(Value::as_str)
+        .is_some_and(|s| !s.is_empty());
+    ModelResponse::from_parts(
+        message,
+        usage,
+        if refused {
+            FinishReason::Refusal
+        } else {
+            FinishReason::from_raw(reason.as_deref())
+        },
+        reason,
+        value
+            .get("id")
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned),
+    )
 }
 
 fn apply_openai_choice(
@@ -256,7 +328,9 @@ fn append_openai_delta(
     delta: &Value,
 ) -> Vec<StreamDelta> {
     let mut deltas = Vec::new();
-    if let Some(text) = delta_text(delta.get("content")) {
+    if let Some(text) =
+        delta_text(delta.get("content")).or_else(|| delta_text(delta.get("refusal")))
+    {
         message.content.push_str(&text);
         deltas.push(StreamDelta::Text(text));
     }
@@ -459,7 +533,7 @@ mod tests {
             "data: {\"usage\":{\"prompt_tokens\":12,\"completion_tokens\":5}}\n\n",
             "data: [DONE]\n\n",
         );
-        let (message, usage) = parse_openai_sse(sse).expect("parse openai sse");
+        let ModelResponse { message, usage, .. } = parse_openai_sse(sse).expect("parse openai sse");
         assert_eq!(message.content, "hi ");
         assert_eq!(message.tool_calls[0].id, "call_1");
         assert_eq!(message.tool_calls[0].name, "Read");
@@ -532,7 +606,7 @@ mod tests {
             "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"think\"},\"message\":{\"content\":\"plan json\"}}]}\n\n",
             "data: [DONE]\n\n",
         );
-        let (message, _) = parse_openai_sse(sse).expect("parse message fallback");
+        let ModelResponse { message, .. } = parse_openai_sse(sse).expect("parse message fallback");
         assert_eq!(message.reasoning_content, "think");
         assert_eq!(message.content, "plan json");
     }
@@ -579,7 +653,7 @@ mod tests {
         let value = json!({
             "choices": [{"message": {"reasoning": {"content": "think"}}}]
         });
-        let (message, _) = parse_openai_json(&value).expect("reasoning only");
+        let ModelResponse { message, .. } = parse_openai_json(&value).expect("reasoning only");
         assert_eq!(message.reasoning_content, "think");
         assert!(message.content.is_empty());
     }
@@ -590,7 +664,7 @@ mod tests {
             "choices": [{"message": {"role": "assistant", "content": "hello plan"}}],
             "usage": {"prompt_tokens": 8, "completion_tokens": 2}
         });
-        let (message, usage) = parse_openai_json(&value).expect("parse json");
+        let ModelResponse { message, usage, .. } = parse_openai_json(&value).expect("parse json");
         assert_eq!(message.content, "hello plan");
         assert_eq!(usage.prompt_tokens, 8);
         assert_eq!(usage.completion_tokens, 2);
@@ -602,7 +676,7 @@ mod tests {
             "data: {\"choices\":[{\"delta\":{\"reasoning\":{\"content\":\"think\"},\"content\":[{\"type\":\"output_text\",\"text\":\"hi\"}]}}]}\n\n",
             "data: [DONE]\n\n",
         );
-        let (message, _) = parse_openai_sse(sse).expect("parse reasoning object");
+        let ModelResponse { message, .. } = parse_openai_sse(sse).expect("parse reasoning object");
         assert_eq!(message.reasoning_content, "think");
         assert_eq!(message.content, "hi");
     }
@@ -610,7 +684,7 @@ mod tests {
     #[test]
     fn parses_sse_without_blank_line_separators() {
         let sse = "data: {\"choices\":[{\"delta\":{\"content\":\"hello\"}}]}\ndata: {\"choices\":[{\"delta\":{\"content\":\" world\"}}]}\ndata: [DONE]\n";
-        let (message, _) = parse_openai_sse(sse).expect("parse packed sse");
+        let ModelResponse { message, .. } = parse_openai_sse(sse).expect("parse packed sse");
         assert_eq!(message.content, "hello world");
     }
 }

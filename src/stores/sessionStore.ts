@@ -1,4 +1,5 @@
 import { create } from "zustand";
+import { useSteerStore } from "@/stores/steerStore";
 
 import { getAgentSessionLogLines, getSessionSubagents } from "@/lib/backend";
 import { resolveHistoricalUsage, resolveHistoryLimitTokens } from "@/lib/contextUsage";
@@ -17,6 +18,8 @@ import type {
   NativePlanApprovalRequest,
   NativePlanQuestionRequest,
   NativeTextDelta,
+  NativeTurnState,
+  NativeSteerSnapshot,
   NativeRequestResolved,
   NativeBackgroundProcess,
   NativeBackgroundProcesses,
@@ -75,6 +78,7 @@ interface SessionState {
   turnState: Record<string, string>;
   usage: Record<string, NativeContextUsage>;
   stream: Record<string, SessionStreamFragment[]>;
+  resolvedRequests: Record<string, Record<string, true>>;
   permissions: Record<string, Record<string, NativePermissionRequest>>;
   planQuestions: Record<string, Record<string, NativePlanQuestionRequest>>;
   planApprovals: Record<string, Record<string, NativePlanApprovalRequest>>;
@@ -90,13 +94,14 @@ interface SessionState {
   ensureHistory: (sessionId: string) => Promise<void>;
   loadHistory: (sessionId: string) => Promise<void>;
   loadEarlierHistory: (sessionId: string) => Promise<boolean>;
-  onStarted: (session: AgentSessionStarted) => void;
+  onStarted: (session: AgentSessionStarted) => boolean;
   onStdout: (output: AgentSessionOutput) => void;
   onDelta: (delta: NativeTextDelta) => void;
   onUsage: (usage: NativeContextUsage) => void;
-  onTurnState: (sessionId: string, state: string) => void;
+  onTurnState: (event: NativeTurnState) => boolean;
+  onSteerSnapshot: (snapshot: NativeSteerSnapshot) => void;
   onPlanMode: (sessionId: string, planMode: boolean, inputQueueId?: string | null) => void;
-  onExit: (exit: AgentSessionExit) => void;
+  onExit: (exit: AgentSessionExit) => boolean;
   setPermission: (request: NativePermissionRequest) => void;
   setPlanQuestion: (request: NativePlanQuestionRequest) => void;
   setPlanApproval: (request: NativePlanApprovalRequest) => void;
@@ -107,13 +112,31 @@ interface SessionState {
   setConfiguration: (sessionId: string, runtime: NativeSessionRuntime) => void;
   setPendingConfiguration: (sessionId: string, pending: PendingSessionConfiguration) => void;
   clearPendingConfiguration: (sessionId: string) => void;
-  onConfiguration: (payload: NativeSessionConfigurationEvent) => void;
+  onConfiguration: (payload: NativeSessionConfigurationEvent) => boolean;
   openWorktreeMergePrompt: (prompt: WorktreeMergePrompt) => void;
   closeWorktreeMergePrompt: () => void;
   markWorktreeMerged: (sessionId: string) => void;
   markWorktreeAutoPrompted: (sessionId: string) => void;
   markPendingAiMergeResolve: (sessionId: string) => void;
   clearPendingAiMergeResolve: (sessionId: string) => void;
+}
+
+function acceptsInteraction(
+  state: SessionState,
+  request: {
+    session_record_id: string;
+    request_id: string;
+    instance_id?: string | null;
+    detached?: boolean;
+  },
+  kind: string,
+): boolean {
+  return (
+    !state.resolvedRequests[request.session_record_id]?.[`${kind}:${request.request_id}`] &&
+    (request.detached ||
+      !request.instance_id ||
+      useSteerStore.getState().acceptsRuntime(request.session_record_id, request.instance_id))
+  );
 }
 
 const historyRequests = new Map<string, Promise<void>>();
@@ -136,6 +159,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
   turnState: {},
   usage: {},
   stream: {},
+  resolvedRequests: {},
   permissions: {},
   planQuestions: {},
   planApprovals: {},
@@ -276,8 +300,13 @@ export const useSessionStore = create<SessionState>((set, get) => ({
     await get().ensureHistory(sessionId);
   },
   onStarted: (session) => {
+    if (!useSteerStore.getState().onStarted(session)) return false;
     const id = session.session_record_id;
     const current = get();
+    const replacingRuntime = Boolean(
+      current.liveBySession[id] &&
+      current.liveBySession[id].input_queue_id !== session.input_queue_id,
+    );
     const inputQueueBySession = { ...current.inputQueueBySession };
     if (inputQueueBySession[id]?.queue_id !== session.input_queue_id) {
       delete inputQueueBySession[id];
@@ -301,38 +330,56 @@ export const useSessionStore = create<SessionState>((set, get) => ({
     const planApprovals = {
       ...current.planApprovals,
       [id]: Object.fromEntries(
-        Object.entries(current.planApprovals[id] ?? {}).filter(([, request]) => !request.detached),
+        Object.entries(current.planApprovals[id] ?? {}).filter(
+          ([, request]) =>
+            !request.detached &&
+            (!replacingRuntime || request.instance_id === session.input_queue_id),
+        ),
       ),
     };
     set({
       liveBySession: { ...current.liveBySession, [id]: { ...session, runtime } },
       inputQueueBySession,
       planApprovals,
+      permissions: replacingRuntime ? { ...current.permissions, [id]: {} } : current.permissions,
+      planQuestions: replacingRuntime
+        ? { ...current.planQuestions, [id]: {} }
+        : current.planQuestions,
+      stream: replacingRuntime ? { ...current.stream, [id]: [] } : current.stream,
       planModeBySession: { ...current.planModeBySession, [id]: planMode },
       planModeRunBySession,
       configurationRevisionBySession,
       configurationBySession: runtime
         ? { ...current.configurationBySession, [id]: runtime }
         : current.configurationBySession,
-      backgroundBySession: current.liveBySession[id]
-        ? current.backgroundBySession
-        : { ...current.backgroundBySession, [id]: [] },
-      processesBySession: current.liveBySession[id]
-        ? current.processesBySession
-        : { ...current.processesBySession, [id]: [] },
+      backgroundBySession:
+        current.liveBySession[id] && !replacingRuntime
+          ? current.backgroundBySession
+          : { ...current.backgroundBySession, [id]: [] },
+      processesBySession:
+        current.liveBySession[id] && !replacingRuntime
+          ? current.processesBySession
+          : { ...current.processesBySession, [id]: [] },
       turnState: {
         ...current.turnState,
-        [id]: current.liveBySession[id] ? (current.turnState[id] ?? "working") : "working",
+        [id]:
+          useSteerStore.getState().lifecycles[id]?.state ??
+          (current.liveBySession[id] ? (current.turnState[id] ?? "working") : "working"),
       },
     });
+    return true;
   },
   onStdout: (output) => {
     const current = get().lines[output.session_record_id] ?? [];
     if (output.session_event_id && current.some((line) => line.id === output.session_event_id))
       return;
     const parts = get().stream[output.session_record_id];
-    const pruned = parts?.length ? pruneCoveredFragments(parts, output.line) : parts;
-    const subagentTag = parseSubagentTag(output.line);
+    const pruned = parts?.length
+      ? pruneCoveredFragments(parts, output.line, output.assistant)
+      : parts;
+    const subagentTag = parseSubagentTag(
+      output.assistant ? (output.assistant.subagent_tag ?? "") : output.line,
+    );
     let nextSubagents = get().subagentsBySession[output.session_record_id];
     if (subagentTag) {
       const list = [...(nextSubagents ?? [])];
@@ -386,6 +433,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
             createdAt: new Date().toISOString(),
             tool: output.tool ?? undefined,
             images: output.images ?? undefined,
+            assistant: output.assistant ?? undefined,
           }),
         ],
       },
@@ -399,6 +447,11 @@ export const useSessionStore = create<SessionState>((set, get) => ({
     });
   },
   onDelta: (delta) => {
+    const lifecycle = useSteerStore.getState();
+    if (!lifecycle.acceptsRuntime(delta.session_record_id, delta.instance_id)) return;
+    const turn = lifecycle.lifecycles[delta.session_record_id];
+    if (turn && delta.turn_id !== turn.turn_id) return;
+
     const current = get().stream[delta.session_record_id] ?? [];
     set({
       stream: {
@@ -408,10 +461,23 @@ export const useSessionStore = create<SessionState>((set, get) => ({
     });
   },
   onUsage: (usage) => set({ usage: { ...get().usage, [usage.session_record_id]: usage } }),
-  onTurnState: (sessionId, state) => set({ turnState: { ...get().turnState, [sessionId]: state } }),
+  onTurnState: (event) => {
+    if (!useSteerStore.getState().onTurnState(event)) return false;
+    set({ turnState: { ...get().turnState, [event.session_record_id]: event.state } });
+    return true;
+  },
+  onSteerSnapshot: (snapshot) => {
+    if (!useSteerStore.getState().onSnapshot(snapshot)) return;
+    const lifecycle = useSteerStore.getState();
+    const turn = lifecycle.lifecycles[snapshot.session_record_id];
+    if (turn && !lifecycle.ended[snapshot.session_record_id])
+      set({ turnState: { ...get().turnState, [snapshot.session_record_id]: turn.state } });
+  },
   onPlanMode: (sessionId, planMode, inputQueueId) =>
     set((state) => {
       const live = state.liveBySession[sessionId];
+      if (inputQueueId && !useSteerStore.getState().acceptsRuntime(sessionId, inputQueueId))
+        return {};
       if (inputQueueId && live?.input_queue_id && inputQueueId !== live.input_queue_id) return {};
       return {
         planModeBySession: { ...state.planModeBySession, [sessionId]: planMode },
@@ -434,6 +500,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
       };
     }),
   onExit: (exit) => {
+    if (!useSteerStore.getState().onExit(exit.session_record_id, exit.instance_id)) return false;
     const liveBySession = { ...get().liveBySession };
     delete liveBySession[exit.session_record_id];
     const stream = { ...get().stream };
@@ -490,6 +557,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
       },
       turnState: { ...get().turnState, [exit.session_record_id]: "ended" },
     });
+    return true;
   },
   onInputQueue: (payload) => {
     const state = get();
@@ -502,35 +570,47 @@ export const useSessionStore = create<SessionState>((set, get) => ({
     });
   },
   setPermission: (request) =>
-    set((state) => ({
-      permissions: {
-        ...state.permissions,
-        [request.session_record_id]: {
-          ...state.permissions[request.session_record_id],
-          [request.request_id]: request,
-        },
-      },
-    })),
+    set((state) =>
+      acceptsInteraction(state, request, "permission")
+        ? {
+            permissions: {
+              ...state.permissions,
+              [request.session_record_id]: {
+                ...state.permissions[request.session_record_id],
+                [request.request_id]: request,
+              },
+            },
+          }
+        : state,
+    ),
   setPlanQuestion: (request) =>
-    set((state) => ({
-      planQuestions: {
-        ...state.planQuestions,
-        [request.session_record_id]: {
-          ...state.planQuestions[request.session_record_id],
-          [request.request_id]: request,
-        },
-      },
-    })),
+    set((state) =>
+      acceptsInteraction(state, request, "question")
+        ? {
+            planQuestions: {
+              ...state.planQuestions,
+              [request.session_record_id]: {
+                ...state.planQuestions[request.session_record_id],
+                [request.request_id]: request,
+              },
+            },
+          }
+        : state,
+    ),
   setPlanApproval: (request) =>
-    set((state) => ({
-      planApprovals: {
-        ...state.planApprovals,
-        [request.session_record_id]: {
-          ...state.planApprovals[request.session_record_id],
-          [request.request_id]: request,
-        },
-      },
-    })),
+    set((state) =>
+      acceptsInteraction(state, request, "plan_approval")
+        ? {
+            planApprovals: {
+              ...state.planApprovals,
+              [request.session_record_id]: {
+                ...state.planApprovals[request.session_record_id],
+                [request.request_id]: request,
+              },
+            },
+          }
+        : state,
+    ),
   resolveRequest: ({ session_record_id: id, request_id: requestId, kind }) =>
     set((state) => {
       const key =
@@ -541,7 +621,13 @@ export const useSessionStore = create<SessionState>((set, get) => ({
             : "planApprovals";
       const requests = { ...state[key][id] };
       delete requests[requestId];
-      return { [key]: { ...state[key], [id]: requests } };
+      return {
+        [key]: { ...state[key], [id]: requests },
+        resolvedRequests: {
+          ...state.resolvedRequests,
+          [id]: { ...state.resolvedRequests[id], [`${kind}:${requestId}`]: true },
+        },
+      };
     }),
   onBackgroundTasks: ({ session_record_id, tasks }) =>
     set((state) => ({
@@ -572,50 +658,46 @@ export const useSessionStore = create<SessionState>((set, get) => ({
       delete pendingConfigurationBySession[sessionId];
       return { pendingConfigurationBySession };
     }),
-  onConfiguration: (payload) =>
-    set((state) => {
-      const id = payload.session_record_id;
-      if (payload.error) {
-        const pending = state.pendingConfigurationBySession[id];
-        if (pending?.request_id !== payload.request_id) return {};
-        const pendingConfigurationBySession = { ...state.pendingConfigurationBySession };
-        delete pendingConfigurationBySession[id];
-        return { pendingConfigurationBySession };
-      }
-      if (!payload.runtime) return {};
-      const live = state.liveBySession[id];
-      if (
-        payload.input_queue_id &&
-        live?.input_queue_id &&
-        payload.input_queue_id !== live.input_queue_id
-      ) {
-        return {};
-      }
-      const currentRevision = state.configurationRevisionBySession[id] ?? 0;
-      if (payload.revision <= currentRevision) return {};
-      const pending = state.pendingConfigurationBySession[id];
+  onConfiguration: (payload) => {
+    const state = get();
+    const id = payload.session_record_id;
+    if (
+      payload.input_queue_id &&
+      !useSteerStore.getState().acceptsRuntime(id, payload.input_queue_id)
+    )
+      return false;
+    const live = state.liveBySession[id];
+    if (
+      payload.input_queue_id &&
+      live?.input_queue_id &&
+      payload.input_queue_id !== live.input_queue_id
+    )
+      return false;
+    if (payload.error) {
+      if (state.pendingConfigurationBySession[id]?.request_id !== payload.request_id) return false;
       const pendingConfigurationBySession = { ...state.pendingConfigurationBySession };
-      if (pending?.request_id === payload.request_id) {
-        delete pendingConfigurationBySession[id];
-      }
-      return {
-        pendingConfigurationBySession,
-        configurationRevisionBySession: {
-          ...state.configurationRevisionBySession,
-          [id]: payload.revision,
-        },
-        configurationBySession: {
-          ...state.configurationBySession,
-          [id]: payload.runtime,
-        },
-        liveBySession: live
-          ? {
-              ...state.liveBySession,
-              [id]: { ...live, runtime: payload.runtime },
-            }
-          : state.liveBySession,
-      };
-    }),
+      delete pendingConfigurationBySession[id];
+      set({ pendingConfigurationBySession });
+      return true;
+    }
+    if (!payload.runtime || payload.revision <= (state.configurationRevisionBySession[id] ?? 0))
+      return false;
+    const pendingConfigurationBySession = { ...state.pendingConfigurationBySession };
+    if (pendingConfigurationBySession[id]?.request_id === payload.request_id)
+      delete pendingConfigurationBySession[id];
+    set({
+      pendingConfigurationBySession,
+      configurationRevisionBySession: {
+        ...state.configurationRevisionBySession,
+        [id]: payload.revision,
+      },
+      configurationBySession: { ...state.configurationBySession, [id]: payload.runtime },
+      liveBySession: live
+        ? { ...state.liveBySession, [id]: { ...live, runtime: payload.runtime } }
+        : state.liveBySession,
+    });
+    return true;
+  },
   openWorktreeMergePrompt: (prompt) => set({ worktreeMergePrompt: prompt }),
   closeWorktreeMergePrompt: () => set({ worktreeMergePrompt: null }),
   markWorktreeMerged: (sessionId) =>

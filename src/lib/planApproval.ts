@@ -1,5 +1,6 @@
-import type { SessionSubmissionInput } from "@/lib/sessionSubmission";
-import type { AgentSession, NativePlanApprovalRequest } from "@/lib/types";
+import { resolveNativePlanApproval } from "@/lib/backend";
+import type { PlanApprovalModelArgs } from "@/lib/sessionModel";
+import type { AgentSession, ApprovedPlanSnapshot, NativePlanApprovalRequest } from "@/lib/types";
 
 /** `agent_sessions.pending_plan_json` 的形状，由 Rust 侧 `PendingPlanSnapshot` 写入。 */
 interface PendingPlanSnapshot {
@@ -10,7 +11,7 @@ interface PendingPlanSnapshot {
 
 /**
  * 把落库的待批准计划还原成审批请求。会话已结束，所以标记 `detached`：
- * 原来挂起的 ExitPlanMode 已经失效，只能以续聊新一轮的方式继续。
+ * 原来挂起的 ExitPlanMode 已经失效，由后端保存计划并安全启动新一轮。
  */
 export function parsePendingPlan(
   session: AgentSession | undefined,
@@ -37,43 +38,53 @@ export function parsePendingPlan(
   };
 }
 
-/**
- * detached 审批要发出的续聊指令。批准时带上完整计划正文：会话停止或强退后
- * transcript 里的 ExitPlanMode 工具对可能已被清理，只说「已批准」模型会不知道要做什么。
- */
-export function planApprovalResumePrompt(
-  approved: boolean,
-  plan: string,
-  feedback?: string,
-): string {
-  const extra = feedback?.trim();
-  if (!approved) {
-    return `请修改计划：${extra ?? ""}`.trim();
+/** Persisted authorization also drives retry UI after stopping/reopening the app. */
+export function parseApprovedPlan(session: AgentSession | undefined): ApprovedPlanSnapshot | null {
+  try {
+    const plan = JSON.parse(session?.approved_plan_json ?? "null") as ApprovedPlanSnapshot | null;
+    return plan &&
+      typeof plan.request_id === "string" &&
+      typeof plan.path === "string" &&
+      typeof plan.body === "string" &&
+      typeof plan.ai_channel_id === "string" &&
+      typeof plan.model === "string" &&
+      typeof plan.feedback === "string" &&
+      ["saving", "failed", "saved", "cancelled"].includes(plan.status)
+      ? plan
+      : null;
+  } catch {
+    return null;
   }
-  const base = `已批准计划，请按下面的计划开始实施：\n\n${plan.trim()}`;
-  return extra ? `${base}\n\n补充意见：${extra}` : base;
 }
 
-/** detached 审批的续聊入参：批准即退出计划模式实施，退回则继续在计划模式里改。 */
-export function planApprovalResumeInput(input: {
-  approved: boolean;
-  sessionId: string;
-  workspaceId: string;
-  channelId: string;
-  modelId?: string | null;
-  reasoningEffort?: string | null;
-  permissionMode?: string | null;
-  plan: string;
-  feedback?: string;
-}): SessionSubmissionInput {
-  return {
-    sessionId: input.sessionId,
-    workspaceId: input.workspaceId,
-    channelId: input.channelId,
-    prompt: planApprovalResumePrompt(input.approved, input.plan, input.feedback),
-    model: input.modelId ?? null,
-    reasoningEffort: input.reasoningEffort ?? null,
-    planMode: !input.approved,
-    permissionMode: input.permissionMode ?? null,
-  };
+export function authorizedPlanRetry(
+  pending: NativePlanApprovalRequest | undefined,
+  saved: ApprovedPlanSnapshot | null,
+): ApprovedPlanSnapshot | null {
+  return pending &&
+    saved &&
+    pending.request_id === saved.request_id &&
+    pending.plan.trim() === saved.body.trim() &&
+    saved.status !== "cancelled"
+    ? saved
+    : null;
+}
+
+/** Live and detached requests share the authoritative backend transaction. */
+export function submitPlanApproval(
+  request: NativePlanApprovalRequest,
+  approved: boolean,
+  feedback: string,
+  model: PlanApprovalModelArgs,
+  resolve = resolveNativePlanApproval,
+) {
+  return resolve(
+    request.session_record_id,
+    request.request_id,
+    approved,
+    feedback.trim() || undefined,
+    model.aiChannelId,
+    model.model,
+    model.reasoningEffort,
+  );
 }

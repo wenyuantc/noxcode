@@ -9,7 +9,7 @@ use serde_json::Value;
 use tokio::sync::{mpsc, Mutex, Semaphore};
 use tokio::task::JoinSet;
 
-use crate::db::models::{NativeToolEvent, NativeToolPhase};
+use crate::db::models::{NativeAssistantFragment, NativeToolEvent, NativeToolPhase};
 use crate::engine::UsageDelta;
 use crate::native::artifacts::{bound_with_artifact, ArtifactStore};
 use crate::native::live_model::{LiveModelSnapshot, SharedLiveModel};
@@ -19,6 +19,7 @@ use crate::native::model::call_log::{
     OPERATION_SUBAGENT,
 };
 use crate::native::model::client::{ChatRequest, ModelClient};
+use crate::native::model::response::{FinishReason, ModelError, ModelErrorKind, ModelResponse};
 use crate::native::model::types::{
     Message, NativeImage, Role, StreamDelta, ToolCall, ToolSpec, Usage,
 };
@@ -39,8 +40,8 @@ use crate::native::tools::{
 use super::background::BackgroundTaskRegistry;
 use super::compact::{
     compact_local, compact_with_summary, compaction_prompt_with_instructions,
-    is_context_overflow_error, is_usable_compaction_summary, microcompact, reset_local,
-    BudgetSnapshot, ChildQuota, CompactBoundary, CompactTrigger, ContextWindow, RolloutBudget,
+    is_usable_compaction_summary, microcompact, reset_local, BudgetSnapshot, ChildQuota,
+    CompactBoundary, CompactTrigger, ContextWindow, RolloutBudget,
 };
 use super::subagent::{
     child_system_prompt, custom_child_system_prompt, format_subagent_log_tag,
@@ -67,6 +68,7 @@ const REPEAT_TOOL_LIMIT: u32 = 3;
 const MAX_PARALLEL_TOOL_CALLS: usize = 8;
 /// stop 钩子在一个用户回合内最多要求继续的次数，防止死循环。
 const MAX_STOP_HOOK_CONTINUES: u32 = 3;
+const OUTPUT_RECOVERY_REMINDER: &str = "上一条模型输出达到输出 token 上限，尚未完成。从中断处继续，不要重复已有内容。未完成的工具调用已丢弃；如仍需要工具，重新提供完整调用。";
 const LAST_TURN_REMINDER: &str = "工具轮次已达上限。请立即给出最终结论，不要再调用工具。";
 const LAST_TURN_FALLBACK: &str = "已达到最大工具轮次，已根据已有工具结果停止。";
 const TOOL_RESULT_DISPLAY_MAX_LINES: usize = 2000;
@@ -169,6 +171,10 @@ pub struct AgentRunner {
     last_tool_key: Option<String>,
     last_tool_repeat: u32,
     stop_hook_continues: u32,
+    output_continuations: u32,
+    output_partial: String,
+    output_pending: bool,
+    output_fragment: Option<NativeAssistantFragment>,
     /// `/compact [指令]` 请求，下一次模型调用前执行。
     pending_manual_compact: Option<NativeCompactionRequest>,
     /// 下一条用户消息末尾要附加的文本（记忆回忆等），用后即清。
@@ -224,8 +230,17 @@ pub struct ContextUsageSnapshot {
 
 #[derive(Debug)]
 pub enum NativeEvent {
+    TurnIdentity {
+        instance_id: String,
+        turn_id: String,
+    },
     Flush(tokio::sync::oneshot::Sender<()>),
     Line(String),
+    Assistant {
+        text: String,
+        fragment: NativeAssistantFragment,
+    },
+    ModelCall(NativeAssistantFragment),
     UserInput {
         text: String,
         images: Vec<NativeImage>,
@@ -288,6 +303,10 @@ impl AgentRunner {
             last_tool_key: None,
             last_tool_repeat: 0,
             stop_hook_continues: 0,
+            output_continuations: 0,
+            output_partial: String::new(),
+            output_pending: false,
+            output_fragment: None,
             pending_manual_compact: None,
             turn_suffix: None,
             pending_downshift_compact: false,
@@ -410,6 +429,7 @@ impl AgentRunner {
         while let Ok(item) = guard.try_recv() {
             match item {
                 NativeFollowup::Input { text, images } => {
+                    self.clear_output_recovery();
                     if let Some(tx) = &self.on_event {
                         let _ = tx.send(NativeEvent::UserInput {
                             text: text.clone(),
@@ -423,11 +443,87 @@ impl AgentRunner {
                     self.pending_manual_compact = Some(request);
                 }
                 NativeFollowup::Finish => {
+                    self.clear_output_recovery();
                     self.pending_steer_finish = true;
                 }
             }
         }
         injected
+    }
+
+    /// Claim once before awaiting hooks; a second accepted input stays in the mailbox.
+    async fn inject_user_steer(&mut self) -> Result<bool, String> {
+        let Some(mailbox) = self.ctx.user_steer.clone() else {
+            return Ok(false);
+        };
+        let mut consumed = false;
+        while let Some(input) = mailbox.take().await {
+            consumed = true;
+            self.clear_output_recovery();
+            self.ctx.main_origin = Some(crate::native::steer::MainOrigin {
+                instance_id: input.receipt.instance_id.clone(),
+                generation: input.receipt.generation,
+                child: false,
+            });
+            if self.ctx.cancel.is_cancelled() {
+                mailbox
+                    .finish_input(
+                        &input.receipt.input_id,
+                        crate::native::steer::SteerStatus::Cancelled,
+                        Some("会话已停止".into()),
+                    )
+                    .await?;
+                continue;
+            }
+            let mut text = input.receipt.text.clone();
+            match run_user_prompt_submit_hooks(&self.ctx.hook_runtime(), &text).await {
+                Ok(context) => {
+                    if self.ctx.cancel.is_cancelled() {
+                        mailbox
+                            .finish_input(
+                                &input.receipt.input_id,
+                                crate::native::steer::SteerStatus::Cancelled,
+                                Some("会话已停止".into()),
+                            )
+                            .await?;
+                        continue;
+                    }
+                    if !context.is_empty() {
+                        text = format!("{text}\n\n[钩子上下文]\n{}", context.join("\n"));
+                    }
+                    self.messages
+                        .push(Message::user_with_images(text, input.images));
+                    self.checkpoint_transcript().await;
+                    mailbox
+                        .finish_input(
+                            &input.receipt.input_id,
+                            crate::native::steer::SteerStatus::Applied,
+                            None,
+                        )
+                        .await?;
+                }
+                Err(reason) => {
+                    mailbox
+                        .finish_input(
+                            &input.receipt.input_id,
+                            crate::native::steer::SteerStatus::Rejected,
+                            Some(format!("输入被钩子阻断：{reason}")),
+                        )
+                        .await?
+                }
+            }
+        }
+        Ok(consumed)
+    }
+
+    async fn seal_user_turn(&mut self) -> Result<bool, String> {
+        if self.inject_user_steer().await? {
+            return Ok(false);
+        }
+        match &self.ctx.user_steer {
+            Some(mailbox) => Ok(mailbox.seal().await),
+            None => Ok(true),
+        }
     }
 
     /// `/compact [指令]`：下一次模型调用前压缩。
@@ -611,6 +707,7 @@ impl AgentRunner {
                         | "TaskStop"
                         | "SendMessage"
                         | "CronCreate"
+                        | "CronUpdate"
                         | "CronList"
                         | "CronDelete"
                         | "Goal"
@@ -848,7 +945,27 @@ impl AgentRunner {
         }
     }
 
-    fn begin_model_call(&self) {
+    fn begin_model_call(&mut self) {
+        let fragment = if self.output_pending {
+            let mut fragment = self
+                .output_fragment
+                .clone()
+                .expect("pending output has a fragment");
+            fragment.part += 1;
+            fragment
+        } else {
+            NativeAssistantFragment {
+                chain_id: crate::app::shared::new_id(),
+                part: 0,
+                subagent_tag: self.subagent_tag(),
+            }
+        };
+        self.output_fragment = Some(fragment.clone());
+        if self.streaming {
+            if let Some(tx) = &self.on_event {
+                let _ = tx.send(NativeEvent::ModelCall(fragment));
+            }
+        }
         self.call_started_ms.store(unix_now_ms(), Ordering::Relaxed);
         self.reasoning_started_ms.store(0, Ordering::Relaxed);
     }
@@ -1055,6 +1172,7 @@ impl AgentRunner {
                 max_output_tokens = live.max_output_tokens;
                 thinking_enabled = live.thinking_enabled;
             }
+            self.inject_user_steer().await?;
             if self.inject_steer_messages() {
                 self.checkpoint_transcript().await;
             }
@@ -1077,14 +1195,18 @@ impl AgentRunner {
                     }
                     tools_now = &[];
                     let Some(budget) = self.reserve_model_call(max_output_tokens, tools_now) else {
+                        if let Some(mailbox) = &self.ctx.user_steer {
+                            mailbox.cancel("本回合预算已用尽；补充指令未应用").await?;
+                        }
                         return self.finish_without_model();
                     };
                     budget
                 };
             self.begin_model_call();
+            let request_messages = self.model_request_messages();
             let result = client
                 .chat(ChatRequest {
-                    messages: &self.messages,
+                    messages: &request_messages,
                     tools: tools_now,
                     model: &model,
                     effort: effort.as_deref(),
@@ -1092,7 +1214,12 @@ impl AgentRunner {
                     thinking_enabled,
                 })
                 .await;
-            let (assistant, usage) = match result {
+            let ModelResponse {
+                message: assistant,
+                usage,
+                finish_reason,
+                ..
+            } = match result {
                 Ok(value) => value,
                 Err(error) => {
                     self.release_model_reservation();
@@ -1100,12 +1227,30 @@ impl AgentRunner {
                     if self.try_reactive_compaction(&client, &error).await {
                         continue;
                     }
-                    return Err(error);
+                    return Err(error.into());
                 }
             };
             let requested_with_tools = !tools_now.is_empty();
             self.settle_model_usage(usage, Some(&assistant));
             self.emit_usage(usage);
+            if matches!(
+                finish_reason,
+                FinishReason::OutputLimit | FinishReason::ContextLimit
+            ) {
+                match self
+                    .consume_partial(assistant, finish_reason, &client)
+                    .await?
+                {
+                    TurnControl::Continue => continue,
+                    TurnControl::Stop(text) => {
+                        if self.seal_user_turn().await? {
+                            return Ok(text);
+                        } else {
+                            continue;
+                        }
+                    }
+                }
+            }
             last_turn = last_turn_after_response(
                 last_turn,
                 requested_with_tools,
@@ -1116,15 +1261,111 @@ impl AgentRunner {
                 .consume_assistant(assistant, last_turn, Some(&client))
                 .await?
             {
-                TurnControl::Stop(text) => return Ok(text),
+                TurnControl::Stop(text) => {
+                    if self.seal_user_turn().await? {
+                        return Ok(text);
+                    } else {
+                        continue;
+                    }
+                }
                 TurnControl::Continue => {}
             }
         }
     }
 
+    /// Commit useful partial text without ever publishing an unfinished tool pair.
+    /// This counter belongs to the user turn, so compaction and steering cannot reset it.
+    async fn consume_partial(
+        &mut self,
+        mut assistant: Message,
+        reason: FinishReason,
+        client: &ModelClient,
+    ) -> Result<TurnControl, String> {
+        assistant.tool_calls.clear();
+        if let Some(line) = thinking_start_line(
+            &assistant.reasoning_content,
+            self.thinking_elapsed_seconds(),
+        ) {
+            self.emit(line);
+        }
+        if !assistant.content.is_empty() {
+            self.emit_assistant_text(&assistant.content);
+            self.output_partial.push_str(&assistant.content);
+        }
+        self.messages.push(assistant);
+        self.emit_delta_clear();
+        self.checkpoint_transcript().await;
+        if self.ctx.cancel.is_cancelled() {
+            return Err("已取消".to_string());
+        }
+        if reason == FinishReason::ContextLimit {
+            self.clear_output_recovery();
+            let error = ModelError::new(ModelErrorKind::ContextLimit, "模型上下文已达上限");
+            if self.try_reactive_compaction(client, &error).await {
+                return Ok(TurnControl::Continue);
+            }
+            return Err(error.into());
+        }
+        if self.output_continuations >= 3
+            || self.budget_exhausted
+            || self.rollout_budget.is_exhausted()
+            || self
+                .child_quota
+                .as_ref()
+                .is_some_and(|quota| quota.remaining() == 0)
+        {
+            let text = self.finish_incomplete_output();
+            self.checkpoint_transcript().await;
+            return Ok(TurnControl::Stop(text));
+        }
+        self.output_continuations += 1;
+        self.output_pending = true;
+        Ok(TurnControl::Continue)
+    }
+
+    fn finish_incomplete_output(&mut self) -> String {
+        let notice = "[未完成] 模型输出达到上限，已停止自动续接。已保留此前输出。";
+        self.emit(notice);
+        self.messages.push(Message::assistant_text(notice));
+        let text = format!("{}\n\n{notice}", self.output_partial);
+        self.clear_output_recovery();
+        text
+    }
+
+    fn model_request_messages(&self) -> Vec<Message> {
+        let mut messages = self.messages.clone();
+        if self.output_pending {
+            messages.push(Message::system(OUTPUT_RECOVERY_REMINDER));
+        }
+        messages
+    }
+
+    fn clear_output_recovery(&mut self) {
+        self.output_pending = false;
+        self.output_partial.clear();
+        self.output_fragment = None;
+    }
+
+    fn emit_assistant_text(&self, text: &str) {
+        if let (Some(tx), Some(fragment)) = (&self.on_event, &self.output_fragment) {
+            let _ = tx.send(NativeEvent::Assistant {
+                text: text.to_string(),
+                fragment: fragment.clone(),
+            });
+        } else {
+            self.emit(text);
+        }
+    }
+
+    fn complete_output_chain(&mut self, suffix: &str) -> String {
+        let text = format!("{}{suffix}", self.output_partial);
+        self.clear_output_recovery();
+        text
+    }
+
     /// 供应商报上下文溢出时被动压缩再重试；连续两次仍溢出则放弃。
-    async fn try_reactive_compaction(&mut self, client: &ModelClient, error: &str) -> bool {
-        if !is_context_overflow_error(error) || self.reactive_compactions >= 2 {
+    async fn try_reactive_compaction(&mut self, client: &ModelClient, error: &ModelError) -> bool {
+        if error.kind != ModelErrorKind::ContextLimit || self.reactive_compactions >= 2 {
             return false;
         }
         self.reactive_compactions += 1;
@@ -1188,9 +1429,10 @@ impl AgentRunner {
                     budget
                 };
             self.begin_model_call();
+            let request_messages = self.model_request_messages();
             let result = client
                 .chat(ChatRequest {
-                    messages: &self.messages,
+                    messages: &request_messages,
                     tools: tools_now,
                     model,
                     effort,
@@ -1198,19 +1440,36 @@ impl AgentRunner {
                     thinking_enabled,
                 })
                 .await;
-            let (assistant, usage) = match result {
+            let ModelResponse {
+                message: assistant,
+                usage,
+                finish_reason,
+                ..
+            } = match result {
                 Ok(value) => value,
                 Err(error) => {
                     self.release_model_reservation();
                     if self.try_reactive_compaction(&client, &error).await {
                         continue;
                     }
-                    return Err(error);
+                    return Err(error.into());
                 }
             };
             let requested_with_tools = !tools_now.is_empty();
             self.settle_model_usage(usage, Some(&assistant));
             self.emit_usage(usage);
+            if matches!(
+                finish_reason,
+                FinishReason::OutputLimit | FinishReason::ContextLimit
+            ) {
+                match self
+                    .consume_partial(assistant, finish_reason, &client)
+                    .await?
+                {
+                    TurnControl::Continue => continue,
+                    TurnControl::Stop(text) => return Ok(text),
+                }
+            }
             last_turn = last_turn_after_response(
                 last_turn,
                 requested_with_tools,
@@ -1295,10 +1554,15 @@ impl AgentRunner {
         if self.ctx.cancel.is_cancelled() {
             return Err("已取消".to_string());
         }
+        if let Some(mailbox) = &self.ctx.user_steer {
+            self.ctx.main_origin = Some(mailbox.begin_turn().await);
+        }
         self.turns = 0;
         self.last_tool_key = None;
         self.last_tool_repeat = 0;
         self.stop_hook_continues = 0;
+        self.output_continuations = 0;
+        self.clear_output_recovery();
         self.reactive_compactions = 0;
         let mut text = user.to_string();
         if let Some(suffix) = self.turn_suffix.take() {
@@ -1553,10 +1817,10 @@ impl AgentRunner {
             })
             .await;
         match result {
-            Ok((summary, usage)) => {
-                self.settle_model_usage(usage, Some(&summary));
-                self.emit_usage(usage);
-                Some(summary)
+            Ok(response) => {
+                self.settle_model_usage(response.usage, Some(&response.message));
+                self.emit_usage(response.usage);
+                response.complete_message().ok()
             }
             Err(error) => {
                 self.release_model_reservation();
@@ -1587,7 +1851,7 @@ impl AgentRunner {
         if self.pending_budget_reservation > 0 {
             self.release_model_reservation();
         }
-        let input_tokens = total_message_tokens(&self.messages) as u64;
+        let input_tokens = total_message_tokens(&self.model_request_messages()) as u64;
         let requested_output_tokens =
             u64::from(max_output_tokens.unwrap_or(DEFAULT_FINAL_OUTPUT_RESERVE as u32));
         let tool_tokens = total_tool_tokens(tools) as u64;
@@ -1654,6 +1918,9 @@ impl AgentRunner {
 
     fn finish_without_model(&mut self) -> Result<String, String> {
         self.release_model_reservation();
+        if self.output_pending {
+            return Ok(self.finish_incomplete_output());
+        }
         self.emit(LAST_TURN_FALLBACK.to_string());
         Ok(LAST_TURN_FALLBACK.to_string())
     }
@@ -1682,11 +1949,16 @@ impl AgentRunner {
         }
         let text = assistant.content.clone();
         let tool_calls = assistant.tool_calls.clone();
-        if !text.trim().is_empty() {
-            self.emit(text.clone());
+        if !text.is_empty() {
+            self.emit_assistant_text(&text);
         }
         self.messages.push(assistant);
+        self.emit_delta_clear();
+        let text = self.complete_output_chain(&text);
         if tool_calls.is_empty() {
+            if self.inject_user_steer().await? {
+                return Ok(TurnControl::Continue);
+            }
             let text = if text.trim().is_empty() && last_turn {
                 self.emit(LAST_TURN_FALLBACK.to_string());
                 LAST_TURN_FALLBACK.to_string()
@@ -1727,10 +1999,12 @@ impl AgentRunner {
         }
         let text = assistant.content.clone();
         let tool_calls = assistant.tool_calls.clone();
-        if !text.trim().is_empty() {
-            self.emit(text.clone());
+        if !text.is_empty() {
+            self.emit_assistant_text(&text);
         }
         self.messages.push(assistant);
+        self.emit_delta_clear();
+        let text = self.complete_output_chain(&text);
         if tool_calls.is_empty() {
             let text = if text.trim().is_empty() && last_turn {
                 self.emit(LAST_TURN_FALLBACK.to_string());
@@ -1816,6 +2090,16 @@ impl AgentRunner {
         let registry = self.contract_registry();
         let mut index = 0;
         while index < calls.len() {
+            if !self.ctx.execution_current() {
+                for call in &calls[index..] {
+                    self.push_tool_output(
+                        call,
+                        ToolOutput::error(crate::native::steer::SUPERSEDED),
+                    )
+                    .await;
+                }
+                return Ok(());
+            }
             if self.ctx.cancel.is_cancelled() {
                 return Err("已取消".to_string());
             }
@@ -2096,9 +2380,23 @@ impl AgentRunner {
         let batch_quota = self.child_quota_for_share();
         let mut tags: HashMap<String, String> = HashMap::new();
         for (pos, job) in jobs {
+            if !self.ctx.execution_current() {
+                slot[pos] = Some((
+                    job.call,
+                    ToolOutput::error(crate::native::steer::SUPERSEDED),
+                ));
+                continue;
+            }
             let tag = format_subagent_log_tag(job.index, &job.spec.kind, &job.spec.description);
             tags.insert(job.call.id.clone(), tag.clone());
             self.emit_tool_start_with_tag(&job.call, Some(&tag)).await;
+            if !self.ctx.execution_current() {
+                slot[pos] = Some((
+                    job.call,
+                    ToolOutput::error(crate::native::steer::SUPERSEDED),
+                ));
+                continue;
+            }
             self.emit(format!("{} 启动（{}）", tag, job.spec.kind.as_str()));
             self.emit_activity(
                 "native_subagent_started",
@@ -2778,6 +3076,14 @@ mod tests {
         while let Ok(event) = rx.try_recv() {
             match event {
                 NativeEvent::Line(line) | NativeEvent::Tool { line, .. } => lines.push(line),
+                NativeEvent::Assistant { text, fragment } => {
+                    lines.push(
+                        fragment
+                            .subagent_tag
+                            .map(|tag| format!("{tag} {text}"))
+                            .unwrap_or(text),
+                    );
+                }
                 NativeEvent::UserInput { text, .. } => {
                     lines.push(format!("[USER_INPUT] {text}"));
                 }
@@ -2804,6 +3110,18 @@ mod tests {
         task_id: String,
         responses: Vec<(Value, Option<String>)>,
     ) -> (ModelClient, tokio::task::JoinHandle<Vec<Value>>) {
+        mock_model_before_response(registry, task_id, responses, None).await
+    }
+
+    type BeforeModelResponse =
+        Arc<dyn Fn(usize) -> Pin<Box<dyn Future<Output = ()> + Send>> + Send + Sync>;
+
+    async fn mock_model_before_response(
+        registry: Arc<BackgroundTaskRegistry>,
+        task_id: String,
+        responses: Vec<(Value, Option<String>)>,
+        before: Option<BeforeModelResponse>,
+    ) -> (ModelClient, tokio::task::JoinHandle<Vec<Value>>) {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
@@ -2811,7 +3129,7 @@ mod tests {
         let address = listener.local_addr().unwrap();
         let server = tokio::spawn(async move {
             let mut captured = Vec::new();
-            for (response, steer) in responses {
+            for (index, (response, steer)) in responses.into_iter().enumerate() {
                 let (mut stream, _) = listener.accept().await.unwrap();
                 let mut bytes = Vec::new();
                 let mut buffer = [0u8; 4096];
@@ -2841,6 +3159,9 @@ mod tests {
                         .unwrap(),
                     );
                     break;
+                }
+                if let Some(before) = &before {
+                    before(index).await;
                 }
                 if let Some(steer) = steer {
                     registry.send_message(&task_id, &steer).await.unwrap();
@@ -3641,10 +3962,7 @@ mod tests {
             "点击 (100, 200)"
         );
         assert_eq!(
-            tool_args_summary(
-                "Computer",
-                r#"{"action":"get_app_state","app":"Safari"}"#
-            ),
+            tool_args_summary("Computer", r#"{"action":"get_app_state","app":"Safari"}"#),
             "读取状态 Safari"
         );
     }
@@ -4216,6 +4534,19 @@ mod tests {
             .iter()
             .any(|message| message.content.contains("done two")));
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn cron_update_is_visible_only_to_non_plan_parent() {
+        let (mut runner, root) = temp_runner();
+        assert!(runner.tool_names().iter().any(|name| name == "CronUpdate"));
+        runner.set_plan_mode(true);
+        assert!(!runner.tool_names().iter().any(|name| name == "CronUpdate"));
+        runner.set_plan_mode(false);
+        let spec = parse_subagent_args(r#"{"prompt":"go","description":"child"}"#).unwrap();
+        let child = runner.spawn_child_runner(&spec, 1);
+        assert!(!child.tool_names().iter().any(|name| name == "CronUpdate"));
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
@@ -5059,5 +5390,931 @@ mod tests {
         assert_eq!(runner.context_window.token_limit, 8_000);
         assert!(runner.apply_pending_live_model().is_none());
         let _ = fs::remove_dir_all(root);
+    }
+
+    fn completion_fixture(text: &str, reason: &str) -> Value {
+        serde_json::json!({"choices":[{"finish_reason":reason,"message":{"content":text}}]})
+    }
+
+    async fn run_fixture_turn(
+        runner: &mut AgentRunner,
+        client: &ModelClient,
+        child: bool,
+    ) -> Result<String, String> {
+        if child {
+            runner
+                .run_child_with_client(None, client, "go", "test", None, Some(1024), false, None)
+                .await
+        } else {
+            runner
+                .run_with_client(client, "go", "test", None, Some(1024), false, Vec::new())
+                .await
+        }
+    }
+
+    #[tokio::test]
+    async fn output_continuation_main_and_child_are_bounded_and_drop_partial_tools() {
+        use serde_json::json;
+        for child in [false, true] {
+            for empty in [false, true] {
+                let (mut runner, root) = temp_runner();
+                if child {
+                    runner = runner
+                        .spawn_child_runner(&parse_subagent_args(r#"{"prompt":"go"}"#).unwrap(), 1);
+                }
+                runner.ctx.hooks = vec![crate::db::models::NativeHook::shell(
+                    "stop",
+                    "stop",
+                    "",
+                    "printf called >> stop-called; printf '%s' '{\"continue\":true}'",
+                    5,
+                    true,
+                )];
+                let text = if empty { "" } else { "partial" };
+                let partial = json!({"choices":[{"finish_reason":"length","message":{"content":text,"tool_calls":[{"id":"unfinished","function":{"name":"Write","arguments":"{"}}]}}]});
+                let (client, server) = mock_child_model(
+                    runner.background.clone(),
+                    String::new(),
+                    vec![(partial, None); 4],
+                )
+                .await;
+                let (tx, mut rx) = mpsc::unbounded_channel();
+                runner.on_event = Some(tx);
+                let result = tokio::time::timeout(
+                    Duration::from_secs(4),
+                    run_fixture_turn(&mut runner, &client, child),
+                )
+                .await
+                .unwrap()
+                .unwrap();
+                assert!(result.contains("[未完成]"));
+                assert_eq!(result.matches("partial").count(), if empty { 0 } else { 4 });
+                assert_eq!(server.await.unwrap().len(), 4);
+                assert_eq!(runner.output_continuations, 3);
+                assert_eq!(
+                    runner
+                        .messages
+                        .iter()
+                        .filter(|m| m.role == Role::User)
+                        .count(),
+                    1
+                );
+                assert!(runner
+                    .messages
+                    .iter()
+                    .all(|m| m.tool_calls.is_empty() && m.role != Role::Tool));
+                assert!(
+                    !root.join("stop-called").exists(),
+                    "partial chunks must not run stop hooks"
+                );
+                assert!(!drain_events(&mut rx)
+                    .iter()
+                    .any(|line| line.starts_with("[USER_INPUT]")));
+                fs::remove_dir_all(root).unwrap();
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn output_continuation_main_and_child_finish_on_third_additional_request() {
+        for child in [false, true] {
+            let (mut runner, root) = temp_runner();
+            let responses = vec![
+                (completion_fixture("a", "length"), None),
+                (completion_fixture("b", "length"), None),
+                (completion_fixture("c", "length"), None),
+                (completion_fixture("d", "stop"), None),
+            ];
+            let (client, server) =
+                mock_child_model(runner.background.clone(), String::new(), responses).await;
+            assert_eq!(
+                run_fixture_turn(&mut runner, &client, child).await.unwrap(),
+                "abcd"
+            );
+            let requests = server.await.unwrap();
+            assert_eq!(requests.len(), 4);
+            assert_eq!(
+                requests[3]["messages"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .filter(|m| m["role"] == "user")
+                    .count(),
+                1
+            );
+            runner.begin_user_turn("next", Vec::new()).await.unwrap();
+            assert_eq!(runner.output_continuations, 0);
+            assert!(runner.output_partial.is_empty());
+            fs::remove_dir_all(root).unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn output_continuation_does_not_replay_discarded_tools() {
+        use serde_json::json;
+        for child in [false, true] {
+            let (mut runner, root) = temp_runner();
+            runner.set_allowed_tools(&["Bash".to_string()]);
+            let tool = json!({"id":"write-once","function":{"name":"Bash","arguments":r#"{"command":"printf x >> once.txt"}"#}});
+            let partial = json!({"choices":[{"finish_reason":"length","message":{"content":"start","tool_calls":[tool.clone()]}}]});
+            let complete = json!({"choices":[{"finish_reason":"tool_calls","message":{"content":"","tool_calls":[tool]}}]});
+            let (client, server) = mock_child_model(
+                runner.background.clone(),
+                String::new(),
+                vec![
+                    (partial, None),
+                    (complete, None),
+                    (completion_fixture("end", "stop"), None),
+                ],
+            )
+            .await;
+            assert_eq!(
+                run_fixture_turn(&mut runner, &client, child).await.unwrap(),
+                "end"
+            );
+            assert_eq!(fs::read_to_string(root.join("once.txt")).unwrap(), "x");
+            assert_eq!(
+                runner
+                    .messages
+                    .iter()
+                    .filter(|m| m.role == Role::Tool)
+                    .count(),
+                1
+            );
+            assert_eq!(server.await.unwrap().len(), 3);
+            fs::remove_dir_all(root).unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn output_continuation_cancellation_and_budget_prevent_another_call() {
+        for child in [false, true] {
+            for cancel in [false, true] {
+                let (mut runner, root) = temp_runner();
+                let mut partial = completion_fixture("kept", "length");
+                if cancel {
+                    let flag = runner.ctx.cancel.clone();
+                    runner.on_checkpoint = Some(Arc::new(move |messages| {
+                        let flag = flag.clone();
+                        Box::pin(async move {
+                            if messages.iter().any(|m| m.role == Role::Assistant) {
+                                flag.cancel();
+                            }
+                        })
+                    }));
+                } else {
+                    runner.set_rollout_budget_limit(100_000);
+                    partial["usage"] =
+                        serde_json::json!({"prompt_tokens":100_000,"completion_tokens":1000});
+                }
+                let (mut client, server) = mock_child_model(
+                    runner.background.clone(),
+                    String::new(),
+                    vec![(partial, None)],
+                )
+                .await;
+                if child {
+                    runner.depth = 1;
+                }
+                if cancel {
+                    let flag = runner.ctx.cancel.clone();
+                    client =
+                        client.with_call_log(Default::default(), Arc::new(move |_| flag.cancel()));
+                }
+                let result = run_fixture_turn(&mut runner, &client, child).await;
+                if cancel {
+                    assert_eq!(result.unwrap_err(), "已取消");
+                } else {
+                    assert!(result.unwrap().contains("[未完成]"));
+                }
+                assert_eq!(server.await.unwrap().len(), 1);
+                assert!(runner.messages.iter().any(|m| m.content == "kept"));
+                fs::remove_dir_all(root).unwrap();
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn output_continuation_is_not_triggered_by_complete_or_failed_responses() {
+        for child in [false, true] {
+            for reason in ["stop", "refusal", "future_reason"] {
+                let (mut runner, root) = temp_runner();
+                let (client, server) = mock_child_model(
+                    runner.background.clone(),
+                    String::new(),
+                    vec![(completion_fixture("done", reason), None)],
+                )
+                .await;
+                assert_eq!(
+                    run_fixture_turn(&mut runner, &client, child).await.unwrap(),
+                    "done"
+                );
+                assert_eq!(server.await.unwrap().len(), 1);
+                assert_eq!(runner.output_continuations, 0);
+                fs::remove_dir_all(root).unwrap();
+            }
+            let (mut runner, root) = temp_runner();
+            let (client, server) = mock_child_model(
+                runner.background.clone(),
+                String::new(),
+                vec![(
+                    serde_json::json!({"error":{"code":"server_error","message":"failed"}}),
+                    None,
+                )],
+            )
+            .await;
+            assert!(run_fixture_turn(&mut runner, &client, child).await.is_err());
+            assert_eq!(server.await.unwrap().len(), 1);
+            assert_eq!(runner.output_continuations, 0);
+            fs::remove_dir_all(root).unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn output_continuation_stop_hook_runs_only_for_completed_answer() {
+        let (mut runner, root) = temp_runner();
+        runner.ctx.hooks = vec![crate::db::models::NativeHook::shell(
+            "stop",
+            "stop",
+            "*",
+            "printf x >> stop-count; printf '%s' '{\"continue\":false}'",
+            5,
+            true,
+        )];
+        let (client, server) = mock_child_model(
+            runner.background.clone(),
+            String::new(),
+            vec![
+                (completion_fixture("a", "length"), None),
+                (completion_fixture("b", "stop"), None),
+            ],
+        )
+        .await;
+        assert_eq!(
+            run_fixture_turn(&mut runner, &client, false).await.unwrap(),
+            "ab"
+        );
+        assert_eq!(fs::read_to_string(root.join("stop-count")).unwrap(), "x");
+        assert_eq!(server.await.unwrap().len(), 2);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn output_continuation_counter_survives_steering_and_compaction() {
+        let (mut runner, root) = temp_runner();
+        runner.begin_user_turn("initial", Vec::new()).await.unwrap();
+        runner.output_continuations = 3;
+        runner.output_partial = "preserved".into();
+        for n in 0..20 {
+            runner.messages.push(Message::user(format!("earlier {n}")));
+            runner
+                .messages
+                .push(Message::assistant_text("old response"));
+        }
+        let (tx, rx) = mpsc::channel(8);
+        runner.steer_rx = Some(Arc::new(Mutex::new(rx)));
+        tx.send(NativeFollowup::input("steered")).await.unwrap();
+        assert!(runner.inject_steer_messages());
+        assert!(runner
+            .run_compaction(None, CompactTrigger::Manual, None)
+            .await
+            .is_some());
+        assert_eq!(runner.output_continuations, 3);
+        assert!(runner.output_partial.is_empty());
+        assert!(!runner.output_pending);
+        runner
+            .begin_user_turn("new turn", Vec::new())
+            .await
+            .unwrap();
+        assert_eq!(runner.output_continuations, 0);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn output_continuation_context_limit_uses_reactive_compaction_without_resetting_counter()
+    {
+        for child in [false, true] {
+            let (mut runner, root) = temp_runner();
+            runner.begin_user_turn("go", Vec::new()).await.unwrap();
+            for n in 0..20 {
+                runner.messages.push(Message::user(format!("earlier {n}")));
+                runner
+                    .messages
+                    .push(Message::assistant_text("old response"));
+            }
+            runner.output_continuations = 2;
+            runner.model_turn = Some(ModelTurnCfg {
+                model: "test".into(),
+                effort: None,
+                max_output_tokens: Some(1024),
+                thinking_enabled: false,
+            });
+            if child {
+                runner.depth = 1;
+            }
+            let summary = "User goal\nContinue task\nConstraints\nPreserve details\nCompleted work\nReviewed history\nPending work\nFinish answer";
+            let (client, server) = mock_child_model(
+                runner.background.clone(),
+                String::new(),
+                vec![(completion_fixture(summary, "stop"), None)],
+            )
+            .await;
+            assert!(matches!(
+                runner
+                    .consume_partial(
+                        Message::assistant_text("partial"),
+                        FinishReason::ContextLimit,
+                        &client
+                    )
+                    .await
+                    .unwrap(),
+                TurnControl::Continue
+            ));
+            assert_eq!(runner.reactive_compactions, 1);
+            assert_eq!(runner.output_continuations, 2);
+            assert_eq!(server.await.unwrap().len(), 1);
+            assert!(runner.output_partial.is_empty());
+            fs::remove_dir_all(root).unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn compaction_output_limit_is_not_automatically_continued_or_accepted() {
+        let (mut runner, root) = temp_runner();
+        runner.model_turn = Some(ModelTurnCfg {
+            model: "test".into(),
+            effort: None,
+            max_output_tokens: Some(1024),
+            thinking_enabled: false,
+        });
+        let (client, server) = mock_child_model(
+            runner.background.clone(),
+            String::new(),
+            vec![(
+                completion_fixture(
+                    "User goal\nPartial summary\nPending work\nunfinished",
+                    "length",
+                ),
+                None,
+            )],
+        )
+        .await;
+        assert!(runner
+            .request_compaction_summary(&client, &[Message::user("summarize")])
+            .await
+            .is_none());
+        assert_eq!(runner.output_continuations, 0);
+        assert_eq!(server.await.unwrap().len(), 1);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn invalid_last_tool_prevents_execution_of_first_tool_in_actual_loops() {
+        use serde_json::json;
+        for child in [false, true] {
+            let (mut runner, root) = temp_runner();
+            let response = json!({"choices":[{"finish_reason":"tool_calls","message":{"tool_calls":[
+                {"id":"valid","function":{"name":"Bash","arguments":r#"{"command":"printf x > should-not-exist"}"#}},
+                {"id":"invalid","function":{"name":"Write","arguments":"{"}}
+            ]}}]});
+            let (client, server) = mock_child_model(
+                runner.background.clone(),
+                String::new(),
+                vec![(response, None)],
+            )
+            .await;
+            assert!(run_fixture_turn(&mut runner, &client, child).await.is_err());
+            assert!(!root.join("should-not-exist").exists());
+            assert!(runner.messages.iter().all(|m| m.role != Role::Tool));
+            assert_eq!(server.await.unwrap().len(), 1);
+            fs::remove_dir_all(root).unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn output_recovery_reminder_is_transient_to_pending_request() {
+        for child in [false, true] {
+            let (mut runner, root) = temp_runner();
+            let (client, server) = mock_child_model(
+                runner.background.clone(),
+                String::new(),
+                vec![
+                    (completion_fixture("a", "length"), None),
+                    (completion_fixture("b", "stop"), None),
+                    (completion_fixture("c", "stop"), None),
+                ],
+            )
+            .await;
+            assert_eq!(
+                run_fixture_turn(&mut runner, &client, child).await.unwrap(),
+                "ab"
+            );
+            assert!(!runner
+                .messages
+                .iter()
+                .any(|m| m.role == Role::System && m.content.contains("上一条模型输出达到")));
+            assert_eq!(
+                run_fixture_turn(&mut runner, &client, child).await.unwrap(),
+                "c"
+            );
+            let requests = server.await.unwrap();
+            assert!(requests[1].to_string().contains("上一条模型输出达到"));
+            assert!(!requests[2].to_string().contains("上一条模型输出达到"));
+            fs::remove_dir_all(root).unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn completed_recovery_does_not_prefix_a_later_stop_hook_answer() {
+        let (mut runner, root) = temp_runner();
+        runner.ctx.hooks = vec![crate::db::models::NativeHook::shell("stop", "stop", "*", "printf '%s\\n' \"$NATIVE_HOOK_PAYLOAD\" >> hook-payloads; if [ -f hook-called ]; then printf '%s' '{\"continue\":false}'; else touch hook-called; printf '%s' '{\"continue\":true}'; fi", 5, true)];
+        let (client, server) = mock_child_model(
+            runner.background.clone(),
+            String::new(),
+            vec![
+                (completion_fixture("a", "length"), None),
+                (completion_fixture("b", "stop"), None),
+                (completion_fixture("c", "stop"), None),
+            ],
+        )
+        .await;
+        assert_eq!(
+            run_fixture_turn(&mut runner, &client, false).await.unwrap(),
+            "c"
+        );
+        let payloads = fs::read_to_string(root.join("hook-payloads")).unwrap();
+        let payloads = payloads
+            .lines()
+            .map(|line| serde_json::from_str::<Value>(line).unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            payloads
+                .iter()
+                .map(|value| value["final_text"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            vec!["ab", "c"]
+        );
+        assert_eq!(runner.output_continuations, 1);
+        let requests = server.await.unwrap();
+        assert!(!requests[2].to_string().contains("上一条模型输出达到"));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn output_identity_is_shared_only_until_the_model_response_is_complete() {
+        for child in [false, true] {
+            let (mut runner, root) = temp_runner();
+            let (tx, mut rx) = mpsc::unbounded_channel();
+            runner.on_event = Some(tx);
+            let middle = serde_json::json!({"choices":[{"finish_reason":"tool_calls","message":{"content":"b","tool_calls":[{"id":"read","function":{"name":"Read","arguments":r#"{"file_path":"missing"}"#}}]}}]});
+            let (client, server) = mock_child_model(
+                runner.background.clone(),
+                String::new(),
+                vec![
+                    (completion_fixture("a", "length"), None),
+                    (middle, None),
+                    (completion_fixture("c", "stop"), None),
+                ],
+            )
+            .await;
+            assert_eq!(
+                run_fixture_turn(&mut runner, &client, child).await.unwrap(),
+                "c"
+            );
+            let mut fragments = Vec::new();
+            while let Ok(event) = rx.try_recv() {
+                if let NativeEvent::Assistant { text, fragment } = event {
+                    fragments.push((text, fragment));
+                }
+            }
+            assert_eq!(
+                fragments
+                    .iter()
+                    .map(|(text, _)| text.as_str())
+                    .collect::<Vec<_>>(),
+                vec!["a", "b", "c"]
+            );
+            assert_eq!(fragments[0].1.chain_id, fragments[1].1.chain_id);
+            assert_eq!((fragments[0].1.part, fragments[1].1.part), (0, 1));
+            assert_ne!(fragments[1].1.chain_id, fragments[2].1.chain_id);
+            assert_eq!(runner.output_continuations, 1);
+            assert!(runner.output_partial.is_empty());
+            assert_eq!(server.await.unwrap().len(), 3);
+            fs::remove_dir_all(root).unwrap();
+        }
+    }
+
+    #[test]
+    fn budget_fallback_distinguishes_pending_output_from_used_continuation_allowance() {
+        let (mut runner, root) = temp_runner();
+        runner.output_continuations = 1;
+        runner.output_pending = true;
+        runner.output_partial = "a".to_string();
+        assert_eq!(runner.complete_output_chain("b"), "ab");
+        assert_eq!(runner.output_continuations, 1);
+        assert_eq!(runner.finish_without_model().unwrap(), LAST_TURN_FALLBACK);
+        assert_eq!(runner.output_continuations, 1);
+
+        runner.output_pending = true;
+        runner.output_partial = "pending".to_string();
+        let incomplete = runner.finish_without_model().unwrap();
+        assert!(incomplete.starts_with("pending"));
+        assert!(incomplete.contains("[未完成]"));
+        assert_eq!(runner.output_continuations, 1);
+        fs::remove_dir_all(root).unwrap();
+    }
+    fn attach_user_mailbox(runner: &mut AgentRunner) -> Arc<crate::native::steer::SteerMailbox> {
+        let mailbox = Arc::new(crate::native::steer::SteerMailbox::new(
+            "session", "instance",
+        ));
+        mailbox.configure(Arc::new(|_| Box::pin(async { Ok(()) })), Arc::new(|_| {}));
+        runner.ctx.user_steer = Some(mailbox.clone());
+        mailbox
+    }
+
+    #[tokio::test]
+    async fn user_steer_during_model_response_skips_old_tools_and_prevents_final_seal() {
+        for tools in [false, true] {
+            let (mut runner, root) = temp_runner();
+            let mailbox = attach_user_mailbox(&mut runner);
+            let steer_mailbox = mailbox.clone();
+            let before: BeforeModelResponse = Arc::new(move |index| {
+                let mailbox = steer_mailbox.clone();
+                Box::pin(async move {
+                    if index == 0 {
+                        let turn = mailbox.snapshot().await.turn_id.unwrap();
+                        mailbox
+                            .accept(
+                                &turn,
+                                &uuid::Uuid::new_v4().to_string(),
+                                "new instruction",
+                                &[],
+                                vec![],
+                            )
+                            .await
+                            .unwrap();
+                    }
+                })
+            });
+            let first = if tools {
+                serde_json::json!({"choices":[{"finish_reason":"tool_calls","message":{"content":"old proposal","tool_calls":[{"id":"write","function":{"name":"Write","arguments":"{\"file_path\":\"forbidden.txt\",\"content\":\"old action\"}"}}]}}]})
+            } else {
+                completion_fixture("old answer", "stop")
+            };
+            let (client, server) = mock_model_before_response(
+                runner.background.clone(),
+                "".into(),
+                vec![
+                    (first, None),
+                    (completion_fixture("new answer", "stop"), None),
+                ],
+                Some(before),
+            )
+            .await;
+            let (tx, mut events) = mpsc::unbounded_channel();
+            runner.on_event = Some(tx);
+            let answer = run_fixture_turn(&mut runner, &client, false).await.unwrap();
+            assert_eq!(answer, "new answer");
+            assert!(!root.join("forbidden.txt").exists());
+            let requests = server.await.unwrap();
+            assert_eq!(requests.len(), 2);
+            assert!(requests[1]["messages"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(
+                    |message| message["role"] == "user" && message["content"] == "new instruction"
+                ));
+            if tools {
+                assert!(runner
+                    .messages
+                    .iter()
+                    .any(|message| message.role == Role::Tool
+                        && message.tool_call_id == "write"
+                        && message.content.contains(crate::native::steer::SUPERSEDED)));
+            }
+            let snapshot = mailbox.snapshot().await;
+            assert!(snapshot.turn_id.is_none());
+            assert_eq!(
+                snapshot.receipts[0].status,
+                crate::native::steer::SteerStatus::Applied
+            );
+            assert!(!drain_events(&mut events)
+                .iter()
+                .any(|line| line.contains("[USER_INPUT] new instruction")));
+            fs::remove_dir_all(root).unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn user_steer_between_serial_tools_preserves_completed_result_and_recovery_budget() {
+        let (mut runner, root) = temp_runner();
+        let mailbox = attach_user_mailbox(&mut runner);
+        runner.begin_user_turn("go", vec![]).await.unwrap();
+        let mut hook =
+            crate::db::models::NativeHook::shell("steer", "post_tool_use", "Write", "", 5, true);
+        hook.handler_type = "agent".into();
+        hook.agent_prompt = Some("steer".into());
+        runner.ctx.hooks = vec![hook];
+        let hook_mailbox = mailbox.clone();
+        runner.ctx.hook_agent = Some(Arc::new(move |_, _| {
+            let mailbox = hook_mailbox.clone();
+            Box::pin(async move {
+                let turn = mailbox.snapshot().await.turn_id.unwrap();
+                mailbox
+                    .accept(
+                        &turn,
+                        &uuid::Uuid::new_v4().to_string(),
+                        "changed",
+                        &[],
+                        vec![],
+                    )
+                    .await
+                    .unwrap();
+                Ok("{}".into())
+            })
+        }));
+        runner.output_continuations = 2;
+        runner.output_pending = true;
+        runner.output_partial = "partial".into();
+        runner
+            .consume_assistant(
+                assistant_tool_calls(&[
+                    (
+                        "first",
+                        "Write",
+                        r#"{"file_path":"first.txt","content":"done"}"#,
+                    ),
+                    (
+                        "second",
+                        "Write",
+                        r#"{"file_path":"second.txt","content":"never"}"#,
+                    ),
+                ]),
+                false,
+                None,
+            )
+            .await
+            .unwrap();
+        assert!(root.join("first.txt").exists());
+        assert!(!root.join("second.txt").exists());
+        assert!(runner.messages.iter().any(|m| m.role == Role::Tool
+            && m.tool_call_id == "first"
+            && !m.content.contains(crate::native::steer::SUPERSEDED)));
+        assert!(runner.messages.iter().any(|m| m.role == Role::Tool
+            && m.tool_call_id == "second"
+            && m.content.contains(crate::native::steer::SUPERSEDED)));
+        assert!(runner.inject_user_steer().await.unwrap());
+        assert_eq!(runner.output_continuations, 2);
+        assert!(!runner.output_pending);
+        assert!(runner.output_partial.is_empty());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn user_steer_rejected_by_hook_is_terminal_and_claimed_only_once() {
+        let (mut runner, root) = temp_runner();
+        let mailbox = attach_user_mailbox(&mut runner);
+        runner.begin_user_turn("go", vec![]).await.unwrap();
+        let mut hook =
+            crate::db::models::NativeHook::shell("deny", "user_prompt_submit", "*", "", 5, true);
+        hook.handler_type = "agent".into();
+        hook.agent_prompt = Some("deny".into());
+        runner.ctx.hooks = vec![hook];
+        let invoked = Arc::new(AtomicU32::new(0));
+        let counter = invoked.clone();
+        runner.ctx.hook_agent = Some(Arc::new(move |_, _| {
+            counter.fetch_add(1, Ordering::SeqCst);
+            Box::pin(async { Ok(r#"{"decision":"block","reason":"test rejection"}"#.into()) })
+        }));
+        let turn = mailbox.snapshot().await.turn_id.unwrap();
+        mailbox
+            .accept(
+                &turn,
+                &uuid::Uuid::new_v4().to_string(),
+                "rejected",
+                &[],
+                vec![],
+            )
+            .await
+            .unwrap();
+        assert!(runner.inject_user_steer().await.unwrap());
+        assert!(!runner.inject_user_steer().await.unwrap());
+        assert_eq!(invoked.load(Ordering::SeqCst), 1);
+        assert!(!runner.messages.iter().any(|m| m.content == "rejected"));
+        assert_eq!(
+            mailbox.snapshot().await.receipts[0].status,
+            crate::native::steer::SteerStatus::Rejected
+        );
+        assert!(runner.seal_user_turn().await.unwrap());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn user_steer_accepted_inside_stop_hook_survives_final_boundary() {
+        let (mut runner, root) = temp_runner();
+        let mailbox = attach_user_mailbox(&mut runner);
+        let mut hook = crate::db::models::NativeHook::shell("stop", "stop", "*", "", 5, true);
+        hook.handler_type = "agent".into();
+        hook.agent_prompt = Some("stop".into());
+        runner.ctx.hooks = vec![hook];
+        let hook_mailbox = mailbox.clone();
+        let calls = Arc::new(AtomicU32::new(0));
+        let hook_calls = calls.clone();
+        runner.ctx.hook_agent = Some(Arc::new(move |_, _| {
+            let mailbox = hook_mailbox.clone();
+            let count = hook_calls.fetch_add(1, Ordering::SeqCst);
+            Box::pin(async move {
+                if count == 0 {
+                    let turn = mailbox.snapshot().await.turn_id.unwrap();
+                    mailbox
+                        .accept(
+                            &turn,
+                            &uuid::Uuid::new_v4().to_string(),
+                            "after hook",
+                            &[],
+                            vec![],
+                        )
+                        .await
+                        .unwrap();
+                }
+                Ok(r#"{"continue":false}"#.into())
+            })
+        }));
+        let (client, server) = mock_child_model(
+            runner.background.clone(),
+            "".into(),
+            vec![
+                (completion_fixture("old", "stop"), None),
+                (completion_fixture("new", "stop"), None),
+            ],
+        )
+        .await;
+        assert_eq!(
+            run_fixture_turn(&mut runner, &client, false).await.unwrap(),
+            "new"
+        );
+        assert_eq!(server.await.unwrap().len(), 2);
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        assert!(mailbox.snapshot().await.turn_id.is_none());
+        fs::remove_dir_all(root).unwrap();
+    }
+    #[tokio::test]
+    async fn bootstrap_steer_survives_begin_user_turn_without_adopting_unconsumed_generation() {
+        let (mut runner, root) = temp_runner();
+        let mailbox = attach_user_mailbox(&mut runner);
+        runner.ctx.main_origin = Some(mailbox.begin_turn().await);
+        let initial = runner.ctx.main_origin.clone();
+        let turn = mailbox.snapshot().await.turn_id.unwrap();
+        mailbox
+            .accept(
+                &turn,
+                &uuid::Uuid::new_v4().to_string(),
+                "during bootstrap authorization",
+                &[],
+                vec![],
+            )
+            .await
+            .unwrap();
+        runner.begin_user_turn("original", vec![]).await.unwrap();
+        assert_eq!(runner.ctx.main_origin, initial);
+        assert!(!runner.ctx.execution_current());
+        assert_eq!(
+            mailbox.snapshot().await.turn_id.as_deref(),
+            Some(turn.as_str())
+        );
+        assert!(runner.inject_user_steer().await.unwrap());
+        assert!(runner.ctx.execution_current());
+        assert_eq!(
+            runner.messages.last().unwrap().content,
+            "during bootstrap authorization"
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+    #[tokio::test]
+    async fn user_steer_preserves_started_parallel_results_and_skips_remaining_serial_tools() {
+        let (mut runner, root) = temp_runner();
+        fs::write(root.join("second.txt"), "second result").unwrap();
+        let mailbox = attach_user_mailbox(&mut runner);
+        runner.begin_user_turn("go", vec![]).await.unwrap();
+        let turn = mailbox.snapshot().await.turn_id.unwrap();
+        let mut hook =
+            crate::db::models::NativeHook::shell("parallel", "post_tool_use", "Read", "", 5, true);
+        hook.handler_type = "agent".into();
+        hook.agent_prompt = Some("wait".into());
+        runner.ctx.hooks = vec![hook];
+        let entered = Arc::new(tokio::sync::Barrier::new(3));
+        let release = Arc::new(Semaphore::new(0));
+        let hook_entered = entered.clone();
+        let hook_release = release.clone();
+        runner.ctx.hook_agent = Some(Arc::new(move |_, _| {
+            let entered = hook_entered.clone();
+            let release = hook_release.clone();
+            Box::pin(async move {
+                entered.wait().await;
+                let _permit = release.acquire().await.unwrap();
+                Ok("{}".into())
+            })
+        }));
+        let running = tokio::spawn(async move {
+            runner
+                .consume_assistant(
+                    assistant_tool_calls(&[
+                        ("read-1", "Read", r#"{"file_path":"hello.txt"}"#),
+                        ("read-2", "Read", r#"{"file_path":"second.txt"}"#),
+                        (
+                            "write",
+                            "Write",
+                            r#"{"file_path":"forbidden.txt","content":"old"}"#,
+                        ),
+                    ]),
+                    false,
+                    None,
+                )
+                .await
+                .unwrap();
+            runner
+        });
+        tokio::time::timeout(Duration::from_secs(3), entered.wait())
+            .await
+            .unwrap();
+        mailbox
+            .accept(
+                &turn,
+                &uuid::Uuid::new_v4().to_string(),
+                "new direction",
+                &[],
+                vec![],
+            )
+            .await
+            .unwrap();
+        release.add_permits(2);
+        let mut runner = tokio::time::timeout(Duration::from_secs(3), running)
+            .await
+            .unwrap()
+            .unwrap();
+        for (id, expected) in [
+            ("read-1", "hello world"),
+            ("read-2", "second result"),
+            ("write", crate::native::steer::SUPERSEDED),
+        ] {
+            assert!(runner
+                .messages
+                .iter()
+                .any(|message| message.role == Role::Tool
+                    && message.tool_call_id == id
+                    && message.content.contains(expected)));
+        }
+        assert!(!root.join("forbidden.txt").exists());
+        assert!(!runner.ctx.cancel.is_cancelled());
+        assert!(runner.inject_user_steer().await.unwrap());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn user_steer_does_not_abort_a_running_command() {
+        let (mut runner, root) = temp_runner();
+        let mailbox = attach_user_mailbox(&mut runner);
+        runner.begin_user_turn("go", vec![]).await.unwrap();
+        let turn = mailbox.snapshot().await.turn_id.unwrap();
+        let running = tokio::spawn(async move {
+            runner.consume_assistant(assistant_tool_calls(&[
+                ("running", "Bash", r#"{"command":"touch ready; while [ ! -f release ]; do sleep 0.01; done; printf completed"}"#),
+                ("unstarted", "Write", r#"{"file_path":"forbidden.txt","content":"old"}"#),
+            ]), false, None).await.unwrap();
+            runner
+        });
+        tokio::time::timeout(Duration::from_secs(3), async {
+            while !root.join("ready").exists() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        mailbox
+            .accept(
+                &turn,
+                &uuid::Uuid::new_v4().to_string(),
+                "steer without killing",
+                &[],
+                vec![],
+            )
+            .await
+            .unwrap();
+        fs::write(root.join("release"), "release").unwrap();
+        let runner = tokio::time::timeout(Duration::from_secs(3), running)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(runner
+            .messages
+            .iter()
+            .any(|message| message.role == Role::Tool
+                && message.tool_call_id == "running"
+                && message.content.contains("completed")));
+        assert!(!root.join("forbidden.txt").exists());
+        assert!(!runner.ctx.cancel.is_cancelled());
+        fs::remove_dir_all(root).unwrap();
     }
 }

@@ -5,13 +5,13 @@ use std::ptr;
 
 use core_foundation::base::{CFRelease, CFTypeRef, TCFType};
 use core_foundation::string::{CFString, CFStringRef};
-use foreign_types::ForeignType;
 use core_graphics::display::{
     kCGWindowImageBoundsIgnoreFraming, kCGWindowListOptionIncludingWindow, CGWindowListCreateImage,
 };
 use core_graphics::event::{CGEvent, CGEventFlags, CGEventTapLocation, CGEventType, CGMouseButton};
 use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
 use core_graphics::geometry::{CGPoint, CGRect, CGSize};
+use foreign_types::ForeignType;
 use image::RgbaImage;
 
 use super::{window_root_element, BackgroundError, ResolvedAction};
@@ -563,12 +563,6 @@ fn cgimage_to_rgba(image: core_graphics::sys::CGImageRef) -> Result<RgbaImage, S
 #[allow(dead_code)]
 fn ns_event_mouse(window_id: u32, x: f64, y: f64) -> Option<()> {
     // 尽力绑定 NSEvent.windowNumber；失败时仍使用上面的 CGEvent 字段。
-    let _ = (
-        window_id,
-        x,
-        y,
-        CString::new("NSEvent"),
-        c"",
-    );
+    let _ = (window_id, x, y, CString::new("NSEvent"), c"");
     None
 }

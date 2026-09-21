@@ -108,9 +108,19 @@
   "permissionScopeWorkspace": "当前工作区",
   "permissionScopeGlobal": "全局",
   "permissionOperation": {
-    "read": "读取", "search": "搜索", "write": "写入", "edit": "修改",
-    "create": "创建", "delete": "删除", "move_source": "移动源文件", "move_destination": "移动目标"
+    "read": "读取",
+    "search": "搜索",
+    "write": "写入",
+    "edit": "修改",
+    "create": "创建",
+    "delete": "删除",
+    "move_source": "移动源文件",
+    "move_destination": "移动目标"
   },
+  "permissionNetworkOrigin": "非公网来源",
+  "permissionNetworkProxy": "代理信任",
+  "permissionProxyAllowSession": "本会话信任此代理",
+  "permissionNetworkAllowSession": "本会话信任此目标",
   "permissionAllowSession": "本会话允许",
   "permissionAllowSessionCommands": "当前会话允许所有命令",
   "permissionAllowServer": "允许该服务器",
@@ -124,6 +134,7 @@
   "planApprovalHint": "批准后 Agent 开始实施；退回时可以写下要修改的地方。",
   "planApprovalFeedbackPlaceholder": "可选：给 Agent 的反馈或补充要求",
   "planApprovalApprove": "批准并开始实施",
+  "planApprovalRetry": "重试保存并实施",
   "planApprovalReject": "退回修改",
   "planCopy": "复制计划",
   "planCopied": "已复制",
@@ -259,27 +270,90 @@
   "slashPluginsNone": "还没有插件。",
   "slashContextEmpty": "当前没有上下文用量。",
   "slashBuiltin": {
-    "init": { "description": "生成或补充 AGENTS.md", "hint": "[补充要求]" },
-    "fork": { "description": "分叉当前会话", "hint": "[checkpoint]" },
-    "compact": { "description": "压缩上下文", "hint": "[指令]" },
-    "new": { "description": "开始新会话", "hint": "" },
-    "clear": { "description": "清空并开始新会话", "hint": "" },
-    "mode": { "description": "切换权限模式", "hint": "[default|edit|build|plan|yolo]" },
-    "model": { "description": "切换模型", "hint": "[模型]" },
-    "effort": { "description": "切换思考等级", "hint": "[low|medium|high|…]" },
-    "plan": { "description": "进入计划模式", "hint": "[任务]" },
-    "permissions": { "description": "打开权限规则", "hint": "" },
-    "memory": { "description": "打开工作区记忆", "hint": "" },
-    "mcp": { "description": "打开 MCP 设置", "hint": "" },
-    "plugins": { "description": "查看并打开插件目录", "hint": "" },
-    "skill": { "description": "调用技能", "hint": "<名称> [参数]" },
-    "diff": { "description": "打开 Git 改动", "hint": "" },
-    "context": { "description": "查看上下文用量", "hint": "" },
-    "help": { "description": "列出斜杠命令", "hint": "" },
-    "goal": { "description": "设置或清除会话目标", "hint": "[set|clear] [标题]" },
-    "review": { "description": "审查工作区 diff", "hint": "[范围]" },
-    "create-skill": { "description": "创建技能 SKILL.md", "hint": "[名称] [说明]" },
-    "create-subagent": { "description": "创建子智能体档案", "hint": "[名称] [说明]" }
+    "init": {
+      "description": "生成或补充 AGENTS.md",
+      "hint": "[补充要求]"
+    },
+    "fork": {
+      "description": "分叉当前会话",
+      "hint": "[checkpoint]"
+    },
+    "compact": {
+      "description": "压缩上下文",
+      "hint": "[指令]"
+    },
+    "new": {
+      "description": "开始新会话",
+      "hint": ""
+    },
+    "clear": {
+      "description": "清空并开始新会话",
+      "hint": ""
+    },
+    "mode": {
+      "description": "切换权限模式",
+      "hint": "[default|edit|build|plan|yolo]"
+    },
+    "model": {
+      "description": "切换模型",
+      "hint": "[模型]"
+    },
+    "effort": {
+      "description": "切换思考等级",
+      "hint": "[low|medium|high|…]"
+    },
+    "plan": {
+      "description": "进入计划模式",
+      "hint": "[任务]"
+    },
+    "permissions": {
+      "description": "打开权限规则",
+      "hint": ""
+    },
+    "memory": {
+      "description": "打开工作区记忆",
+      "hint": ""
+    },
+    "mcp": {
+      "description": "打开 MCP 设置",
+      "hint": ""
+    },
+    "plugins": {
+      "description": "查看并打开插件目录",
+      "hint": ""
+    },
+    "skill": {
+      "description": "调用技能",
+      "hint": "<名称> [参数]"
+    },
+    "diff": {
+      "description": "打开 Git 改动",
+      "hint": ""
+    },
+    "context": {
+      "description": "查看上下文用量",
+      "hint": ""
+    },
+    "help": {
+      "description": "列出斜杠命令",
+      "hint": ""
+    },
+    "goal": {
+      "description": "设置或清除会话目标",
+      "hint": "[set|clear] [标题]"
+    },
+    "review": {
+      "description": "审查工作区 diff",
+      "hint": "[范围]"
+    },
+    "create-skill": {
+      "description": "创建技能 SKILL.md",
+      "hint": "[名称] [说明]"
+    },
+    "create-subagent": {
+      "description": "创建子智能体档案",
+      "hint": "[名称] [说明]"
+    }
   },
   "noSkills": "暂无技能",
   "noFiles": "没有匹配的文件",
@@ -423,5 +497,25 @@
       "step3": "3. 用 Write 或 Edit 写回主工作区，不要留下冲突标记。",
       "step4": "4. 写完后用简短中文说明每个文件如何取舍。不要调用 EnterWorktree；本回合结束后会话会自动回到隔离工作树。"
     }
+  },
+  "steer": {
+    "action": "转向当前回合",
+    "help": "在当前回合的下一个安全边界应用。回车仍发送到下一回合队列。",
+    "history": "当前回合补充指令",
+    "accepted": "待应用",
+    "applied": "已应用",
+    "rejected": "已拒绝",
+    "cancelled": "已取消 / 中断",
+    "images": "{{count}} 张图片",
+    "reselect": "再次提交前请重新选择图片。",
+    "restore": "恢复文字草稿",
+    "noTurn": "当前回合已结束，草稿已保留。",
+    "limit": "文字最多 200 KiB，最多 8 张图片，每张不超过 8 MiB。",
+    "target": "转向会话：{{name}}",
+    "editor": "当前回合补充指令",
+    "attach": "添加图片",
+    "removeImage": "移除 {{name}}",
+    "submitting": "正在提交…",
+    "back": "返回授权操作"
   }
 }

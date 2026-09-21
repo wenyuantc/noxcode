@@ -238,7 +238,7 @@ pub fn tool_contracts() -> Vec<ToolContract> {
         ),
         contract(
             "WebFetch",
-            "抓取公开 URL 并转成可读文本",
+            "在 Agent 本机抓取 URL；非公网来源和代理需要显式信任",
             true,
             false,
             true,
@@ -417,6 +417,11 @@ pub fn tool_contracts() -> Vec<ToolContract> {
             ToolTimeout::fixed(15_000),
         ),
     ];
+    if let Some(fetch) = contracts.iter_mut().find(|tool| tool.name == "WebFetch") {
+        // WebFetch counts network IO itself; human trust prompts have no network deadline.
+        fetch.requires_user_interaction = true;
+        fetch.timeout = ToolTimeout::fixed(30_000);
+    }
     for name in ["AskUserQuestion", "AskQuestion"] {
         let mut ask = contract(
             name,
@@ -493,6 +498,14 @@ pub fn tool_contracts() -> Vec<ToolContract> {
         (
             "CronCreate",
             "创建定时自动化会话",
+            false,
+            true,
+            false,
+            PermissionCapability::AutomationWrite,
+        ),
+        (
+            "CronUpdate",
+            "更新工作区自动化配置",
             false,
             true,
             false,
@@ -696,6 +709,23 @@ pub fn automation_specs() -> Vec<ToolSpec> {
                     "prompt": {"type": "string", "description": "Self-contained task for the scheduled session"}
                 },
                 "required": ["name", "cron", "prompt"]
+            }),
+        ),
+        spec(
+            "CronUpdate",
+            "Update an automation in this workspace without running it. Supply id and at least one update field; omitted fields stay unchanged. Empty channel_id clears both channel and model; empty model restores the channel default. Changes require automation write permission.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "id": {"type": "string"},
+                    "name": {"type": "string"},
+                    "prompt": {"type": "string"},
+                    "cron": {"type": "string", "description": "Standard 5-field cron or @hourly/@daily/@weekly"},
+                    "enabled": {"type": "boolean"},
+                    "channel_id": {"type": "string", "description": "Enabled AI channel id; empty clears channel and model. Cannot clear while supplying a nonempty model."},
+                    "model": {"type": "string", "description": "Model id from the effective channel's model list; empty clears the override"}
+                },
+                "required": ["id"]
             }),
         ),
         spec(
@@ -955,7 +985,7 @@ fn core_tool_specs() -> Vec<ToolSpec> {
         ),
         spec(
             "WebFetch",
-            "Fetch a public http(s) URL, convert readable content to text, and optionally extract by prompt.",
+            "Fetch an http(s) URL on the agent local host (including for SSH workspaces). Nonpublic origins and configured proxies require explicit user trust. Convert readable content to text, and optionally extract by prompt.",
             json!({
                 "type": "object",
                 "properties": {
@@ -1069,6 +1099,34 @@ fn spec(name: &str, description: &str, parameters: serde_json::Value) -> ToolSpe
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cron_update_requires_automation_write_and_is_not_read_only() {
+        let contract = builtin_contract("CronUpdate").expect("CronUpdate contract");
+        assert_eq!(contract.permission, PermissionCapability::AutomationWrite);
+        assert!(contract.needs_approval);
+        assert!(!contract.allowed_in_plan_mode);
+        assert!(!contract.read_only);
+        let spec = automation_specs()
+            .into_iter()
+            .find(|spec| spec.name == "CronUpdate")
+            .expect("CronUpdate schema");
+        assert_eq!(spec.parameters["required"], json!(["id"]));
+        for field in [
+            "id",
+            "name",
+            "prompt",
+            "cron",
+            "enabled",
+            "channel_id",
+            "model",
+        ] {
+            assert!(
+                spec.parameters["properties"].get(field).is_some(),
+                "{field}"
+            );
+        }
+    }
 
     #[test]
     fn read_only_tools_exclude_writers() {

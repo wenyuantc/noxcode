@@ -1,6 +1,7 @@
 use serde_json::{json, Value};
 
 use super::openai::normalize_effort;
+use super::response::{provider_error, ModelError, ModelErrorKind, ModelResponse};
 use super::sse::{parse_sse, SseEvent};
 use super::types::{Message, Role, StreamDelta, ToolCall, ToolSpec, Usage};
 use super::usage::parse_usage;
@@ -184,7 +185,7 @@ fn anthropic_user_content(message: &Message) -> Value {
     json!(parts)
 }
 
-pub fn parse_anthropic_sse(text: &str) -> Result<(Message, Usage), String> {
+pub fn parse_anthropic_sse(text: &str) -> Result<ModelResponse, ModelError> {
     let mut state = AnthropicStreamState::new();
     for event in parse_sse(text) {
         state.apply(&event);
@@ -200,6 +201,11 @@ pub struct AnthropicStreamState {
     message: Message,
     usage: Usage,
     tools: Vec<(i64, ToolCall)>,
+    stopped: bool,
+    raw_finish_reason: Option<String>,
+    response_id: Option<String>,
+    error: Option<ModelError>,
+    tool_deltas: std::collections::HashSet<i64>,
 }
 
 impl Default for AnthropicStreamState {
@@ -208,6 +214,11 @@ impl Default for AnthropicStreamState {
             message: Message::assistant_text(""),
             usage: Usage::default(),
             tools: Vec::new(),
+            stopped: false,
+            raw_finish_reason: None,
+            response_id: None,
+            error: None,
+            tool_deltas: Default::default(),
         }
     }
 }
@@ -219,20 +230,58 @@ impl AnthropicStreamState {
 
     pub fn apply(&mut self, event: &SseEvent) -> Vec<StreamDelta> {
         let Ok(payload) = serde_json::from_str::<Value>(&event.data) else {
+            self.error = Some(ModelError::new(
+                ModelErrorKind::InvalidResponse,
+                "无效的 Anthropic SSE JSON",
+            ));
             return Vec::new();
         };
+        if let Some(error) = provider_error(&payload) {
+            self.error = Some(error);
+            return Vec::new();
+        }
         let event_type = payload
             .get("type")
             .and_then(Value::as_str)
             .unwrap_or(event.event.as_str());
         match event_type {
+            "error" => {
+                self.error = Some(ModelError::new(
+                    ModelErrorKind::Provider,
+                    event.data.clone(),
+                ));
+                Vec::new()
+            }
+            "message_stop" => {
+                self.stopped = true;
+                Vec::new()
+            }
             "content_block_start" => {
                 start_anthropic_block(&mut self.message, &mut self.tools, &payload)
             }
             "content_block_delta" => {
+                if payload.pointer("/delta/type").and_then(Value::as_str)
+                    == Some("input_json_delta")
+                {
+                    let index = payload.get("index").and_then(Value::as_i64).unwrap_or(0);
+                    if self.tool_deltas.insert(index) {
+                        if let Some((_, tool)) = self.tools.iter_mut().find(|(i, _)| *i == index) {
+                            tool.arguments.clear();
+                        }
+                    }
+                    if !self.tools.iter().any(|(i, _)| *i == index) {
+                        self.error = Some(ModelError::new(
+                            ModelErrorKind::InvalidResponse,
+                            "工具参数缺少对应工具块",
+                        ));
+                    }
+                }
                 delta_anthropic_block(&mut self.message, &mut self.tools, &payload)
             }
             "message_start" => {
+                if let Some(id) = payload.pointer("/message/id").and_then(Value::as_str) {
+                    self.response_id = Some(id.to_string());
+                }
                 if let Some(raw) = payload.pointer("/message/usage") {
                     let parsed = parse_usage(raw);
                     self.usage.prompt_tokens = parsed.prompt_tokens;
@@ -241,6 +290,12 @@ impl AnthropicStreamState {
                 Vec::new()
             }
             "message_delta" => {
+                if let Some(reason) = payload
+                    .pointer("/delta/stop_reason")
+                    .and_then(Value::as_str)
+                {
+                    self.raw_finish_reason = Some(reason.to_string());
+                }
                 if let Some(raw) = payload.get("usage") {
                     let parsed = parse_usage(raw);
                     if parsed.prompt_tokens > 0 {
@@ -259,17 +314,31 @@ impl AnthropicStreamState {
         }
     }
 
-    pub fn finish(mut self) -> Result<(Message, Usage), String> {
+    pub fn finish(mut self) -> Result<ModelResponse, ModelError> {
         self.tools.sort_by_key(|(index, _)| *index);
         self.message.tool_calls = self.tools.into_iter().map(|(_, call)| call).collect();
-        if message_is_empty(&self.message) {
-            return Err("模型返回空响应".to_string());
+        if let Some(error) = self.error {
+            return Err(error);
         }
-        Ok((self.message, self.usage))
+        if !self.stopped {
+            return Err(ModelError::new(
+                ModelErrorKind::IncompleteStream,
+                "Anthropic 响应流缺少 message_stop",
+            ));
+        }
+        ModelResponse::new(
+            self.message,
+            self.usage,
+            self.raw_finish_reason,
+            self.response_id,
+        )
     }
 }
 
-pub fn parse_anthropic_json(value: &Value) -> Result<(Message, Usage), String> {
+pub fn parse_anthropic_json(value: &Value) -> Result<ModelResponse, ModelError> {
+    if let Some(error) = provider_error(value) {
+        return Err(error);
+    }
     let mut message = Message::assistant_text("");
     let mut tools: Vec<(i64, ToolCall)> = Vec::new();
     let usage = value.get("usage").map(parse_usage).unwrap_or_default();
@@ -284,16 +353,18 @@ pub fn parse_anthropic_json(value: &Value) -> Result<(Message, Usage), String> {
     }
     tools.sort_by_key(|(index, _)| *index);
     message.tool_calls = tools.into_iter().map(|(_, call)| call).collect();
-    if message_is_empty(&message) {
-        return Err("模型返回空响应".to_string());
-    }
-    Ok((message, usage))
-}
-
-fn message_is_empty(message: &Message) -> bool {
-    message.content.is_empty()
-        && message.reasoning_content.is_empty()
-        && message.tool_calls.is_empty()
+    ModelResponse::new(
+        message,
+        usage,
+        value
+            .get("stop_reason")
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned),
+        value
+            .get("id")
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned),
+    )
 }
 
 fn start_anthropic_block(
@@ -338,7 +409,7 @@ fn start_anthropic_block(
                     .and_then(Value::as_str)
                     .unwrap_or_default()
                     .to_string(),
-                arguments: String::new(),
+                arguments: block.get("input").map(Value::to_string).unwrap_or_default(),
             },
         )),
         _ => {}
@@ -401,8 +472,10 @@ mod tests {
             "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":1,\"content_block\":{\"type\":\"tool_use\",\"id\":\"toolu_1\",\"name\":\"Read\"}}\n\n",
             "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{\\\"path\\\":\\\"a.rs\\\"}\"}}\n\n",
             "event: message_delta\ndata: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":6}}\n\n",
+            "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n",
         );
-        let (message, usage) = parse_anthropic_sse(sse).expect("parse anthropic sse");
+        let ModelResponse { message, usage, .. } =
+            parse_anthropic_sse(sse).expect("parse anthropic sse");
         assert_eq!(message.content, "hi there");
         assert_eq!(message.tool_calls[0].id, "toolu_1");
         assert_eq!(message.tool_calls[0].arguments, r#"{"path":"a.rs"}"#);
@@ -419,7 +492,8 @@ mod tests {
             ],
             "usage": {"input_tokens": 5, "output_tokens": 2}
         });
-        let (message, usage) = parse_anthropic_json(&value).expect("parse json");
+        let ModelResponse { message, usage, .. } =
+            parse_anthropic_json(&value).expect("parse json");
         assert_eq!(message.reasoning_content, "reason");
         assert_eq!(message.content, "hello");
         assert_eq!(usage.prompt_tokens, 5);
@@ -432,8 +506,9 @@ mod tests {
             "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"thinking\",\"thinking\":\"hm\"}}\n\n",
             "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\"m\"}}\n\n",
             "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":1,\"content_block\":{\"type\":\"text\",\"text\":\"ok\"}}\n\n",
+            "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n",
         );
-        let (message, _) = parse_anthropic_sse(sse).expect("parse thinking start");
+        let ModelResponse { message, .. } = parse_anthropic_sse(sse).expect("parse thinking start");
         assert_eq!(message.reasoning_content, "hmm");
         assert_eq!(message.content, "ok");
     }

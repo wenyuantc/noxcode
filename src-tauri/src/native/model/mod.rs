@@ -5,11 +5,15 @@ pub mod anthropic;
 pub mod call_log;
 pub mod client;
 pub mod openai;
+pub mod response;
 pub mod responses;
 pub mod retry;
 pub mod sse;
 pub mod types;
 pub mod usage;
+
+#[cfg(test)]
+mod stream_integrity_tests;
 
 pub use client::{
     ListedModels, ModelClient, ModelClientConfig, PromptCacheMode, ResponsesContinuationMode,

@@ -118,6 +118,9 @@ import { SubagentPopover } from "./SubagentPopover";
 import { WorkspacePicker } from "./WorkspacePicker";
 import { WorktreeToggle } from "./WorktreeToggle";
 import { QueuedInputs } from "./QueuedInputs";
+import { SteerInputs } from "./SteerInputs";
+import { useNativeSteer } from "@/hooks/useNativeSteer";
+import { canClearSteerDraft } from "@/lib/nativeSteer";
 
 const IMAGE_DIALOG_FILTERS = [
   { name: "Images", extensions: ["png", "jpg", "jpeg", "gif", "webp"] },
@@ -155,6 +158,7 @@ export function Composer({ compact = false }: { compact?: boolean }) {
   const ai = useSettingsStore((state) => state.ai);
   const setNative = useSettingsStore((state) => state.setNative);
   const selectedSessionId = useSessionStore((state) => state.selectedSessionId);
+  const steer = useNativeSteer(selectedSessionId);
   const runtime = useSessionStore((state) =>
     selectedSessionId ? state.configurationBySession[selectedSessionId] : undefined,
   );
@@ -758,6 +762,38 @@ export function Composer({ compact = false }: { compact?: boolean }) {
     }
   };
 
+  const sendSteer = async () => {
+    if (sendingRef.current || sending || steer.busy || applyingConfig) return;
+    const submitted = {
+      sessionId: selectedSessionId,
+      text: draft,
+      paths: attachments.map((item) => item.path),
+    };
+    const prompt = assembleComposerPrompt(pills, draft).prompt.trim();
+    if (!prompt && attachments.length === 0) return;
+    sendingRef.current = true;
+    setSending(true);
+    setError(null);
+    try {
+      if (
+        (await steer.submit(prompt, submitted.paths)) &&
+        canClearSteerDraft(submitted, {
+          sessionId: useSessionStore.getState().selectedSessionId,
+          text: useUiStore.getState().composerDraft,
+          paths: attachmentsRef.current.map((item) => item.path),
+        })
+      ) {
+        attachmentsRef.current = [];
+        setDraft("");
+        setPills(initialComposerPills());
+        setAttachments([]);
+      }
+    } finally {
+      sendingRef.current = false;
+      setSending(false);
+    }
+  };
+
   const send = async () => {
     if (sendingRef.current || sending || applyingConfig) return;
     const assembled = assembleComposerPrompt(pills, draft);
@@ -1020,6 +1056,12 @@ export function Composer({ compact = false }: { compact?: boolean }) {
           </ul>
         </div>
       ) : null}
+      {steer.error ? (
+        <p role="alert" className="text-xs text-destructive">
+          {steer.error}
+        </p>
+      ) : null}
+      {selectedSessionId ? <SteerInputs sessionId={selectedSessionId} /> : null}
       {selectedSessionId ? (
         <QueuedInputs key={selectedSessionId} sessionId={selectedSessionId} />
       ) : null}
@@ -1233,6 +1275,23 @@ export function Composer({ compact = false }: { compact?: boolean }) {
                 }
               >
                 <Square className="size-3.5" />
+              </Button>
+            ) : null}
+            {live || steer.snapshot?.turn_id ? (
+              <Button
+                size="sm"
+                variant="outline"
+                title={t("sessions:steer.help")}
+                aria-label={t("sessions:steer.action")}
+                disabled={
+                  sendBusy ||
+                  steer.busy ||
+                  !steer.canSubmit ||
+                  (!draft.trim() && attachments.length === 0 && !hasPills(pills))
+                }
+                onClick={() => void sendSteer()}
+              >
+                {steer.busy ? t("sessions:steer.submitting") : t("sessions:steer.action")}
               </Button>
             ) : null}
             <Button

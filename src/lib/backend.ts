@@ -3,6 +3,8 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { getLocalePreference } from "@/lib/i18n/locale";
 
 import type {
+  NativeSteerReceipt,
+  NativeSteerSnapshot,
   ActivityLog,
   AgentSession,
   AppHealthCheck,
@@ -618,6 +620,32 @@ export function updateNativeSessionConfiguration(
   return invoke("update_native_session_configuration", { payload });
 }
 
+export function submitNativeSteer(
+  sessionRecordId: string,
+  expectedTurnId: string,
+  inputId: string,
+  text: string,
+  imagePaths: string[],
+): Promise<NativeSteerReceipt> {
+  return invoke("submit_native_steer", {
+    sessionRecordId,
+    expectedTurnId,
+    inputId,
+    text,
+    imagePaths,
+  });
+}
+
+export function getNativeSteerSnapshot(sessionRecordId: string): Promise<NativeSteerSnapshot> {
+  return invoke("get_native_steer_snapshot", { sessionRecordId });
+}
+
+export function onNativeSteer(
+  callback: (snapshot: NativeSteerSnapshot) => void,
+): Promise<UnlistenFn> {
+  return listen<NativeSteerSnapshot>("native-steer", (event) => callback(event.payload));
+}
+
 export function sendNativeInput(sessionRecordId: string, input: string): Promise<NativeInputQueue> {
   return invoke("send_native_input", { sessionRecordId, input });
 }
@@ -819,7 +847,7 @@ export function resolveNativePlanApproval(
   aiChannelId?: string,
   model?: string,
   reasoningEffort?: string,
-): Promise<void> {
+): Promise<AgentSessionStarted | null> {
   return invoke("resolve_native_plan_approval", {
     sessionRecordId,
     requestId,

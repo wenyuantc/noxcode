@@ -126,6 +126,7 @@ function stoppedPlanSession(pendingPlanJson?: string | null): AgentSession {
 describe("native interaction rendering", () => {
   beforeEach(() => {
     useSessionStore.setState({
+      resolvedRequests: {},
       permissions: {},
       planQuestions: {},
       planApprovals: {},
@@ -211,6 +212,56 @@ describe("native interaction rendering", () => {
       },
     });
     expect(renderToStaticMarkup(<PendingPlanApproval sessionId="s1" />)).toBe("");
+  });
+  it("restores failed-save retry controls and the authorized model after reopening", () => {
+    const session = stoppedPlanSession(JSON.stringify({ request_id: "req-1", plan: "plan body" }));
+    session.approved_plan_json = JSON.stringify({
+      authorization_id: "authorization",
+      request_id: "req-1",
+      body: "plan body",
+      feedback: "add tests",
+      cwd: "/worktree",
+      path: "/worktree/.noxcode/plans/plan-s1.md",
+      content_hash: "hash",
+      saved_hash: null,
+      status: "failed",
+      ai_channel_id: "implementation-channel",
+      model: "implementation-model",
+      reasoning_effort: "high",
+      error: "disk full",
+    });
+    useWorkspaceStore.setState({ sessions: [session] });
+    const card = renderToStaticMarkup(<PendingPlanApproval sessionId="s1" />);
+    expect(card).toContain("planApprovalRetry");
+    expect(card).not.toContain("planApprovalApprove</span>");
+    expect(card).toContain("channel-model-picker:implementation-channel/implementation-model");
+    expect(card).toContain("/worktree/.noxcode/plans/plan-s1.md");
+    expect(card).toContain("disk full");
+  });
+  it("shows the saved file path on the durable historical plan card", () => {
+    const session = stoppedPlanSession(null);
+    session.approved_plan_json = JSON.stringify({
+      authorization_id: "authorization",
+      request_id: "req-1",
+      body: "plan body",
+      feedback: "",
+      cwd: "/worktree",
+      path: "/worktree/.noxcode/plans/plan-s1.md",
+      content_hash: "hash",
+      saved_hash: "hash",
+      status: "saved",
+      ai_channel_id: "channel",
+      model: "model",
+      reasoning_effort: null,
+      error: null,
+    });
+    useWorkspaceStore.setState({ sessions: [session] });
+    const item = groupSessionLines([
+      { id: "plan", sessionId: "s1", text: "[PLAN]\nplan body", createdAt: "t" },
+    ])[0];
+    const card = renderToStaticMarkup(<PlanRow item={item} sessionId="s1" />);
+    expect(card).toContain("/worktree/.noxcode/plans/plan-s1.md");
+    expect(card).toContain("planHistoricalBadge");
   });
   it("ignores surrounding whitespace when matching the pending plan", () => {
     useSessionStore.getState().setPlanApproval({

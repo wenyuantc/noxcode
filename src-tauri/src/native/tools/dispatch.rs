@@ -53,6 +53,7 @@ pub struct SessionScope {
 /// ExitPlanMode 提交给用户审批的计划。
 #[derive(Debug, Clone)]
 pub struct PlanApprovalPrompt {
+    pub origin: Option<crate::native::steer::MainOrigin>,
     pub request_id: String,
     pub plan: String,
 }
@@ -66,6 +67,10 @@ pub struct PlanApprovalAnswer {
     pub ai_channel_id: Option<String>,
     #[serde(default)]
     pub model: Option<String>,
+    #[serde(default)]
+    pub plan_path: Option<String>,
+    #[serde(skip)]
+    pub authorization: Option<crate::native::plans::PlanAuthorization>,
 }
 
 pub type PlanApprovalRequester =
@@ -83,6 +88,7 @@ pub struct TodoItem {
 
 #[derive(Debug, Clone)]
 pub struct PermissionPrompt {
+    pub origin: Option<crate::native::steer::MainOrigin>,
     pub request_id: String,
     pub tool_name: String,
     pub kind: NativeToolRiskKind,
@@ -98,8 +104,14 @@ pub struct PermissionPrompt {
 pub type PermissionRequester =
     Arc<dyn Fn(PermissionPrompt, oneshot::Sender<NativePermissionDecision>) + Send + Sync>;
 
-pub type QuestionRequester =
-    Arc<dyn Fn(Vec<super::PlanQuestion>, oneshot::Sender<PlanQuestionAnswer>) + Send + Sync>;
+pub type QuestionRequester = Arc<
+    dyn Fn(
+            Vec<super::PlanQuestion>,
+            Option<crate::native::steer::MainOrigin>,
+            oneshot::Sender<PlanQuestionAnswer>,
+        ) + Send
+        + Sync,
+>;
 
 pub type PermissionExpirer =
     Arc<dyn Fn(String) -> tauri::async_runtime::JoinHandle<()> + Send + Sync>;
@@ -123,9 +135,20 @@ pub struct IsolationRestore {
 /// 权限放行），因此同一轮里并行执行的工具可以各拿一份副本。
 #[derive(Clone)]
 pub struct ToolCtx {
+    /// 子 Agent 即使显式构造调用，也不能使用仅主会话开放的工具。
+    is_child: bool,
+    pub main_origin: Option<crate::native::steer::MainOrigin>,
+    pub user_steer: Option<Arc<crate::native::steer::SteerMailbox>>,
     pub workspace: LocalWorkspace,
     pub ssh: Option<SshToolRuntime>,
     pub extra_env: Vec<(String, String)>,
+    pub web_settings: crate::app::network_settings::NetworkSettings,
+    pub web_settings_provider: Option<super::web_access::SettingsProvider>,
+    pub web_network: Arc<super::web_access::NetworkState>,
+    #[cfg(test)]
+    pub web_test_resolver: Option<super::web_access::TestResolver>,
+    #[cfg(test)]
+    pub web_test_connect: Option<super::web_access::TestConnect>,
     pub cancel: CancelFlag,
     pub read_files: ReadFileRegistry,
     pub todos: Arc<Mutex<Vec<TodoItem>>>,
@@ -184,12 +207,46 @@ pub struct ToolCtx {
 }
 
 impl ToolCtx {
+    pub fn request_origin(&self) -> Option<crate::native::steer::MainOrigin> {
+        self.main_origin.clone().map(|mut origin| {
+            origin.child = self.is_child;
+            origin
+        })
+    }
+
+    pub fn execution_current(&self) -> bool {
+        self.is_child
+            || self
+                .main_origin
+                .as_ref()
+                .zip(self.user_steer.as_ref())
+                .is_none_or(|(origin, mailbox)| mailbox.is_current(origin))
+    }
+
+    pub fn check_execution(&self) -> Result<(), String> {
+        if self.execution_current() {
+            Ok(())
+        } else {
+            Err(crate::native::steer::SUPERSEDED.into())
+        }
+    }
+
     pub fn new(workspace: LocalWorkspace) -> Self {
         let original_root = workspace.root.clone();
         Self {
+            is_child: false,
+            main_origin: None,
+            user_steer: None,
             workspace,
             ssh: None,
             extra_env: Vec::new(),
+            web_settings: Default::default(),
+            web_settings_provider: None,
+            web_network: Arc::new(super::web_access::NetworkState::default()),
+            #[cfg(test)]
+            web_test_resolver: None,
+            #[cfg(test)]
+            web_test_connect: None,
             cancel: CancelFlag::new(),
             read_files: Arc::new(Mutex::new(HashMap::new())),
             todos: Arc::new(Mutex::new(Vec::new())),
@@ -418,6 +475,8 @@ impl ToolCtx {
     /// 与待办清单是独立的。
     pub fn fork_for_child(&self) -> Self {
         let mut child = self.clone();
+        child.is_child = true;
+        child.user_steer = None;
         child.workspace.authorized_paths.clear();
         if let Some(ssh) = &mut child.ssh {
             ssh.authorized_paths.clear();
@@ -517,10 +576,14 @@ pub(crate) struct PreparedTool {
 
 /// 特殊调度工具（如 Agent）与普通工具共用执行前后的安全边界。
 pub(crate) async fn preflight_tool(ctx: &ToolCtx, call: &ToolCall) -> Result<PreparedTool, String> {
+    ctx.check_execution()?;
     let name = call.name.as_str();
     let arguments = call.arguments.as_str();
     if ctx.cancel.is_cancelled() {
         return Err("已取消".to_string());
+    }
+    if ctx.is_child && name == "CronUpdate" {
+        return Err("子 Agent 不能更新自动化".to_string());
     }
     let contract = ctx.contract_for(name).await;
     if ctx.is_read_only() && !ctx.allows_in_read_only(&contract) {
@@ -541,6 +604,7 @@ pub(crate) async fn preflight_tool(ctx: &ToolCtx, call: &ToolCall) -> Result<Pre
     if ctx.is_read_only() && !ctx.allows_in_read_only(&contract) {
         return Err(format!("只读规划模式禁止调用工具 {name}"));
     }
+    ctx.check_execution()?;
     Ok(PreparedTool {
         name: name.to_string(),
         arguments: arguments.to_string(),
@@ -627,6 +691,7 @@ async fn run_with_contract_timeout(
 }
 
 async fn dispatch(ctx: &ToolCtx, name: &str, arguments: &str) -> Result<ToolOutput, String> {
+    ctx.check_execution()?;
     match name {
         "Read" => call_read(ctx, arguments).await,
         "SQLiteQuery" => super::sqlite::query(ctx, arguments)
@@ -640,7 +705,9 @@ async fn dispatch(ctx: &ToolCtx, name: &str, arguments: &str) -> Result<ToolOutp
         "Bash" => call_bash(ctx, arguments).await.map(ToolOutput::text),
         "TodoRead" => Ok(ToolOutput::text(format_todos(&ctx.todos_snapshot()))),
         "TodoWrite" => call_todo_write(ctx, arguments).map(ToolOutput::text),
-        "WebFetch" => super::web::web_fetch(arguments).await.map(ToolOutput::text),
+        "WebFetch" => super::web::web_fetch(ctx, arguments)
+            .await
+            .map(ToolOutput::text),
         "WebSearch" => super::web::web_search(arguments)
             .await
             .map(ToolOutput::text),
@@ -658,6 +725,7 @@ async fn dispatch(ctx: &ToolCtx, name: &str, arguments: &str) -> Result<ToolOutp
             .map(ToolOutput::text),
         "RespondToCoordinator" => call_respond_to_coordinator(ctx, arguments).map(ToolOutput::text),
         "CronCreate" => call_cron_create(ctx, arguments).await.map(ToolOutput::text),
+        "CronUpdate" => call_cron_update(ctx, arguments).await.map(ToolOutput::text),
         "CronList" => call_cron_list(ctx).await.map(ToolOutput::text),
         "CronDelete" => call_cron_delete(ctx, arguments).await.map(ToolOutput::text),
         "Goal" => call_goal(ctx, arguments).await.map(ToolOutput::text),
@@ -691,7 +759,7 @@ async fn call_ask_question(ctx: &ToolCtx, arguments: &str) -> Result<String, Str
         return Err("当前不是计划提问阶段，不能向用户提问".to_string());
     };
     let (tx, rx) = oneshot::channel();
-    requester(questions.clone(), tx);
+    requester(questions.clone(), ctx.request_origin(), tx);
     let answer = tokio::select! {
         biased;
         _ = async {
@@ -707,6 +775,7 @@ async fn call_ask_question(ctx: &ToolCtx, arguments: &str) -> Result<String, Str
     if ctx.cancel.is_cancelled() {
         return Err("已取消".to_string());
     }
+    ctx.check_execution()?;
     if !answer.skipped && answer.answers.len() != questions.len() {
         return Err("回答数量与问题数量不一致".to_string());
     }
@@ -753,6 +822,21 @@ async fn call_cron_create(ctx: &ToolCtx, arguments: &str) -> Result<String, Stri
         created.cron,
         created.next_run_at.as_deref().unwrap_or("-")
     ))
+}
+
+async fn call_cron_update(ctx: &ToolCtx, arguments: &str) -> Result<String, String> {
+    let scope = session_scope(ctx)?;
+    let workspace_id = scope_workspace(scope)?;
+    let args = parse_args(arguments)?;
+    let id = string_arg(&args, "id")?;
+    let updates = serde_json::from_value::<crate::native::scheduler::UpdateNativeAutomation>(args)
+        .map_err(|error| format!("自动化更新参数无效: {error}"))?;
+    let automation = crate::native::scheduler::get_automation(&scope.pool, &id).await?;
+    if automation.workspace_id != workspace_id {
+        return Err("只能更新当前工作区的自动化".to_string());
+    }
+    let updated = crate::native::scheduler::update_automation(&scope.pool, &id, updates).await?;
+    serde_json::to_string_pretty(&updated).map_err(|error| format!("序列化自动化失败: {error}"))
 }
 
 async fn call_cron_list(ctx: &ToolCtx) -> Result<String, String> {
@@ -968,6 +1052,7 @@ async fn call_exit_plan_mode(ctx: &ToolCtx, arguments: &str) -> Result<String, S
     let (tx, rx) = oneshot::channel();
     requester(
         PlanApprovalPrompt {
+            origin: ctx.request_origin(),
             request_id: request_id.clone(),
             plan: plan.clone(),
         },
@@ -986,8 +1071,13 @@ async fn call_exit_plan_mode(ctx: &ToolCtx, arguments: &str) -> Result<String, S
         result = rx => result.map_err(|_| "计划审批通道已关闭，保持计划模式".to_string()),
     };
     let answer = match answer {
-        Ok(answer) if !ctx.cancel.is_cancelled() => answer,
+        Ok(answer) if !ctx.cancel.is_cancelled() && ctx.execution_current() => answer,
         result => {
+            if let Ok(answer) = &result {
+                if let Some(authorization) = &answer.authorization {
+                    authorization.cancel();
+                }
+            }
             if let Some(expire) = &ctx.expire_plan_approval {
                 let _ = expire(request_id).await;
             }
@@ -995,15 +1085,26 @@ async fn call_exit_plan_mode(ctx: &ToolCtx, arguments: &str) -> Result<String, S
         }
     };
     if answer.approved {
-        ctx.set_read_only(false);
-        ctx.set_plan_mode(false);
-        Ok(if answer.feedback.trim().is_empty() {
+        let unlock = || {
+            ctx.set_read_only(false);
+            ctx.set_plan_mode(false);
+        };
+        if let Some(authorization) = &answer.authorization {
+            authorization.commit_implementation(unlock)?;
+        } else {
+            unlock();
+        }
+        let message = if answer.feedback.trim().is_empty() {
             "用户已批准计划，进入实施。".to_string()
         } else {
             format!(
                 "用户已批准计划并补充：{}\n进入实施。",
                 answer.feedback.trim()
             )
+        };
+        Ok(match answer.plan_path {
+            Some(path) => format!("{message}\n计划文件：{path}"),
+            None => message,
         })
     } else if answer.feedback.trim().is_empty() {
         Ok("用户未批准计划。请根据对话调整计划后再次调用 ExitPlanMode，或用 AskUserQuestion 澄清。".to_string())
@@ -1337,6 +1438,7 @@ async fn request_permission(
     };
     let request_id = uuid::Uuid::new_v4().to_string();
     let prompt = PermissionPrompt {
+        origin: ctx.request_origin(),
         request_id: request_id.clone(),
         tool_name: name.to_string(),
         kind,
@@ -1396,6 +1498,7 @@ async fn request_permission(
     if ctx.cancel.is_cancelled() {
         return Err("已取消".to_string());
     }
+    ctx.check_execution()?;
     if plan_bash
         && !matches!(
             decision,
@@ -2183,6 +2286,115 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn cron_update_scopes_updates_and_returns_saved_configuration() {
+        use crate::native::scheduler::{create_automation, get_automation, CreateNativeAutomation};
+        let pool = crate::db::test_support::setup_migrated_pool().await;
+        let mut automations = Vec::new();
+        for workspace in ["ws-a", "ws-b"] {
+            sqlx::query(
+                "INSERT INTO workspaces (id, name, workspace_type) VALUES ($1, $1, 'local')",
+            )
+            .bind(workspace)
+            .execute(&pool)
+            .await
+            .unwrap();
+            automations.push(
+                create_automation(
+                    &pool,
+                    CreateNativeAutomation {
+                        workspace_id: workspace.into(),
+                        name: "original".into(),
+                        prompt: "prompt".into(),
+                        cron: "@daily".into(),
+                        channel_id: None,
+                        model: None,
+                        enabled: Some(true),
+                    },
+                )
+                .await
+                .unwrap(),
+            );
+        }
+        let root = tempfile::tempdir().unwrap();
+        let mut ctx = ctx_for(root.path());
+        ctx.allow_all_high_risk.store(true, Ordering::SeqCst);
+        ctx.session_scope = Some(SessionScope {
+            pool: pool.clone(),
+            workspace_id: Some("ws-a".into()),
+            channel_id: "unused".into(),
+            model: "unused".into(),
+            on_goal: None,
+        });
+        let id = &automations[0].id;
+        let result = execute_tool(
+            &ctx,
+            "CronUpdate",
+            &serde_json::json!({"id":id,"prompt":"new prompt"}).to_string(),
+        )
+        .await
+        .unwrap();
+        let updated: Value = serde_json::from_str(&result).expect("updated configuration");
+        assert_eq!(updated["id"], *id);
+        assert_eq!(updated["name"], "original");
+        assert_eq!(updated["prompt"], "new prompt");
+        assert_eq!(updated["cron"], "@daily");
+        assert_eq!(
+            updated["next_run_at"],
+            serde_json::to_value(&automations[0].next_run_at).unwrap()
+        );
+        for args in [
+            serde_json::json!({"id":id}),
+            serde_json::json!({"id":id,"unknown":"ignored"}),
+            serde_json::json!({"id":id,"name":" "}),
+            serde_json::json!({"id":id,"enabled":"false"}),
+            serde_json::json!({"id":id,"model":1}),
+            serde_json::json!({"id":"missing","name":"new"}),
+            serde_json::json!({"id":automations[1].id,"name":"foreign"}),
+        ] {
+            assert!(
+                execute_tool(&ctx, "CronUpdate", &args.to_string())
+                    .await
+                    .is_err(),
+                "{args}"
+            );
+        }
+        assert_eq!(
+            get_automation(&pool, &automations[1].id)
+                .await
+                .unwrap()
+                .name,
+            "original"
+        );
+        assert_eq!(get_automation(&pool, id).await.unwrap().name, "original");
+        let child = ctx.fork_for_child();
+        let child_args = serde_json::json!({"id":id,"name":"child update"}).to_string();
+        assert!(execute_tool(&child, "CronUpdate", &child_args)
+            .await
+            .unwrap_err()
+            .contains("子 Agent"));
+        ctx.request_permission = Some(deny_requester());
+        ctx.allow_all_high_risk.store(false, Ordering::SeqCst);
+        let args = serde_json::json!({"id":id,"name":"denied"}).to_string();
+        assert!(execute_tool(&ctx, "CronUpdate", &args)
+            .await
+            .unwrap_err()
+            .contains("不允许"));
+        ctx.allow_all_high_risk.store(true, Ordering::SeqCst);
+        ctx.set_plan_mode(true);
+        assert!(execute_tool(&ctx, "CronUpdate", &args)
+            .await
+            .unwrap_err()
+            .contains("只读规划模式"));
+        ctx.set_plan_mode(false);
+        ctx.session_scope.as_mut().unwrap().workspace_id = None;
+        assert!(execute_tool(&ctx, "CronUpdate", &args)
+            .await
+            .unwrap_err()
+            .contains("没有绑定工作区"));
+        assert_eq!(get_automation(&pool, id).await.unwrap().name, "original");
+    }
+
+    #[tokio::test]
     async fn cancelling_permission_wait_expires_the_visible_request() {
         let root = tempfile::tempdir().unwrap();
         let mut ctx = ctx_for(root.path());
@@ -2369,7 +2581,7 @@ mod tests {
         let root = temp_root("codex-ai-ask-ok");
         let mut ctx = ctx_for(&root);
         ctx.set_read_only(true);
-        ctx.request_question = Some(Arc::new(|_questions, tx| {
+        ctx.request_question = Some(Arc::new(|_questions, _origin, tx| {
             let _ = tx.send(PlanQuestionAnswer {
                 skipped: false,
                 answers: vec!["用 A".to_string()],
@@ -3391,6 +3603,32 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn stale_saved_approval_cannot_unlock_plan_mode() {
+        let root = temp_root("stale-approved-plan");
+        let mut ctx = ctx_for(&root);
+        ctx.set_read_only(true);
+        ctx.set_plan_mode(true);
+        ctx.request_plan_approval = Some(Arc::new(move |_, tx| {
+            let authorization = crate::native::plans::PlanAuthorization::new();
+            tx.send(PlanApprovalAnswer {
+                approved: true,
+                plan_path: Some(".noxcode/plans/plan-session.md".into()),
+                authorization: Some(authorization.clone()),
+                ..Default::default()
+            })
+            .unwrap();
+            authorization.cancel();
+        }));
+        let error = execute_tool(&ctx, "ExitPlanMode", r#"{"plan":"approved"}"#)
+            .await
+            .unwrap_err();
+        assert!(error.contains("授权已取消"));
+        assert!(ctx.is_plan_mode() && ctx.is_read_only());
+        assert!(!root.join(".noxcode").exists());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
     async fn exit_plan_mode_waits_for_user_and_honors_rejection() {
         let root = temp_root("codex-ai-plan-approval");
         let mut ctx = ctx_for(&root);
@@ -3422,6 +3660,7 @@ mod tests {
         assert!(rejected.contains("未批准"));
         assert!(rejected.contains("先补测试"));
         assert!(ctx.is_plan_mode());
+        assert!(!root.join(".noxcode/plans").exists());
         assert_eq!(mode_changes.lock().expect("lock").as_slice(), &[true]);
         let approved = execute_tool(&ctx, "ExitPlanMode", r#"{"plan":"v2"}"#)
             .await
@@ -3715,5 +3954,47 @@ mod tests {
             "{err}"
         );
         let _ = std::fs::remove_dir_all(root);
+    }
+    #[tokio::test]
+    async fn user_steer_after_permission_grant_still_prevents_execution_and_keeps_child_origin() {
+        let root = tempfile::tempdir().unwrap();
+        let mut ctx = ToolCtx::new(LocalWorkspace::new(root.path().to_path_buf()));
+        let mailbox = Arc::new(crate::native::steer::SteerMailbox::new(
+            "session", "runtime",
+        ));
+        mailbox.configure(Arc::new(|_| Box::pin(async { Ok(()) })), Arc::new(|_| {}));
+        ctx.main_origin = Some(mailbox.begin_turn().await);
+        ctx.user_steer = Some(mailbox.clone());
+        let child = ctx.fork_for_child();
+        assert!(child.request_origin().unwrap().child);
+        assert_eq!(child.request_origin().unwrap().instance_id, "runtime");
+        let turn = mailbox.snapshot().await.turn_id.unwrap();
+        ctx.request_permission = Some(Arc::new(move |_, reply| {
+            let mailbox = mailbox.clone();
+            let turn = turn.clone();
+            tokio::spawn(async move {
+                reply.send(NativePermissionDecision::AllowOnce).unwrap();
+                mailbox
+                    .accept(
+                        &turn,
+                        &uuid::Uuid::new_v4().to_string(),
+                        "superseded",
+                        &[],
+                        vec![],
+                    )
+                    .await
+                    .unwrap();
+            });
+        }));
+        // The permission callback commits acceptance in the same scheduler task as replying.
+        let result = execute_tool(
+            &ctx,
+            "Bash",
+            r#"{"command":"printf forbidden > should-not-exist.txt"}"#,
+        )
+        .await;
+        assert!(result.is_err());
+        assert!(!root.path().join("should-not-exist.txt").exists());
+        assert!(child.execution_current());
     }
 }

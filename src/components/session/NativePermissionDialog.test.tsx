@@ -53,6 +53,7 @@ describe("plan Bash permission controls", () => {
     buttonActions.clear();
     vi.mocked(resolveNativeToolPermission).mockReset().mockResolvedValue(undefined);
     useSessionStore.setState({
+      resolvedRequests: {},
       permissions: {},
       selectedSessionId: "plan",
       configurationBySession: {},
@@ -182,6 +183,49 @@ describe("plan Bash permission controls", () => {
     expect(html).toContain("permissionAllowOnce");
     expect(html).toContain("permissionDeny");
   });
+
+  it.each(["network_origin", "network_proxy"] as const)(
+    "scopes %s trust to its target without switching the session to yolo",
+    async (kind) => {
+      const runtime = {
+        ai_channel_id: "c",
+        model: "m",
+        reasoning_effort: null,
+        permission_mode: "default",
+        plan_mode: false,
+      };
+      useSessionStore.getState().setConfiguration("plan", runtime);
+      useSessionStore.getState().setPermission({
+        session_record_id: "plan",
+        request_id: "network",
+        profile_id: "",
+        workspace_id: null,
+        session_kind: "chat",
+        tool_name: "WebFetch",
+        kind,
+        summary:
+          "本机 WebFetch：http://internal.example:8080；代理解析目标 DNS，本机无法核验目标 IP。",
+        remote: false,
+        mcp_server_id: null,
+      });
+      const html = renderToStaticMarkup(<NativePermissionDialog />);
+      const action =
+        kind === "network_proxy" ? "permissionProxyAllowSession" : "permissionNetworkAllowSession";
+      expect(html).toContain(action);
+      expect(html).toContain("http://internal.example:8080");
+      expect(html).not.toContain("permissionAllowAlways");
+      expect(html).not.toContain("permissionAllowServer");
+      await buttonActions.get(action)!();
+      expect(resolveNativeToolPermission).toHaveBeenCalledWith(
+        "plan",
+        "network",
+        "allow_session",
+        undefined,
+        undefined,
+      );
+      expect(useSessionStore.getState().configurationBySession.plan).toEqual(runtime);
+    },
+  );
 
   describe("parsePermissionSummary", () => {
     it("handles undefined or empty summary", async () => {

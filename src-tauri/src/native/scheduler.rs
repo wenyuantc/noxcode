@@ -327,39 +327,58 @@ pub async fn update_automation(
     id: &str,
     updates: UpdateNativeAutomation,
 ) -> Result<NativeAutomation, String> {
+    if updates.name.is_none()
+        && updates.prompt.is_none()
+        && updates.cron.is_none()
+        && updates.enabled.is_none()
+        && updates.channel_id.is_none()
+        && updates.model.is_none()
+    {
+        return Err("至少提供一个自动化更新字段".to_string());
+    }
     let current = get_automation(pool, id).await?;
-    let name = updates
-        .name
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
-        .unwrap_or(current.name);
-    let prompt = updates
-        .prompt
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
-        .unwrap_or(current.prompt);
-    let cron = updates
-        .cron
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
-        .unwrap_or(current.cron);
+    let name = updated_required_text(updates.name, &current.name, "名称")?;
+    let prompt = updated_required_text(updates.prompt, &current.prompt, "提示词")?;
+    let cron = updated_required_text(updates.cron, &current.cron, "cron")?;
     parse_cron(&cron)?;
     let enabled = updates.enabled.unwrap_or(current.enabled != 0);
+    let clearing_channel = updates
+        .channel_id
+        .as_ref()
+        .is_some_and(|value| value.trim().is_empty());
+    if clearing_channel
+        && updates
+            .model
+            .as_ref()
+            .is_some_and(|value| !value.trim().is_empty())
+    {
+        return Err("清空渠道时不能同时指定模型".to_string());
+    }
     let channel_id = match updates.channel_id {
-        Some(value) => Some(value).filter(|item| !item.trim().is_empty()),
-        None => current.channel_id,
+        Some(value) => normalized_selection(value),
+        None => current.channel_id.clone(),
     };
-    let model = match updates.model {
-        Some(value) => Some(value).filter(|item| !item.trim().is_empty()),
-        None => current.model,
+    let model = if clearing_channel {
+        None
+    } else {
+        match updates.model {
+            Some(value) => normalized_selection(value),
+            None => current.model.clone(),
+        }
     };
-    let next_run = if enabled {
+    if channel_id != current.channel_id || model != current.model {
+        validate_automation_selection(pool, channel_id.as_deref(), model.as_deref()).await?;
+    }
+    let schedule_changed = cron != current.cron || enabled != (current.enabled != 0);
+    let next_run = if !schedule_changed {
+        current.next_run_at
+    } else if enabled {
         compute_next_run(&cron, Local::now())?
     } else {
         None
     };
     sqlx::query(
-        "UPDATE native_automations SET name = $1, prompt = $2, cron = $3, enabled = $4, channel_id = $5, model = $6, next_run_at = $7, updated_at = $8 WHERE id = $9",
+        "UPDATE native_automations SET name = $1, prompt = $2, cron = $3, enabled = $4, channel_id = $5, model = $6, next_run_at = CASE WHEN $10 THEN $7 ELSE next_run_at END, updated_at = $8 WHERE id = $9",
     )
     .bind(&name)
     .bind(&prompt)
@@ -370,10 +389,65 @@ pub async fn update_automation(
     .bind(&next_run)
     .bind(now_sqlite())
     .bind(id)
+    .bind(schedule_changed)
     .execute(pool)
     .await
     .map_err(|error| format!("更新自动化失败: {error}"))?;
     get_automation(pool, id).await
+}
+
+fn updated_required_text(
+    value: Option<String>,
+    current: &str,
+    label: &str,
+) -> Result<String, String> {
+    match value {
+        Some(value) if value.trim().is_empty() => Err(format!("自动化{label}不能为空")),
+        Some(value) => Ok(value.trim().to_string()),
+        None => Ok(current.to_string()),
+    }
+}
+
+fn normalized_selection(value: String) -> Option<String> {
+    let value = value.trim();
+    (!value.is_empty()).then(|| value.to_string())
+}
+
+async fn validate_automation_selection(
+    pool: &SqlitePool,
+    channel_id: Option<&str>,
+    model: Option<&str>,
+) -> Result<(), String> {
+    // 同时清空两者恢复运行时默认选择，无需当前已有可用渠道。
+    if channel_id.is_none() && model.is_none() {
+        return Ok(());
+    }
+    let channel_id = match channel_id {
+        Some(id) => id.to_string(),
+        None => sqlx::query_scalar::<_, String>(
+            "SELECT id FROM ai_channels WHERE enabled = 1 ORDER BY updated_at DESC LIMIT 1",
+        )
+        .fetch_optional(pool)
+        .await
+        .map_err(|error| format!("读取渠道失败: {error}"))?
+        .ok_or_else(|| "没有可用的 AI 渠道".to_string())?,
+    };
+    let channel = crate::native::channels::fetch_channel_record(pool, &channel_id).await?;
+    if channel.enabled == 0 {
+        return Err(format!("渠道「{}」已停用", channel.name));
+    }
+    let models = crate::native::protocol::parse_channel_models_json(&channel.models_json)?;
+    let selected =
+        match model {
+            Some(model) => Some(models.iter().find(|config| config.id == model).ok_or_else(
+                || format!("模型「{model}」不在渠道「{}」的模型列表中", channel.name),
+            )?),
+            None => models.first(),
+        };
+    if let Some(config) = selected {
+        crate::native::model_catalog::validate_channel_model_config(config)?;
+    }
+    Ok(())
 }
 
 pub async fn delete_automation(pool: &SqlitePool, id: &str) -> Result<bool, String> {
@@ -681,6 +755,300 @@ mod tests {
         let text = compute_next_run("0 12 * * *", after).unwrap().unwrap();
         assert_eq!(text, "2026-09-03 12:00:00");
         assert!(parse_local(&text).is_some());
+    }
+
+    async fn update_fixture() -> (SqlitePool, NativeAutomation) {
+        let pool = crate::db::test_support::setup_migrated_pool().await;
+        sqlx::query(
+            "INSERT INTO workspaces (id, name, workspace_type) VALUES ('ws', 'ws', 'local')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        for (id, enabled, models) in [
+            ("first", 1, r#"["model-a", "model-b"]"#),
+            ("second", 1, r#"[{"id":"custom-model"}]"#),
+            ("disabled", 0, r#"["model-a"]"#),
+        ] {
+            sqlx::query("INSERT INTO ai_channels (id, name, protocol, base_url, models_json, enabled) VALUES ($1, $1, 'openai', 'http://localhost', $2, $3)")
+                .bind(id).bind(models).bind(enabled).execute(&pool).await.unwrap();
+        }
+        let created = create_automation(
+            &pool,
+            CreateNativeAutomation {
+                workspace_id: "ws".into(),
+                name: "original".into(),
+                prompt: "original prompt".into(),
+                cron: "@daily".into(),
+                channel_id: Some("first".into()),
+                model: Some("model-a".into()),
+                enabled: Some(true),
+            },
+        )
+        .await
+        .unwrap();
+        sqlx::query("UPDATE native_automations SET created_at = '2020-01-01 00:00:00', updated_at = '2020-01-02 00:00:00', next_run_at = '2020-01-03 00:00:00', last_run_at = '2020-01-02 00:00:00', last_error = 'previous error' WHERE id = $1")
+            .bind(&created.id).execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO agent_sessions (id, workspace_id, title, status) VALUES ('previous-run', 'ws', 'history', 'exited')")
+            .execute(&pool).await.unwrap();
+        sqlx::query("UPDATE native_automations SET last_session_id = 'previous-run' WHERE id = $1")
+            .bind(&created.id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let created = get_automation(&pool, &created.id).await.unwrap();
+        (pool, created)
+    }
+
+    #[tokio::test]
+    async fn cron_update_partial_preserves_schedule_and_run_history() {
+        let (pool, original) = update_fixture().await;
+        let updated = update_automation(
+            &pool,
+            &original.id,
+            UpdateNativeAutomation {
+                name: Some(" renamed ".into()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(updated.name, "renamed");
+        assert_eq!(updated.prompt, original.prompt);
+        assert_eq!(updated.cron, original.cron);
+        assert_eq!(updated.enabled, original.enabled);
+        assert_eq!(updated.channel_id, original.channel_id);
+        assert_eq!(updated.model, original.model);
+        assert_eq!(updated.id, original.id);
+        assert_eq!(updated.created_at, original.created_at);
+        assert_eq!(updated.last_run_at, original.last_run_at);
+        assert_eq!(updated.last_error, original.last_error);
+        assert_eq!(updated.last_session_id, original.last_session_id);
+        assert_eq!(updated.next_run_at, original.next_run_at);
+        assert_ne!(updated.updated_at, original.updated_at);
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM agent_sessions")
+                .fetch_one(&pool)
+                .await
+                .unwrap(),
+            1
+        );
+        let unchanged = update_automation(
+            &pool,
+            &original.id,
+            UpdateNativeAutomation {
+                cron: Some(original.cron),
+                enabled: Some(true),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(unchanged.next_run_at, original.next_run_at);
+    }
+
+    #[tokio::test]
+    async fn cron_update_rejects_empty_and_invalid_fields_without_mutation() {
+        let (pool, original) = update_fixture().await;
+        for updates in [
+            UpdateNativeAutomation::default(),
+            UpdateNativeAutomation {
+                name: Some(" \t".into()),
+                ..Default::default()
+            },
+            UpdateNativeAutomation {
+                prompt: Some(" \n".into()),
+                ..Default::default()
+            },
+            UpdateNativeAutomation {
+                cron: Some(" ".into()),
+                ..Default::default()
+            },
+            UpdateNativeAutomation {
+                cron: Some("invalid".into()),
+                ..Default::default()
+            },
+        ] {
+            assert!(update_automation(&pool, &original.id, updates)
+                .await
+                .is_err());
+            assert_eq!(
+                serde_json::to_value(get_automation(&pool, &original.id).await.unwrap()).unwrap(),
+                serde_json::to_value(&original).unwrap()
+            );
+        }
+        assert!(update_automation(
+            &pool,
+            "missing",
+            UpdateNativeAutomation {
+                name: Some("new".into()),
+                ..Default::default()
+            }
+        )
+        .await
+        .is_err());
+    }
+
+    #[tokio::test]
+    async fn cron_update_recomputes_schedule_only_on_schedule_changes() {
+        let (pool, original) = update_fixture().await;
+        let changed = update_automation(
+            &pool,
+            &original.id,
+            UpdateNativeAutomation {
+                cron: Some("@hourly".into()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        assert!(changed.next_run_at.is_some());
+        assert_ne!(changed.next_run_at, original.next_run_at);
+        let disabled = update_automation(
+            &pool,
+            &original.id,
+            UpdateNativeAutomation {
+                enabled: Some(false),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(disabled.next_run_at, None);
+        let enabled = update_automation(
+            &pool,
+            &original.id,
+            UpdateNativeAutomation {
+                enabled: Some(true),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        assert!(enabled.next_run_at.is_some());
+        assert_eq!(enabled.last_run_at, original.last_run_at);
+        assert_eq!(enabled.last_session_id, original.last_session_id);
+    }
+
+    #[tokio::test]
+    async fn cron_update_unrelated_fields_do_not_require_an_enabled_channel() {
+        let (pool, original) = update_fixture().await;
+        sqlx::query("UPDATE ai_channels SET enabled = 0")
+            .execute(&pool)
+            .await
+            .unwrap();
+        for enabled in [false, true] {
+            let updated = update_automation(
+                &pool,
+                &original.id,
+                UpdateNativeAutomation {
+                    name: Some("renamed".into()),
+                    enabled: Some(enabled),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+            assert_eq!(updated.enabled, i64::from(enabled));
+            assert_eq!(updated.channel_id, original.channel_id);
+            assert_eq!(updated.model, original.model);
+        }
+    }
+
+    #[tokio::test]
+    async fn cron_update_validates_effective_channel_and_model() {
+        let (pool, original) = update_fixture().await;
+        for updates in [
+            UpdateNativeAutomation {
+                channel_id: Some("missing".into()),
+                ..Default::default()
+            },
+            UpdateNativeAutomation {
+                channel_id: Some("disabled".into()),
+                ..Default::default()
+            },
+            UpdateNativeAutomation {
+                model: Some("unknown".into()),
+                ..Default::default()
+            },
+            UpdateNativeAutomation {
+                channel_id: Some("second".into()),
+                ..Default::default()
+            },
+            UpdateNativeAutomation {
+                channel_id: Some("".into()),
+                model: Some("model-b".into()),
+                ..Default::default()
+            },
+        ] {
+            assert!(update_automation(&pool, &original.id, updates)
+                .await
+                .is_err());
+            assert_eq!(
+                serde_json::to_value(get_automation(&pool, &original.id).await.unwrap()).unwrap(),
+                serde_json::to_value(&original).unwrap()
+            );
+        }
+        let changed = update_automation(
+            &pool,
+            &original.id,
+            UpdateNativeAutomation {
+                model: Some(" model-b ".into()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(changed.model.as_deref(), Some("model-b"));
+        assert_eq!(changed.next_run_at, original.next_run_at);
+        let custom = update_automation(
+            &pool,
+            &original.id,
+            UpdateNativeAutomation {
+                channel_id: Some(" second ".into()),
+                model: Some(" custom-model ".into()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(custom.channel_id.as_deref(), Some("second"));
+        assert_eq!(custom.model.as_deref(), Some("custom-model"));
+        let default_model = update_automation(
+            &pool,
+            &original.id,
+            UpdateNativeAutomation {
+                model: Some(" ".into()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(default_model.channel_id.as_deref(), Some("second"));
+        assert_eq!(default_model.model, None);
+        update_automation(
+            &pool,
+            &original.id,
+            UpdateNativeAutomation {
+                model: Some("custom-model".into()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let cleared = update_automation(
+            &pool,
+            &original.id,
+            UpdateNativeAutomation {
+                channel_id: Some(" ".into()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(cleared.channel_id, None);
+        assert_eq!(cleared.model, None);
+        assert_eq!(cleared.next_run_at, original.next_run_at);
     }
 
     #[tokio::test]

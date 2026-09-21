@@ -559,7 +559,7 @@ pub async fn extract_memories(
             }
         )),
     ];
-    let (message, _usage) = lite_client(client, OPERATION_MEMORY_EXTRACT, role)
+    let message = lite_client(client, OPERATION_MEMORY_EXTRACT, role)
         .chat(ChatRequest {
             messages: &prompt,
             tools: &[],
@@ -568,7 +568,8 @@ pub async fn extract_memories(
             max_output_tokens: Some(2_048),
             thinking_enabled: false,
         })
-        .await?;
+        .await?
+        .complete_message()?;
     let mut saved = 0;
     for (name, kind, description, body) in parse_entries_json(&message.content)
         .into_iter()
@@ -631,7 +632,7 @@ pub async fn dream(
         ),
         Message::user(format!("当前记忆：\n\n{}", dump.join("\n\n"))),
     ];
-    let (message, _usage) = lite_client(client, OPERATION_MEMORY_DREAM, role)
+    let message = lite_client(client, OPERATION_MEMORY_DREAM, role)
         .chat(ChatRequest {
             messages: &prompt,
             tools: &[],
@@ -640,7 +641,8 @@ pub async fn dream(
             max_output_tokens: Some(8_192),
             thinking_enabled: false,
         })
-        .await?;
+        .await?
+        .complete_message()?;
     let parsed = parse_entries_json(&message.content);
     if parsed.is_empty() {
         return Err("模型没有返回可用的整理结果，记忆保持不变".to_string());

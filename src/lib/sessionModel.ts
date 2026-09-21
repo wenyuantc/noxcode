@@ -71,8 +71,9 @@ export function planApprovalModelArgs(
   approved: boolean,
   selection: SessionModelSelection,
   reasoningEffort?: string | null,
+  detached = false,
 ): PlanApprovalModelArgs {
-  if (!approved) return {};
+  if (!approved && !detached) return {};
   const aiChannelId = nonEmpty(selection.channelId) ?? undefined;
   const model = nonEmpty(selection.modelId) ?? undefined;
   if (!aiChannelId || !model) return {};

@@ -37,33 +37,42 @@ export function mergeConflictResolvePrompt(conflicts: string[]): string {
   ].join("\n");
 }
 
-async function restoreIsolationAfterAiMerge(sessionId: string): Promise<void> {
+async function restoreIsolationAfterAiMerge(
+  sessionId: string,
+  isCurrent: () => boolean,
+): Promise<void> {
+  if (!isCurrent()) return;
   try {
     await restoreSessionWorktree(sessionId);
   } catch {
     // 会话已结束时忽略，后续对话若恢复会按 working_dir 回到隔离树。
   }
-  useGitStore.getState().bumpRevision();
+  if (isCurrent()) useGitStore.getState().bumpRevision();
 }
 
 export async function maybeFinishAiMergeResolve(input: {
+  isCurrent?: () => boolean;
   sessionId: string;
   workspaceId?: string | null;
 }): Promise<boolean> {
+  const isCurrent = input.isCurrent ?? (() => true);
+  if (!isCurrent()) return false;
   const store = useSessionStore.getState();
   if (!store.pendingAiMergeResolveBySession[input.sessionId]) return false;
-  store.clearPendingAiMergeResolve(input.sessionId);
 
   await useWorkspaceStore.getState().refreshSessions();
+  if (!isCurrent()) return false;
+  store.clearPendingAiMergeResolve(input.sessionId);
   const session = useWorkspaceStore.getState().sessions.find((item) => item.id === input.sessionId);
   const workspaceId = input.workspaceId ?? session?.workspace_id ?? null;
   if (!workspaceId) {
-    await restoreIsolationAfterAiMerge(input.sessionId);
+    await restoreIsolationAfterAiMerge(input.sessionId, isCurrent);
     return true;
   }
 
   try {
     const result = await resolveSessionWorktreeMerge(workspaceId, input.sessionId, "complete");
+    if (!isCurrent()) return false;
     if (result.status === "resolved") {
       store.markWorktreeMerged(input.sessionId);
       return true;
@@ -77,8 +86,10 @@ export async function maybeFinishAiMergeResolve(input: {
     });
     return true;
   } catch {
+    if (!isCurrent()) return false;
     try {
       const state = await getWorktreeMergeState(workspaceId);
+      if (!isCurrent()) return false;
       if (state.in_progress) {
         store.openWorktreeMergePrompt({
           sessionId: input.sessionId,
@@ -92,16 +103,19 @@ export async function maybeFinishAiMergeResolve(input: {
     }
     return true;
   } finally {
-    await restoreIsolationAfterAiMerge(input.sessionId);
+    await restoreIsolationAfterAiMerge(input.sessionId, isCurrent);
   }
 }
 
 export async function maybeOpenWorktreeMerge(input: {
+  isCurrent?: () => boolean;
   sessionId: string;
   workspaceId?: string | null;
   worktreePath?: string | null;
   reason: "exit" | "turn";
 }): Promise<boolean> {
+  const isCurrent = input.isCurrent ?? (() => true);
+  if (!isCurrent()) return false;
   const store = useSessionStore.getState();
   if (store.mergedWorktreeBySession[input.sessionId]) return false;
   if (store.worktreeMergePrompt?.sessionId === input.sessionId) return false;
@@ -110,6 +124,7 @@ export async function maybeOpenWorktreeMerge(input: {
   }
 
   await useWorkspaceStore.getState().refreshSessions();
+  if (!isCurrent()) return false;
 
   const next = useSessionStore.getState();
   const session = useWorkspaceStore.getState().sessions.find((item) => item.id === input.sessionId);
@@ -118,10 +133,6 @@ export async function maybeOpenWorktreeMerge(input: {
   const path = input.worktreePath ?? runtime?.worktree_path ?? session?.working_dir;
   const worktreeRoot = useSettingsStore.getState().native?.worktree_root;
   if (!workspaceId || !isManagedWorktreePath(path, input.sessionId, worktreeRoot)) return false;
-
-  if (input.reason === "turn") {
-    useSessionStore.getState().markWorktreeAutoPrompted(input.sessionId);
-  }
 
   let phase: "choose" | "conflict" = "choose";
   let conflicts: string[] = [];
@@ -133,6 +144,11 @@ export async function maybeOpenWorktreeMerge(input: {
     }
   } catch {
     // 查不到合并状态时仍弹出选择，避免结束时漏掉 worktree。
+  }
+
+  if (!isCurrent()) return false;
+  if (input.reason === "turn") {
+    useSessionStore.getState().markWorktreeAutoPrompted(input.sessionId);
   }
 
   useSessionStore.getState().openWorktreeMergePrompt({

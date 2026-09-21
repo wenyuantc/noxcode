@@ -2,6 +2,9 @@ use std::collections::HashMap;
 use std::sync::{LazyLock, Mutex};
 use std::time::{Duration, Instant};
 
+use super::dispatch::ToolCtx;
+use super::web_access::{authorize_hop, parse_url, sanitized_url, FetchSettings, NetworkBudget};
+use futures_util::{Stream, StreamExt};
 use serde_json::Value;
 
 const FETCH_TIMEOUT: Duration = Duration::from_secs(30);
@@ -12,7 +15,10 @@ const SEARCH_MODEL_CHARS: usize = 20_000;
 const FETCH_CACHE_TTL: Duration = Duration::from_secs(15 * 60);
 const FETCH_CACHE_MAX_BYTES: usize = 50 * 1024 * 1024;
 
+#[derive(Clone)]
 struct CachedFetch {
+    chain: Vec<reqwest::Url>,
+    accounted_bytes: usize,
     status: u16,
     text: String,
     fetched_at: Instant,
@@ -47,12 +53,32 @@ impl FetchCache {
 
     fn remove(&mut self, url: &str) {
         if let Some(entry) = self.entries.remove(url) {
-            self.total_bytes = self.total_bytes.saturating_sub(entry.text.len());
+            self.total_bytes = self.total_bytes.saturating_sub(entry.accounted_bytes);
         }
     }
 
     fn put(&mut self, url: &str, status: u16, text: &str, now: Instant) {
-        if text.len() > FETCH_CACHE_MAX_BYTES {
+        self.put_chain(url, status, text, Vec::new(), now);
+    }
+
+    fn put_chain(
+        &mut self,
+        url: &str,
+        status: u16,
+        text: &str,
+        chain: Vec<reqwest::Url>,
+        now: Instant,
+    ) {
+        // Charge keys, redirect URLs and entry storage as well as body text.
+        // A nonzero minimum prevents unlimited empty-response cache entries.
+        let accounted_bytes = url.len()
+            + text.len()
+            + std::mem::size_of::<CachedFetch>()
+            + std::mem::size_of::<String>()
+            + chain.capacity() * std::mem::size_of::<reqwest::Url>()
+            + chain.iter().map(|hop| hop.as_str().len()).sum::<usize>()
+            + 128;
+        if accounted_bytes > FETCH_CACHE_MAX_BYTES {
             return;
         }
         self.remove(url);
@@ -66,7 +92,7 @@ impl FetchCache {
         for key in expired {
             self.remove(&key);
         }
-        while self.total_bytes + text.len() > FETCH_CACHE_MAX_BYTES {
+        while self.total_bytes + accounted_bytes > FETCH_CACHE_MAX_BYTES {
             let Some(oldest) = self
                 .entries
                 .iter()
@@ -77,10 +103,12 @@ impl FetchCache {
             };
             self.remove(&oldest);
         }
-        self.total_bytes += text.len();
+        self.total_bytes += accounted_bytes;
         self.entries.insert(
             url.to_string(),
             CachedFetch {
+                chain,
+                accounted_bytes,
                 status,
                 text: text.to_string(),
                 fetched_at: now,
@@ -91,65 +119,143 @@ impl FetchCache {
 
 static FETCH_CACHE: LazyLock<Mutex<FetchCache>> = LazyLock::new(|| Mutex::new(FetchCache::new()));
 
-fn cached_fetch(url: &str) -> Option<(u16, String)> {
-    FETCH_CACHE
-        .lock()
-        .ok()
-        .and_then(|mut cache| cache.get(url, Instant::now()))
+fn cached_fetch(key: &str) -> Option<CachedFetch> {
+    let mut cache = FETCH_CACHE.lock().ok()?;
+    cache.get(key, Instant::now())?;
+    cache.entries.get(key).cloned()
 }
 
-fn store_fetch(url: &str, status: u16, text: &str) {
+fn store_fetch(key: &str, status: u16, text: &str, chain: Vec<reqwest::Url>) {
     if let Ok(mut cache) = FETCH_CACHE.lock() {
-        cache.put(url, status, text, Instant::now());
+        cache.put_chain(key, status, text, chain, Instant::now());
     }
 }
 
-async fn fetch_page(url: &str) -> Result<(u16, String), String> {
-    let client = reqwest::Client::builder()
-        .timeout(FETCH_TIMEOUT)
-        .redirect(reqwest::redirect::Policy::limited(5))
-        .build()
-        .map_err(|error| format!("创建 HTTP 客户端失败: {error}"))?;
-    let response = client
-        .get(url)
-        .header("user-agent", "noxcode-native/0.1 (+coding-agent)")
-        .send()
-        .await
-        .map_err(|error| format!("WebFetch 失败: {error}"))?;
-    let status = response.status().as_u16();
-    let bytes = response
-        .bytes()
-        .await
-        .map_err(|error| format!("读取网页失败: {error}"))?;
-    let raw = String::from_utf8_lossy(&bytes[..bytes.len().min(FETCH_BODY_LIMIT)]);
-    Ok((status, truncate_chars(&strip_tags(&raw), FETCH_MODEL_CHARS)))
+async fn read_bounded_body<S, B, E>(stream: S) -> Result<(Vec<u8>, bool), String>
+where
+    S: Stream<Item = Result<B, E>>,
+    B: AsRef<[u8]>,
+    E: std::fmt::Display,
+{
+    futures_util::pin_mut!(stream);
+    let mut body = Vec::new();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|error| format!("读取网页失败: {error}"))?;
+        let bytes = chunk.as_ref();
+        let keep = bytes.len().min(FETCH_BODY_LIMIT - body.len());
+        body.extend_from_slice(&bytes[..keep]);
+        if body.len() == FETCH_BODY_LIMIT {
+            // Drop the response stream here. Reading a whole response and
+            // truncating afterwards does not bound network or memory use.
+            return Ok((body, true));
+        }
+    }
+    Ok((body, false))
 }
 
-pub async fn web_fetch(arguments: &str) -> Result<String, String> {
+async fn fetch_page(
+    ctx: &ToolCtx,
+    settings: &FetchSettings,
+    initial_url: reqwest::Url,
+    initial_client: reqwest::Client,
+    budget: &mut NetworkBudget,
+) -> Result<(u16, String, Vec<reqwest::Url>), String> {
+    let mut url = initial_url;
+    let mut client = initial_client;
+    let mut chain = Vec::new();
+    loop {
+        chain.push(url.clone());
+        let response = budget
+            .run(ctx, async {
+                client
+                    .get(url.clone())
+                    .header("user-agent", "noxcode-native/0.1 (+coding-agent)")
+                    .send()
+                    .await
+                    .map_err(|error| format!("WebFetch 请求失败: {}", error.without_url()))
+            })
+            .await?;
+        if matches!(response.status().as_u16(), 301 | 302 | 303 | 307 | 308) {
+            if let Some(location) = response.headers().get(reqwest::header::LOCATION) {
+                if chain.len() > 5 {
+                    return Err("WebFetch 重定向超过 5 次".into());
+                }
+                let location = location.to_str().map_err(|_| "WebFetch 重定向地址无效")?;
+                let mut next = parse_url(
+                    url.join(location)
+                        .map_err(|_| "WebFetch 重定向地址无效")?
+                        .as_str(),
+                )?;
+                // A redirect is a fresh unauthenticated request. Never forward
+                // URL userinfo or allow a Location header to introduce it.
+                let _ = next.set_username("");
+                let _ = next.set_password(None);
+                if chain.contains(&next) {
+                    return Err("WebFetch 检测到重定向循环".into());
+                }
+                drop(response);
+                client = authorize_hop(ctx, settings, &next, budget).await?;
+                url = next;
+                continue;
+            }
+        }
+        let status = response.status().as_u16();
+        let (bytes, limited) = budget
+            .run(ctx, read_bounded_body(response.bytes_stream()))
+            .await?;
+        let raw = String::from_utf8_lossy(&bytes);
+        let text = truncate_chars(&strip_tags(&raw), FETCH_MODEL_CHARS);
+        return Ok((
+            status,
+            if limited {
+                format!("[响应正文达到读取上限，以下内容可能不完整]\n{text}")
+            } else {
+                text
+            },
+            chain,
+        ));
+    }
+}
+
+pub async fn web_fetch(ctx: &ToolCtx, arguments: &str) -> Result<String, String> {
     let args = parse_args(arguments)?;
-    let url = string_arg(&args, "url")?;
+    let url = parse_url(&string_arg(&args, "url")?)?;
     let prompt = args
         .get("prompt")
         .and_then(Value::as_str)
         .unwrap_or("")
-        .trim()
-        .to_string();
-    ensure_http_url(&url)?;
-    let (status, text) = match cached_fetch(&url) {
-        Some(hit) => hit,
-        None => {
-            let fetched = fetch_page(&url).await?;
-            if (200..300).contains(&fetched.0) {
-                store_fetch(&url, fetched.0, &fetched.1);
+        .trim();
+    let mut budget = NetworkBudget::new(FETCH_TIMEOUT);
+    let settings = budget.run(ctx, FetchSettings::load(ctx)).await?;
+    let client = authorize_hop(ctx, &settings, &url, &mut budget).await?;
+    let key = format!(
+        "{}:{}:{}",
+        ctx.web_network.cache_scope, settings.identity, url
+    );
+    let (status, text) = match cached_fetch(&key) {
+        Some(hit) => {
+            // Cached redirects retain their full access chain. Re-resolve and
+            // re-authorize every destination with current rules and grants.
+            for hop in hit.chain.iter().skip(1) {
+                authorize_hop(ctx, &settings, hop, &mut budget).await?;
             }
-            fetched
+            (hit.status, hit.text)
+        }
+        None => {
+            let (status, text, chain) =
+                fetch_page(ctx, &settings, url.clone(), client, &mut budget).await?;
+            if (200..300).contains(&status) {
+                store_fetch(&key, status, &text, chain);
+            }
+            (status, text)
         }
     };
+    let display = sanitized_url(&url);
     if prompt.is_empty() {
-        Ok(format!("URL: {url}\nStatus: {status}\n\n{text}"))
+        Ok(format!("URL: {display}\nStatus: {status}\n\n{text}"))
     } else {
         Ok(format!(
-            "URL: {url}\nStatus: {status}\nPrompt: {prompt}\n\nContent:\n{text}"
+            "URL: {display}\nStatus: {status}\nPrompt: {prompt}\n\nContent:\n{text}"
         ))
     }
 }
@@ -351,6 +457,41 @@ mod tests {
     use super::*;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
+    #[tokio::test]
+    async fn bounded_body_stops_before_an_unbounded_tail() {
+        let stream = futures_util::stream::iter([
+            Ok(vec![b'a'; FETCH_BODY_LIMIT]),
+            Err("the tail must never be polled"),
+        ]);
+        let (body, limited) = read_bounded_body(stream).await.unwrap();
+        assert_eq!(body.len(), FETCH_BODY_LIMIT);
+        assert!(limited);
+    }
+
+    #[tokio::test]
+    async fn bounded_body_caps_a_large_chunk_and_joins_small_chunks() {
+        let large =
+            futures_util::stream::iter([Ok::<_, String>(vec![b'x'; FETCH_BODY_LIMIT + 100])]);
+        let (body, limited) = read_bounded_body(large).await.unwrap();
+        assert_eq!(body, vec![b'x'; FETCH_BODY_LIMIT]);
+        assert!(limited);
+        let short =
+            futures_util::stream::iter([Ok::<_, String>(b"hel".to_vec()), Ok(b"lo".to_vec())]);
+        assert_eq!(
+            read_bounded_body(short).await.unwrap(),
+            (b"hello".to_vec(), false)
+        );
+    }
+
+    #[tokio::test]
+    async fn bounded_body_propagates_errors_before_the_limit() {
+        let stream = futures_util::stream::iter([Ok(b"partial".to_vec()), Err("connection lost")]);
+        assert!(read_bounded_body(stream)
+            .await
+            .unwrap_err()
+            .contains("connection lost"));
+    }
+
     #[test]
     fn rejects_file_scheme() {
         let error = ensure_http_url("file:///etc/passwd").unwrap_err();
@@ -360,6 +501,14 @@ mod tests {
     #[test]
     fn accepts_https() {
         ensure_http_url("https://example.com/a").expect("https ok");
+    }
+
+    #[test]
+    fn empty_body_cache_accounts_for_keys_and_entry_metadata() {
+        let mut cache = FetchCache::new();
+        let key = "long-key".repeat(1024);
+        cache.put(&key, 200, "", Instant::now());
+        assert!(cache.total_bytes >= key.len() + std::mem::size_of::<CachedFetch>());
     }
 
     #[test]
@@ -376,10 +525,32 @@ mod tests {
         assert_eq!(cache.total_bytes, 0);
         cache.put("https://b", 200, "bbb", start);
         cache.put("https://c", 200, "ccc", start + Duration::from_secs(1));
-        assert_eq!(cache.total_bytes, 6);
+        assert!(cache.total_bytes > 6);
+        assert!(cache.total_bytes <= FETCH_CACHE_MAX_BYTES);
         let huge = "x".repeat(FETCH_CACHE_MAX_BYTES + 1);
         cache.put("https://huge", 200, &huge, start);
         assert!(cache.get("https://huge", start).is_none());
+    }
+
+    #[test]
+    fn cache_evicts_oldest_and_charges_redirect_provenance() {
+        let mut cache = FetchCache::new();
+        let now = Instant::now();
+        let body = "x".repeat(FETCH_CACHE_MAX_BYTES / 2);
+        cache.put("first", 200, &body, now);
+        cache.put_chain(
+            "second",
+            200,
+            &body,
+            vec![parse_url("https://example.com/redirect").unwrap()],
+            now + Duration::from_secs(1),
+        );
+        assert!(cache.get("first", now + Duration::from_secs(1)).is_none());
+        assert!(cache.get("second", now + Duration::from_secs(1)).is_some());
+        assert!(cache.total_bytes <= FETCH_CACHE_MAX_BYTES);
+        let with_chain = cache.total_bytes;
+        cache.put("second", 200, &body, now + Duration::from_secs(2));
+        assert!(cache.total_bytes < with_chain);
     }
 
     #[test]
@@ -389,6 +560,22 @@ mod tests {
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].0, "Hello");
         assert_eq!(hits[0].1, "https://example.com");
+    }
+
+    #[tokio::test]
+    async fn private_fetch_without_permission_channel_never_connects() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/", listener.local_addr().unwrap());
+        let ctx = super::super::dispatch::ToolCtx::new(super::super::LocalWorkspace::new(
+            std::env::temp_dir(),
+        ));
+        let arguments = serde_json::json!({"url": url}).to_string();
+        let fetch = super::super::dispatch::execute_tool(&ctx, "WebFetch", &arguments);
+        tokio::pin!(fetch);
+        tokio::select! {
+            result = &mut fetch => assert!(result.unwrap_err().contains("权限确认")),
+            _ = listener.accept() => panic!("private network contacted before authorization"),
+        }
     }
 
     #[tokio::test]
@@ -409,7 +596,10 @@ mod tests {
             let _ = stream.write_all(header.as_bytes()).await;
             let _ = stream.write_all(body.as_bytes()).await;
         });
-        let output = web_fetch(&format!(r#"{{"url":"http://{addr}/"}}"#))
+        let ctx = ToolCtx::new(super::super::LocalWorkspace::new(std::env::temp_dir()));
+        ctx.allow_all_high_risk
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        let output = web_fetch(&ctx, &format!(r#"{{"url":"http://{addr}/"}}"#))
             .await
             .expect("fetch");
         assert!(output.contains("Status: 200"));

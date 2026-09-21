@@ -75,5 +75,7 @@ core-graphics = "0.24"
 foreign-types = "0.5"
 
 [dev-dependencies]
+# Local-only HTTPS fixtures; keep the same ring TLS backend as production.
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
 rand = "0.10"
 tokio = { version = "1", features = ["test-util"] }

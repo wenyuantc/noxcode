@@ -45,6 +45,7 @@ type OnChange = Arc<dyn Fn(NativeInputQueueSnapshot) + Send + Sync>;
 
 pub struct NativeInputQueue {
     pub id: String,
+    pub steer: Arc<crate::native::steer::SteerMailbox>,
     session_record_id: String,
     state: Mutex<QueueState>,
     changed: Notify,
@@ -53,8 +54,13 @@ pub struct NativeInputQueue {
 
 impl NativeInputQueue {
     pub fn new(session_record_id: &str) -> Self {
+        let id = new_id();
         Self {
-            id: new_id(),
+            steer: Arc::new(crate::native::steer::SteerMailbox::new(
+                session_record_id,
+                &id,
+            )),
+            id,
             session_record_id: session_record_id.to_string(),
             state: Mutex::new(QueueState::default()),
             changed: Notify::new(),

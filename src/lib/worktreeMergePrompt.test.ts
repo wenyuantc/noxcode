@@ -178,4 +178,72 @@ describe("maybeOpenWorktreeMerge", () => {
     ).resolves.toBe(true);
     expect(useSessionStore.getState().worktreeMergePrompt?.sessionId).toBe("s1");
   });
+  it("rechecks lifecycle after refresh before completing a merge or consuming its pending flag", async () => {
+    let current = true;
+    let refresh!: () => void;
+    useSessionStore.setState({ pendingAiMergeResolveBySession: { s1: true } });
+    useWorkspaceStore.setState({
+      refreshSessions: vi.fn(
+        () =>
+          new Promise<void>((resolve) => {
+            refresh = resolve;
+          }),
+      ),
+    });
+    const finishing = maybeFinishAiMergeResolve({
+      sessionId: "s1",
+      workspaceId: "ws-1",
+      isCurrent: () => current,
+    });
+    current = false;
+    refresh();
+    expect(await finishing).toBe(false);
+    expect(completeMerge).not.toHaveBeenCalled();
+    expect(restoreWorktree).not.toHaveBeenCalled();
+    expect(useSessionStore.getState().pendingAiMergeResolveBySession.s1).toBe(true);
+  });
+
+  it("rechecks lifecycle after merge-state lookup before marking or opening a prompt", async () => {
+    let current = true;
+    let resolveLookup!: (value: { in_progress: boolean; conflicts: string[] }) => void;
+    getState.mockReturnValue(
+      new Promise((resolve) => {
+        resolveLookup = resolve;
+      }),
+    );
+    const opening = maybeOpenWorktreeMerge({
+      sessionId: "s1",
+      workspaceId: "ws-1",
+      reason: "turn",
+      isCurrent: () => current,
+    });
+    await Promise.resolve();
+    current = false;
+    resolveLookup({ in_progress: false, conflicts: [] });
+    expect(await opening).toBe(false);
+    expect(useSessionStore.getState().worktreeMergePrompt).toBeNull();
+    expect(useSessionStore.getState().autoPromptedWorktreeBySession.s1).toBeUndefined();
+  });
+
+  it("does not restore or change newer runtime UI when an already-started completion finishes late", async () => {
+    let current = true;
+    let finish!: (result: Awaited<ReturnType<typeof resolveSessionWorktreeMerge>>) => void;
+    useSessionStore.setState({ pendingAiMergeResolveBySession: { s1: true } });
+    completeMerge.mockReturnValue(
+      new Promise((resolve) => {
+        finish = resolve;
+      }),
+    );
+    const finishing = maybeFinishAiMergeResolve({
+      sessionId: "s1",
+      workspaceId: "ws-1",
+      isCurrent: () => current,
+    });
+    await Promise.resolve();
+    current = false;
+    finish({ status: "resolved", conflicts: [], resolved: [], failed: [], message: "done" });
+    expect(await finishing).toBe(false);
+    expect(restoreWorktree).not.toHaveBeenCalled();
+    expect(useSessionStore.getState().mergedWorktreeBySession.s1).toBeUndefined();
+  });
 });

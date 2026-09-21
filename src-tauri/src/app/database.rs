@@ -860,7 +860,7 @@ mod tests {
             );
             assert_eq!(
                 status.current_description.as_deref(),
-                Some("agent_sessions.pending_plan_json resumable plan approval")
+                Some("agent_sessions.approved_plan_json durable approved plans")
             );
         });
     }

@@ -6,6 +6,10 @@ import {
 } from "./sessionConfiguration";
 import { useChannelStore } from "@/stores/channelStore";
 import { useSessionStore } from "@/stores/sessionStore";
+import { useSteerStore } from "@/stores/steerStore";
+import { useUiStore } from "@/stores/uiStore";
+import { handleNativeExit } from "@/lib/nativeLifecycle";
+import { maybeFinishAiMergeResolve, maybeOpenWorktreeMerge } from "@/lib/worktreeMergePrompt";
 import { useWorkspaceStore } from "@/stores/workspaceStore";
 import type {
   AgentSession,
@@ -18,6 +22,11 @@ vi.mock("./backend", () => ({
   finishNativeInput: vi.fn(),
   getAgentSessionLogLines: vi.fn(),
   updateNativeSessionConfiguration: vi.fn(),
+}));
+
+vi.mock("@/lib/worktreeMergePrompt", () => ({
+  maybeFinishAiMergeResolve: vi.fn().mockResolvedValue(false),
+  maybeOpenWorktreeMerge: vi.fn().mockResolvedValue(false),
 }));
 
 const runtime: NativeSessionRuntime = {
@@ -75,6 +84,13 @@ function configurationEvent(
 
 describe("session configuration", () => {
   beforeEach(() => {
+    useSteerStore.setState(useSteerStore.getInitialState(), true);
+    useWorkspaceStore.setState({
+      sessions: [],
+      refreshSessions: vi.fn().mockResolvedValue(undefined),
+    });
+    vi.mocked(maybeFinishAiMergeResolve).mockClear();
+    vi.mocked(maybeOpenWorktreeMerge).mockClear();
     vi.mocked(finishNativeInput).mockReset();
     vi.mocked(updateNativeSessionConfiguration).mockReset();
     useSessionStore.setState({
@@ -214,5 +230,150 @@ describe("session configuration", () => {
     await second;
     expect(useSessionStore.getState().configurationBySession.s1.model).toBe("second");
     expect(useSessionStore.getState().pendingConfigurationBySession.s1).toBeUndefined();
+  });
+  it.each(["old-runtime", "superseded-revision"])(
+    "does not apply a delayed %s IPC result to global selection",
+    async (kind) => {
+      useSessionStore.getState().onStarted({ ...live, input_queue_id: "old" });
+      useSessionStore.setState({ selectedSessionId: "s1" });
+      let resolve!: (event: NativeSessionConfigurationEvent) => void;
+      vi.mocked(updateNativeSessionConfiguration).mockReturnValue(
+        new Promise((done) => {
+          resolve = done;
+        }),
+      );
+      const changing = changeSessionConfiguration("s1", { model: "requested" });
+      const requestId = useSessionStore.getState().pendingConfigurationBySession.s1.request_id;
+      const latest = {
+        ...runtime,
+        ai_channel_id: "latest-channel",
+        model: "latest-model",
+        reasoning_effort: "high",
+      };
+      if (kind === "old-runtime") {
+        useSessionStore.getState().onStarted({ ...live, input_queue_id: "new", runtime: latest });
+      } else {
+        useSessionStore.getState().onConfiguration(
+          configurationEvent({
+            input_queue_id: "old",
+            request_id: "newer",
+            revision: 2,
+            runtime: latest,
+          }),
+        );
+      }
+      useChannelStore.getState().setSelection(latest.ai_channel_id, latest.model);
+      useUiStore.getState().setComposerThinkingLevel("high");
+      resolve(
+        configurationEvent({
+          input_queue_id: "old",
+          request_id: requestId,
+          revision: 1,
+          runtime: { ...runtime, model: "stale-model", reasoning_effort: "low" },
+        }),
+      );
+      expect(await changing).toBeUndefined();
+      expect(useChannelStore.getState().activeChannelId).toBe("latest-channel");
+      expect(useChannelStore.getState().activeModelId).toBe("latest-model");
+      expect(useUiStore.getState().composerThinkingLevel).toBe("high");
+      expect(useSessionStore.getState().pendingConfigurationBySession.s1).toBeUndefined();
+    },
+  );
+
+  it("returns success when the equivalent configuration event beat its IPC response", async () => {
+    useSessionStore.getState().onStarted({ ...live, input_queue_id: "current" });
+    useSessionStore.setState({ selectedSessionId: "s1" });
+    let resolve!: (event: NativeSessionConfigurationEvent) => void;
+    vi.mocked(updateNativeSessionConfiguration).mockReturnValue(
+      new Promise((done) => {
+        resolve = done;
+      }),
+    );
+    const changing = changeSessionConfiguration("s1", { model: "new" });
+    const requestId = useSessionStore.getState().pendingConfigurationBySession.s1.request_id;
+    const event = configurationEvent({ input_queue_id: "current", request_id: requestId });
+    expect(useSessionStore.getState().onConfiguration(event)).toBe(true);
+    useChannelStore.getState().setSelection(event.runtime!.ai_channel_id, event.runtime!.model);
+    resolve(event);
+    expect(await changing).toEqual(event);
+    expect(useSessionStore.getState().pendingConfigurationBySession.s1).toBeUndefined();
+    expect(useChannelStore.getState().activeModelId).toBe("new");
+  });
+
+  it.each(["synthetic-first", "broadcast-first"])(
+    "handles %s exit completion effects exactly once",
+    async (ordering) => {
+      useSessionStore.getState().onStarted({
+        ...live,
+        input_queue_id: "current",
+        runtime: { ...runtime, worktree_path: "/cfg/worktrees/s1" },
+      });
+      useSessionStore.setState({ turnState: { s1: "waiting_input" } });
+      const exit = { ...live, instance_id: "current", worktree_path: "/cfg/worktrees/s1", code: 0 };
+      vi.mocked(finishNativeInput).mockImplementation(async () => {
+        if (ordering === "broadcast-first") await handleNativeExit(exit);
+      });
+      await changeSessionConfiguration("s1", { permission_mode: "edit" });
+      if (ordering === "synthetic-first") await handleNativeExit(exit);
+      await handleNativeExit(exit);
+      expect(maybeFinishAiMergeResolve).toHaveBeenCalledTimes(1);
+      expect(maybeOpenWorktreeMerge).toHaveBeenCalledTimes(1);
+      expect(maybeOpenWorktreeMerge).toHaveBeenCalledWith(
+        expect.objectContaining({
+          workspaceId: "ws",
+          worktreePath: "/cfg/worktrees/s1",
+          reason: "exit",
+        }),
+      );
+      expect(useWorkspaceStore.getState().refreshSessions).toHaveBeenCalledTimes(1);
+    },
+  );
+  it("synthetic exit retains workspace and worktree fallback captured before finishing", async () => {
+    useSessionStore.getState().onStarted({ ...live, workspace_id: "", input_queue_id: "current" });
+    useSessionStore.setState({ turnState: { s1: "waiting_input" } });
+    useWorkspaceStore.setState({
+      sessions: [
+        {
+          ...session("s1", "model"),
+          workspace_id: "fallback-ws",
+          working_dir: "/fallback/worktrees/s1",
+        },
+      ],
+    });
+    vi.mocked(finishNativeInput).mockImplementation(async () => {
+      useWorkspaceStore.setState({ sessions: [] });
+    });
+    await changeSessionConfiguration("s1", { permission_mode: "edit" });
+    expect(maybeFinishAiMergeResolve).toHaveBeenCalledWith(
+      expect.objectContaining({ workspaceId: "fallback-ws" }),
+    );
+    expect(maybeOpenWorktreeMerge).toHaveBeenCalledWith(
+      expect.objectContaining({
+        workspaceId: "fallback-ws",
+        worktreePath: "/fallback/worktrees/s1",
+      }),
+    );
+  });
+
+  it("a rejected IPC result does not clear a newer pending configuration", async () => {
+    useSessionStore.getState().onStarted({ ...live, input_queue_id: "current" });
+    let resolve!: (event: NativeSessionConfigurationEvent) => void;
+    vi.mocked(updateNativeSessionConfiguration).mockReturnValue(
+      new Promise((done) => {
+        resolve = done;
+      }),
+    );
+    const changing = changeSessionConfiguration("s1", { model: "old-request" });
+    const oldRequest = useSessionStore.getState().pendingConfigurationBySession.s1.request_id;
+    useSessionStore
+      .getState()
+      .onConfiguration(
+        configurationEvent({ input_queue_id: "current", revision: 2, request_id: "applied-newer" }),
+      );
+    const pending = { request_id: "still-newer", ai_channel_id: "channel", model: "pending-model" };
+    useSessionStore.getState().setPendingConfiguration("s1", pending);
+    resolve(configurationEvent({ input_queue_id: "current", revision: 1, request_id: oldRequest }));
+    expect(await changing).toBeUndefined();
+    expect(useSessionStore.getState().pendingConfigurationBySession.s1).toEqual(pending);
   });
 });

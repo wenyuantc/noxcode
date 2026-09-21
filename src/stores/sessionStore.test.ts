@@ -16,6 +16,7 @@ vi.mock("@/lib/backend", () => ({
 import { getAgentSessionLogLines } from "@/lib/backend";
 import { useChannelStore } from "./channelStore";
 import { useSessionStore } from "./sessionStore";
+import { useSteerStore } from "./steerStore";
 import { useWorkspaceStore } from "./workspaceStore";
 
 const getLines = vi.mocked(getAgentSessionLogLines);
@@ -53,6 +54,7 @@ function started(sessionId: string, sessionKind: string): AgentSessionStarted {
 describe("sessionStore history", () => {
   beforeEach(() => {
     getLines.mockReset();
+    useSteerStore.setState(useSteerStore.getInitialState(), true);
     useSessionStore.setState({
       selectedSessionId: null,
       liveBySession: {},
@@ -68,6 +70,7 @@ describe("sessionStore history", () => {
       configurationRevisionBySession: {},
       backgroundBySession: {},
       inputQueueBySession: {},
+      resolvedRequests: {},
       permissions: {},
       planQuestions: {},
       planApprovals: {},
@@ -78,6 +81,41 @@ describe("sessionStore history", () => {
       activeChannelId: null,
       activeModelId: null,
     });
+  });
+
+  it("guards stale starts before changing live runtime and configuration", () => {
+    const runtime = {
+      ai_channel_id: "channel",
+      model: "old-model",
+      reasoning_effort: null,
+      permission_mode: "default",
+      plan_mode: false,
+    };
+    const old = { ...started("s1", "execution"), input_queue_id: "retired", runtime };
+    const current = {
+      ...started("s1", "execution"),
+      input_queue_id: "current",
+      runtime: { ...runtime, model: "new-model" },
+    };
+    const state = useSessionStore.getState();
+    state.onStarted(old);
+    state.onExit({ ...old, instance_id: old.input_queue_id, code: 0 });
+    state.onStarted(current);
+    useSteerStore.getState().onSnapshot({
+      session_record_id: "s1",
+      instance_id: "current",
+      turn_id: "current-turn",
+      revision: 1,
+      receipts: [],
+    });
+    state.onStarted(old);
+    expect(useSessionStore.getState().liveBySession.s1.input_queue_id).toBe("current");
+    expect(useSessionStore.getState().configurationBySession.s1.model).toBe("new-model");
+    expect(useSteerStore.getState().snapshots.s1.turn_id).toBe("current-turn");
+    state.onExit({ ...current, instance_id: current.input_queue_id, code: 0 });
+    state.onStarted(current);
+    expect(useSessionStore.getState().liveBySession.s1).toBeUndefined();
+    expect(useSessionStore.getState().turnState.s1).toBe("ended");
   });
 
   it("keeps queued input separate from history and rejects stale snapshots", () => {
@@ -107,7 +145,7 @@ describe("sessionStore history", () => {
     const payload = { session_record_id: "s1", queue_id: "q1", revision: 1, items: [] };
     useSessionStore.getState().onStarted(session);
     useSessionStore.getState().onInputQueue(payload);
-    useSessionStore.getState().onExit({ ...session, code: 0 });
+    useSessionStore.getState().onExit({ ...session, instance_id: session.input_queue_id, code: 0 });
     useSessionStore.getState().onInputQueue({ ...payload, revision: 2 });
     expect(useSessionStore.getState().inputQueueBySession.s1).toBeUndefined();
     useSessionStore.getState().onStarted({ ...session, input_queue_id: "q2" });
@@ -194,7 +232,9 @@ describe("sessionStore history", () => {
     };
     useSessionStore.getState().onStarted(snapshot);
     useSessionStore.getState().onPlanMode("s1", true, "q1");
-    useSessionStore.getState().onExit({ ...snapshot, code: 0 });
+    useSessionStore
+      .getState()
+      .onExit({ ...snapshot, instance_id: snapshot.input_queue_id, code: 0 });
     useSessionStore.getState().onStarted({ ...snapshot, input_queue_id: "q2" });
     useSessionStore.getState().onPlanMode("s1", true, "q1");
     useSessionStore.getState().selectSession("s1");
@@ -318,7 +358,7 @@ describe("sessionStore history", () => {
         },
       ],
     });
-    useSessionStore.getState().onExit({ ...started("s1", "execution"), code: 0 });
+    useSessionStore.getState().onExit({ ...started("s1", "execution"), instance_id: "", code: 0 });
     expect(useSessionStore.getState().backgroundBySession.s1[0].status).toBe("stopped");
     useSessionStore.getState().onStarted(started("s1", "execution"));
     expect(useSessionStore.getState().backgroundBySession.s1).toEqual([]);
@@ -339,7 +379,7 @@ describe("sessionStore history", () => {
         },
       ],
     });
-    useSessionStore.getState().onExit({ ...started("s1", "execution"), code: 0 });
+    useSessionStore.getState().onExit({ ...started("s1", "execution"), instance_id: "", code: 0 });
     expect(useSessionStore.getState().processesBySession.s1[0].status).toBe("stopped");
     useSessionStore.getState().onStarted(started("s1", "execution"));
     expect(useSessionStore.getState().processesBySession.s1).toEqual([]);
@@ -375,7 +415,7 @@ describe("sessionStore history", () => {
     useSessionStore.getState().resolveRequest({ ...request, kind: "plan_approval" });
     expect(Object.keys(useSessionStore.getState().planApprovals.s1)).toEqual(["r2"]);
     expect(Object.keys(useSessionStore.getState().planApprovals.s2)).toEqual(["r1"]);
-    useSessionStore.getState().onExit({ ...started("s1", "execution"), code: 0 });
+    useSessionStore.getState().onExit({ ...started("s1", "execution"), instance_id: "", code: 0 });
     expect(useSessionStore.getState().planApprovals.s1.r2.detached).toBe(true);
     expect(useSessionStore.getState().planApprovals.s2.r1).toBeDefined();
     expect(useSessionStore.getState().planApprovals.s2.r1.detached).toBeUndefined();
@@ -391,7 +431,7 @@ describe("sessionStore history", () => {
       plan: "plan",
     };
     useSessionStore.getState().setPlanApproval(request);
-    useSessionStore.getState().onExit({ ...started("s1", "plan"), code: 0 });
+    useSessionStore.getState().onExit({ ...started("s1", "plan"), instance_id: "", code: 0 });
     expect(useSessionStore.getState().planApprovals.s1.r1.detached).toBe(true);
     useSessionStore.getState().onStarted(started("s1", "plan"));
     expect(useSessionStore.getState().planApprovals.s1).toEqual({});
@@ -721,7 +761,7 @@ describe("sessionStore history", () => {
       ai_channel_id: "ch",
       model: "next",
     });
-    store.onExit({ ...started("s1", "execution"), code: 0 });
+    store.onExit({ ...started("s1", "execution"), instance_id: "", code: 0 });
     expect(useSessionStore.getState().pendingConfigurationBySession.s1).toBeUndefined();
   });
 
@@ -769,6 +809,7 @@ describe("sessionStore history", () => {
 
     // Exit marks running subagents as stopped
     store.onExit({
+      instance_id: "",
       profile_id: "p",
       workspace_id: null,
       session_kind: "agent",
@@ -779,4 +820,46 @@ describe("sessionStore history", () => {
     const exitedSubagents = useSessionStore.getState().subagentsBySession.s1;
     expect(exitedSubagents[0].status).toBe("stopped");
   });
+});
+
+it("preserves explicit text identity from live stdout through replay and prunes only committed parts", async () => {
+  useSessionStore.setState({ lines: {}, stream: {}, historyLoaded: {} });
+  const assistant = { chain_id: "chain-a", part: 0 };
+  useSessionStore.getState().onStdout({ ...stdout("s1", "a"), line: "hel", assistant });
+  useSessionStore.getState().onDelta({
+    session_record_id: "s1",
+    kind: "text",
+    text: "lo",
+    clear: false,
+    assistant: { ...assistant, part: 1 },
+  });
+  expect(useSessionStore.getState().stream.s1[0]).toMatchObject({
+    text: "lo",
+    assistant: { ...assistant, part: 1 },
+  });
+  useSessionStore.getState().onStdout({ ...stdout("s1", "usage"), line: "[用量] 输入 1 | 输出 1" });
+  expect(useSessionStore.getState().stream.s1).toHaveLength(1);
+  useSessionStore
+    .getState()
+    .onStdout({ ...stdout("s1", "b"), line: "lo", assistant: { ...assistant, part: 1 } });
+  expect(useSessionStore.getState().stream.s1).toEqual([]);
+  expect(
+    useSessionStore
+      .getState()
+      .lines.s1.filter((line) => line.assistant)
+      .map((line) => line.text),
+  ).toEqual(["hel", "lo"]);
+  const saved = useSessionStore.getState().lines.s1.map((line) => ({
+    ...event(line.id),
+    message: JSON.stringify({ nox: 1, line: line.text, assistant: line.assistant }),
+  }));
+  getLines.mockResolvedValue(saved);
+  useSessionStore.setState({ lines: {}, stream: {}, historyLoaded: {} });
+  await useSessionStore.getState().loadHistory("s1");
+  expect(
+    useSessionStore
+      .getState()
+      .lines.s1.filter((line) => line.assistant)
+      .map((line) => line.assistant),
+  ).toEqual([assistant, { ...assistant, part: 1 }]);
 });

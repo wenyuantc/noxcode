@@ -1,6 +1,7 @@
 use serde_json::{json, Value};
 
 use super::openai::normalize_effort;
+use super::response::{provider_error, FinishReason, ModelError, ModelErrorKind, ModelResponse};
 use super::sse::{parse_sse, SseEvent};
 use super::types::{Message, Role, StreamDelta, ToolCall, ToolSpec, Usage};
 use super::usage::parse_usage;
@@ -103,14 +104,14 @@ fn responses_user_content(message: &Message) -> Value {
     json!(parts)
 }
 
-pub fn parse_responses_sse(text: &str) -> Result<(Message, Usage), String> {
-    parse_responses_sse_with_id(text).map(|(message, usage, _)| (message, usage))
+pub fn parse_responses_sse(text: &str) -> Result<ModelResponse, ModelError> {
+    parse_responses_sse_with_id(text)
 }
 
 /// Parse a Responses stream and retain the server response identifier when one
 /// is present. The identifier lets the caller use `previous_response_id` on
 /// the next request without re-sending the entire conversation.
-pub fn parse_responses_sse_with_id(text: &str) -> Result<(Message, Usage, Option<String>), String> {
+pub fn parse_responses_sse_with_id(text: &str) -> Result<ModelResponse, ModelError> {
     let mut state = ResponsesStreamState::new();
     for event in parse_sse(text) {
         state.apply(&event);
@@ -127,6 +128,12 @@ pub struct ResponsesStreamState {
     tools: Vec<ToolCall>,
     usage: Usage,
     response_id: Option<String>,
+    terminal: bool,
+    refused: bool,
+    incomplete_tool: bool,
+    raw_finish_reason: Option<String>,
+    error: Option<ModelError>,
+    item_ids: std::collections::HashMap<String, String>,
 }
 
 impl Default for ResponsesStreamState {
@@ -136,6 +143,12 @@ impl Default for ResponsesStreamState {
             tools: Vec::new(),
             usage: Usage::default(),
             response_id: None,
+            terminal: false,
+            refused: false,
+            incomplete_tool: false,
+            raw_finish_reason: None,
+            error: None,
+            item_ids: Default::default(),
         }
     }
 }
@@ -146,33 +159,249 @@ impl ResponsesStreamState {
     }
 
     pub fn apply(&mut self, event: &SseEvent) -> Vec<StreamDelta> {
-        let Ok(payload) = serde_json::from_str::<Value>(&event.data) else {
+        // [DONE] is a framing marker, not proof of a completed Responses response.
+        if event.data == "[DONE]" {
+            return Vec::new();
+        }
+        let Ok(mut payload) = serde_json::from_str::<Value>(&event.data) else {
+            self.error = Some(ModelError::new(
+                ModelErrorKind::InvalidResponse,
+                "无效的 Responses SSE JSON",
+            ));
             return Vec::new();
         };
         let event_type = payload
             .get("type")
             .and_then(Value::as_str)
-            .unwrap_or(event.event.as_str());
+            .unwrap_or(event.event.as_str())
+            .to_string();
+        let response = payload.get("response").unwrap_or(&payload);
+        if let Some(error) = provider_error(response).or_else(|| provider_error(&payload)) {
+            self.error = Some(error);
+            return Vec::new();
+        }
+        if matches!(event_type.as_str(), "error" | "response.failed") {
+            self.error = Some(ModelError::new(
+                ModelErrorKind::Provider,
+                event.data.clone(),
+            ));
+            return Vec::new();
+        }
+        if matches!(
+            event_type.as_str(),
+            "response.completed" | "response.done" | "response.incomplete"
+        ) {
+            self.terminal = true;
+            self.raw_finish_reason = responses_finish_reason(response);
+            self.refused |= responses_refused(response);
+            if matches!(
+                response.get("status").and_then(Value::as_str),
+                Some("failed" | "in_progress" | "queued")
+            ) || ((event_type == "response.incomplete"
+                || response.get("status").and_then(Value::as_str) == Some("incomplete"))
+                && FinishReason::from_raw(self.raw_finish_reason.as_deref())
+                    == FinishReason::Unknown
+                && !self.refused)
+            {
+                self.error = Some(ModelError::new(
+                    ModelErrorKind::InvalidResponse,
+                    "Responses 返回未完成且无法分类的响应",
+                ));
+            }
+            if self.raw_finish_reason.is_none() && event_type == "response.incomplete" {
+                self.raw_finish_reason = Some("incomplete".to_string());
+            }
+            if let Some(id) = responses_response_id(&payload) {
+                self.response_id = Some(id.to_string());
+            }
+            if let Some(output) = response
+                .get("output")
+                .and_then(Value::as_array)
+                .filter(|items| !items.is_empty())
+            {
+                let mut complete = Message::assistant_text("");
+                let mut tools = Vec::new();
+                apply_responses_output(&mut complete, &mut tools, output);
+                if !complete.content.is_empty() {
+                    self.message.content = complete.content;
+                }
+                if !complete.reasoning_content.is_empty() {
+                    self.message.reasoning_content = complete.reasoning_content;
+                }
+                self.tools = tools;
+                if output
+                    .iter()
+                    .any(|item| item.get("status").and_then(Value::as_str) == Some("incomplete"))
+                    && !matches!(
+                        FinishReason::from_raw(self.raw_finish_reason.as_deref()),
+                        FinishReason::OutputLimit
+                            | FinishReason::ContextLimit
+                            | FinishReason::Refusal
+                    )
+                    && !self.refused
+                {
+                    self.error = Some(ModelError::new(
+                        ModelErrorKind::InvalidResponse,
+                        "Responses 工具或文本块尚未完成",
+                    ));
+                }
+            }
+        }
+        if matches!(
+            event_type.as_str(),
+            "response.refusal.delta" | "response.refusal.done"
+        ) {
+            self.refused = true;
+            if let Some(text) = payload
+                .get("delta")
+                .or_else(|| payload.get("refusal"))
+                .and_then(Value::as_str)
+            {
+                if event_type.ends_with(".delta") || self.message.content.is_empty() {
+                    self.message.content.push_str(text);
+                    return vec![StreamDelta::Text(text.to_string())];
+                }
+            }
+        }
+        if let Some(item) = payload.get("item") {
+            if event_type == "response.output_item.done"
+                && item.get("status").and_then(Value::as_str) == Some("incomplete")
+            {
+                self.incomplete_tool = true;
+            }
+            if let (Some(id), Some(call_id)) = (
+                item.get("id").and_then(Value::as_str),
+                item.get("call_id").and_then(Value::as_str),
+            ) {
+                self.item_ids.insert(id.to_string(), call_id.to_string());
+            }
+        }
+        if event_type.starts_with("response.function_call_arguments.") {
+            match argument_call_id(&payload, &self.item_ids, &self.tools) {
+                Ok(call_id) => payload["call_id"] = json!(call_id),
+                Err(error) => {
+                    self.error = Some(error);
+                    return Vec::new();
+                }
+            }
+        }
         apply_responses_event(
             &mut self.message,
             &mut self.tools,
             &mut self.usage,
             &mut self.response_id,
-            event_type,
+            &event_type,
             &payload,
         )
     }
 
-    pub fn finish(mut self) -> Result<(Message, Usage, Option<String>), String> {
-        self.message.tool_calls = self.tools;
-        if self.message.content.is_empty()
-            && self.message.reasoning_content.is_empty()
-            && self.message.tool_calls.is_empty()
-        {
-            return Err("模型返回空响应".to_string());
+    pub fn finish(mut self) -> Result<ModelResponse, ModelError> {
+        if let Some(error) = self.error {
+            return Err(error);
         }
-        Ok((self.message, self.usage, self.response_id))
+        if !self.terminal {
+            return Err(ModelError::new(
+                ModelErrorKind::IncompleteStream,
+                "Responses 响应流缺少结束事件",
+            ));
+        }
+        if self.raw_finish_reason.as_deref() == Some("incomplete") {
+            return Err(ModelError::new(
+                ModelErrorKind::InvalidResponse,
+                "Responses 响应未完成且缺少结束原因",
+            ));
+        }
+        let reason = if self.refused {
+            FinishReason::Refusal
+        } else {
+            FinishReason::from_raw(self.raw_finish_reason.as_deref())
+        };
+        if self.incomplete_tool
+            && !matches!(
+                reason,
+                FinishReason::OutputLimit | FinishReason::ContextLimit | FinishReason::Refusal
+            )
+        {
+            return Err(ModelError::new(
+                ModelErrorKind::InvalidResponse,
+                "Responses 输出工具尚未完成",
+            ));
+        }
+        self.message.tool_calls = self.tools;
+        ModelResponse::from_parts(
+            self.message,
+            self.usage,
+            reason,
+            self.raw_finish_reason,
+            self.response_id,
+        )
     }
+}
+
+fn argument_call_id(
+    payload: &Value,
+    item_ids: &std::collections::HashMap<String, String>,
+    tools: &[ToolCall],
+) -> Result<String, ModelError> {
+    let invalid = || {
+        ModelError::new(
+            ModelErrorKind::InvalidResponse,
+            "Responses 工具参数标识缺失、未知或相互冲突",
+        )
+    };
+    let direct = payload
+        .get("call_id")
+        .map(|value| {
+            value
+                .as_str()
+                .filter(|id| !id.is_empty() && tools.iter().any(|tool| tool.id == *id))
+                .map(ToOwned::to_owned)
+                .ok_or_else(invalid)
+        })
+        .transpose()?;
+    let item = payload
+        .get("item_id")
+        .map(|value| {
+            value
+                .as_str()
+                .and_then(|id| item_ids.get(id))
+                .filter(|id| tools.iter().any(|tool| tool.id == **id))
+                .cloned()
+                .ok_or_else(invalid)
+        })
+        .transpose()?;
+    match (direct, item) {
+        (Some(direct), Some(item)) if direct != item => Err(invalid()),
+        (Some(id), _) | (_, Some(id)) => Ok(id),
+        (None, None) if tools.len() == 1 => Ok(tools[0].id.clone()),
+        _ => Err(invalid()),
+    }
+}
+
+fn responses_finish_reason(response: &Value) -> Option<String> {
+    response
+        .pointer("/incomplete_details/reason")
+        .and_then(Value::as_str)
+        .or_else(|| response.get("finish_reason").and_then(Value::as_str))
+        .or_else(|| response.get("status").and_then(Value::as_str))
+        .map(ToOwned::to_owned)
+}
+
+fn responses_refused(response: &Value) -> bool {
+    response
+        .get("output")
+        .and_then(Value::as_array)
+        .is_some_and(|items| {
+            items.iter().any(|item| {
+                item.get("content")
+                    .and_then(Value::as_array)
+                    .is_some_and(|parts| {
+                        parts
+                            .iter()
+                            .any(|part| part.get("type").and_then(Value::as_str) == Some("refusal"))
+                    })
+            })
+        })
 }
 
 fn apply_responses_event(
@@ -185,11 +414,18 @@ fn apply_responses_event(
 ) -> Vec<StreamDelta> {
     let mut deltas = Vec::new();
     match event_type {
-        "response.created" | "response.in_progress" | "response.completed" | "response.done" => {
+        "response.created"
+        | "response.in_progress"
+        | "response.completed"
+        | "response.done"
+        | "response.incomplete" => {
             if response_id.is_none() {
                 *response_id = responses_response_id(payload).map(ToOwned::to_owned);
             }
-            if matches!(event_type, "response.completed" | "response.done") {
+            if matches!(
+                event_type,
+                "response.completed" | "response.done" | "response.incomplete"
+            ) {
                 if let Some(raw) = payload
                     .pointer("/response/usage")
                     .or_else(|| payload.get("usage"))
@@ -279,6 +515,35 @@ fn apply_responses_event(
                 });
             }
         }
+        "response.output_item.done" => {
+            if let Some(item) = payload
+                .get("item")
+                .filter(|item| item.get("type").and_then(Value::as_str) == Some("function_call"))
+            {
+                let mut complete = Vec::new();
+                apply_responses_output(
+                    &mut Message::assistant_text(""),
+                    &mut complete,
+                    std::slice::from_ref(item),
+                );
+                for call in complete {
+                    if let Some(existing) = tools.iter_mut().find(|existing| existing.id == call.id)
+                    {
+                        *existing = call;
+                    } else {
+                        tools.push(call);
+                    }
+                }
+            }
+        }
+        "response.function_call_arguments.done" => {
+            let id = payload.get("call_id").and_then(Value::as_str).unwrap_or("");
+            if let Some(call) = tools.iter_mut().find(|call| call.id == id || id.is_empty()) {
+                if let Some(arguments) = payload.get("arguments").and_then(Value::as_str) {
+                    call.arguments = arguments.to_string();
+                }
+            }
+        }
         "response.function_call_arguments.delta" => {
             let call_id = payload.get("call_id").and_then(Value::as_str).unwrap_or("");
             let delta = payload.get("delta").and_then(Value::as_str).unwrap_or("");
@@ -295,17 +560,31 @@ fn apply_responses_event(
     deltas
 }
 
-pub fn parse_responses_json(value: &Value) -> Result<(Message, Usage), String> {
-    parse_responses_json_with_id(value).map(|(message, usage, _)| (message, usage))
+pub fn parse_responses_json(value: &Value) -> Result<ModelResponse, ModelError> {
+    parse_responses_json_with_id(value)
 }
 
 /// Parse a complete Responses payload and retain its server response id.
-pub fn parse_responses_json_with_id(
-    value: &Value,
-) -> Result<(Message, Usage, Option<String>), String> {
+pub fn parse_responses_json_with_id(value: &Value) -> Result<ModelResponse, ModelError> {
     let mut message = Message::assistant_text("");
     let mut tools = Vec::new();
     let response = value.get("response").unwrap_or(value);
+    if let Some(error) = provider_error(response).or_else(|| provider_error(value)) {
+        return Err(error);
+    }
+    let reason = responses_finish_reason(response);
+    if matches!(
+        response.get("status").and_then(Value::as_str),
+        Some("failed" | "in_progress" | "queued")
+    ) || (response.get("status").and_then(Value::as_str) == Some("incomplete")
+        && FinishReason::from_raw(reason.as_deref()) == FinishReason::Unknown
+        && !responses_refused(response))
+    {
+        return Err(ModelError::new(
+            ModelErrorKind::InvalidResponse,
+            "Responses 返回未完成的响应",
+        ));
+    }
     let response_id = responses_response_id(value).or_else(|| responses_response_id(response));
     let usage = response
         .get("usage")
@@ -321,13 +600,35 @@ pub fn parse_responses_json_with_id(
         }
     }
     message.tool_calls = tools;
-    if message.content.is_empty()
-        && message.reasoning_content.is_empty()
-        && message.tool_calls.is_empty()
+    let normalized = if responses_refused(response) {
+        FinishReason::Refusal
+    } else {
+        FinishReason::from_raw(reason.as_deref())
+    };
+    if !matches!(
+        normalized,
+        FinishReason::OutputLimit | FinishReason::ContextLimit | FinishReason::Refusal
+    ) && response
+        .get("output")
+        .and_then(Value::as_array)
+        .is_some_and(|items| {
+            items
+                .iter()
+                .any(|item| item.get("status").and_then(Value::as_str) == Some("incomplete"))
+        })
     {
-        return Err("模型返回空响应".to_string());
+        return Err(ModelError::new(
+            ModelErrorKind::InvalidResponse,
+            "Responses 输出块尚未完成",
+        ));
     }
-    Ok((message, usage, response_id.map(ToOwned::to_owned)))
+    ModelResponse::from_parts(
+        message,
+        usage,
+        normalized,
+        reason,
+        response_id.map(ToOwned::to_owned),
+    )
 }
 
 fn responses_response_id(value: &Value) -> Option<&str> {
@@ -346,9 +647,13 @@ fn apply_responses_output(message: &mut Message, tools: &mut Vec<ToolCall>, outp
                 if let Some(parts) = item.get("content").and_then(Value::as_array) {
                     for part in parts {
                         let part_type = part.get("type").and_then(Value::as_str);
-                        if matches!(part_type, Some("output_text") | Some("text") | None) {
+                        if matches!(
+                            part_type,
+                            Some("output_text") | Some("text") | Some("refusal") | None
+                        ) {
                             if let Some(text) = part
                                 .get("text")
+                                .or_else(|| part.get("refusal"))
                                 .and_then(Value::as_str)
                                 .filter(|item| !item.is_empty())
                             {
@@ -432,7 +737,8 @@ mod tests {
             "event: response.function_call_arguments.delta\ndata: {\"type\":\"response.function_call_arguments.delta\",\"call_id\":\"call_1\",\"delta\":\"{\\\"path\\\":\\\"a.rs\\\"}\"}\n\n",
             "event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"usage\":{\"input_tokens\":11,\"output_tokens\":4}}}\n\n",
         );
-        let (message, usage) = parse_responses_sse(sse).expect("parse responses sse");
+        let ModelResponse { message, usage, .. } =
+            parse_responses_sse(sse).expect("parse responses sse");
         assert_eq!(message.content, "hi ");
         assert_eq!(message.tool_calls[0].id, "call_1");
         assert_eq!(message.tool_calls[0].arguments, r#"{"path":"a.rs"}"#);
@@ -448,7 +754,8 @@ mod tests {
             "event: response.completed\n",
             "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_123\",\"usage\":{\"input_tokens\":1,\"output_tokens\":1}}}\n\n",
         );
-        let (_, _, response_id) = parse_responses_sse_with_id(sse).expect("parse response id");
+        let ModelResponse { response_id, .. } =
+            parse_responses_sse_with_id(sse).expect("parse response id");
         assert_eq!(response_id.as_deref(), Some("resp_123"));
     }
 
@@ -458,7 +765,8 @@ mod tests {
             "event: response.completed\n",
             "data: {\"type\":\"response.completed\",\"response\":{\"output\":[{\"type\":\"message\",\"content\":[{\"type\":\"output_text\",\"text\":\"plan ok\"}]}],\"usage\":{\"input_tokens\":3,\"output_tokens\":2}}}\n\n",
         );
-        let (message, usage) = parse_responses_sse(sse).expect("parse completed output");
+        let ModelResponse { message, usage, .. } =
+            parse_responses_sse(sse).expect("parse completed output");
         assert_eq!(message.content, "plan ok");
         assert_eq!(usage.prompt_tokens, 3);
         assert_eq!(usage.completion_tokens, 2);
@@ -466,8 +774,9 @@ mod tests {
 
     #[test]
     fn parses_output_text_done_without_deltas() {
-        let sse = "event: response.output_text.done\ndata: {\"type\":\"response.output_text.done\",\"text\":\"only done\"}\n\n";
-        let (message, _) = parse_responses_sse(sse).expect("parse output_text.done");
+        let sse = concat!("event: response.output_text.done\ndata: {\"type\":\"response.output_text.done\",\"text\":\"only done\"}\n\n", "event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{}}\n\n");
+        let ModelResponse { message, .. } =
+            parse_responses_sse(sse).expect("parse output_text.done");
         assert_eq!(message.content, "only done");
     }
 
@@ -483,7 +792,8 @@ mod tests {
             "event: response.completed\n",
             "data: {\"type\":\"response.completed\",\"response\":{\"usage\":{\"input_tokens\":1,\"output_tokens\":1}}}\n\n",
         );
-        let (message, _) = parse_responses_sse(sse).expect("parse reasoning summary");
+        let ModelResponse { message, .. } =
+            parse_responses_sse(sse).expect("parse reasoning summary");
         assert_eq!(message.content, "问候");
         assert_eq!(message.reasoning_content, "思考过程");
     }
@@ -495,8 +805,9 @@ mod tests {
             "data: {\"type\":\"response.unknown_text.delta\",\"delta\":\"not output\"}\n\n",
             "event: response.output_text.delta\n",
             "data: {\"type\":\"response.output_text.delta\",\"delta\":\"actual output\"}\n\n",
+            "event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{}}\n\n",
         );
-        let (message, _) = parse_responses_sse(sse).expect("parse unknown event");
+        let ModelResponse { message, .. } = parse_responses_sse(sse).expect("parse unknown event");
         assert_eq!(message.content, "actual output");
         assert_eq!(message.reasoning_content, "");
     }
@@ -509,7 +820,8 @@ mod tests {
             "event: response.completed\n",
             "data: {\"type\":\"response.completed\",\"response\":{\"output\":[{\"type\":\"reasoning\",\"summary\":[{\"text\":\"思考\"}]},{\"type\":\"message\",\"content\":[{\"type\":\"output_text\",\"text\":\"问候\"}]}]}}\n\n",
         );
-        let (message, _) = parse_responses_sse(sse).expect("parse completed output");
+        let ModelResponse { message, .. } =
+            parse_responses_sse(sse).expect("parse completed output");
         assert_eq!(message.content, "问候");
         assert_eq!(message.reasoning_content, "思考");
     }
@@ -524,7 +836,8 @@ mod tests {
             ],
             "usage": {"input_tokens": 4, "output_tokens": 1}
         });
-        let (message, usage) = parse_responses_json(&value).expect("parse json");
+        let ModelResponse { message, usage, .. } =
+            parse_responses_json(&value).expect("parse json");
         assert_eq!(message.content, "hello");
         assert_eq!(message.reasoning_content, "think");
         assert_eq!(message.tool_calls[0].id, "call_1");
@@ -537,7 +850,8 @@ mod tests {
             "id": "resp_json",
             "output": [{"type":"message","content":[{"type":"output_text","text":"ok"}]}]
         });
-        let (_, _, response_id) = parse_responses_json_with_id(&value).expect("parse response id");
+        let ModelResponse { response_id, .. } =
+            parse_responses_json_with_id(&value).expect("parse response id");
         assert_eq!(response_id.as_deref(), Some("resp_json"));
     }
 

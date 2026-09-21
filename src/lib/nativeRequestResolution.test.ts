@@ -32,7 +32,12 @@ const approval: NativePlanApprovalRequest = { ...base, plan: "current plan" };
 
 describe("native request resolution", () => {
   beforeEach(() =>
-    useSessionStore.setState({ permissions: {}, planQuestions: {}, planApprovals: {} }),
+    useSessionStore.setState({
+      resolvedRequests: {},
+      permissions: {},
+      planQuestions: {},
+      planApprovals: {},
+    }),
   );
   it.each(["permission", "question", "plan_approval"] as const)(
     "retains %s after an IPC failure so it can be retried",

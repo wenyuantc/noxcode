@@ -26,6 +26,8 @@ pub enum NativeToolRiskKind {
     ExternalPath,
     /// 本机已打开应用的后台电脑控制。
     Computer,
+    NetworkOrigin,
+    NetworkProxy,
 }
 
 impl NativeToolRiskKind {
@@ -41,6 +43,8 @@ impl NativeToolRiskKind {
             Self::Automation => "自动化",
             Self::ExternalPath => "工作区外访问",
             Self::Computer => "电脑控制",
+            Self::NetworkOrigin => "非公网来源",
+            Self::NetworkProxy => "代理信任",
         }
     }
 }
@@ -239,6 +243,7 @@ fn risk_rank(kind: NativeToolRiskKind) -> u8 {
         NativeToolRiskKind::Push => 5,
         NativeToolRiskKind::Computer => 5,
         NativeToolRiskKind::ForceGit => 6,
+        NativeToolRiskKind::NetworkOrigin | NativeToolRiskKind::NetworkProxy => 5,
     }
 }
 

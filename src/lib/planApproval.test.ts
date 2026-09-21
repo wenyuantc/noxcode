@@ -1,12 +1,13 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import {
   parsePendingPlan,
-  planApprovalResumeInput,
-  planApprovalResumePrompt,
+  authorizedPlanRetry,
+  parseApprovedPlan,
+  submitPlanApproval,
 } from "./planApproval";
-import { sessionSubmissionPayload } from "./sessionSubmission";
-import type { AgentSession } from "./types";
+import type { AgentSession, AgentSessionStarted, ApprovedPlanSnapshot } from "./types";
+import { planApprovalModelArgs } from "./sessionModel";
 
 function session(pendingPlanJson?: string | null): AgentSession {
   return {
@@ -63,61 +64,127 @@ describe("parsePendingPlan", () => {
   });
 });
 
-describe("planApprovalResumePrompt", () => {
-  it("carries the full plan when approving so a trimmed transcript still has it", () => {
-    expect(planApprovalResumePrompt(true, "## 目标\n改接口")).toBe(
-      "已批准计划，请按下面的计划开始实施：\n\n## 目标\n改接口",
+const snapshot: ApprovedPlanSnapshot = {
+  authorization_id: "authorization-1",
+  request_id: "request-1",
+  body: "plan",
+  feedback: "add tests",
+  cwd: "/worktree",
+  path: "/worktree/.noxcode/plans/plan-s1.md",
+  content_hash: "new-hash",
+  saved_hash: "prior-hash",
+  status: "failed",
+  ai_channel_id: "implementation-channel",
+  model: "implementation-model",
+  reasoning_effort: "high",
+  error: "disk full",
+};
+const pending = parsePendingPlan(
+  session(JSON.stringify({ request_id: "request-1", plan: "plan", created_at: "t" })),
+)!;
+
+describe("durable plan approval", () => {
+  it("retains retry consent and selected configuration when remote cwd resolution failed", () => {
+    const unresolved = {
+      ...snapshot,
+      cwd: "$HOME/worktree",
+      cwd_resolved: false,
+      saved_path: "/previous/plan.md",
+      error: "SSH unavailable",
+    };
+    const reloaded = {
+      ...session(JSON.stringify({ request_id: "request-1", plan: "plan" })),
+      approved_plan_json: JSON.stringify(unresolved),
+    };
+    expect(authorizedPlanRetry(parsePendingPlan(reloaded)!, parseApprovedPlan(reloaded))).toEqual(
+      unresolved,
     );
-    expect(planApprovalResumePrompt(true, "计划", "  顺便加日志  ")).toBe(
-      "已批准计划，请按下面的计划开始实施：\n\n计划\n\n补充意见：顺便加日志",
+  });
+  it("sends the chosen replacement model when a stopped plan is returned for revision", async () => {
+    const resolve = vi.fn().mockResolvedValue(null);
+    const model = planApprovalModelArgs(
+      false,
+      { channelId: "replacement-channel", modelId: "chosen-model" },
+      "high",
+      Boolean(pending.detached),
+    );
+    await submitPlanApproval(pending, false, "revise", model, resolve);
+    expect(resolve).toHaveBeenCalledExactlyOnceWith(
+      "s1",
+      "request-1",
+      false,
+      "revise",
+      "replacement-channel",
+      "chosen-model",
+      "high",
+    );
+  });
+  it("recovers authorized model, feedback, path and retry status after reload", () => {
+    const reloaded = {
+      ...session(JSON.stringify({ request_id: "request-1", plan: "plan" })),
+      approved_plan_json: JSON.stringify(snapshot),
+    };
+    expect(authorizedPlanRetry(parsePendingPlan(reloaded)!, parseApprovedPlan(reloaded))).toEqual(
+      snapshot,
+    );
+    expect(authorizedPlanRetry({ ...pending, request_id: "new-request" }, snapshot)).toBeNull();
+    expect(authorizedPlanRetry({ ...pending, plan: "changed plan" }, snapshot)).toBeNull();
+    expect(authorizedPlanRetry(pending, { ...snapshot, status: "cancelled" })).toBeNull();
+  });
+
+  it("sends detached approval to the backend with request identity and selected model", async () => {
+    const started: AgentSessionStarted = {
+      session_record_id: "s1",
+      workspace_id: "ws-1",
+      profile_id: "",
+      session_kind: "execution",
+    };
+    const resolve = vi.fn().mockResolvedValue(started);
+    await expect(
+      submitPlanApproval(
+        pending,
+        true,
+        " add tests ",
+        {
+          aiChannelId: "implementation-channel",
+          model: "implementation-model",
+          reasoningEffort: "high",
+        },
+        resolve,
+      ),
+    ).resolves.toEqual(started);
+    expect(resolve).toHaveBeenCalledExactlyOnceWith(
+      "s1",
+      "request-1",
+      true,
+      "add tests",
+      "implementation-channel",
+      "implementation-model",
+      "high",
     );
   });
 
-  it("asks for a revision when sending the plan back", () => {
-    expect(planApprovalResumePrompt(false, "计划", "拆成两步")).toBe("请修改计划：拆成两步");
-  });
-});
-
-describe("planApprovalResumeInput", () => {
-  const base = {
-    sessionId: "s1",
-    workspaceId: "ws-1",
-    channelId: "ch",
-    modelId: "gpt",
-    reasoningEffort: "high",
-    permissionMode: "default",
-    plan: "计划",
-  };
-
-  it("leaves plan mode when approved so the next turn can implement", () => {
-    const input = planApprovalResumeInput({ ...base, approved: true });
-    expect(input.planMode).toBe(false);
-    expect(input.prompt).toContain("已批准计划");
-    // 以同一 session id 续聊，不会新建会话
-    expect(sessionSubmissionPayload(input).resume_session_id).toBe("s1");
+  it("preserves a failed approval so retry does not need a newly manufactured user prompt", async () => {
+    const resolve = vi.fn().mockRejectedValue(new Error("disk full"));
+    await expect(submitPlanApproval(pending, true, "add tests", {}, resolve)).rejects.toThrow(
+      "disk full",
+    );
+    expect(authorizedPlanRetry(pending, snapshot)?.status).toBe("failed");
   });
 
-  it("stays in plan mode when sent back", () => {
-    const input = planApprovalResumeInput({ ...base, approved: false, feedback: "拆成两步" });
-    expect(input.planMode).toBe(true);
-    expect(input.prompt).toBe("请修改计划：拆成两步");
-  });
-
-  it("passes the picked channel, model and thinking level through", () => {
-    expect(planApprovalResumeInput({ ...base, approved: true })).toMatchObject({
-      channelId: "ch",
-      model: "gpt",
-      reasoningEffort: "high",
-      permissionMode: "default",
-    });
-    expect(
-      planApprovalResumeInput({
-        ...base,
-        approved: true,
-        modelId: null,
-        reasoningEffort: null,
-        permissionMode: null,
-      }),
-    ).toMatchObject({ model: null, reasoningEffort: null, permissionMode: null });
+  it("uses the same backend for live denial, with no implementation selection", async () => {
+    const resolve = vi.fn().mockResolvedValue(null);
+    await expect(
+      submitPlanApproval({ ...pending, detached: false }, false, "revise", {}, resolve),
+    ).resolves.toBeNull();
+    expect(resolve).toHaveBeenCalledExactlyOnceWith(
+      "s1",
+      "request-1",
+      false,
+      "revise",
+      undefined,
+      undefined,
+      undefined,
+    );
   });
 });

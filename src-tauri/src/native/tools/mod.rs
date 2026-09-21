@@ -27,6 +27,11 @@ pub mod shell_snapshot;
 pub mod sqlite;
 pub mod ssh;
 pub mod web;
+pub mod web_access;
+pub mod web_dns;
+pub mod web_policy;
+#[cfg(test)]
+mod web_tests;
 
 pub use cancel::CancelFlag;
 pub use catalog::{

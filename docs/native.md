@@ -37,7 +37,9 @@ P4 把进程内编程 Agent 接到渠道 + 工作区外壳。数据流仍是 `Re
 
 权限模式（`permission_mode`）四档，对齐 ZCode：`default` 变更前确认；`edit` 自动放行 `Overwrite`（删除 / 推送 / 强制 Git / 不透明命令 / MCP 仍弹确认）；`build` 再放行不透明 shell 与带 `readOnlyHint` 的 MCP；`yolo` 完全访问（`allow_all_high_risk=true`，不弹 MCP / 工作区钩子 / 命令 / ask 规则确认，deny 仍拒绝）。旧文件的 `confirm / auto_edit / full` 与 Claude Code 的 `acceptEdits / auto / bypassPermissions / dontAsk` 读入时映射到新名；`confirm_high_risk: false` 读成 `yolo`。`plan` 是会话态：既可由 Composer 选择在启动时进入，也可由模型调用 `EnterPlanMode` 进入；`ExitPlanMode` 提交计划触发 `native-plan-approval-request`，用户批准后恢复执行模式，退回则连同反馈交回模型继续修改。批准 IPC 可带 `ai_channel_id` / `model`：与当前 runtime 不同时先加载新 client 写入 live slot 并 `emit native-session`，再解除 `ExitPlanMode`；同一回合下一次 `chat()` 用实施模型。模型未变或退回则跳过加载。
 
-待批准的计划在入队时写入 `agent_sessions.pending_plan_json`（`{request_id, plan, created_at}`）。批准、退回、换到队列里下一条待批计划，以及非 live 会话开启新一轮时清空；**停止会话、取消 `ExitPlanMode` 与应用退出都不清**。因此会话停止或应用重开后，前端仍能从该列还原出一张 detached 审批卡：挂起的 `ExitPlanMode` 已失效，批准改为以 `resume_native_session` 续聊新一轮（`plan_mode=false`，提示词带上完整计划正文，因为 transcript 里未完成的工具对可能已被清洗掉），退回则以 `plan_mode=true` 带反馈重新规划。
+待批准计划写入 `agent_sessions.pending_plan_json`（`{request_id, plan, created_at}`）；停止或退出后仍保留。live 与 detached 审批统一走 `resolve_native_plan_approval`：后端读取对应请求的正文并校验实施模型，先保存 `approved_plan_json` 授权快照，再将计划原子写入实际会话目录的 `.noxcode/plans/plan-<session>.md`（支持隔离 worktree 和 SSH），成功后才应用实施模型并解除只读。普通执行模式续聊不能跳过尚未解决的计划审批；停止后的批准由后端启动实施续聊，前端不再拼接批准提示词绕过保存。
+
+已批准快照包含正文、补充意见、工作目录、路径、哈希、保存状态及实施模型。保存失败保留审批和快照，卡片可「重试保存并实施」；正文、补充意见或模型选择变化后需要新的批准。写入使用同目录临时文件和原子替换；已有文件与上次成功保存的哈希不一致时报冲突，不覆盖用户改动。停止/新计划会先使旧的在途授权失效，解除只读与实施确认在同一授权锁下提交。成功记录在普通续聊中保留，工具结果、计划卡片和后续回合上下文提供计划路径。实现见 [`plans.rs`](../src-tauri/src/native/plans.rs)。
 
 ## 权限规则
 
@@ -61,6 +63,12 @@ P4 把进程内编程 Agent 接到渠道 + 工作区外壳。数据流仍是 `Re
 
 `native-session.input_queue_id` 区分同一会话的运行实例；队列 IPC 和 `native-input-queue` 返回带单调 `revision` 的完整快照，前端忽略旧运行实例及过期快照。`/compact` 仍走独立控制通道，可在运行中处理；后台子 Agent 的 `SendMessage` 仍是定向 steer，不受主会话排队语义影响。权限、提问和计划审批按会话与请求 ID 隔离，IPC 成功后才移除请求，失败保留重试；历史计划不附着新请求的审批按钮。后台会话启动不改变当前选中会话。
 
+工作中可另选「转向当前回合」，通过 `submit_native_steer` 提交 `session_record_id`、`expected_turn_id`、客户端 UUID `input_id`、文字和已暂存图片路径。后端为每个用户回合生成 `turn_id`，接收与最终关闭共用同一信箱锁；同一 UUID 的重试先查持久化回执，不重复消费或重新读取已清理的附件。接收上限是 8 条待消费输入、每条 200 KiB UTF-8 文字，图片沿用每条 8 张/每张 8 MiB，待消费图片合计最多 64 MiB。只有校验及持久化接收成功才清理暂存图片；失败不改投下一回合。
+
+转向在模型响应返回后、串行工具之间、已启动并行批次完成后及最终关闭前消费。已开始的工具等到安全边界；旧响应尚未开始的工具写入「因转向未执行」结果，维持调用/结果配对。接收会使主回合旧的权限、提问、计划审批失效，后台子 Agent 的独立交互保留；计划模式保持，旧审批不能再解除限制。输入仍经过用户输入 Hook，拒绝会明确记录；转向不重置资源预算或输出续写次数。
+
+`native_steer` 回执复用 `agent_session_events`，记录 `accepted / applied / rejected / cancelled`，普通聊天日志分页不包含这些状态事件。`get_native_steer_snapshot` 和 `native-steer` 提供运行实例、当前回合、单调版本、回执与最近生命周期状态；快照可恢复漏收的回合广播。回合关闭后保留已完成的回合身份供空闲压缩状态使用，每次状态变化仍递增版本。进程重启不自动重放尚未消费的转向；界面显示中断并支持恢复文字，图片需重新选择。后端内存仅保留待消费项与最近 128 条终态回执，UUID 去重查持久化记录，不限制单回合累计转向次数；前端展示最近 256 条状态。实现见 [`steer.rs`](../src-tauri/src/native/steer.rs)。
+
 ## 上下文持久化
 
 `agent_session_events` 只服务 UI 回放；模型续聊只读 `native_session_transcripts`。两表没有数据库级同步约束。
@@ -68,7 +76,7 @@ P4 把进程内编程 Agent 接到渠道 + 工作区外壳。数据流仍是 `Re
 顶层 runner 在这些边界同步 UPSERT transcript（fingerprint 未变则跳过）：
 
 - 用户消息进入 `messages` 之后、下一次模型调用之前
-- 新回合输入或子 Agent 定向 steer 注入之后（未执行的排队消息不进入 transcript）
+- 新回合输入、用户转向或子 Agent 定向 steer 注入之后（未执行的排队消息不进入 transcript）
 - 每一轮 assistant 文本，或 assistant + 对应 tool 结果写完整之后
 - `run_native_loop` 退出前再 flush 一次（覆盖错误 / 取消）
 
@@ -83,7 +91,7 @@ P4 把进程内编程 Agent 接到渠道 + 工作区外壳。数据流仍是 `Re
 - 计划模式与 explore 子 Agent 的常规只读白名单来自契约的 `allowed_in_plan_mode`，不再硬编码。`Agent` 保持 `allowed_in_plan_mode=false`：仅计划模式顶层 runner 在工具广告和预检中作显式特例，再由 `run_agent_batch` 按 `SubagentKind::Explore` 收紧；普通只读 runner、general、自定义 Agent 与嵌套委派不会因此放开。
 - 同一轮里连续的 `concurrent_safe && !destructive && !needs_approval` 调用（Read / Glob / Grep / Lsp / WebFetch / WebSearch / Skill / TodoRead）并行执行，上限 8，结果按模型给出的顺序回填；写工具与 Bash 串行；连续 `Agent` 调用仍成批并行。
 - 结果预算：输出超过 `result_budget.max_model_bytes` 且策略为 `Artifact` 时，完整内容写入 `$APPCONFIG/artifacts/<session>/<id>.txt` 并登记 `native_tool_artifacts`，模型只看到头（Glob / Grep / WebFetch / Agent / MCP）或尾（Bash）预览加 artifact 路径；`Read` 允许读取 artifact 目录。之后仍按 `max_tool_output_tokens` 截断兜底。
-- 逐工具超时：Read / Write / Edit / Glob / Skill / Todo 30 秒，Grep 60 秒，ApplyPatch 60 秒，WebFetch / WebSearch 45 秒；Bash 自带超时（默认 `bash_default_timeout_secs`，模型可覆盖到 600 秒）；Agent、AskQuestion 与 ExitPlanMode 不设超时。
+- 逐工具超时：Read / Write / Edit / Glob / Skill / Todo 30 秒，Grep 60 秒，ApplyPatch 60 秒，WebSearch 45 秒；WebFetch 单次抓取共用 30 秒网络预算，用户授权等待不计入；Bash 自带超时（默认 `bash_default_timeout_secs`，模型可覆盖到 600 秒）；Agent、AskQuestion 与 ExitPlanMode 不设超时。
 - `Edit` 匹配策略链：exact → quote_normalized → line_number_prefix_stripped → escape_normalized → unicode_escape_normalized → indentation_flexible → line_trimmed → block_anchor，结果里注明命中策略；CRLF 文件保持 CRLF。本地 Write / Edit 会校验文件自上次 Read 后未被修改，否则要求重新 Read；文件不存在时给出同目录相近文件名提示。
 - `Read` 支持 png / jpg / gif / webp：图片作为紧随工具结果的用户消息附件交给模型。
 - `Bash`：会话开始时导出一次 login shell 快照（函数 / 别名 / shell 选项 / PATH）到 `$APPCONFIG/shell-snapshots/`，之后每次只 `source` 快照再 `eval` 命令；导出失败或关闭 `shell_snapshot_enabled` 时回退 `bash -lc`。`run_in_background=true` 把命令登记到会话进程表，立即返回 `process_id`；用 `ProcessList` / `ProcessOutput` / `ProcessStop` / `Monitor` 跟踪。仅本地会话支持后台 Bash。`Grep` 在 `rg_sidecar_enabled` 且找到打包的 `tools/rg` 或 PATH 上的 `rg` 时用 ripgrep，否则用 Rust 正则遍历。
@@ -94,7 +102,7 @@ P4 把进程内编程 Agent 接到渠道 + 工作区外壳。数据流仍是 `Re
 - 未验证 Shell 命令默认需要授权；重定向覆盖、`cp/mv`、所有 `git restore` 均进入风险判断。本地 Bash 同时排空两路输出并限内存，超时或取消时终止独立进程组；SSH Bash 透传 deadline / cancel 并发送终止信号、关闭通道。超出硬上限的输出仅保留尾部，不能从 artifact 恢复被丢弃前缀。
 - 本地文件工具按真实路径及最近存在父目录检查边界，额外读写根保持各自权限，递归搜索不跟随符号链接；SSH 文件工具拒绝符号链接路径。SSH Write 支持防覆盖创建新文件，覆盖旧文件仍要求 Read 与内容指纹匹配。这些边界不等同于操作系统级 Shell 沙箱。
 - 本地会话的 `Read / Glob / Grep` 默认允许只读访问当前有效技能目录及其附属文件，遵守启停、重名覆盖和子 Agent 的技能筛选。技能父目录及写入需额外授权，yolo 按完全访问处理。相对路径以工作区为基准，未指定路径的搜索只扫描工作区。链接按真实目录检查，递归搜索不跟随链接逃逸；直接访问外部链接目标仍须经过外部路径授权。
-- `WebFetch` 有 15 分钟 / 50 MB 的内存缓存。
+- `WebFetch` 有 15 分钟 / 50 MiB 的内存缓存，按当前会话与网络配置隔离；命中前仍重新检查权限、DNS 和缓存的重定向链。
 
 ## 钩子
 
@@ -114,7 +122,8 @@ P4 把进程内编程 Agent 接到渠道 + 工作区外壳。数据流仍是 `Re
 
 ## 自动化、目标与跨会话上下文
 
-- Cron 自动化（[`scheduler.rs`](../src-tauri/src/native/scheduler.rs)）：五段 cron + `@hourly/@daily/@weekly/@monthly`，本地时区算 `next_run_at`；调度器每 30 秒扫描，工作区有会话在工作中则推迟 1 分钟，到期时用 `start_native_with_manager` 启动新会话（提示词前缀 `[自动化 名称]`）。工具 `CronCreate`（需确认，`kind = automation`）/ `CronList` / `CronDelete`；命令 `list/create/update/delete_native_automations`、`run_native_automation_now`；设置页「自动化」。
+- Cron 自动化（[`scheduler.rs`](../src-tauri/src/native/scheduler.rs)）：五段 cron + `@hourly/@daily/@weekly/@monthly`，本地时区算 `next_run_at`；调度器每 30 秒扫描，工作区有会话在工作中则推迟 1 分钟，到期时用 `start_native_with_manager` 启动新会话（提示词前缀 `[自动化 名称]`）。工具 `CronCreate` / `CronList` / `CronUpdate` / `CronDelete`；写操作需确认（`kind = automation`）；命令 `list/create/update/delete_native_automations`、`run_native_automation_now`；设置页「自动化」。
+- `CronUpdate(id, name?, prompt?, cron?, enabled?, channel_id?, model?)` 仅主 Agent 可用，计划模式禁止调用；只能更新当前工作区的自动化，至少提供一个更新字段。未提供字段保持不变，名称/提示词/cron 不接受空白；渠道和模型可用空字符串清除，清除渠道同时清除模型。修改渠道/模型会校验有效组合；仅 cron 或启停变化重算下次执行时间，改名或改提示词保留调度时间及既有运行记录，不立即执行。
 - 目标（[`goals.rs`](../src-tauri/src/native/goals.rs)）：`Goal(action=set|update|complete|clear, title, checklist, note)` 维护会话的当前目标与进度清单，`GoalRead` 读取；每次变更写 `[GOAL] {json}` 行，前端渲染为 `GoalRow`。
 - `ReadSessionContext`：不带 `session_id` 列出同工作区最近会话（标题、时间、轮数、最后回复摘录）；带 `session_id` 仍校验工作区归属，再返回最近的用户 / 助手对话摘录。
 - `/fork [checkpoint_id]` → `fork_native_session`：把已结束会话的 transcript 复制到一条新的会话记录（标题加「（分叉）」，`resume_session_id` 指向源会话），可选先回滚到某个 Git 检查点；新会话可直接续聊。
@@ -152,15 +161,27 @@ P4 把进程内编程 Agent 接到渠道 + 工作区外壳。数据流仍是 `Re
 - Prompt cache：Anthropic 官方端点在 system 末块、最后一个工具、最后一条消息打 `cache_control: ephemeral`；OpenAI / Responses 官方端点传会话级 `prompt_cache_key`。第三方兼容网关默认不改请求体（`PromptCacheMode::Auto`）。系统提示的易变块（日期、Git 状态、权限模式）移到最后，静态前缀才能命中缓存。
 - 重试：`model_retry_*` 设置控制指数退避（默认 6 次、1 s 起、上限 30 s、倍数 2、带抖动），服务端 `Retry-After` 优先但不超过上限；流读取中断视为可重试，重试前清空已流式显示的半截内容。
 
+模型层通过 `ModelResponse` 返回消息、usage、提供商原始结束字段、规范化结束类型和 Responses ID；传输中断、无效响应、取消、提供商错误与上下文错误保留结构化分类。完整 JSON 或合法终止事件可兼容缺少结束原因的网关：OpenAI SSE 需要 `finish_reason` 或 `[DONE]`，Anthropic 需要 `message_stop`，Responses 需要完整响应级终止事件。未知原因的显式 incomplete 状态、无终止证据、错误事件和无效工具批不能作为成功响应；增量 SSE 解析失败不会再退回文本缓冲区绕过检查。
+
+输出达到 token 上限时，主 Agent 与真实子 Agent 保留有效文本/思考内容，丢弃该响应的工具调用，再自动续接，**每个用户回合最多额外调用 3 次**。压缩和转向不重置次数；取消、预算不足或次数耗尽会停止并报告未完成。续接提示只属于当前待恢复请求，完成、转向和新用户回合后不残留；正常完成的工具/stop-hook 后续步骤不携带旧的部分文本前缀。上下文上限沿用被动压缩流程。摘要、记忆、Hook 和一次性生成不自动续接，遇到部分结果会报告失败。OutputLimit/ContextLimit/Refusal 会清除 Responses 服务端续接锚点，避免继续携带已被本地丢弃的工具调用。
+
+助手输出使用 `assistant: { chain_id, part, subagent_tag? }` 标识片段，贯穿实时 delta、持久化事件及历史回放。同一文本链按片段序号精确拼接，跨 thinking/usage 事件仍保留完整 Markdown 与代码围栏，复制结果与显示一致；独立文本链保持段落分隔。旧的无身份历史保持原有显示，不通过文本相似度猜测拼接关系。
+
 ## 工具与 MCP 子进程环境
 
 会话启动时把 `network-settings.json` 转成代理 / CA 环境变量：代理写入大小写 `HTTP_PROXY` / `HTTPS_PROXY`，不代理地址写入 `NO_PROXY`，自定义 CA 写入 `SSL_CERT_FILE` / `NODE_EXTRA_CA_CERTS`。本地 Bash 和本地 MCP 子进程会注入这些变量；MCP 自身的 `env` 随后应用。本地 stdio MCP 还会把 Homebrew / nvm / fnm / volta 等常见目录并入 PATH，并把 `npx` 这类裸命令解析成绝对路径后再 spawn，避免桌面进程 PATH 过短导致 `os error 2`。SSH 远端 Bash 与远端 MCP 不注入本机网络设置。
 
 子 Agent 克隆父 Agent 的 `ToolCtx.extra_env`，因此本地 Bash 的网络环境在子 Agent 中保持一致。
 
+`WebFetch` 始终从 Agent 所在本机请求，SSH 工作区不改变网络主机。只允许 HTTP/HTTPS，直连每一跳先解析并检查全部候选 IPv4/IPv6，再将连接固定到已检查地址，保留原始 Host 和 TLS 主机名校验；混合公网/非公网 DNS 也需要非公网授权。最多跟随 5 次重定向，每跳重新检查，不向重定向目标转发 URL 凭据。网络等待累计最多 30 秒，读取达到 512 KiB 即停止并标明内容可能不完整。
+
+非公网、回环及特殊用途地址使用 `network_origin` 确认，可允许本次或当前会话的同一 origin（协议、主机、端口）。`WebFetch` 每次读取应用明确保存的代理、NO_PROXY 和自定义 CA，禁用隐式环境代理；NO_PROXY 命中走相同的严格直连检查。代理使用 `network_proxy` 单独确认，说明代理侧 DNS/目标 IP 无法由本机核验，信任绑定代理与网络配置，配置或 CA 内容变化后重新确认；代理失败直接报错，不回退直连。
+
+这些确认不生成普通工具 allow 规则，也不能由网页或 `permission_request` Hook 授予；「当前会话允许」只保存对应网络信任，不开启全局完全访问。显式 deny 始终优先，`yolo` 按既有完全访问语义免确认。私网授权按会话/origin 保存，缓存读取仍检查当前访问链，不能借其他会话或旧代理配置绕过授权。实现见 [`web_access.rs`](../src-tauri/src/native/tools/web_access.rs)、[`web_dns.rs`](../src-tauri/src/native/tools/web_dns.rs) 和 [`web.rs`](../src-tauri/src/native/tools/web.rs)。
+
 ## 命令
 
-会话：`start_native_session`、`stop_native_session`、`stop_native`、`restart_native_session`、`resume_native_session`、`send_native_input`、`finish_native_input`、`resolve_native_tool_permission`（决策含 `allow_always`）、`answer_native_plan_question`、`resolve_native_plan_approval`（可选 `ai_channel_id` / `model` / `reasoning_effort`，批准时热更换实施模型与思考等级）、`compact_native_session`。
+会话：`start_native_session`、`stop_native_session`、`stop_native`、`restart_native_session`、`resume_native_session`、`send_native_input`、`submit_native_steer`、`get_native_steer_snapshot`、`finish_native_input`、`resolve_native_tool_permission`（决策含 `allow_always`）、`answer_native_plan_question`、`resolve_native_plan_approval`（可选 `ai_channel_id` / `model` / `reasoning_effort`，批准时热更换实施模型与思考等级）、`compact_native_session`。
 
 工作区 / 历史：`list/create/update/delete_workspace`、`check_workspace_health`、`list_agent_sessions`、`get_agent_session_log_lines`、`prepare_agent_session_resume`、`set_agent_session_pinned`、`delete_agent_session`、`list_activity_logs`。
 
@@ -174,17 +195,18 @@ P4 把进程内编程 Agent 接到渠道 + 工作区外壳。数据流仍是 `Re
 | --- | --- |
 | `native-session` | `AgentSessionStarted` |
 | `native-input-queue` | `session_record_id` + `queue_id` + `revision` + `items(id/text/image_count/editing)`，待执行指令完整快照。 |
+| `native-steer` | `session_record_id` + `instance_id` + `turn_id` + `revision` + `receipts` + 可选 `lifecycle`，当前回合与转向状态快照。 |
 | `native-request-resolved` | `session_record_id` + `request_id` + `kind(permission/question/plan_approval)`，仅清除对应请求。 |
 | `native-background-tasks` | `session_record_id` + `tasks`，后台任务完整快照。 |
-| `native-stdout` | `AgentSessionOutput`（已写入 `agent_session_events`）。工具 start/result 带可选 `tool`（`call_id` / `name` / `title` / `ok` / `duration_ms` 等）和 live-only `images`；落库 `message` 为 `{"nox":1,"line":"...","tool":{...}}` 信封，旧纯文本行仍可回放。 |
-| `native-text-delta` | `NativeTextDelta`（仅展示，不落库） |
+| `native-stdout` | `AgentSessionOutput`（已写入 `agent_session_events`）。工具 start/result 带可选 `tool`（`call_id` / `name` / `title` / `ok` / `duration_ms` 等）和 live-only `images`；助手正文带可选 `assistant` 片段身份。落库 `message` 为 `{"nox":1,"line":"...","tool":{...},"assistant":{...}}` 信封（未使用字段省略），旧纯文本行仍可回放。 |
+| `native-text-delta` | `NativeTextDelta`（仅展示，不落库）；携带运行实例及回合身份，可带 `assistant`，与已提交片段精确拼接，重试清空只影响未提交内容。 |
 | `native-context-usage` | `NativeContextUsage`（`used` = 工具 schema + 消息；分类字段 + 上次调用 `prompt_tokens` / `cached_tokens`；仅父 Agent；同时写入 `agent_sessions.context_usage_json`） |
-| `native-turn-state` | `NativeTurnState`（`waiting_input` / `working`，不落库） |
+| `native-turn-state` | `session_record_id` + `instance_id` + `turn_id` + `steer_turn_id` + 单调 `revision` + `state`（`waiting_input` / `working`，不落库）；`steer_turn_id` 仅在信箱仍开放时非空，空闲压缩不开放转向。 |
 | `native-plan-mode` | `NativePlanModeChanged`（`session_record_id` + 当前 `plan_mode`，不落库） |
 | `native-permission-request` | 高风险工具确认（含 `suggested_rule`） |
 | `native-plan-question` | `AskUserQuestion` 提问（所有模式可用） |
 | `native-plan-approval-request` | `ExitPlanMode` 提交的计划，等待批准 / 退回 |
-| `native-exit` | `AgentSessionExit` |
+| `native-exit` | `AgentSessionExit`，含退出的 `instance_id`，不能清除同一会话的新运行实例。 |
 
 前端监听：`onNativeStdout` / `onNativeExit` / `onNativeSession` / `onNativeTextDelta` / `onNativePermissionRequest` / `onNativePlanQuestion` / `onNativeContextUsage` / `onNativeTurnState` / `onNativePlanMode`。接线见 [`frontend.md`](frontend.md)。
 

@@ -1215,7 +1215,15 @@ async fn add_list_and_remove_detached_worktree() {
     let items = super::worktree::list_worktrees(&env.target)
         .await
         .expect("list");
-    assert!(items.iter().any(|item| item.path == path_text), "{items:?}");
+    // Git reports canonical paths; macOS's temporary directory may use /var
+    // while the same directory is listed under /private/var.
+    let canonical_path = path.canonicalize().expect("created worktree path");
+    assert!(
+        items.iter().any(|item| {
+            Path::new(&item.path).canonicalize().ok().as_deref() == Some(canonical_path.as_path())
+        }),
+        "{items:?}"
+    );
     super::worktree::remove_worktree(&env.target, &path_text)
         .await
         .expect("remove");

@@ -107,6 +107,7 @@ pub(crate) fn take_latest_configuration(
 
 #[derive(Debug, Clone)]
 pub struct PermissionRequest {
+    pub origin: Option<crate::native::steer::MainOrigin>,
     pub request_id: String,
     pub profile_id: String,
     pub workspace_id: Option<String>,
@@ -128,6 +129,7 @@ pub struct PendingPermission {
 
 #[derive(Debug, Clone)]
 pub struct PlanApprovalRequest {
+    pub origin: Option<crate::native::steer::MainOrigin>,
     pub request_id: String,
     pub profile_id: String,
     pub workspace_id: Option<String>,
@@ -142,6 +144,7 @@ pub struct PendingPlanApproval {
 
 #[derive(Debug, Clone)]
 pub struct PlanQuestionRequest {
+    pub origin: Option<crate::native::steer::MainOrigin>,
     pub request_id: String,
     pub profile_id: String,
     pub workspace_id: Option<String>,
@@ -182,6 +185,12 @@ pub struct NativeLiveSession {
 }
 
 impl NativeLiveSession {
+    pub fn accepts_origin(&self, origin: Option<&crate::native::steer::MainOrigin>) -> bool {
+        !self.cancel.is_cancelled()
+            && !self.closing
+            && origin.is_none_or(|origin| self.input_queue.steer.is_current(origin))
+    }
+
     pub fn runtime_snapshot(&self) -> Option<crate::db::models::NativeSessionRuntime> {
         self.runtime.clone().map(|mut runtime| {
             runtime.plan_mode = self.plan_mode.load(Ordering::SeqCst);
@@ -201,10 +210,61 @@ pub struct NativeAgentManager {
     sessions: HashMap<String, NativeLiveSession>,
     workspace_roots: HashMap<String, SessionWorkspaceRoots>,
     operation_locks: HashMap<String, Weak<tokio::sync::Mutex<()>>>,
+    steer_submission_locks: HashMap<(String, String), Weak<tokio::sync::Mutex<()>>>,
+    plan_authorizations: HashMap<String, (String, crate::native::plans::PlanAuthorization)>,
+    plan_authorization_revisions: HashMap<String, u64>,
     stopping: CancelFlag,
 }
 
 impl NativeAgentManager {
+    /// Cancel before awaiting the session operation lock (stop/steer can interrupt saving).
+    pub fn invalidate_plan_authorization(&mut self, session_id: &str) {
+        let revision = self
+            .plan_authorization_revisions
+            .entry(session_id.to_string())
+            .or_default();
+        *revision = revision.wrapping_add(1);
+        if let Some((_, token)) = self.plan_authorizations.remove(session_id) {
+            token.cancel();
+        }
+    }
+
+    pub fn plan_authorization_revision(&self, session_id: &str) -> u64 {
+        self.plan_authorization_revisions
+            .get(session_id)
+            .copied()
+            .unwrap_or_default()
+    }
+
+    pub fn begin_plan_authorization(
+        &mut self,
+        session_id: &str,
+        request_id: &str,
+        expected_revision: u64,
+    ) -> Result<crate::native::plans::PlanAuthorization, String> {
+        self.require_running()?;
+        if self.plan_authorization_revision(session_id) != expected_revision {
+            return Err("计划授权已取消或请求已过期".into());
+        }
+        if self.sessions.contains_key(session_id) {
+            self.require_plan_approval(session_id, request_id)?;
+        }
+        if self
+            .plan_authorizations
+            .get(session_id)
+            .is_some_and(|(current, token)| current != request_id && token.check().is_ok())
+        {
+            return Err("计划批准请求已过期".into());
+        }
+        self.invalidate_plan_authorization(session_id);
+        let token = crate::native::plans::PlanAuthorization::new();
+        self.plan_authorizations.insert(
+            session_id.to_string(),
+            (request_id.to_string(), token.clone()),
+        );
+        Ok(token)
+    }
+
     pub fn new() -> Self {
         Self::default()
     }
@@ -240,6 +300,27 @@ impl NativeAgentManager {
         lock
     }
 
+    pub(crate) fn steer_submission_lock(
+        &mut self,
+        session_id: &str,
+        input_id: &str,
+    ) -> Arc<tokio::sync::Mutex<()>> {
+        let key = (session_id.to_string(), input_id.to_string());
+        if let Some(lock) = self
+            .steer_submission_locks
+            .get(&key)
+            .and_then(Weak::upgrade)
+        {
+            return lock;
+        }
+        self.steer_submission_locks
+            .retain(|_, lock| lock.strong_count() > 0);
+        let lock = Arc::new(tokio::sync::Mutex::new(()));
+        self.steer_submission_locks
+            .insert(key, Arc::downgrade(&lock));
+        lock
+    }
+
     pub(crate) fn session_is_busy(&self, session_id: &str) -> bool {
         self.get_session(session_id).is_some_and(|session| {
             session.closing
@@ -264,6 +345,17 @@ impl NativeAgentManager {
         if self.sessions.contains_key(session_id) {
             self.workspace_roots.insert(session_id.to_string(), roots);
         }
+    }
+
+    pub fn effective_plan_cwd(&self, session_id: &str) -> Option<String> {
+        self.workspace_roots.get(session_id).map(|roots| {
+            roots
+                .active_root
+                .read()
+                .unwrap_or_else(|error| error.into_inner())
+                .to_string_lossy()
+                .into_owned()
+        })
     }
 
     pub fn isolation_worktree_path(&self, session_id: &str) -> Option<String> {
@@ -317,6 +409,7 @@ impl NativeAgentManager {
     }
 
     pub fn remove_session(&mut self, session_record_id: &str) -> Option<NativeLiveSession> {
+        self.invalidate_plan_authorization(session_record_id);
         self.workspace_roots.remove(session_record_id);
         self.sessions.remove(session_record_id)
     }
@@ -358,7 +451,7 @@ impl NativeAgentManager {
             .filter(|pending| {
                 pending.request.request_id == request_id
                     && !pending.reply.is_closed()
-                    && !session.cancel.is_cancelled()
+                    && session.accepts_origin(pending.request.origin.as_ref())
             })
             .ok_or_else(|| "权限确认请求已过期".to_string())?;
         if pending.request.allow_once_only {
@@ -426,6 +519,48 @@ impl NativeAgentManager {
         Ok(Some(session.followup_tx.clone()))
     }
 
+    /// Keep child-origin requests, expiring only superseded main execution requests.
+    pub fn supersede_main_requests(&mut self, session_id: &str) -> Vec<(String, &'static str)> {
+        let mut resolved = Vec::new();
+        if let Some(session) = self.sessions.get_mut(session_id) {
+            let mailbox = session.input_queue.steer.clone();
+            session.pending_permission.retain(|pending| {
+                let stale = pending
+                    .request
+                    .origin
+                    .as_ref()
+                    .is_some_and(|origin| !mailbox.is_current(origin));
+                if stale {
+                    resolved.push((pending.request.request_id.clone(), "permission"));
+                }
+                !stale
+            });
+            session.pending_question.retain(|pending| {
+                let stale = pending
+                    .request
+                    .origin
+                    .as_ref()
+                    .is_some_and(|origin| !mailbox.is_current(origin));
+                if stale {
+                    resolved.push((pending.request.request_id.clone(), "question"));
+                }
+                !stale
+            });
+            session.pending_plan_approval.retain(|pending| {
+                let stale = pending
+                    .request
+                    .origin
+                    .as_ref()
+                    .is_some_and(|origin| !mailbox.is_current(origin));
+                if stale {
+                    resolved.push((pending.request.request_id.clone(), "plan_approval"));
+                }
+                !stale
+            });
+        }
+        resolved
+    }
+
     pub fn deny_pending_permission(&mut self, session_record_id: &str) {
         if let Some(session) = self.sessions.get_mut(session_record_id) {
             while let Some(pending) = session.pending_permission.pop_front() {
@@ -447,10 +582,19 @@ impl NativeAgentManager {
         session_record_id: &str,
         pending: PendingPlanApproval,
     ) -> Result<bool, String> {
+        if !self
+            .sessions
+            .get(session_record_id)
+            .is_some_and(|s| s.accepts_origin(pending.request.origin.as_ref()))
+            || pending.reply.is_closed()
+        {
+            return Err(crate::native::steer::SUPERSEDED.into());
+        }
+        self.invalidate_plan_authorization(session_record_id);
         let session = self
             .sessions
             .get_mut(session_record_id)
-            .ok_or_else(|| "没有运行中的内置 Agent 会话".to_string())?;
+            .expect("validated session");
         if pending.reply.is_closed() || session.cancel.is_cancelled() || session.closing {
             return Err("计划审批请求已失效".to_string());
         }
@@ -476,6 +620,9 @@ impl NativeAgentManager {
             .pending_plan_approval
             .pop_front()
             .ok_or_else(|| "没有待批准的计划".to_string())?;
+        if !session.accepts_origin(pending.request.origin.as_ref()) {
+            return Err(crate::native::steer::SUPERSEDED.into());
+        }
         if pending.request.request_id != request_id {
             session.pending_plan_approval.push_front(pending);
             return Err("计划批准请求已过期".to_string());
@@ -544,6 +691,9 @@ impl NativeAgentManager {
             .sessions
             .get_mut(session_record_id)
             .ok_or_else(|| "没有运行中的内置 Agent 会话".to_string())?;
+        if pending.reply.is_closed() || !session.accepts_origin(pending.request.origin.as_ref()) {
+            return Err(crate::native::steer::SUPERSEDED.into());
+        }
         if session.allow_session_commands.load(Ordering::SeqCst)
             && pending.request.tool_name == "Bash"
             && pending.request.file_access.is_none()
@@ -574,6 +724,9 @@ impl NativeAgentManager {
             .pending_permission
             .pop_front()
             .ok_or_else(|| "没有待确认的高风险操作".to_string())?;
+        if !session.accepts_origin(pending.request.origin.as_ref()) {
+            return Err(crate::native::steer::SUPERSEDED.into());
+        }
         if pending.request.request_id != request_id {
             session.pending_permission.push_front(pending);
             return Err("权限确认请求已过期".to_string());
@@ -587,6 +740,18 @@ impl NativeAgentManager {
         {
             session.pending_permission.push_front(pending);
             return Err("当前请求不能授权本会话的所有命令".to_string());
+        }
+        if matches!(
+            pending.request.kind,
+            NativeToolRiskKind::NetworkOrigin | NativeToolRiskKind::NetworkProxy
+        ) && !matches!(
+            decision,
+            NativePermissionDecision::AllowOnce
+                | NativePermissionDecision::AllowSession
+                | NativePermissionDecision::Deny
+        ) {
+            session.pending_permission.push_front(pending);
+            return Err("网络信任仅支持本次、当前会话或拒绝".into());
         }
         if pending.request.allow_once_only
             && !matches!(
@@ -620,7 +785,12 @@ impl NativeAgentManager {
             return Err("文件访问请使用本次允许或始终允许".to_string());
         }
         if decision == NativePermissionDecision::AllowSession
-            && pending.request.kind != NativeToolRiskKind::Mcp
+            && !matches!(
+                pending.request.kind,
+                NativeToolRiskKind::Mcp
+                    | NativeToolRiskKind::NetworkOrigin
+                    | NativeToolRiskKind::NetworkProxy
+            )
             && pending.request.tool_name != "WorkspaceHooks"
         {
             session
@@ -701,6 +871,9 @@ impl NativeAgentManager {
             .sessions
             .get_mut(session_record_id)
             .ok_or_else(|| "没有运行中的内置 Agent 会话".to_string())?;
+        if pending.reply.is_closed() || !session.accepts_origin(pending.request.origin.as_ref()) {
+            return Err(crate::native::steer::SUPERSEDED.into());
+        }
         let should_emit = session.pending_question.is_empty();
         session.pending_question.push_back(pending);
         Ok(should_emit)
@@ -720,6 +893,9 @@ impl NativeAgentManager {
             .pending_question
             .pop_front()
             .ok_or_else(|| "没有待回答的计划提问".to_string())?;
+        if !session.accepts_origin(pending.request.origin.as_ref()) {
+            return Err(crate::native::steer::SUPERSEDED.into());
+        }
         if pending.request.request_id != request_id {
             session.pending_question.push_front(pending);
             return Err("计划提问已过期".to_string());
@@ -780,6 +956,9 @@ impl NativeAgentManager {
     }
 
     pub fn cancel_all(&mut self) {
+        for (_, authorization) in self.plan_authorizations.values() {
+            authorization.cancel();
+        }
         for session in self.sessions.values() {
             session.cancel.cancel();
         }
@@ -887,6 +1066,82 @@ pub(super) mod tests {
     }
 
     #[tokio::test]
+    async fn stale_plan_authorization_does_not_cancel_save_or_unconsumed_reply() {
+        let manager = Arc::new(tokio::sync::Mutex::new(NativeAgentManager::new()));
+        manager.lock().await.add_session(live_session("plan"));
+        let (reply, rx) = oneshot::channel();
+        manager
+            .lock()
+            .await
+            .enqueue_plan_approval(
+                "plan",
+                PendingPlanApproval {
+                    request: PlanApprovalRequest {
+                        origin: None,
+                        request_id: "current".into(),
+                        profile_id: String::new(),
+                        workspace_id: None,
+                        session_kind: "plan".into(),
+                        plan: "body".into(),
+                    },
+                    reply,
+                },
+            )
+            .unwrap();
+        let revision = manager.lock().await.plan_authorization_revision("plan");
+        let authorization = manager
+            .lock()
+            .await
+            .begin_plan_authorization("plan", "current", revision)
+            .unwrap();
+        let waiting = authorization.clone();
+        let acknowledgement = tokio::spawn(async move { waiting.wait_for_implementation().await });
+        for reply_sent in [false, true] {
+            if reply_sent {
+                manager
+                    .lock()
+                    .await
+                    .resolve_plan_approval(
+                        "plan",
+                        "current",
+                        PlanApprovalAnswer {
+                            approved: true,
+                            authorization: Some(authorization.clone()),
+                            ..Default::default()
+                        },
+                    )
+                    .unwrap();
+            }
+            let stale_manager = manager.clone();
+            let stale = tokio::spawn(async move {
+                let mut manager = stale_manager.lock().await;
+                let revision = manager.plan_authorization_revision("plan");
+                manager.begin_plan_authorization("plan", "stale", revision)
+            });
+            assert!(stale.await.unwrap().is_err());
+            authorization.check().unwrap();
+            assert!(!acknowledgement.is_finished());
+        }
+        let answer = rx.await.unwrap();
+        answer
+            .authorization
+            .unwrap()
+            .commit_implementation(|| ())
+            .unwrap();
+        acknowledgement.await.unwrap().unwrap();
+    }
+
+    #[test]
+    fn stop_during_plan_validation_prevents_late_authorization() {
+        let mut manager = NativeAgentManager::new();
+        let revision = manager.plan_authorization_revision("detached");
+        manager.invalidate_plan_authorization("detached");
+        assert!(manager
+            .begin_plan_authorization("detached", "current", revision)
+            .is_err());
+    }
+
+    #[tokio::test]
     async fn stale_cancelled_and_expired_plan_requests_cannot_be_approved() {
         let mut manager = NativeAgentManager::new();
         manager.add_session(live_session("plan"));
@@ -896,6 +1151,7 @@ pub(super) mod tests {
                 "plan",
                 PendingPlanApproval {
                     request: PlanApprovalRequest {
+                        origin: None,
                         request_id: "current".into(),
                         profile_id: String::new(),
                         workspace_id: None,
@@ -934,6 +1190,7 @@ pub(super) mod tests {
                 "plan",
                 PendingPlanApproval {
                     request: PlanApprovalRequest {
+                        origin: None,
                         request_id: "late".into(),
                         profile_id: String::new(),
                         workspace_id: None,
@@ -1421,6 +1678,7 @@ pub(super) mod tests {
         (
             PendingPermission {
                 request: PermissionRequest {
+                    origin: None,
                     request_id: request_id.to_string(),
                     profile_id: "prof-1".to_string(),
                     workspace_id: Some("ws-1".to_string()),
@@ -1593,8 +1851,8 @@ pub(super) mod tests {
             source: crate::native::tools::contract::PatternSource::Command,
             plan_bash: None,
         });
-        drop(reply);
         manager.enqueue_permission("one", pending).unwrap();
+        drop(reply);
         assert!(manager
             .save_permission_rules(config.path(), "one", "closed", None, None)
             .is_err());
@@ -1623,6 +1881,38 @@ pub(super) mod tests {
             NativePermissionDecision::Deny
         );
         assert!(second_rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn network_trust_cannot_grant_global_permissions_or_persistent_rules() {
+        for kind in [
+            NativeToolRiskKind::NetworkOrigin,
+            NativeToolRiskKind::NetworkProxy,
+        ] {
+            let mut manager = NativeAgentManager::new();
+            manager.add_session(live_session("sess-1"));
+            let (mut request, rx) = pending("network", "WebFetch");
+            request.request.kind = kind;
+            manager.enqueue_permission("sess-1", request).unwrap();
+            for decision in [
+                NativePermissionDecision::AllowAlways,
+                NativePermissionDecision::AllowServer,
+                NativePermissionDecision::AllowSessionCommands,
+            ] {
+                assert!(manager
+                    .resolve_permission("sess-1", "network", decision)
+                    .is_err());
+            }
+            manager
+                .resolve_permission("sess-1", "network", NativePermissionDecision::AllowSession)
+                .unwrap();
+            assert_eq!(rx.await.unwrap(), NativePermissionDecision::AllowSession);
+            assert!(!manager
+                .get_session("sess-1")
+                .unwrap()
+                .allow_all_high_risk
+                .load(Ordering::SeqCst));
+        }
     }
 
     #[tokio::test]
@@ -1919,5 +2209,120 @@ pub(super) mod tests {
         );
         drop(latest);
         assert!(second_rx.await.is_err());
+    }
+    #[tokio::test]
+    async fn steer_supersedes_main_waits_preserves_children_and_rejects_late_enqueue() {
+        let mut manager = NativeAgentManager::new();
+        let session = live_session("steer");
+        let mailbox = session.input_queue.steer.clone();
+        mailbox.configure(Arc::new(|_| Box::pin(async { Ok(()) })), Arc::new(|_| {}));
+        let origin = mailbox.begin_turn().await;
+        let turn = mailbox.snapshot().await.turn_id.unwrap();
+        manager.add_session(session);
+        let (mut main, main_rx) = pending("main", "Bash");
+        main.request.origin = Some(origin.clone());
+        let (mut child, child_rx) = pending("child", "Bash");
+        let mut child_origin = origin.clone();
+        child_origin.child = true;
+        child.request.origin = Some(child_origin.clone());
+        manager.enqueue_permission("steer", main).unwrap();
+        manager.enqueue_permission("steer", child).unwrap();
+        let (question_tx, question_rx) = oneshot::channel();
+        manager
+            .enqueue_question(
+                "steer",
+                PendingPlanQuestion {
+                    request: PlanQuestionRequest {
+                        origin: Some(origin.clone()),
+                        request_id: "question".into(),
+                        profile_id: "".into(),
+                        workspace_id: None,
+                        session_kind: "plan".into(),
+                        questions: vec![],
+                    },
+                    reply: question_tx,
+                },
+            )
+            .unwrap();
+        let (plan_tx, plan_rx) = oneshot::channel();
+        manager
+            .enqueue_plan_approval(
+                "steer",
+                PendingPlanApproval {
+                    request: PlanApprovalRequest {
+                        origin: Some(origin.clone()),
+                        request_id: "plan".into(),
+                        profile_id: "".into(),
+                        workspace_id: None,
+                        session_kind: "plan".into(),
+                        plan: "body".into(),
+                    },
+                    reply: plan_tx,
+                },
+            )
+            .unwrap();
+        mailbox
+            .accept(
+                &turn,
+                &uuid::Uuid::new_v4().to_string(),
+                "change",
+                &[],
+                vec![],
+            )
+            .await
+            .unwrap();
+        let resolved = manager.supersede_main_requests("steer");
+        assert_eq!(resolved.len(), 3);
+        assert!(main_rx.await.is_err());
+        assert!(question_rx.await.is_err());
+        assert!(plan_rx.await.is_err());
+        assert_eq!(
+            manager
+                .get_session("steer")
+                .unwrap()
+                .pending_permission
+                .front()
+                .unwrap()
+                .request
+                .request_id,
+            "child"
+        );
+        assert!(manager
+            .resolve_permission("steer", "main", NativePermissionDecision::AllowOnce)
+            .is_err());
+        let (mut late, _late_rx) = pending("late", "Bash");
+        late.request.origin = Some(origin.clone());
+        manager
+            .get_session("steer")
+            .unwrap()
+            .allow_session_commands
+            .store(true, Ordering::SeqCst);
+        assert!(
+            manager.enqueue_permission("steer", late).is_err(),
+            "validate before auto-allow"
+        );
+        let (mut late_child, late_child_rx) = pending("late-child", "Write");
+        late_child.request.origin = Some(child_origin);
+        assert!(!manager.enqueue_permission("steer", late_child).unwrap());
+        manager
+            .resolve_permission("steer", "child", NativePermissionDecision::AllowOnce)
+            .unwrap();
+        assert_eq!(child_rx.await.unwrap(), NativePermissionDecision::AllowOnce);
+        manager
+            .resolve_permission("steer", "late-child", NativePermissionDecision::AllowOnce)
+            .unwrap();
+        assert_eq!(
+            late_child_rx.await.unwrap(),
+            NativePermissionDecision::AllowOnce
+        );
+        manager.remove_session("steer");
+        manager.add_session(live_session("steer"));
+        let (mut previous_runtime, _rx) = pending("old-runtime", "Write");
+        let mut old_child = origin;
+        old_child.child = true;
+        previous_runtime.request.origin = Some(old_child);
+        assert!(manager
+            .enqueue_permission("steer", previous_runtime)
+            .is_err());
     }
 }

@@ -18,8 +18,8 @@ use crate::app::ssh::validate_password_execution;
 use crate::db::models::{
     AgentSessionExit, AgentSessionOutput, AgentSessionRecord, AgentSessionStarted,
     NativeContextUsage, NativePlanModeChanged, NativeSessionConfigurationEvent,
-    NativeSessionRuntime, NativeTextDelta, NativeToolEvent, NativeToolImage, NativeTurnState,
-    SshConfigRecord, StartNativeSessionInput, UpdateNativeSessionConfigurationInput,
+    NativeSessionRuntime, NativeTextDelta, NativeToolEvent, NativeToolImage, SshConfigRecord,
+    StartNativeSessionInput, UpdateNativeSessionConfigurationInput,
 };
 use crate::engine::context::{resolve_workspace_execution_context_with_pool, ExecutionContext};
 use crate::engine::UsageDelta;
@@ -45,6 +45,9 @@ use crate::native::model::types::StreamDelta;
 use crate::native::model::{ModelClient, ModelClientConfig, ResponsesContinuationMode};
 use crate::native::model_catalog::{
     apply_catalog_defaults, fill_from_catalog, resolve_runtime_reasoning_effort,
+};
+use crate::native::plans::{
+    self, ApprovedPlanSnapshot, PendingPlanSnapshot, PlanAuthorization, PlanSaveStatus,
 };
 use crate::native::protocol::record_to_channel;
 use crate::native::tools::dispatch::PlanApprovalAnswer;
@@ -182,6 +185,7 @@ fn user_turn_count(messages: &[crate::native::model::types::Message]) -> u32 {
 
 #[derive(Clone, Serialize)]
 struct NativePermissionRequestEvent {
+    instance_id: Option<String>,
     session_record_id: String,
     request_id: String,
     profile_id: String,
@@ -210,6 +214,10 @@ fn permission_event(
     request: &PermissionRequest,
 ) -> NativePermissionRequestEvent {
     NativePermissionRequestEvent {
+        instance_id: request
+            .origin
+            .as_ref()
+            .map(|origin| origin.instance_id.clone()),
         session_record_id: session_record_id.to_string(),
         request_id: request.request_id.clone(),
         profile_id: request.profile_id.clone(),
@@ -228,6 +236,7 @@ fn permission_event(
 
 #[derive(Clone, Serialize)]
 struct NativePlanQuestionEvent {
+    instance_id: Option<String>,
     session_record_id: String,
     request_id: String,
     profile_id: String,
@@ -241,6 +250,10 @@ fn question_event(
     request: &PlanQuestionRequest,
 ) -> NativePlanQuestionEvent {
     NativePlanQuestionEvent {
+        instance_id: request
+            .origin
+            .as_ref()
+            .map(|origin| origin.instance_id.clone()),
         session_record_id: session_record_id.to_string(),
         request_id: request.request_id.clone(),
         profile_id: request.profile_id.clone(),
@@ -252,6 +265,7 @@ fn question_event(
 
 #[derive(Clone, Serialize)]
 struct NativePlanApprovalEvent {
+    instance_id: Option<String>,
     session_record_id: String,
     request_id: String,
     profile_id: String,
@@ -265,6 +279,10 @@ fn plan_approval_event(
     request: &PlanApprovalRequest,
 ) -> NativePlanApprovalEvent {
     NativePlanApprovalEvent {
+        instance_id: request
+            .origin
+            .as_ref()
+            .map(|origin| origin.instance_id.clone()),
         session_record_id: session_record_id.to_string(),
         request_id: request.request_id.clone(),
         profile_id: request.profile_id.clone(),
@@ -321,7 +339,7 @@ fn hook_agent_handler(run: &NativeRunSettings) -> crate::native::tools::hooks::H
                     "判定要求：\n{prompt}\n\n事件载荷：\n{payload}"
                 )),
             ];
-            let (message, _usage) = client
+            let message = client
                 .chat(crate::native::model::client::ChatRequest {
                     messages: &messages,
                     tools: &[],
@@ -330,7 +348,8 @@ fn hook_agent_handler(run: &NativeRunSettings) -> crate::native::tools::hooks::H
                     max_output_tokens: Some(512),
                     thinking_enabled: false,
                 })
-                .await?;
+                .await?
+                .complete_message()?;
             Ok(message.content)
         })
     })
@@ -525,6 +544,7 @@ async fn approve_workspace_hooks(
     let (tx, rx) = tokio::sync::oneshot::channel();
     requester(
         crate::native::tools::dispatch::PermissionPrompt {
+            origin: ctx.request_origin(),
             request_id: request_id.clone(),
             tool_name: "WorkspaceHooks".to_string(),
             kind: NativeToolRiskKind::Opaque,
@@ -559,10 +579,11 @@ async fn approve_workspace_hooks(
             let _ = expire(request_id).await;
         }
     }
-    matches!(
-        decision,
-        Some(NativePermissionDecision::AllowOnce | NativePermissionDecision::AllowSession)
-    )
+    ctx.execution_current()
+        && matches!(
+            decision,
+            Some(NativePermissionDecision::AllowOnce | NativePermissionDecision::AllowSession)
+        )
 }
 
 fn attach_subagent_runtime(
@@ -634,15 +655,23 @@ async fn announce_isolation_restore(
     .await;
 }
 
-fn emit_turn_state(app: &AppHandle, session_record_id: &str, working: &AtomicBool, state: &str) {
+async fn emit_turn_state(
+    app: &AppHandle,
+    mailbox: &crate::native::steer::SteerMailbox,
+    working: &AtomicBool,
+    state: &str,
+    events: Option<&mpsc::UnboundedSender<NativeEvent>>,
+) {
     working.store(state == "working", Ordering::SeqCst);
-    let _ = app.emit(
-        "native-turn-state",
-        NativeTurnState {
-            session_record_id: session_record_id.to_string(),
-            state: state.to_string(),
-        },
-    );
+    if let Some(lifecycle) = mailbox.lifecycle_state(state).await {
+        if let Some(events) = events {
+            let _ = events.send(NativeEvent::TurnIdentity {
+                instance_id: lifecycle.instance_id.clone(),
+                turn_id: lifecycle.turn_id.clone(),
+            });
+        }
+        let _ = app.emit("native-turn-state", lifecycle);
+    }
 }
 
 fn emit_plan_mode(app: &AppHandle, session_record_id: &str, input_queue_id: &str, plan_mode: bool) {
@@ -669,9 +698,12 @@ const DELTA_SEGMENT_TEXT: &str = "text";
 const DELTA_SEGMENT_REASONING: &str = "reasoning";
 
 struct NativeDeltaEmitter {
+    instance_id: String,
+    turn_id: Option<String>,
     app: AppHandle,
     session_record_id: String,
     pending: Option<(&'static str, String)>,
+    assistant: Option<crate::db::models::NativeAssistantFragment>,
 }
 
 impl NativeDeltaEmitter {
@@ -709,10 +741,17 @@ impl NativeDeltaEmitter {
         let _ = self.app.emit(
             "native-text-delta",
             NativeTextDelta {
+                instance_id: self.instance_id.clone(),
+                turn_id: self.turn_id.clone(),
                 session_record_id: self.session_record_id.clone(),
                 kind: segment.to_string(),
                 text: delta,
                 clear,
+                assistant: if segment == DELTA_SEGMENT_TEXT {
+                    self.assistant.clone()
+                } else {
+                    None
+                },
             },
         );
     }
@@ -720,6 +759,7 @@ impl NativeDeltaEmitter {
 
 async fn forward_native_events(
     app: AppHandle,
+    instance_id: String,
     session_record_id: String,
     profile_id: String,
     workspace_id: Option<String>,
@@ -727,9 +767,12 @@ async fn forward_native_events(
     mut event_rx: mpsc::UnboundedReceiver<NativeEvent>,
 ) {
     let mut deltas = NativeDeltaEmitter {
+        instance_id,
+        turn_id: None,
         app: app.clone(),
         session_record_id: session_record_id.clone(),
         pending: None,
+        assistant: None,
     };
     let mut ticker = tokio::time::interval(DELTA_FLUSH_INTERVAL);
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -741,6 +784,11 @@ async fn forward_native_events(
                     break;
                 };
                 match event {
+                    NativeEvent::TurnIdentity { instance_id, turn_id } => {
+                        deltas.flush();
+                        deltas.instance_id = instance_id;
+                        deltas.turn_id = Some(turn_id);
+                    }
                     NativeEvent::Flush(reply) => {
                         deltas.flush();
                         let _ = reply.send(());
@@ -757,6 +805,18 @@ async fn forward_native_events(
                         )
                         .await;
                     }
+                    NativeEvent::ModelCall(fragment) => {
+                        deltas.clear();
+                        deltas.assistant = Some(fragment);
+                    }
+                    NativeEvent::Assistant { text, fragment } => {
+                        deltas.flush();
+                        emit_native_output(
+                            &app, &session_record_id, &profile_id,
+                            workspace_id.as_deref(), &session_kind,
+                            text, None, None, Some(fragment),
+                        ).await;
+                    }
                     NativeEvent::UserInput { text, images } => {
                         deltas.flush();
                         emit_native_output(
@@ -768,6 +828,7 @@ async fn forward_native_events(
                             format!("[USER_INPUT] {text}"),
                             None,
                             native_images_for_output(&images),
+                            None,
                         )
                         .await;
                     }
@@ -796,6 +857,7 @@ async fn forward_native_events(
                             line,
                             Some(event),
                             live_images,
+                            None,
                         )
                         .await;
                     }
@@ -836,8 +898,30 @@ async fn forward_native_events(
     }
 }
 
-async fn insert_session_event(
+async fn persist_steer_receipt(
     pool: &sqlx::SqlitePool,
+    receipt: &crate::native::steer::SteerReceipt,
+) -> Result<(), String> {
+    let message = serde_json::to_string(receipt).map_err(|error| error.to_string())?;
+    let mut transaction = pool.begin().await.map_err(|error| error.to_string())?;
+    if receipt.status == crate::native::steer::SteerStatus::Accepted {
+        plans::invalidate_persisted(&mut *transaction, &receipt.session_record_id, true).await?;
+    }
+    insert_session_event(
+        &mut *transaction,
+        &receipt.session_record_id,
+        "native_steer",
+        Some(&message),
+    )
+    .await?;
+    transaction
+        .commit()
+        .await
+        .map_err(|error| error.to_string())
+}
+
+async fn insert_session_event<'e>(
+    executor: impl sqlx::Executor<'e, Database = sqlx::Sqlite>,
     session_record_id: &str,
     event_type: &str,
     message: Option<&str>,
@@ -852,7 +936,7 @@ async fn insert_session_event(
     .bind(event_type)
     .bind(message)
     .bind(&now)
-    .execute(pool)
+    .execute(executor)
     .await
     .map_err(|error| format!("写入会话事件失败: {error}"))?;
     Ok(id)
@@ -875,6 +959,7 @@ async fn emit_native_line(
         line,
         None,
         None,
+        None,
     )
     .await;
 }
@@ -883,9 +968,10 @@ fn persist_stdout_message(
     line: &str,
     tool: Option<&NativeToolEvent>,
     images: Option<&[NativeToolImage]>,
+    assistant: Option<&crate::db::models::NativeAssistantFragment>,
 ) -> String {
     let has_images = images.map(|items| !items.is_empty()).unwrap_or(false);
-    if tool.is_none() && !has_images {
+    if tool.is_none() && !has_images && assistant.is_none() {
         return line.to_string();
     }
     let mut value = serde_json::json!({
@@ -894,6 +980,9 @@ fn persist_stdout_message(
     });
     if let Some(tool) = tool {
         value["tool"] = serde_json::to_value(tool).unwrap_or(serde_json::Value::Null);
+    }
+    if let Some(assistant) = assistant {
+        value["assistant"] = serde_json::to_value(assistant).unwrap_or(serde_json::Value::Null);
     }
     if let Some(images) = images {
         if !images.is_empty() {
@@ -932,12 +1021,14 @@ async fn emit_native_output(
     line: String,
     tool: Option<NativeToolEvent>,
     images: Option<Vec<NativeToolImage>>,
+    assistant: Option<crate::db::models::NativeAssistantFragment>,
 ) {
     let pool = match sqlite_pool(app).await {
         Ok(pool) => pool,
         Err(_) => return,
     };
-    let persisted = persist_stdout_message(&line, tool.as_ref(), images.as_deref());
+    let persisted =
+        persist_stdout_message(&line, tool.as_ref(), images.as_deref(), assistant.as_ref());
     let event_id = insert_session_event(&pool, session_record_id, "stdout", Some(&persisted))
         .await
         .ok();
@@ -952,6 +1043,7 @@ async fn emit_native_output(
             line,
             tool,
             images,
+            assistant,
         },
     );
 }
@@ -1277,7 +1369,7 @@ async fn run_native_one_shot_with_run(
     } else {
         crate::native::model::types::Message::user_with_images(prompt, loaded.images)
     };
-    let (mut message, mut usage) = run
+    let response = run
         .client
         .chat(crate::native::model::client::ChatRequest {
             messages: std::slice::from_ref(&user),
@@ -1289,8 +1381,10 @@ async fn run_native_one_shot_with_run(
         })
         .await
         .map_err(|error| format!("内置 Agent 一次性调用失败：{error}"))?;
+    let mut usage = response.usage;
+    let mut message = response.complete_message()?;
     if native_one_shot_text(&message).is_err() && run.thinking_enabled {
-        if let Ok((retry_message, retry_usage)) = run
+        if let Ok(retry_response) = run
             .client
             .chat(crate::native::model::client::ChatRequest {
                 messages: std::slice::from_ref(&user),
@@ -1302,9 +1396,12 @@ async fn run_native_one_shot_with_run(
             })
             .await
         {
-            if native_one_shot_text(&retry_message).is_ok() {
-                message = retry_message;
-                usage = retry_usage;
+            let retry_usage = retry_response.usage;
+            if let Ok(retry_message) = retry_response.complete_message() {
+                if native_one_shot_text(&retry_message).is_ok() {
+                    message = retry_message;
+                    usage = retry_usage;
+                }
             }
         }
     }
@@ -1909,13 +2006,14 @@ pub(crate) async fn start_native_with_manager(
         }
         _ => None,
     };
-    start_native_session_locked(app, manager_state, payload).await
+    start_native_session_locked(app, manager_state, payload, None).await
 }
 
 async fn start_native_session_locked(
     app: AppHandle,
     manager_state: Arc<Mutex<NativeAgentManager>>,
     payload: StartNativeSessionInput,
+    approved_request: Option<(&str, &PlanAuthorization)>,
 ) -> Result<AgentSessionStarted, String> {
     crate::app::lifecycle::require_running(&app)?;
     manager_state.lock().await.require_running()?;
@@ -1969,9 +2067,24 @@ async fn start_native_session_locked(
     }
 
     let pool = sqlite_pool(&app).await?;
-    // 走到这里说明会话不是 live（live 输入已在上面入队返回），新一轮开始即让上一份待批准计划作废。
     if let Some(resume_id) = resume_id.as_deref() {
-        clear_pending_plan_with(&pool, resume_id).await?;
+        if let Some((_, authorization)) = approved_request {
+            authorization.check()?;
+        }
+        if plans::validate_resume(
+            &pool,
+            resume_id,
+            plan_mode,
+            approved_request.map(|(request, _)| request),
+        )
+        .await?
+        {
+            manager_state
+                .lock()
+                .await
+                .invalidate_plan_authorization(resume_id);
+            plans::invalidate_persisted(&pool, resume_id, true).await?;
+        }
     }
     let execution_context =
         resolve_workspace_execution_context_with_pool(&pool, &workspace_id).await?;
@@ -2045,6 +2158,26 @@ async fn start_native_session_locked(
         existing_working_dir.as_deref(),
     )
     .await;
+    if let Some((_, authorization)) = approved_request {
+        authorization.check()?;
+        let approved = plans::load_approved(&pool, &session_record_id)
+            .await?
+            .ok_or_else(|| "缺少已保存计划".to_string())?;
+        let implementation_cwd = if let Some(config) = ssh_config.as_ref() {
+            plans::resolve_ssh_cwd(&SshToolRuntime {
+                app: app.clone(),
+                config: config.clone(),
+                root: run_cwd.clone(),
+                authorized_paths: Vec::new(),
+            })
+            .await?
+        } else {
+            run_cwd.clone()
+        };
+        if approved.cwd != implementation_cwd {
+            return Err("实施工作目录与计划保存目录不一致".into());
+        }
+    }
     let sandbox_active = native_settings
         .as_ref()
         .is_some_and(|settings| settings.bash_sandbox_enabled)
@@ -2151,6 +2284,17 @@ async fn start_native_session_locked(
         sandbox_active,
     };
     let input_queue = Arc::new(NativeInputQueue::new(&session_record_id));
+    let steer_pool = pool.clone();
+    let steer_app = app.clone();
+    input_queue.steer.configure(
+        Arc::new(move |receipt| {
+            let pool = steer_pool.clone();
+            Box::pin(async move { persist_steer_receipt(&pool, &receipt).await })
+        }),
+        Arc::new(move |snapshot| {
+            let _ = steer_app.emit("native-steer", snapshot);
+        }),
+    );
     let queue_app = app.clone();
     input_queue.set_on_change(Arc::new(move |snapshot| {
         let _ = queue_app.emit("native-input-queue", snapshot);
@@ -2288,8 +2432,28 @@ async fn start_native_session_locked(
         .await;
         return Err("应用正在退出，会话未启动".into());
     }
+    if let Some((_, authorization)) = approved_request {
+        if let Err(error) = authorization.commit_implementation(|| {
+            let _ = loop_ready_tx.send(());
+        }) {
+            manager_state
+                .lock()
+                .await
+                .remove_session(&session_record_id);
+            update_agent_session_status(
+                &pool,
+                &session_record_id,
+                "exited",
+                Some(0),
+                Some(&now_sqlite()),
+            )
+            .await?;
+            return Err(error);
+        }
+    } else {
+        let _ = loop_ready_tx.send(());
+    }
     let _ = app.emit("native-session", &started);
-    let _ = loop_ready_tx.send(());
     Ok(started)
 }
 
@@ -2352,14 +2516,6 @@ fn apply_run_settings_to_runner(runner: &mut AgentRunner, run: &NativeRunSetting
     }
 }
 
-/// 落库的待批准计划快照。会话停止或应用退出时保留，供重新打开后继续实施。
-#[derive(Debug, Clone, Serialize)]
-struct PendingPlanSnapshot {
-    request_id: String,
-    plan: String,
-    created_at: String,
-}
-
 async fn save_pending_plan(
     app: &AppHandle,
     session_record_id: &str,
@@ -2383,7 +2539,7 @@ async fn save_pending_plan_with(
     };
     let payload = serde_json::to_string(&snapshot)
         .map_err(|error| format!("序列化待批准计划失败: {error}"))?;
-    sqlx::query("UPDATE agent_sessions SET pending_plan_json = $1 WHERE id = $2")
+    sqlx::query("UPDATE agent_sessions SET pending_plan_json = $1, approved_plan_json = CASE WHEN json_extract(approved_plan_json, '$.status') IN ('saving', 'failed') THEN json_set(approved_plan_json, '$.status', 'cancelled') ELSE approved_plan_json END WHERE id = $2")
         .bind(payload)
         .bind(session_record_id)
         .execute(pool)
@@ -2639,6 +2795,9 @@ async fn run_native_loop(
     let mut config_revision = 0_u64;
     let mut runner = AgentRunner::new(LocalWorkspace::new(PathBuf::from(&run_cwd)));
     runner.ctx.ssh = ssh;
+    let web_settings_app = app.clone();
+    runner.ctx.web_settings_provider =
+        Some(Arc::new(move || load_network_settings(&web_settings_app)));
     runner.ctx.extra_env = load_network_settings(&app)
         .map(|settings| proxy_env_vars(&settings))
         .unwrap_or_default();
@@ -2681,6 +2840,16 @@ async fn run_native_loop(
         );
     }
     runner.steer_rx = Some(followup_rx.clone());
+    runner.ctx.user_steer = Some(input_queue.steer.clone());
+    runner.ctx.main_origin = Some(input_queue.steer.begin_turn().await);
+    emit_turn_state(
+        &app,
+        &input_queue.steer,
+        &working,
+        "working",
+        runner.on_event.as_ref(),
+    )
+    .await;
     if plan_mode {
         runner.set_read_only(true);
         runner.set_plan_mode(true);
@@ -2799,6 +2968,7 @@ async fn run_native_loop(
             let kind = kind_perm.clone();
             tauri::async_runtime::spawn(async move {
                 let request = PermissionRequest {
+                    origin: prompt.origin.clone(),
                     request_id: prompt.request_id.clone(),
                     profile_id: profile_id.clone(),
                     workspace_id: Some(workspace_id.clone()),
@@ -2896,6 +3066,16 @@ async fn run_native_loop(
                 )
                 .await;
                 if let Some(request) = next {
+                    let manager = manager_state.lock().await;
+                    if !manager
+                        .get_session(&session_record_id)
+                        .and_then(|s| s.pending_permission.front())
+                        .is_some_and(|p| {
+                            p.request.request_id == request.request_id && !p.reply.is_closed()
+                        })
+                    {
+                        return;
+                    }
                     let _ = app.emit(
                         "native-permission-request",
                         permission_event(&session_record_id, &request),
@@ -2921,12 +3101,25 @@ async fn run_native_loop(
             let kind = kind_q.clone();
             tauri::async_runtime::spawn(async move {
                 let request = PlanApprovalRequest {
+                    origin: prompt.origin.clone(),
                     request_id: prompt.request_id.clone(),
                     profile_id: profile_id.clone(),
                     workspace_id: Some(workspace_id.clone()),
                     session_kind: kind.clone(),
                     plan: prompt.plan.clone(),
                 };
+                {
+                    let mut manager = manager_state.lock().await;
+                    if !manager
+                        .get_session(&session_record_id)
+                        .is_some_and(|session| session.accepts_origin(request.origin.as_ref()))
+                    {
+                        return;
+                    }
+                    manager.invalidate_plan_authorization(&session_record_id);
+                }
+                let _operation =
+                    lock_agent_session_operation(&manager_state, &session_record_id).await;
                 let should_emit = {
                     let mut manager = manager_state.lock().await;
                     match manager.enqueue_plan_approval(
@@ -2941,9 +3134,20 @@ async fn run_native_loop(
                     }
                 };
                 // 落库后即使会话被停止或应用退出，重新打开仍能继续这份计划。
-                let _ =
+                if !should_emit {
+                    return;
+                }
+                if let Err(error) =
                     save_pending_plan(&app, &session_record_id, &request.request_id, &prompt.plan)
-                        .await;
+                        .await
+                {
+                    manager_state
+                        .lock()
+                        .await
+                        .expire_plan_approval(&session_record_id, &request.request_id);
+                    eprintln!("[native] {error}");
+                    return;
+                }
                 emit_native_line(
                     &app,
                     &session_record_id,
@@ -3006,6 +3210,13 @@ async fn run_native_loop(
                     .expire_plan_approval(&session_id, &request_id);
                 emit_request_resolved(&app, &session_id, &request_id, "plan_approval");
                 if let Some(request) = next {
+                    let guard = manager.lock().await;
+                    if guard
+                        .require_plan_approval(&session_id, &request.request_id)
+                        .is_err()
+                    {
+                        return;
+                    }
                     let _ = app.emit(
                         "native-plan-approval-request",
                         plan_approval_event(&session_id, &request),
@@ -3013,7 +3224,7 @@ async fn run_native_loop(
                 }
             })
         }));
-        runner.ctx.request_question = Some(std::sync::Arc::new(move |questions, reply| {
+        runner.ctx.request_question = Some(std::sync::Arc::new(move |questions, origin, reply| {
             let app = app_q.clone();
             let manager_state = manager_q.clone();
             let session_record_id = session_q.clone();
@@ -3023,6 +3234,7 @@ async fn run_native_loop(
             tauri::async_runtime::spawn(async move {
                 let request_id = uuid::Uuid::new_v4().to_string();
                 let request = PlanQuestionRequest {
+                    origin,
                     request_id: request_id.clone(),
                     profile_id: profile_id.clone(),
                     workspace_id: Some(workspace_id.clone()),
@@ -3057,6 +3269,16 @@ async fn run_native_loop(
                 )
                 .await;
                 if should_emit {
+                    let manager = manager_state.lock().await;
+                    if !manager
+                        .get_session(&session_record_id)
+                        .and_then(|s| s.pending_question.front())
+                        .is_some_and(|p| {
+                            p.request.request_id == request.request_id && !p.reply.is_closed()
+                        })
+                    {
+                        return;
+                    }
                     let _ = app.emit(
                         "native-plan-question",
                         question_event(&session_record_id, &request),
@@ -3330,9 +3552,11 @@ async fn run_native_loop(
     let emit_profile = profile_id.clone();
     let emit_workspace = Some(workspace_id.clone());
     let emit_kind = kind.clone();
+    let emit_instance = input_queue.id.clone();
     let emit_join = tokio::spawn(async move {
         forward_native_events(
             emit_app,
+            emit_instance,
             emit_session,
             emit_profile,
             emit_workspace,
@@ -3373,8 +3597,16 @@ async fn run_native_loop(
         if cancel.is_cancelled() {
             break;
         }
+        runner.ctx.main_origin = Some(input_queue.steer.begin_turn().await);
         let _ = runner.ctx.restore_isolation_worktree();
-        emit_turn_state(&app, &session_record_id, &working, "working");
+        emit_turn_state(
+            &app,
+            &input_queue.steer,
+            &working,
+            "working",
+            runner.on_event.as_ref(),
+        )
+        .await;
         let images = std::mem::take(&mut pending_images);
         emit_native_output(
             &app,
@@ -3385,6 +3617,7 @@ async fn run_native_loop(
             format!("[USER_INPUT] {prompt}"),
             None,
             native_images_for_output(&images),
+            None,
         )
         .await;
         // 每回合按关键词回忆相关记忆，附在用户消息后。
@@ -3394,6 +3627,14 @@ async fn run_native_loop(
                 runner.set_turn_suffix(crate::native::memory::format_recall_block(dir, &hits));
             }
         }
+        let prompt = if let Ok(pool) = sqlite_pool(&app).await {
+            match plans::reference(&pool, &session_record_id).await {
+                Ok(Some(reference)) => format!("{prompt}{reference}"),
+                _ => prompt,
+            }
+        } else {
+            prompt
+        };
         match runner
             .run_with_client(
                 &run.client,
@@ -3466,7 +3707,14 @@ async fn run_native_loop(
                     runner.ctx.restore_isolation_worktree(),
                 )
                 .await;
-                emit_turn_state(&app, &session_record_id, &working, "waiting_input");
+                emit_turn_state(
+                    &app,
+                    &input_queue.steer,
+                    &working,
+                    "waiting_input",
+                    runner.on_event.as_ref(),
+                )
+                .await;
                 // 等待输入时先应用模型配置，再处理 /compact 与输入队列。
                 let followup = loop {
                     if let Some(request) = take_latest_configuration(&mut config_rx, None) {
@@ -3522,7 +3770,14 @@ async fn run_native_loop(
                             .await;
                         }
                         NativeIdleWait::Followup(Some(NativeFollowup::Compact(mut request))) => {
-                            emit_turn_state(&app, &session_record_id, &working, "working");
+                            emit_turn_state(
+                                &app,
+                                &input_queue.steer,
+                                &working,
+                                "working",
+                                runner.on_event.as_ref(),
+                            )
+                            .await;
                             if runner
                                 .compact_now(&run.client, request.instructions.take())
                                 .await
@@ -3548,7 +3803,14 @@ async fn run_native_loop(
                                 last_transcript_fingerprint.as_ref(),
                             )
                             .await;
-                            emit_turn_state(&app, &session_record_id, &working, "waiting_input");
+                            emit_turn_state(
+                                &app,
+                                &input_queue.steer,
+                                &working,
+                                "waiting_input",
+                                runner.on_event.as_ref(),
+                            )
+                            .await;
                         }
                         NativeIdleWait::Followup(other) => break other,
                         NativeIdleWait::Input(input) => {
@@ -3562,7 +3824,6 @@ async fn run_native_loop(
                     Some(NativeFollowup::Input { text, images }) => {
                         match next_loop_step(await_followups, NativeLoopEvent::FollowupInput) {
                             NativeLoopAction::RunFollowup => {
-                                emit_turn_state(&app, &session_record_id, &working, "working");
                                 pending_images = images;
                                 next = Some(text);
                             }
@@ -3579,6 +3840,13 @@ async fn run_native_loop(
         }
     }
 
+    if let Err(error) = input_queue
+        .steer
+        .cancel("回合已停止；未应用的指令未自动重放，图片需要重新选择")
+        .await
+    {
+        eprintln!("[native] {error}");
+    }
     input_queue.close();
     persist_runner_transcript(
         &app,
@@ -3687,6 +3955,7 @@ async fn run_native_loop(
     let _ = app.emit(
         "native-exit",
         AgentSessionExit {
+            instance_id: input_queue.id.clone(),
             profile_id: profile_id.clone(),
             workspace_id: Some(workspace_id),
             session_kind: kind,
@@ -3714,6 +3983,11 @@ async fn stop_native_process(
     event_type: &str,
     message: &str,
 ) -> Result<bool, String> {
+    manager_state
+        .lock()
+        .await
+        .invalidate_plan_authorization(session_record_id);
+    plans::invalidate_persisted(&sqlite_pool(app).await?, session_record_id, false).await?;
     let info = {
         let manager = manager_state.lock().await;
         manager
@@ -3740,6 +4014,14 @@ async fn stop_native_process(
     let session = {
         let mut manager = manager_state.lock().await;
         manager.deny_pending_permission(session_record_id);
+        if let Some(session) = manager.get_session(session_record_id) {
+            session.cancel.cancel();
+            session
+                .input_queue
+                .steer
+                .cancel("会话已停止；未应用的指令未自动重放，图片需要重新选择")
+                .await?;
+        }
         manager.remove_session(session_record_id)
     };
     let Some(session) = session else {
@@ -3788,7 +4070,6 @@ pub async fn resolve_native_tool_permission(
             manager.resolve_permission(&session_record_id, &request_id, decision)?,
         )
     };
-    drop(manager);
     for request_id in resolved {
         emit_request_resolved(&app, &session_record_id, &request_id, "permission");
     }
@@ -4009,9 +4290,9 @@ async fn apply_plan_implementation_model(
     app: &AppHandle,
     manager_state: &Arc<Mutex<NativeAgentManager>>,
     session_record_id: &str,
-    ai_channel_id: &str,
-    model: &str,
-    reasoning_effort: Option<&str>,
+    next: NativeRunSettings,
+    request_id: &str,
+    authorization: &PlanAuthorization,
 ) -> Result<(), String> {
     let snapshot = {
         let manager = manager_state.lock().await;
@@ -4030,15 +4311,13 @@ async fn apply_plan_implementation_model(
         let current_effort = runtime
             .as_ref()
             .and_then(|item| item.reasoning_effort.clone());
-        let effort =
-            resolve_plan_implementation_effort(current_effort.as_deref(), reasoning_effort);
         if plan_implementation_unchanged(
             current_channel,
             current_model,
             current_effort.as_deref(),
-            ai_channel_id,
-            model,
-            effort.as_deref(),
+            &next.channel_id,
+            &next.model,
+            next.effort.as_deref(),
         ) {
             return Ok(());
         }
@@ -4057,7 +4336,6 @@ async fn apply_plan_implementation_model(
             })
             .or_else(|| Some(crate::app::shared::EXECUTION_TARGET_LOCAL.to_string()));
         (
-            effort,
             workspace_id,
             profile_id,
             session_kind,
@@ -4065,65 +4343,71 @@ async fn apply_plan_implementation_model(
             execution_target,
         )
     };
-    let (effort, workspace_id, profile_id, session_kind, input_queue_id, execution_target) =
-        snapshot;
+    let (workspace_id, profile_id, session_kind, input_queue_id, execution_target) = snapshot;
     let pool = sqlite_pool(app).await?;
-    let mut next = load_native_client(app, &pool, ai_channel_id, model, effort.as_deref()).await?;
-    next = bind_run_to_session(
+    let next = bind_run_to_session(
         next,
         session_record_id,
         &workspace_id,
         false,
         execution_target.clone(),
     );
-    update_agent_session_channel(&pool, session_record_id, &next.channel_id).await?;
+    authorization.check()?;
     let context_token_limit =
         crate::native::settings::session_context_window_tokens(app, next.context_tokens) as usize;
     let hook_agent = hook_agent_handler(&next);
     let runtime = {
         let mut manager = manager_state.lock().await;
-        let session = manager
-            .get_session_mut(session_record_id)
-            .ok_or_else(|| "会话已结束".to_string())?;
-        if let Some(slot) = &session.live_model {
-            write_live_model(
-                slot,
-                live_snapshot_from_run(
-                    &next,
-                    context_token_limit,
-                    execution_target,
-                    Some(hook_agent),
-                ),
-            );
-        }
-        session.info.channel_id = next.channel_id.clone();
-        let permission_mode = session
-            .runtime
-            .as_ref()
-            .map(|item| item.permission_mode.clone())
-            .unwrap_or_else(|| crate::native::settings::PERMISSION_MODE_DEFAULT.to_string());
-        let plan_mode = session.plan_mode.load(Ordering::SeqCst);
-        let previous = session.runtime.clone();
-        let runtime = NativeSessionRuntime {
-            ai_channel_id: next.channel_id.clone(),
-            model: next.model.clone(),
-            reasoning_effort: next.effort.clone(),
-            permission_mode,
-            plan_mode,
-            worktree_path: previous
+        manager.require_plan_approval(session_record_id, request_id)?;
+        authorization.with_current(|| -> Result<_, String> {
+            let session = manager
+                .get_session_mut(session_record_id)
+                .ok_or_else(|| "会话已结束".to_string())?;
+            if let Some(slot) = &session.live_model {
+                write_live_model(
+                    slot,
+                    live_snapshot_from_run(
+                        &next,
+                        context_token_limit,
+                        execution_target,
+                        Some(hook_agent),
+                    ),
+                );
+            }
+            session.info.channel_id = next.channel_id.clone();
+            let permission_mode = session
+                .runtime
                 .as_ref()
-                .and_then(|item| item.worktree_path.clone()),
-            sandbox_active: previous.as_ref().is_some_and(|item| item.sandbox_active),
-        };
-        session.runtime = Some(runtime.clone());
-        let transcript = session
-            .transcript_model
-            .clone()
-            .unwrap_or_else(|| Arc::new(Mutex::new(next.model.clone())));
-        (runtime, transcript)
+                .map(|item| item.permission_mode.clone())
+                .unwrap_or_else(|| crate::native::settings::PERMISSION_MODE_DEFAULT.to_string());
+            let plan_mode = session.plan_mode.load(Ordering::SeqCst);
+            let previous = session.runtime.clone();
+            let runtime = NativeSessionRuntime {
+                ai_channel_id: next.channel_id.clone(),
+                model: next.model.clone(),
+                reasoning_effort: next.effort.clone(),
+                permission_mode,
+                plan_mode,
+                worktree_path: previous
+                    .as_ref()
+                    .and_then(|item| item.worktree_path.clone()),
+                sandbox_active: previous.as_ref().is_some_and(|item| item.sandbox_active),
+            };
+            session.runtime = Some(runtime.clone());
+            let transcript = session
+                .transcript_model
+                .clone()
+                .unwrap_or_else(|| Arc::new(Mutex::new(next.model.clone())));
+            Ok((runtime, transcript))
+        })??
     };
+    update_agent_session_channel(&pool, session_record_id, &next.channel_id).await?;
+    authorization.check()?;
     let (runtime, transcript_model) = runtime;
-    *transcript_model.lock().await = next.model.clone();
+    {
+        let mut transcript = transcript_model.lock().await;
+        authorization.with_current(|| *transcript = next.model.clone())?;
+    }
     let started = AgentSessionStarted {
         runtime: Some(runtime),
         input_queue_id: Some(input_queue_id),
@@ -4154,6 +4438,31 @@ async fn apply_plan_implementation_model(
     Ok(())
 }
 
+/// Invalidate immediately, then serialize durable cleanup with approval/save/start.
+/// Stop retains pending approval; steer passes `clear_pending = true`.
+/// Do not call this while holding the session operation lock. Call the manager's
+/// synchronous invalidation first and `plans::invalidate_persisted` under your lock instead.
+pub(crate) async fn invalidate_native_plan_authorization(
+    app: &AppHandle,
+    manager: &Arc<Mutex<NativeAgentManager>>,
+    session: &str,
+    clear_pending: bool,
+) -> Result<(), String> {
+    manager.lock().await.invalidate_plan_authorization(session);
+    let _operation = lock_agent_session_operation(manager, session).await;
+    plans::invalidate_persisted(&sqlite_pool(app).await?, session, clear_pending).await
+}
+
+async fn clear_pending_plan_request(
+    pool: &sqlx::SqlitePool,
+    session: &str,
+    request: &str,
+) -> Result<(), String> {
+    sqlx::query("UPDATE agent_sessions SET pending_plan_json = NULL WHERE id = $1 AND json_extract(pending_plan_json, '$.request_id') = $2")
+        .bind(session).bind(request).execute(pool).await.map_err(|error| error.to_string())?;
+    Ok(())
+}
+
 #[tauri::command]
 #[allow(clippy::too_many_arguments)]
 pub async fn resolve_native_plan_approval(
@@ -4166,58 +4475,376 @@ pub async fn resolve_native_plan_approval(
     ai_channel_id: Option<String>,
     model: Option<String>,
     reasoning_effort: Option<String>,
-) -> Result<(), String> {
-    state
+) -> Result<Option<AgentSessionStarted>, String> {
+    crate::app::lifecycle::require_running(&app)?;
+    // Capture stop/steer invalidation without mutating any existing authorization.
+    let authorization_revision = state
         .lock()
         .await
-        .require_plan_approval(&session_record_id, &request_id)?;
-    let channel = ai_channel_id
-        .as_deref()
-        .map(str::trim)
-        .filter(|item| !item.is_empty());
-    let model = model
-        .as_deref()
-        .map(str::trim)
-        .filter(|item| !item.is_empty());
-    let effort = reasoning_effort
-        .as_deref()
-        .map(str::trim)
-        .filter(|item| !item.is_empty());
-    if approved {
-        if let (Some(channel), Some(model)) = (channel, model) {
+        .plan_authorization_revision(&session_record_id);
+    let _operation = lock_agent_session_operation(&state, &session_record_id).await;
+    let pool = sqlite_pool(&app).await?;
+    require_unarchived_session_with(&pool, &session_record_id).await?;
+    let record =
+        sqlx::query_as::<_, AgentSessionRecord>("SELECT * FROM agent_sessions WHERE id = $1")
+            .bind(&session_record_id)
+            .fetch_one(&pool)
+            .await
+            .map_err(|error| error.to_string())?;
+    let pending = plans::load_pending(&pool, &session_record_id).await?;
+    if pending.request_id != request_id {
+        return Err("计划批准请求已过期".into());
+    }
+    let (live, runtime, live_cwd) = {
+        let manager = state.lock().await;
+        let live = manager.get_session(&session_record_id);
+        if live.is_some() {
+            manager.require_plan_approval(&session_record_id, &request_id)?;
+        }
+        (
+            live.is_some(),
+            live.and_then(|session| session.runtime_snapshot()),
+            manager.effective_plan_cwd(&session_record_id),
+        )
+    };
+    // The operation lock and authoritative pending identity must precede replacement.
+    // A stale request cannot cancel a save or an approved reply awaiting consumption.
+    let authorization = state.lock().await.begin_plan_authorization(
+        &session_record_id,
+        &request_id,
+        authorization_revision,
+    )?;
+    let workspace_id = record
+        .workspace_id
+        .clone()
+        .ok_or_else(|| "会话缺少工作区".to_string())?;
+    let old = plans::load_approved(&pool, &session_record_id).await?;
+    if !approved && live {
+        authorization.check()?;
+        plans::invalidate_persisted(&pool, &session_record_id, false).await?;
+        let next = state.lock().await.resolve_plan_approval(
+            &session_record_id,
+            &request_id,
+            PlanApprovalAnswer {
+                approved: false,
+                feedback: feedback.unwrap_or_default(),
+                ..Default::default()
+            },
+        )?;
+        clear_pending_plan_request(&pool, &session_record_id, &request_id).await?;
+        emit_request_resolved(&app, &session_record_id, &request_id, "plan_approval");
+        if let Some(next) = next {
+            save_pending_plan_with(&pool, &session_record_id, &next.request_id, &next.plan).await?;
+            let manager = state.lock().await;
+            if manager
+                .require_plan_approval(&session_record_id, &next.request_id)
+                .is_ok()
+            {
+                let _ = app.emit(
+                    "native-plan-approval-request",
+                    plan_approval_event(&session_record_id, &next),
+                );
+            }
+        }
+        return Ok(None);
+    }
+    let retry = approved
+        .then(|| {
+            old.as_ref().filter(|plan| {
+                plan.retry_matches(&pending)
+                    && feedback.as_deref().unwrap_or_default().trim() == plan.feedback
+                    && ai_channel_id
+                        .as_deref()
+                        .is_none_or(|value| value.trim() == plan.ai_channel_id)
+                    && model
+                        .as_deref()
+                        .is_none_or(|value| value.trim() == plan.model)
+                    && reasoning_effort
+                        .as_deref()
+                        .is_none_or(|value| Some(value.trim()) == plan.reasoning_effort.as_deref())
+            })
+        })
+        .flatten();
+    // A retry reuses the exact approved model and feedback, never a changed UI selection.
+    let channel = retry
+        .map(|plan| plan.ai_channel_id.clone())
+        .or_else(|| ai_channel_id.filter(|value| !value.trim().is_empty()))
+        .or_else(|| {
+            runtime
+                .as_ref()
+                .map(|runtime| runtime.ai_channel_id.clone())
+        })
+        .or(record.ai_channel_id.clone())
+        .ok_or_else(|| "必须选择实施渠道".to_string())?;
+    let selected_model = retry
+        .map(|plan| plan.model.clone())
+        .or_else(|| model.filter(|value| !value.trim().is_empty()))
+        .or_else(|| runtime.as_ref().map(|runtime| runtime.model.clone()));
+    let effort = retry
+        .map(|plan| plan.reasoning_effort.clone())
+        .unwrap_or_else(|| {
+            resolve_plan_implementation_effort(
+                runtime
+                    .as_ref()
+                    .and_then(|runtime| runtime.reasoning_effort.as_deref()),
+                reasoning_effort.as_deref(),
+            )
+        });
+    let feedback = retry
+        .map(|plan| plan.feedback.clone())
+        .unwrap_or_else(|| feedback.unwrap_or_default().trim().to_string());
+    let selected_model = match selected_model {
+        Some(model) => model,
+        None => sqlx::query_scalar::<_, String>("SELECT model FROM native_session_transcripts WHERE session_record_id = $1 AND deleted_at IS NULL")
+            .bind(&session_record_id).fetch_optional(&pool).await.map_err(|error| error.to_string())?.unwrap_or_default(),
+    };
+    // Validate before persisting authorization or writing any file.
+    let validated = load_native_client(
+        &app,
+        &pool,
+        channel.trim(),
+        selected_model.trim(),
+        effort.as_deref(),
+    )
+    .await?;
+    authorization.check()?;
+    if !approved {
+        plans::invalidate_persisted(&pool, &session_record_id, false).await?;
+        let started = start_native_session_locked(
+            app.clone(),
+            state.inner().clone(),
+            StartNativeSessionInput {
+                ai_channel_id: validated.channel_id,
+                workspace_id,
+                prompt: format!(
+                    "请根据反馈修改下面的计划，重新提交审批：\n\n{}\n\n反馈：{}",
+                    pending.plan, feedback
+                ),
+                model: Some(validated.model),
+                reasoning_effort: validated.effort,
+                resume_session_id: Some(session_record_id.clone()),
+                plan_mode: Some(true),
+                permission_mode: runtime.map(|runtime| runtime.permission_mode),
+                system_prompt: None,
+                image_paths: None,
+                isolate_worktree: Some(false),
+                locale: None,
+            },
+            None,
+        )
+        .await?;
+        emit_request_resolved(&app, &session_record_id, &request_id, "plan_approval");
+        return Ok(Some(started));
+    }
+    let cwd = live_cwd
+        .or(record.working_dir.clone())
+        .ok_or_else(|| "会话缺少工作目录".to_string())?;
+    let remote = record.execution_target == crate::app::shared::EXECUTION_TARGET_SSH;
+    let relative = plans::relative_path(&session_record_id)?;
+    // This is only a display target until the remote host resolves the cwd.
+    let path = if remote {
+        format!("{}/{}", cwd.trim_end_matches('/'), relative)
+    } else {
+        Path::new(&cwd)
+            .join(&relative)
+            .to_string_lossy()
+            .into_owned()
+    };
+    // Keep an already-known canonical target across connection failures on retry.
+    let known_target = retry.filter(|plan| remote && plan.cwd_resolved);
+    let mut snapshot = ApprovedPlanSnapshot {
+        authorization_id: new_id(),
+        request_id: request_id.clone(),
+        body: pending.plan,
+        feedback,
+        cwd: known_target
+            .map(|plan| plan.cwd.clone())
+            .unwrap_or_else(|| cwd.clone()),
+        path: known_target
+            .map(|plan| plan.path.clone())
+            .unwrap_or_else(|| path.clone()),
+        cwd_resolved: !remote || known_target.is_some(),
+        content_hash: String::new(),
+        saved_hash: old.as_ref().and_then(|plan| plan.saved_hash.clone()),
+        saved_path: old
+            .as_ref()
+            .and_then(|plan| plan.last_saved_path().map(ToOwned::to_owned)),
+        status: PlanSaveStatus::Saving,
+        ai_channel_id: validated.channel_id.clone(),
+        model: validated.model.clone(),
+        reasoning_effort: validated.effort.clone(),
+        error: None,
+    };
+    let content = snapshot.content();
+    snapshot.content_hash = plans::hash(content.as_bytes());
+    let outcome: Result<Option<AgentSessionStarted>, String> = async {
+        let plan_ssh = if remote {
+            Some(
+                plans::resolve_authorized_ssh_target(
+                    &pool,
+                    &session_record_id,
+                    &mut snapshot,
+                    &authorization,
+                    retry,
+                    || async {
+                        let config_id = record
+                            .ssh_config_id
+                            .as_deref()
+                            .ok_or_else(|| "SSH 会话缺少配置".to_string())?;
+                        let config = fetch_ssh_config_record_by_id(&pool, config_id).await?;
+                        let mut ssh = SshToolRuntime {
+                            app: app.clone(),
+                            config,
+                            root: cwd.clone(),
+                            authorized_paths: Vec::new(),
+                        };
+                        ssh.root = plans::resolve_ssh_cwd(&ssh).await?;
+                        Ok((ssh.root.clone(), ssh))
+                    },
+                )
+                .await?,
+            )
+        } else {
+            plans::store_approved(&pool, &session_record_id, &snapshot).await?;
+            if retry.is_some_and(|plan| plan.cwd != cwd || plan.path != path) {
+                authorization.cancel();
+                return Err("计划工作目录已改变，请重新确认计划".into());
+            }
+            None
+        };
+        authorization.check()?;
+        if let Some(ssh) = plan_ssh.as_ref() {
+            plans::write_ssh(
+                ssh,
+                &session_record_id,
+                &content,
+                snapshot.expected_hash(),
+                &authorization,
+            )
+            .await?;
+        } else {
+            let cwd = cwd.clone();
+            let session = session_record_id.clone();
+            let content = content.clone();
+            let expected = snapshot.expected_hash().map(ToOwned::to_owned);
+            let token = authorization.clone();
+            tokio::task::spawn_blocking(move || {
+                plans::write_local(
+                    Path::new(&cwd),
+                    &session,
+                    &content,
+                    expected.as_deref(),
+                    &token,
+                )
+            })
+            .await
+            .map_err(|error| error.to_string())??;
+        }
+        // Even cancellation after an actual write retains the hash for a safe later retry.
+        snapshot.saved_hash = Some(snapshot.content_hash.clone());
+        snapshot.saved_path = Some(snapshot.path.clone());
+        snapshot.status = PlanSaveStatus::Saved;
+        plans::store_approved(&pool, &session_record_id, &snapshot).await?;
+        authorization.check()?;
+        if live {
+            state
+                .lock()
+                .await
+                .require_plan_approval(&session_record_id, &request_id)?;
             apply_plan_implementation_model(
                 &app,
                 state.inner(),
                 &session_record_id,
-                channel,
-                model,
-                effort,
+                validated,
+                &request_id,
+                &authorization,
             )
             .await?;
+            authorization.check()?;
+            state.lock().await.resolve_plan_approval(
+                &session_record_id,
+                &request_id,
+                PlanApprovalAnswer {
+                    approved: true,
+                    feedback: snapshot.feedback.clone(),
+                    ai_channel_id: Some(snapshot.ai_channel_id.clone()),
+                    model: Some(snapshot.model.clone()),
+                    plan_path: Some(snapshot.path.clone()),
+                    authorization: Some(authorization.clone()),
+                },
+            )?;
+            authorization.wait_for_implementation().await?;
+            Ok(None)
+        } else {
+            let started = start_native_session_locked(
+                app.clone(),
+                state.inner().clone(),
+                StartNativeSessionInput {
+                    ai_channel_id: snapshot.ai_channel_id.clone(),
+                    workspace_id,
+                    prompt: format!(
+                        "已批准并保存计划，请开始实施。\n计划文件：{}\n\n{}",
+                        snapshot.path, content
+                    ),
+                    model: Some(snapshot.model.clone()),
+                    reasoning_effort: snapshot.reasoning_effort.clone(),
+                    resume_session_id: Some(session_record_id.clone()),
+                    plan_mode: Some(false),
+                    permission_mode: runtime.map(|runtime| runtime.permission_mode),
+                    system_prompt: None,
+                    image_paths: None,
+                    isolate_worktree: Some(false),
+                    locale: None,
+                },
+                Some((&request_id, &authorization)),
+            )
+            .await?;
+            Ok(Some(started))
         }
     }
-    let next = state.lock().await.resolve_plan_approval(
-        &session_record_id,
-        &request_id,
-        PlanApprovalAnswer {
-            approved,
-            feedback: feedback.unwrap_or_default(),
-            ai_channel_id: channel.map(ToOwned::to_owned),
-            model: model.map(ToOwned::to_owned),
-        },
-    )?;
-    emit_request_resolved(&app, &session_record_id, &request_id, "plan_approval");
-    if let Some(request) = next {
-        let _ =
-            save_pending_plan(&app, &session_record_id, &request.request_id, &request.plan).await;
-        let _ = app.emit(
-            "native-plan-approval-request",
-            plan_approval_event(&session_record_id, &request),
-        );
-    } else {
-        let _ = clear_pending_plan(&app, &session_record_id).await;
+    .await;
+    match outcome {
+        Ok(started) => {
+            clear_pending_plan_request(&pool, &session_record_id, &request_id).await?;
+            emit_request_resolved(&app, &session_record_id, &request_id, "plan_approval");
+            let next = state
+                .lock()
+                .await
+                .get_session(&session_record_id)
+                .and_then(|session| {
+                    session
+                        .pending_plan_approval
+                        .front()
+                        .map(|pending| pending.request.clone())
+                });
+            if let Some(next) = next {
+                save_pending_plan_with(&pool, &session_record_id, &next.request_id, &next.plan)
+                    .await?;
+                let manager = state.lock().await;
+                if manager
+                    .require_plan_approval(&session_record_id, &next.request_id)
+                    .is_ok()
+                {
+                    let _ = app.emit(
+                        "native-plan-approval-request",
+                        plan_approval_event(&session_record_id, &next),
+                    );
+                }
+            }
+            Ok(started)
+        }
+        Err(error) => {
+            plans::record_failure(
+                &pool,
+                &session_record_id,
+                &mut snapshot,
+                &authorization,
+                &error,
+            )
+            .await?;
+            Err(error)
+        }
     }
-    Ok(())
 }
 
 #[tauri::command]
@@ -4229,7 +4856,8 @@ pub async fn answer_native_plan_question(
     skipped: bool,
     answers: Vec<String>,
 ) -> Result<(), String> {
-    let next = state.lock().await.resolve_question(
+    let mut manager = state.lock().await;
+    let next = manager.resolve_question(
         &session_record_id,
         &request_id,
         PlanQuestionAnswer { skipped, answers },
@@ -4250,6 +4878,10 @@ pub async fn stop_native_session(
     state: State<'_, Arc<Mutex<NativeAgentManager>>>,
     session_record_id: String,
 ) -> Result<(), String> {
+    state
+        .lock()
+        .await
+        .invalidate_plan_authorization(&session_record_id);
     let _operation = lock_agent_session_operation(&state, &session_record_id).await;
     if !stop_native_process(
         &app,
@@ -4273,6 +4905,10 @@ pub async fn stop_native(
 ) -> Result<(), String> {
     let processes = state.lock().await.get_profile_processes(&profile_id);
     for process in processes {
+        state
+            .lock()
+            .await
+            .invalidate_plan_authorization(&process.session_record_id);
         let _operation = lock_agent_session_operation(&state, &process.session_record_id).await;
         let _ = stop_native_process(
             &app,
@@ -4284,6 +4920,317 @@ pub async fn stop_native(
         .await?;
     }
     Ok(())
+}
+
+#[derive(Clone)]
+struct SteerSubmission {
+    session_record_id: String,
+    expected_turn_id: String,
+    input_id: String,
+    text: String,
+    image_paths: Vec<String>,
+}
+
+fn load_steer_submission_images(
+    root: &std::path::Path,
+    paths: &[String],
+) -> Result<crate::native::images::NativeImageLoad, String> {
+    let canonical_root = if paths.is_empty() {
+        root.to_path_buf()
+    } else {
+        root.canonicalize()
+            .map_err(|e| format!("图片暂存目录不可用：{e}"))?
+    };
+    for path in paths {
+        let path = std::path::Path::new(path);
+        if !path.is_absolute()
+            || !path
+                .canonicalize()
+                .map_err(|e| format!("图片不可用：{e}"))?
+                .starts_with(&canonical_root)
+        {
+            return Err("请选择或粘贴图片到输入框后再提交".into());
+        }
+    }
+    crate::native::images::load_steer_images(paths)
+}
+
+#[tauri::command]
+pub async fn submit_native_steer(
+    app: AppHandle,
+    state: State<'_, Arc<Mutex<NativeAgentManager>>>,
+    session_record_id: String,
+    expected_turn_id: String,
+    input_id: String,
+    text: String,
+    image_paths: Vec<String>,
+) -> Result<crate::native::steer::SteerReceipt, crate::native::steer::SteerSubmissionError> {
+    crate::app::lifecycle::require_running(&app)?;
+    let pool = sqlite_pool(&app).await?;
+    let root = crate::native::images::attachments_dir(
+        &app.path()
+            .app_config_dir()
+            .map_err(|error| error.to_string())?,
+    );
+    let input = SteerSubmission {
+        session_record_id,
+        expected_turn_id,
+        input_id,
+        text,
+        image_paths,
+    };
+    submit_native_steer_with(
+        &pool,
+        state.inner(),
+        &input,
+        |paths| async move {
+            tokio::task::spawn_blocking(move || load_steer_submission_images(&root, &paths))
+                .await
+                .map_err(|error| error.to_string())?
+        },
+        |manager, resolved| {
+            for (request_id, kind) in resolved {
+                emit_request_resolved(&app, &input.session_record_id, &request_id, kind);
+            }
+            if let Some(pending) = manager
+                .get_session(&input.session_record_id)
+                .and_then(|session| session.pending_permission.front())
+            {
+                let _ = app.emit(
+                    "native-permission-request",
+                    permission_event(&input.session_record_id, &pending.request),
+                );
+            }
+        },
+    )
+    .await
+}
+
+/// The IPC's complete admission path. Loader/publisher dependencies keep the same
+/// persistence, identity and locking path testable with real SQLite and staged files.
+async fn submit_native_steer_with<F, Fut, P>(
+    pool: &sqlx::SqlitePool,
+    state: &Arc<Mutex<NativeAgentManager>>,
+    input: &SteerSubmission,
+    load_images: F,
+    publish_resolved: P,
+) -> Result<crate::native::steer::SteerReceipt, crate::native::steer::SteerSubmissionError>
+where
+    F: FnOnce(Vec<String>) -> Fut,
+    Fut: std::future::Future<Output = Result<crate::native::images::NativeImageLoad, String>>,
+    P: FnOnce(&NativeAgentManager, Vec<(String, &'static str)>),
+{
+    use crate::native::steer::{SteerMailbox, SteerSubmissionError};
+    let SteerSubmission {
+        session_record_id,
+        expected_turn_id,
+        input_id,
+        text,
+        image_paths,
+    } = input;
+    SteerMailbox::validate_payload(input_id, text, image_paths)
+        .map_err(SteerSubmissionError::rejected)?;
+    let submission_lock = state
+        .lock()
+        .await
+        .steer_submission_lock(session_record_id, input_id);
+    let _submission = submission_lock.lock_owned().await;
+    // The UUID lock covers lookup, image loading, acceptance and staged cleanup.
+    // A concurrent retry can only observe the completed result, even if its turn ended.
+    let manager = state.lock().await;
+    let live_instance = manager
+        .get_session(session_record_id)
+        .map(|session| session.input_queue.id.as_str());
+    if let Some(receipt) = find_steer_receipt(
+        pool,
+        session_record_id,
+        input_id,
+        expected_turn_id,
+        text,
+        image_paths,
+        live_instance,
+    )
+    .await?
+    {
+        return Ok(receipt);
+    }
+    let session = manager
+        .get_session(session_record_id)
+        .ok_or("会话已结束，请保留草稿")?;
+    if !session.accepts_origin(None) {
+        return Err("会话已停止".into());
+    }
+    let mailbox = session.input_queue.steer.clone();
+    drop(manager);
+    if let Some(receipt) = mailbox
+        .prior(expected_turn_id, input_id, text, image_paths)
+        .await?
+    {
+        return Ok(receipt);
+    }
+    let loaded = load_images(image_paths.clone())
+        .await
+        .map_err(SteerSubmissionError::rejected)?;
+    {
+        let mut manager = state.lock().await;
+        let session = manager.get_session(session_record_id).ok_or("会话已结束")?;
+        if !session.accepts_origin(None) || session.input_queue.id != mailbox.instance_id {
+            return Err("当前回合已结束或已切换".into());
+        }
+        // Refuse stale/full/oversized admission before cancelling a saving authorization.
+        if let Some(receipt) = mailbox
+            .check_admission(
+                expected_turn_id,
+                input_id,
+                text,
+                image_paths,
+                &loaded.images,
+            )
+            .await
+            .map_err(SteerSubmissionError::rejected)?
+        {
+            return Ok(receipt);
+        }
+        manager.invalidate_plan_authorization(session_record_id);
+    }
+    let _operation = lock_agent_session_operation(state, session_record_id).await;
+    let mut manager = state.lock().await;
+    let session = manager.get_session(session_record_id).ok_or("会话已结束")?;
+    if !session.accepts_origin(None) || session.input_queue.id != mailbox.instance_id {
+        return Err("会话已停止或重启".into());
+    }
+    // Admission revalidates under the final-seal gate. Its persistence callback
+    // commits plan invalidation and acceptance together, or rolls both back.
+    let receipt = mailbox
+        .accept(
+            expected_turn_id,
+            input_id,
+            text,
+            image_paths,
+            loaded.images.clone(),
+        )
+        .await
+        .map_err(SteerSubmissionError::rejected)?;
+    manager.invalidate_plan_authorization(session_record_id);
+    let resolved = manager.supersede_main_requests(session_record_id);
+    publish_resolved(&manager, resolved);
+    drop(manager);
+    crate::native::images::cleanup_staged_loaded_images(&loaded);
+    Ok(receipt)
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn find_steer_receipt(
+    pool: &sqlx::SqlitePool,
+    session_id: &str,
+    input_id: &str,
+    turn_id: &str,
+    text: &str,
+    paths: &[String],
+    live_instance: Option<&str>,
+) -> Result<Option<crate::native::steer::SteerReceipt>, String> {
+    use crate::native::steer::{SteerMailbox, SteerReceipt, SteerStatus};
+    let row = sqlx::query_scalar::<_, String>("SELECT message FROM agent_session_events WHERE session_id = $1 AND event_type = 'native_steer' AND json_extract(message, '$.input_id') = $2 ORDER BY rowid DESC LIMIT 1")
+        .bind(session_id).bind(input_id).fetch_optional(pool).await.map_err(|e| e.to_string())?;
+    let Some(row) = row else {
+        return Ok(None);
+    };
+    let mut receipt: SteerReceipt = serde_json::from_str(&row).map_err(|e| e.to_string())?;
+    if receipt.turn_id != turn_id || receipt.payload_hash != SteerMailbox::payload_hash(text, paths)
+    {
+        return Err("相同输入标识不能用于不同内容".into());
+    }
+    if receipt.status == SteerStatus::Accepted
+        && live_instance != Some(receipt.instance_id.as_str())
+    {
+        receipt.status = SteerStatus::Cancelled;
+        receipt.error =
+            Some("会话已中断；未自动重放此指令。可恢复文字草稿，图片需要重新选择。".into());
+        let message = serde_json::to_string(&receipt).map_err(|e| e.to_string())?;
+        insert_session_event(pool, session_id, "native_steer", Some(&message)).await?;
+    }
+    Ok(Some(receipt))
+}
+
+async fn load_steer_receipts(
+    pool: &sqlx::SqlitePool,
+    session_id: &str,
+    live_instance: Option<&str>,
+) -> Result<Vec<crate::native::steer::SteerReceipt>, String> {
+    use crate::native::steer::{SteerReceipt, SteerStatus};
+    let rows = sqlx::query_scalar::<_, String>("SELECT message FROM agent_session_events WHERE session_id = $1 AND event_type = 'native_steer' ORDER BY rowid DESC LIMIT 1024")
+        .bind(session_id).fetch_all(pool).await.map_err(|e| e.to_string())?;
+    let mut seen = std::collections::HashSet::new();
+    let mut receipts = Vec::new();
+    for row in rows {
+        let Ok(mut receipt) = serde_json::from_str::<SteerReceipt>(&row) else {
+            continue;
+        };
+        if !seen.insert(receipt.input_id.clone()) {
+            continue;
+        }
+        if receipt.status == SteerStatus::Accepted
+            && live_instance != Some(receipt.instance_id.as_str())
+        {
+            receipt.status = SteerStatus::Cancelled;
+            receipt.error =
+                Some("会话已中断；未自动重放此指令。可恢复文字草稿，图片需要重新选择。".into());
+            let message = serde_json::to_string(&receipt).map_err(|e| e.to_string())?;
+            insert_session_event(pool, session_id, "native_steer", Some(&message)).await?;
+        }
+        receipts.push(receipt);
+        if receipts.len() >= 256 {
+            break;
+        }
+    }
+    receipts.reverse();
+    Ok(receipts)
+}
+
+#[tauri::command]
+pub async fn get_native_steer_snapshot(
+    app: AppHandle,
+    state: State<'_, Arc<Mutex<NativeAgentManager>>>,
+    session_record_id: String,
+) -> Result<crate::native::steer::SteerSnapshot, String> {
+    let manager = state.lock().await;
+    let mailbox = manager
+        .get_session(&session_record_id)
+        .map(|s| s.input_queue.steer.clone());
+    // Keep instance selection and recovery consistent with a concurrent restart.
+    let pool = sqlite_pool(&app).await?;
+    let receipts = load_steer_receipts(
+        &pool,
+        &session_record_id,
+        mailbox.as_ref().map(|m| m.instance_id.as_str()),
+    )
+    .await?;
+    if let Some(mailbox) = mailbox {
+        let mut snapshot = mailbox.snapshot().await;
+        let current: std::collections::HashSet<_> = snapshot
+            .receipts
+            .iter()
+            .map(|r| r.input_id.clone())
+            .collect();
+        let mut history: Vec<_> = receipts
+            .into_iter()
+            .filter(|r| !current.contains(&r.input_id))
+            .collect();
+        history.append(&mut snapshot.receipts);
+        snapshot.receipts = history;
+        return Ok(snapshot);
+    }
+    Ok(crate::native::steer::SteerSnapshot {
+        lifecycle: None,
+        session_record_id,
+        instance_id: receipts
+            .last()
+            .map(|r| r.instance_id.clone())
+            .unwrap_or_default(),
+        turn_id: None,
+        revision: 0,
+        receipts,
+    })
 }
 
 #[tauri::command]
@@ -4560,6 +5507,10 @@ pub async fn restart_native_session(
         .filter(|item| !item.is_empty())
         .map(ToOwned::to_owned);
     let _operation = if let Some(session_id) = restart_id {
+        state
+            .lock()
+            .await
+            .invalidate_plan_authorization(&session_id);
         let guard = lock_agent_session_operation(&state, &session_id).await;
         require_unarchived_session_with(&sqlite_pool(&app).await?, &session_id).await?;
         let _ = stop_native_process(
@@ -4574,7 +5525,7 @@ pub async fn restart_native_session(
     } else {
         None
     };
-    start_native_session_locked(app, state.inner().clone(), payload).await
+    start_native_session_locked(app, state.inner().clone(), payload, None).await
 }
 
 #[tauri::command]
@@ -5194,6 +6145,7 @@ mod tests {
         use crate::native::tools::permission::{NativeToolRiskKind, PermissionRuleSuggestion};
 
         let request = PermissionRequest {
+            origin: None,
             request_id: "r1".to_string(),
             profile_id: "p1".to_string(),
             workspace_id: Some("w1".to_string()),
@@ -5237,13 +6189,13 @@ mod tests {
             mcp_tool: None,
             image_names: Vec::new(),
         };
-        let raw = super::persist_stdout_message("[读取] a.ts", Some(&tool), None);
+        let raw = super::persist_stdout_message("[读取] a.ts", Some(&tool), None, None);
         let value: serde_json::Value = serde_json::from_str(&raw).expect("envelope");
         assert_eq!(value["nox"], 1);
         assert_eq!(value["line"], "[读取] a.ts");
         assert_eq!(value["tool"]["call_id"], "c1");
         assert_eq!(
-            super::persist_stdout_message("[读取] a.ts", None, None),
+            super::persist_stdout_message("[读取] a.ts", None, None, None),
             "[读取] a.ts"
         );
         let images = [crate::db::models::NativeToolImage {
@@ -5252,10 +6204,25 @@ mod tests {
             data_url: "data:image/png;base64,QQ==".to_string(),
         }];
         let with_images =
-            super::persist_stdout_message("[USER_INPUT] 看图", None, Some(images.as_slice()));
+            super::persist_stdout_message("[USER_INPUT] 看图", None, Some(images.as_slice()), None);
         let image_value: serde_json::Value = serde_json::from_str(&with_images).expect("envelope");
         assert_eq!(image_value["line"], "[USER_INPUT] 看图");
         assert_eq!(image_value["images"][0]["name"], "a.png");
+    }
+
+    #[test]
+    fn persist_stdout_message_retains_exact_assistant_fragment_identity_and_bytes() {
+        let fragment = crate::db::models::NativeAssistantFragment {
+            chain_id: "answer".into(),
+            part: 1,
+            subagent_tag: None,
+        };
+        let text = "  1;\n```\n";
+        let persisted = super::persist_stdout_message(text, None, None, Some(&fragment));
+        let value: serde_json::Value = serde_json::from_str(&persisted).unwrap();
+        assert_eq!(value["line"], text);
+        assert_eq!(value["assistant"]["chain_id"], "answer");
+        assert_eq!(value["assistant"]["part"], 1);
     }
 
     #[test]
@@ -5880,5 +6847,547 @@ mod tests {
         // When session is inactive, non-finished subagents become stopped
         let inactive = super::extract_session_subagents(&events, false);
         assert_eq!(inactive[2].status, "stopped");
+    }
+    #[tokio::test]
+    async fn steer_replay_uses_insertion_order_and_never_replays_interrupted_inputs() {
+        use crate::native::steer::{SteerMailbox, SteerReceipt, SteerStatus};
+        let pool = crate::db::test_support::setup_migrated_pool().await;
+        sqlx::query("INSERT INTO agent_sessions (id, title) VALUES ('steer-history', 'steer')")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let id = uuid::Uuid::new_v4().to_string();
+        let paths = vec!["/already/cleaned/image.png".into()];
+        let mut receipt = SteerReceipt {
+            session_record_id: "steer-history".into(),
+            instance_id: "old-runtime".into(),
+            turn_id: "old-turn".into(),
+            input_id: id.clone(),
+            text: "retain draft".into(),
+            image_count: 1,
+            payload_hash: SteerMailbox::payload_hash("retain draft", &paths),
+            generation: 1,
+            status: SteerStatus::Accepted,
+            error: None,
+        };
+        for (event_id, status) in [
+            ("z-accepted", SteerStatus::Accepted),
+            ("a-applied", SteerStatus::Applied),
+        ] {
+            receipt.status = status;
+            sqlx::query("INSERT INTO agent_session_events (id, session_id, event_type, message, created_at) VALUES ($1, 'steer-history', 'native_steer', $2, '2026-09-21 00:00:00')").bind(event_id).bind(serde_json::to_string(&receipt).unwrap()).execute(&pool).await.unwrap();
+        }
+        let loaded = super::load_steer_receipts(&pool, "steer-history", None)
+            .await
+            .unwrap();
+        assert_eq!(loaded[0].status, SteerStatus::Applied);
+        let retry = super::find_steer_receipt(
+            &pool,
+            "steer-history",
+            &id,
+            "old-turn",
+            "retain draft",
+            &paths,
+            None,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(retry.status, SteerStatus::Applied);
+        assert!(super::find_steer_receipt(
+            &pool,
+            "steer-history",
+            &id,
+            "old-turn",
+            "changed",
+            &paths,
+            None
+        )
+        .await
+        .is_err());
+        receipt.input_id = uuid::Uuid::new_v4().to_string();
+        receipt.status = SteerStatus::Accepted;
+        super::insert_session_event(
+            &pool,
+            "steer-history",
+            "native_steer",
+            Some(&serde_json::to_string(&receipt).unwrap()),
+        )
+        .await
+        .unwrap();
+        let recovered = super::load_steer_receipts(&pool, "steer-history", None)
+            .await
+            .unwrap();
+        assert_eq!(recovered[1].status, SteerStatus::Cancelled);
+        assert_eq!(recovered[1].text, "retain draft");
+        assert_eq!(recovered[1].image_count, 1);
+        assert!(recovered[1]
+            .error
+            .as_deref()
+            .unwrap()
+            .contains("图片需要重新选择"));
+        assert!(crate::app::sessions::get_agent_session_log_lines_with(
+            &pool,
+            "steer-history",
+            None,
+            None,
+            None
+        )
+        .await
+        .unwrap()
+        .is_empty());
+        assert_eq!(
+            super::load_steer_receipts(&pool, "steer-history", None)
+                .await
+                .unwrap(),
+            recovered
+        );
+    }
+    struct SteerIpcFixture {
+        pool: sqlx::SqlitePool,
+        manager: std::sync::Arc<tokio::sync::Mutex<crate::native::manager::NativeAgentManager>>,
+        mailbox: std::sync::Arc<crate::native::steer::SteerMailbox>,
+        config: tempfile::TempDir,
+        input: super::SteerSubmission,
+    }
+
+    impl SteerIpcFixture {
+        async fn new() -> Self {
+            let pool = crate::db::test_support::setup_migrated_pool().await;
+            sqlx::query("INSERT INTO agent_sessions (id, title) VALUES ('steer-ipc', 'steer')")
+                .execute(&pool)
+                .await
+                .unwrap();
+            let session = crate::native::manager::tests::live_session("steer-ipc");
+            let mailbox = session.input_queue.steer.clone();
+            let persisted_pool = pool.clone();
+            mailbox.configure(
+                std::sync::Arc::new(move |receipt| {
+                    let pool = persisted_pool.clone();
+                    Box::pin(async move { super::persist_steer_receipt(&pool, &receipt).await })
+                }),
+                std::sync::Arc::new(|_| {}),
+            );
+            mailbox.begin_turn().await;
+            let turn = mailbox.snapshot().await.turn_id.unwrap();
+            let mut manager = crate::native::manager::NativeAgentManager::new();
+            manager.add_session(session);
+            Self {
+                pool,
+                manager: std::sync::Arc::new(tokio::sync::Mutex::new(manager)),
+                mailbox,
+                config: tempfile::tempdir().unwrap(),
+                input: super::SteerSubmission {
+                    session_record_id: "steer-ipc".into(),
+                    expected_turn_id: turn,
+                    input_id: uuid::Uuid::new_v4().to_string(),
+                    text: "change direction".into(),
+                    image_paths: vec![],
+                },
+            }
+        }
+
+        async fn submit(
+            &self,
+            input: &super::SteerSubmission,
+        ) -> Result<crate::native::steer::SteerReceipt, crate::native::steer::SteerSubmissionError>
+        {
+            let root = crate::native::images::attachments_dir(self.config.path());
+            super::submit_native_steer_with(
+                &self.pool,
+                &self.manager,
+                input,
+                |paths| async move { super::load_steer_submission_images(&root, &paths) },
+                |_, _| {},
+            )
+            .await
+        }
+
+        async fn install_pending_plan(
+            &self,
+        ) -> tokio::sync::oneshot::Receiver<crate::native::tools::dispatch::PlanApprovalAnswer>
+        {
+            let pending = serde_json::json!({"request_id":"plan-request", "plan":"keep this plan", "created_at":"same timestamp"}).to_string();
+            let approved = serde_json::json!({"request_id":"plan-request", "status":"saved", "body":"authorized body", "saved_hash":"retain-me"}).to_string();
+            sqlx::query("UPDATE agent_sessions SET pending_plan_json = $1, approved_plan_json = $2 WHERE id = 'steer-ipc'")
+                .bind(pending).bind(approved).execute(&self.pool).await.unwrap();
+            let (reply, receiver) = tokio::sync::oneshot::channel();
+            self.manager
+                .lock()
+                .await
+                .enqueue_plan_approval(
+                    "steer-ipc",
+                    crate::native::manager::PendingPlanApproval {
+                        request: crate::native::manager::PlanApprovalRequest {
+                            origin: Some(self.mailbox.origin()),
+                            request_id: "plan-request".into(),
+                            profile_id: "".into(),
+                            workspace_id: None,
+                            session_kind: "plan".into(),
+                            plan: "keep this plan".into(),
+                        },
+                        reply,
+                    },
+                )
+                .unwrap();
+            receiver
+        }
+
+        async fn plan_json(&self) -> (Option<String>, Option<String>) {
+            sqlx::query_as("SELECT pending_plan_json, approved_plan_json FROM agent_sessions WHERE id = 'steer-ipc'").fetch_one(&self.pool).await.unwrap()
+        }
+    }
+
+    #[tokio::test]
+    async fn steer_ipc_concurrent_uuid_retries_do_not_reload_cleaned_images_or_reject_a_completed_turn(
+    ) {
+        use crate::native::steer::SteerStatus;
+        let mut fixture = SteerIpcFixture::new().await;
+        let image = crate::native::images::stage_image_bytes(
+            fixture.config.path(),
+            "image.png",
+            b"\x89PNG\r\nfixture",
+        )
+        .unwrap();
+        fixture.input.image_paths = vec![image.to_string_lossy().into_owned()];
+        let loaded = std::sync::Arc::new(tokio::sync::Notify::new());
+        let permit = std::sync::Arc::new(tokio::sync::Semaphore::new(0));
+        let first_pool = fixture.pool.clone();
+        let first_manager = fixture.manager.clone();
+        let first_input = fixture.input.clone();
+        let first_root = crate::native::images::attachments_dir(fixture.config.path());
+        let first_loaded = loaded.clone();
+        let first_permit = permit.clone();
+        let first = tokio::spawn(async move {
+            super::submit_native_steer_with(
+                &first_pool,
+                &first_manager,
+                &first_input,
+                |paths| async move {
+                    let images = super::load_steer_submission_images(&first_root, &paths)?;
+                    first_loaded.notify_one();
+                    let _permit = first_permit.acquire().await.unwrap();
+                    Ok(images)
+                },
+                |_, _| {},
+            )
+            .await
+        });
+        loaded.notified().await;
+        let second_pool = fixture.pool.clone();
+        let second_manager = fixture.manager.clone();
+        let second_input = fixture.input.clone();
+        let second_root = crate::native::images::attachments_dir(fixture.config.path());
+        let second_read = std::sync::Arc::new(tokio::sync::Semaphore::new(0));
+        let second_read_wait = second_read.clone();
+        let second_loads = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counted_loads = second_loads.clone();
+        let second = tokio::spawn(async move {
+            super::submit_native_steer_with(
+                &second_pool,
+                &second_manager,
+                &second_input,
+                |paths| async move {
+                    counted_loads.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    let _permit = second_read_wait.acquire().await.unwrap();
+                    super::load_steer_submission_images(&second_root, &paths)
+                },
+                |_, _| {},
+            )
+            .await
+        });
+        tokio::task::yield_now().await;
+        permit.add_permits(1);
+        let first_receipt = first.await.unwrap().unwrap();
+        assert!(!image.exists(), "first durable acceptance cleans staging");
+        let claimed = fixture.mailbox.take().await.unwrap();
+        fixture
+            .mailbox
+            .finish_input(&claimed.receipt.input_id, SteerStatus::Applied, None)
+            .await
+            .unwrap();
+        assert!(fixture.mailbox.seal().await);
+        second_read.add_permits(1);
+        let second_receipt = second.await.unwrap().unwrap();
+        assert_eq!(first_receipt.input_id, second_receipt.input_id);
+        assert_eq!(
+            second_loads.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "a concurrent UUID retry must not enter image loading"
+        );
+        assert!(fixture.mailbox.take().await.is_none());
+        assert_eq!(
+            fixture.submit(&fixture.input).await.unwrap().status,
+            SteerStatus::Applied
+        );
+        let accepts: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM agent_session_events WHERE event_type = 'native_steer' AND json_extract(message, '$.status') = 'accepted'").fetch_one(&fixture.pool).await.unwrap();
+        assert_eq!(accepts, 1);
+    }
+
+    #[tokio::test]
+    async fn steer_ipc_receipt_insert_failure_rolls_back_pending_and_authorized_plan_changes() {
+        use crate::native::steer::SteerStatus;
+        let mut fixture = SteerIpcFixture::new().await;
+        let mut plan_reply = fixture.install_pending_plan().await;
+        let initial = fixture.plan_json().await;
+        let origin = fixture.mailbox.origin();
+        let image = crate::native::images::stage_image_bytes(
+            fixture.config.path(),
+            "image.png",
+            b"\x89PNG\r\nfixture",
+        )
+        .unwrap();
+        fixture.input.image_paths = vec![image.to_string_lossy().into_owned()];
+        sqlx::query("CREATE TRIGGER fail_steer_accept BEFORE INSERT ON agent_session_events WHEN NEW.event_type = 'native_steer' AND json_extract(NEW.message, '$.status') = 'accepted' BEGIN SELECT RAISE(ABORT, 'injected receipt failure'); END").execute(&fixture.pool).await.unwrap();
+        let error = fixture.submit(&fixture.input).await.unwrap_err();
+        assert!(error.message.contains("injected receipt failure"));
+        assert_eq!(fixture.plan_json().await, initial);
+        assert!(fixture
+            .manager
+            .lock()
+            .await
+            .require_plan_approval("steer-ipc", "plan-request")
+            .is_ok());
+        assert!(matches!(
+            plan_reply.try_recv(),
+            Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+        ));
+        assert!(image.exists());
+        assert!(fixture.mailbox.take().await.is_none());
+        assert!(fixture.mailbox.is_current(&origin));
+        let events: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM agent_session_events WHERE event_type = 'native_steer'",
+        )
+        .fetch_one(&fixture.pool)
+        .await
+        .unwrap();
+        assert_eq!(events, 0);
+        sqlx::query("DROP TRIGGER fail_steer_accept")
+            .execute(&fixture.pool)
+            .await
+            .unwrap();
+        let accepted = fixture.submit(&fixture.input).await.unwrap();
+        assert_eq!(accepted.status, SteerStatus::Accepted);
+        let (pending, approved) = fixture.plan_json().await;
+        assert!(pending.is_none());
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&approved.unwrap()).unwrap()["status"],
+            "cancelled"
+        );
+        assert!(plan_reply.await.is_err());
+    }
+
+    #[tokio::test]
+    async fn steer_ipc_late_seal_or_full_mailbox_preserves_plan_and_admission_limits() {
+        for late_seal in [false, true] {
+            let fixture = SteerIpcFixture::new().await;
+            if !late_seal {
+                for _ in 0..8 {
+                    let mut input = fixture.input.clone();
+                    input.input_id = uuid::Uuid::new_v4().to_string();
+                    fixture.submit(&input).await.unwrap();
+                }
+            }
+            let plan_reply = fixture.install_pending_plan().await;
+            let initial = fixture.plan_json().await;
+            let authorization_revision = fixture
+                .manager
+                .lock()
+                .await
+                .plan_authorization_revision("steer-ipc");
+            let operation_lock = fixture
+                .manager
+                .lock()
+                .await
+                .session_operation_lock("steer-ipc");
+            let operation = if late_seal {
+                Some(operation_lock.lock_owned().await)
+            } else {
+                None
+            };
+            let pool = fixture.pool.clone();
+            let manager = fixture.manager.clone();
+            let input = fixture.input.clone();
+            let admission = tokio::spawn(async move {
+                super::submit_native_steer_with(
+                    &pool,
+                    &manager,
+                    &input,
+                    |_| async { Ok(Default::default()) },
+                    |_, _| {},
+                )
+                .await
+            });
+            if late_seal {
+                tokio::time::timeout(std::time::Duration::from_secs(3), async {
+                    while fixture
+                        .manager
+                        .lock()
+                        .await
+                        .plan_authorization_revision("steer-ipc")
+                        == authorization_revision
+                    {
+                        tokio::task::yield_now().await;
+                    }
+                })
+                .await
+                .unwrap();
+                assert!(fixture.mailbox.seal().await);
+                drop(operation);
+            }
+            assert!(admission.await.unwrap().is_err());
+            assert_eq!(fixture.plan_json().await, initial);
+            assert!(fixture
+                .manager
+                .lock()
+                .await
+                .require_plan_approval("steer-ipc", "plan-request")
+                .is_ok());
+            if !late_seal {
+                assert_eq!(
+                    fixture
+                        .manager
+                        .lock()
+                        .await
+                        .plan_authorization_revision("steer-ipc"),
+                    authorization_revision
+                );
+            }
+            fixture
+                .manager
+                .lock()
+                .await
+                .resolve_plan_approval("steer-ipc", "plan-request", Default::default())
+                .unwrap();
+            assert!(
+                !plan_reply.await.unwrap().approved,
+                "failed admission leaves the plan answerable"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn steer_ipc_more_than_256_inputs_evicts_only_terminal_cache_and_keeps_durable_dedup() {
+        use crate::native::steer::SteerStatus;
+        let fixture = SteerIpcFixture::new().await;
+        let pending = fixture.submit(&fixture.input).await.unwrap();
+        let held = fixture.mailbox.take().await.unwrap();
+        assert_eq!(held.receipt.input_id, pending.input_id);
+        let mut oldest_terminal = fixture.input.clone();
+        oldest_terminal.input_id = uuid::Uuid::new_v4().to_string();
+        for index in 0..257 {
+            let mut input = oldest_terminal.clone();
+            if index > 0 {
+                input.input_id = uuid::Uuid::new_v4().to_string();
+            }
+            input.text = format!("completed {index}");
+            fixture.submit(&input).await.unwrap();
+            let claimed = fixture.mailbox.take().await.unwrap();
+            fixture
+                .mailbox
+                .finish_input(&claimed.receipt.input_id, SteerStatus::Applied, None)
+                .await
+                .unwrap();
+        }
+        let snapshot = fixture.mailbox.snapshot().await;
+        assert_eq!(snapshot.receipts.len(), 129);
+        assert_eq!(
+            snapshot
+                .receipts
+                .iter()
+                .filter(|receipt| receipt.status == SteerStatus::Accepted)
+                .count(),
+            1
+        );
+        assert!(snapshot
+            .receipts
+            .iter()
+            .any(|receipt| receipt.input_id == pending.input_id));
+        assert!(!snapshot
+            .receipts
+            .iter()
+            .any(|receipt| receipt.input_id == oldest_terminal.input_id));
+        oldest_terminal.text = "completed 0".into();
+        assert_eq!(
+            fixture.submit(&oldest_terminal).await.unwrap().status,
+            SteerStatus::Applied
+        );
+        assert!(
+            fixture.mailbox.take().await.is_none(),
+            "evicted same-turn UUID never redelivers"
+        );
+        assert_eq!(
+            fixture.submit(&fixture.input).await.unwrap().status,
+            SteerStatus::Accepted
+        );
+        fixture
+            .mailbox
+            .finish_input(&pending.input_id, SteerStatus::Applied, None)
+            .await
+            .unwrap();
+        assert!(fixture.mailbox.seal().await);
+        assert_eq!(
+            fixture.submit(&oldest_terminal).await.unwrap().status,
+            SteerStatus::Applied
+        );
+    }
+    #[test]
+    fn lifecycle_exit_and_interaction_events_identify_the_originating_runtime() {
+        let exit = crate::db::models::AgentSessionExit {
+            instance_id: "old-runtime".into(),
+            session_record_id: "session".into(),
+            profile_id: "".into(),
+            workspace_id: None,
+            session_kind: "execution".into(),
+            code: 0,
+            worktree_path: None,
+        };
+        assert_eq!(
+            serde_json::to_value(exit).unwrap()["instance_id"],
+            "old-runtime"
+        );
+        let origin = Some(crate::native::steer::MainOrigin {
+            instance_id: "child-runtime".into(),
+            generation: 42,
+            child: true,
+        });
+        let question = crate::native::manager::PlanQuestionRequest {
+            origin: origin.clone(),
+            request_id: "question".into(),
+            profile_id: "".into(),
+            workspace_id: None,
+            session_kind: "plan".into(),
+            questions: vec![],
+        };
+        let plan = crate::native::manager::PlanApprovalRequest {
+            origin,
+            request_id: "approval".into(),
+            profile_id: "".into(),
+            workspace_id: None,
+            session_kind: "plan".into(),
+            plan: "body".into(),
+        };
+        assert_eq!(
+            serde_json::to_value(super::question_event("session", &question)).unwrap()
+                ["instance_id"],
+            "child-runtime"
+        );
+        assert_eq!(
+            serde_json::to_value(super::plan_approval_event("session", &plan)).unwrap()
+                ["instance_id"],
+            "child-runtime"
+        );
+        let delta = crate::db::models::NativeTextDelta {
+            session_record_id: "session".into(),
+            instance_id: "runtime".into(),
+            turn_id: Some("completed-turn".into()),
+            kind: "text".into(),
+            text: "".into(),
+            clear: true,
+            assistant: None,
+        };
+        let wire = serde_json::to_value(delta).unwrap();
+        assert_eq!(wire["instance_id"], "runtime");
+        assert_eq!(wire["turn_id"], "completed-turn");
     }
 }
