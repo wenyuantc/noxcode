@@ -3,6 +3,7 @@ import { open } from "@tauri-apps/plugin-dialog";
 import {
   ArrowUp,
   Bot,
+  CornerUpRight,
   FileText,
   Laptop,
   Loader2,
@@ -1279,10 +1280,11 @@ export function Composer({ compact = false }: { compact?: boolean }) {
             ) : null}
             {live || steer.snapshot?.turn_id ? (
               <Button
-                size="sm"
+                size="icon"
                 variant="outline"
                 title={t("sessions:steer.help")}
                 aria-label={t("sessions:steer.action")}
+                aria-busy={steer.busy}
                 disabled={
                   sendBusy ||
                   steer.busy ||
@@ -1291,7 +1293,11 @@ export function Composer({ compact = false }: { compact?: boolean }) {
                 }
                 onClick={() => void sendSteer()}
               >
-                {steer.busy ? t("sessions:steer.submitting") : t("sessions:steer.action")}
+                {steer.busy ? (
+                  <Loader2 className="size-3.5 animate-spin" aria-hidden="true" />
+                ) : (
+                  <CornerUpRight className="size-3.5" aria-hidden="true" />
+                )}
               </Button>
             ) : null}
             <Button
