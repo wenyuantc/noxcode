@@ -72,6 +72,10 @@ export interface ParsedGoalLine {
   status: string;
   checklist: { item: string; done: boolean }[];
   note: string | null;
+  verificationStatus: string | null;
+  failureReason: string | null;
+  evidence: string[];
+  continueRemaining: number | null;
 }
 
 /** `[GOAL] {json}` → 当前目标；`{"cleared":true}` 表示已清除。 */
@@ -83,7 +87,17 @@ export function parseGoalLine(text: string): ParsedGoalLine | null {
     if (!value || typeof value !== "object") return null;
     const record = value as Record<string, unknown>;
     if (record.cleared === true) {
-      return { cleared: true, title: "", status: "cleared", checklist: [], note: null };
+      return {
+        cleared: true,
+        title: "",
+        status: "cleared",
+        checklist: [],
+        note: null,
+        verificationStatus: null,
+        failureReason: null,
+        evidence: [],
+        continueRemaining: null,
+      };
     }
     const checklist = Array.isArray(record.checklist)
       ? record.checklist
@@ -96,12 +110,28 @@ export function parseGoalLine(text: string): ParsedGoalLine | null {
           })
           .filter((entry): entry is { item: string; done: boolean } => entry != null)
       : [];
+    const verification =
+      record.verification && typeof record.verification === "object"
+        ? (record.verification as Record<string, unknown>)
+        : null;
+    const continueCount = typeof record.continue_count === "number" ? record.continue_count : null;
+    const continueLimit = typeof record.continue_limit === "number" ? record.continue_limit : null;
     return {
       cleared: false,
       title: typeof record.title === "string" ? record.title : "",
       status: typeof record.status === "string" ? record.status : "active",
       checklist,
       note: typeof record.note === "string" ? record.note : null,
+      verificationStatus: typeof verification?.status === "string" ? verification.status : null,
+      failureReason:
+        typeof verification?.failure_reason === "string" ? verification.failure_reason : null,
+      evidence: Array.isArray(verification?.evidence)
+        ? verification.evidence.filter((item): item is string => typeof item === "string")
+        : [],
+      continueRemaining:
+        continueCount != null && continueLimit != null
+          ? Math.max(0, continueLimit - continueCount)
+          : null,
     };
   } catch {
     return null;

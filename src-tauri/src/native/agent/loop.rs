@@ -1501,7 +1501,10 @@ impl AgentRunner {
                 &assistant,
                 self.budget_exhausted,
             );
-            match self.consume_assistant_serial(assistant, last_turn).await? {
+            match self
+                .consume_assistant_serial(assistant, last_turn, Some(&client))
+                .await?
+            {
                 TurnControl::Stop(text) => {
                     if self.inject_steer_messages() {
                         self.checkpoint_transcript().await?;
@@ -2006,6 +2009,11 @@ impl AgentRunner {
         }
         self.execute_tool_calls(tool_calls, client).await?;
         self.checkpoint_transcript().await?;
+        if self.goal_verification_paused().await {
+            return Ok(TurnControl::Stop(
+                "目标核验次数已用完，已暂停自动继续".to_string(),
+            ));
+        }
         Ok(TurnControl::Continue)
     }
 
@@ -2013,6 +2021,7 @@ impl AgentRunner {
         &mut self,
         mut assistant: Message,
         last_turn: bool,
+        client: Option<&ModelClient>,
     ) -> Result<TurnControl, String> {
         if self.ctx.cancel.is_cancelled() {
             return Err("已取消".to_string());
@@ -2046,6 +2055,7 @@ impl AgentRunner {
             };
             return Ok(TurnControl::Stop(text));
         }
+        self.install_goal_reviewer(client);
         for call in &mut tool_calls {
             self.assign_call_id(call);
         }
@@ -2062,6 +2072,11 @@ impl AgentRunner {
             self.emit_tool_start(&call).await?;
             let output = self.execute_logged_tool(&call).await;
             self.record_tool_result(&call, output).await?;
+        }
+        if self.goal_verification_paused().await {
+            return Ok(TurnControl::Stop(
+                "目标核验次数已用完，已暂停自动继续".to_string(),
+            ));
         }
         Ok(TurnControl::Continue)
     }
@@ -2082,6 +2097,48 @@ impl AgentRunner {
             ));
         }
         None
+    }
+
+    fn install_goal_reviewer(&mut self, client: Option<&ModelClient>) {
+        let Some(client) = client else {
+            self.ctx.goal_reviewer = None;
+            return;
+        };
+        let Some(model) = self.model_turn.as_ref().map(|cfg| cfg.model.clone()) else {
+            self.ctx.goal_reviewer = None;
+            return;
+        };
+        let client = client.clone();
+        let lite = self.lite_model.clone();
+        self.ctx.goal_reviewer = Some(std::sync::Arc::new(move |material: String| {
+            let client = client.clone();
+            let lite = lite.clone();
+            let model = model.clone();
+            let review: std::pin::Pin<
+                Box<
+                    dyn std::future::Future<Output = crate::native::goals::GoalReviewDecision>
+                        + Send,
+                >,
+            > = Box::pin(async move {
+                crate::native::goals::review_goal_with_client(
+                    &client,
+                    &model,
+                    lite.as_deref(),
+                    &material,
+                )
+                .await
+            });
+            review
+        }));
+    }
+
+    async fn goal_verification_paused(&self) -> bool {
+        let Some(scope) = &self.ctx.session_scope else {
+            return false;
+        };
+        crate::native::goals::verification_paused(&scope.pool, &self.ctx.session_record_id)
+            .await
+            .unwrap_or(false)
     }
 
     async fn execute_logged_tool(&mut self, call: &ToolCall) -> ToolOutput {
@@ -2118,6 +2175,7 @@ impl AgentRunner {
         mut calls: Vec<ToolCall>,
         client: Option<&ModelClient>,
     ) -> Result<(), String> {
+        self.install_goal_reviewer(client);
         for call in &mut calls {
             self.assign_call_id(call);
         }

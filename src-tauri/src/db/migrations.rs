@@ -599,6 +599,31 @@ pub fn get_all_migrations() -> Vec<Migration> {
             "#,
             kind: tauri_plugin_sql::MigrationKind::Up,
         },
+        Migration {
+            version: 18,
+            description: "goal acceptance criteria and verification records",
+            sql: r#"
+                ALTER TABLE native_goals ADD COLUMN criteria_json TEXT NOT NULL DEFAULT '[]';
+                ALTER TABLE native_goals ADD COLUMN criteria_version INTEGER NOT NULL DEFAULT 1;
+                ALTER TABLE native_goals ADD COLUMN continue_count INTEGER NOT NULL DEFAULT 0;
+
+                CREATE TABLE native_goal_verifications (
+                    id TEXT PRIMARY KEY,
+                    goal_id TEXT NOT NULL,
+                    session_record_id TEXT NOT NULL,
+                    criteria_version INTEGER NOT NULL,
+                    branch_id TEXT,
+                    status TEXT NOT NULL,
+                    evidence_json TEXT NOT NULL,
+                    failure_reason TEXT,
+                    continue_count INTEGER NOT NULL,
+                    created_at TEXT NOT NULL
+                );
+                CREATE INDEX idx_native_goal_verifications_goal
+                    ON native_goal_verifications(goal_id, created_at);
+            "#,
+            kind: tauri_plugin_sql::MigrationKind::Up,
+        },
     ]
 }
 
@@ -667,7 +692,7 @@ mod tests {
         for (index, migration) in get_all_migrations().iter().enumerate() {
             assert_eq!(migration.version, index as i64 + 1);
         }
-        assert_eq!(latest_migration_version(), 17);
+        assert_eq!(latest_migration_version(), 18);
         assert_eq!(
             get_all_migrations()
                 .last()
@@ -789,6 +814,9 @@ mod tests {
                     "native_api_call_logs",
                     "native_automations",
                     "native_context_anchors",
+                    "native_file_revisions",
+                    "native_file_rollbacks",
+                    "native_goal_verifications",
                     "native_goals",
                     "native_history_branches",
                     "native_history_links",
@@ -825,6 +853,41 @@ mod tests {
             assert!(channel_columns
                 .iter()
                 .any(|name| name == "responses_continuation"));
+            let goal_columns: Vec<String> =
+                sqlx::query("SELECT name FROM pragma_table_info('native_goals') ORDER BY name")
+                    .fetch_all(&pool)
+                    .await
+                    .expect("goal columns")
+                    .into_iter()
+                    .map(|row| row.get::<String, _>("name"))
+                    .collect();
+            for name in ["criteria_json", "criteria_version", "continue_count"] {
+                assert!(goal_columns.iter().any(|column| column == name), "{name}");
+            }
+            let verification_columns: Vec<String> = sqlx::query(
+                "SELECT name FROM pragma_table_info('native_goal_verifications') ORDER BY name",
+            )
+            .fetch_all(&pool)
+            .await
+            .expect("verification columns")
+            .into_iter()
+            .map(|row| row.get::<String, _>("name"))
+            .collect();
+            assert_eq!(
+                verification_columns,
+                vec![
+                    "branch_id",
+                    "continue_count",
+                    "created_at",
+                    "criteria_version",
+                    "evidence_json",
+                    "failure_reason",
+                    "goal_id",
+                    "id",
+                    "session_record_id",
+                    "status",
+                ]
+            );
         });
     }
 

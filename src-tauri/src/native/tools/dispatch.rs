@@ -183,6 +183,8 @@ pub struct ToolCtx {
     pub record_file_revisions: bool,
     /// 子 Agent 的写入记在父工具调用上，这样回滚能沿消息边界找到它们。
     pub file_attribution_call_id: Option<String>,
+    /// 主观验收的只读复核。由会话层用轻量模型安装，Goal 自己不执行命令。
+    pub goal_reviewer: Option<crate::native::goals::GoalReviewHook>,
     /// 计划模式变化通知；子 Agent 不应向父会话广播该事件。
     pub on_plan_mode_change: Option<PlanModeChangeHook>,
     /// 父 Agent 的后台任务注册表（TaskOutput / TaskStop / SendMessage）。
@@ -277,6 +279,7 @@ impl ToolCtx {
             on_mutation: None,
             record_file_revisions: false,
             file_attribution_call_id: None,
+            goal_reviewer: None,
             on_plan_mode_change: None,
             background: None,
             coordinator: None,
@@ -1013,6 +1016,43 @@ async fn call_cron_delete(ctx: &ToolCtx, arguments: &str) -> Result<String, Stri
     Ok(format!("已删除自动化 {id}「{}」", automation.name))
 }
 
+fn review_material(
+    criteria: &[crate::native::goals::GoalCriterion],
+    artifacts: &[crate::native::goals::ArtifactSnapshot],
+) -> String {
+    let mut lines = Vec::new();
+    for criterion in criteria.iter().filter(|item| item.kind == "subjective") {
+        lines.push(format!("验收条件：{}", criterion.description));
+    }
+    for artifact in artifacts {
+        if let Some(text) = &artifact.text {
+            lines.push(format!("产物 {}：\n{text}", artifact.path));
+        }
+    }
+    lines.join("\n\n")
+}
+
+async fn goal_artifacts(
+    ctx: &ToolCtx,
+    criteria: &[crate::native::goals::GoalCriterion],
+) -> Vec<crate::native::goals::ArtifactSnapshot> {
+    if let Some(ssh) = ctx.ssh_for_exec() {
+        let mut snapshots = Vec::new();
+        for criterion in criteria {
+            let Some(path) = criterion.path.clone() else {
+                continue;
+            };
+            let text = match ssh.exists(&path).await {
+                Ok(true) => ssh.read(&path).await.ok(),
+                _ => None,
+            };
+            snapshots.push(crate::native::goals::ArtifactSnapshot { path, text });
+        }
+        return snapshots;
+    }
+    crate::native::goals::read_local_artifacts(&ctx.active_workspace_root(), criteria)
+}
+
 async fn call_goal(ctx: &ToolCtx, arguments: &str) -> Result<String, String> {
     let scope = session_scope(ctx)?;
     if ctx.session_record_id.trim().is_empty() {
@@ -1023,16 +1063,55 @@ async fn call_goal(ctx: &ToolCtx, arguments: &str) -> Result<String, String> {
     let title = args.get("title").and_then(Value::as_str);
     let note = args.get("note").and_then(Value::as_str);
     let checklist = crate::native::goals::parse_checklist(args.get("checklist"));
-    let goal = crate::native::goals::apply_goal_action(
-        &scope.pool,
-        &ctx.session_record_id,
-        scope.workspace_id.as_deref(),
-        &action,
-        title,
-        checklist,
-        note,
-    )
-    .await?;
+    let criteria = crate::native::goals::parse_criteria(args.get("criteria"));
+    let goal = if action == "complete" {
+        let tools =
+            crate::native::goals::load_committed_tools(&scope.pool, &ctx.session_record_id).await?;
+        let current =
+            crate::native::goals::current_goal(&scope.pool, &ctx.session_record_id).await?;
+        let criteria_for_files = current
+            .as_ref()
+            .map(|goal| goal.criteria.clone())
+            .unwrap_or_default();
+        let artifacts = goal_artifacts(ctx, &criteria_for_files).await;
+        let cancelled = ctx.cancel.is_cancelled();
+        let review = if cancelled {
+            crate::native::goals::GoalReviewDecision::Cancelled
+        } else if criteria_for_files
+            .iter()
+            .any(|item| item.kind == "subjective")
+        {
+            if let Some(reviewer) = &ctx.goal_reviewer {
+                let material = review_material(&criteria_for_files, &artifacts);
+                reviewer(material).await
+            } else {
+                crate::native::goals::GoalReviewDecision::Unavailable("未配置独立复核".to_string())
+            }
+        } else {
+            crate::native::goals::GoalReviewDecision::Unavailable(String::new())
+        };
+        crate::native::goals::verify_goal(
+            &scope.pool,
+            &ctx.session_record_id,
+            &tools,
+            &artifacts,
+            review,
+            cancelled,
+        )
+        .await?
+    } else {
+        crate::native::goals::apply_goal_action(
+            &scope.pool,
+            &ctx.session_record_id,
+            scope.workspace_id.as_deref(),
+            &action,
+            title,
+            checklist,
+            note,
+            criteria,
+        )
+        .await?
+    };
     match goal {
         Some(goal) => {
             if let Some(on_goal) = &scope.on_goal {

@@ -10,7 +10,7 @@ React (UI) → Tauri IPC commands → Rust service layer → SQLite
 
 | 路径 | 职责 |
 | --- | --- |
-| [`src-tauri/src/db/migrations.rs`](../src-tauri/src/db/migrations.rs) | 迁移清单（version 1 baseline + version 2 去掉档案 + version 3 `agent_sessions.title` + version 4 `agent_sessions.pinned` + version 5 `agent_sessions.context_usage_json` + version 6 `ssh_configs.algorithms_json` + version 7 `activity_logs` + version 8 `native_tool_artifacts` / call log `operation`、`model_role` / `ai_channels.lite_model` + version 9 `native_automations`、`native_goals` + version 10 `agent_sessions.archived` + version 11 `ai_channels.responses_continuation` + version 12 `agent_sessions.pending_plan_json` + version 13 `agent_sessions.approved_plan_json` + version 14 追加式历史 + version 15 工具执行账本与模型尝试预算 + version 16 `native_goals.bound_branch_id` + version 17 `native_file_revisions`、`native_file_rollbacks`） |
+| [`src-tauri/src/db/migrations.rs`](../src-tauri/src/db/migrations.rs) | 迁移清单（version 1 baseline + version 2 去掉档案 + version 3 `agent_sessions.title` + version 4 `agent_sessions.pinned` + version 5 `agent_sessions.context_usage_json` + version 6 `ssh_configs.algorithms_json` + version 7 `activity_logs` + version 8 `native_tool_artifacts` / call log `operation`、`model_role` / `ai_channels.lite_model` + version 9 `native_automations`、`native_goals` + version 10 `agent_sessions.archived` + version 11 `ai_channels.responses_continuation` + version 12 `agent_sessions.pending_plan_json` + version 13 `agent_sessions.approved_plan_json` + version 14 追加式历史 + version 15 工具执行账本与模型尝试预算 + version 16 `native_goals.bound_branch_id` + version 17 `native_file_revisions`、`native_file_rollbacks` + version 18 `native_goals` 验收条件与 `native_goal_verifications`） |
 | [`src-tauri/src/db/models.rs`](../src-tauri/src/db/models.rs) | 行模型与 IPC DTO |
 | [`src-tauri/src/app/shared.rs`](../src-tauri/src/app/shared.rs) | `sqlite_pool` / `database_path` / `now_sqlite` / `new_id` |
 | [`src-tauri/src/app/database.rs`](../src-tauri/src/app/database.rs) | 健康检查、备份、恢复 |
@@ -32,7 +32,7 @@ React (UI) → Tauri IPC commands → Rust service layer → SQLite
 
 ## 迁移
 
-`tauri-plugin-sql` 在启动时按 `get_all_migrations()` 升级。版本号必须连续 `1..N`，由 `migration_versions_are_contiguous` 强制。当前最新版本是 **17**：version 6 只为 `ssh_configs` 增加 `algorithms_json`，不增加表；version 7 新增 `activity_logs`；version 8 新增 `native_tool_artifacts`，并给 `native_api_call_logs` 加 `operation`（默认 `agent_step`）与 `model_role`（默认 `main`）、给 `ai_channels` 加 `lite_model`；version 9 新增 `native_automations`（Cron 自动化）与 `native_goals`（会话目标）；version 10 增加 `agent_sessions.archived`（默认 `0`）及列表索引；version 11 给 `ai_channels` 增加 `responses_continuation`（默认 `auto`），version 12 为 `agent_sessions` 增加 `pending_plan_json`；version 13 增加 `approved_plan_json`，保存计划批准、文件写入状态、内容哈希与实施模型；version 14 新增追加式历史五张表；version 15 新增 `native_tool_runs` 与 `native_model_attempt_budgets`；version 16 为 `native_goals` 增加 `bound_branch_id`，把目标完成证据绑定到历史分支；version 17 新增 `native_file_revisions` 与 `native_file_rollbacks`，按路径记录受控写入并保存文件回滚操作。业务表现在是 21 张。
+`tauri-plugin-sql` 在启动时按 `get_all_migrations()` 升级。版本号必须连续 `1..N`，由 `migration_versions_are_contiguous` 强制。当前最新版本是 **18**：version 6 只为 `ssh_configs` 增加 `algorithms_json`，不增加表；version 7 新增 `activity_logs`；version 8 新增 `native_tool_artifacts`，并给 `native_api_call_logs` 加 `operation`（默认 `agent_step`）与 `model_role`（默认 `main`）、给 `ai_channels` 加 `lite_model`；version 9 新增 `native_automations`（Cron 自动化）与 `native_goals`（会话目标）；version 10 增加 `agent_sessions.archived`（默认 `0`）及列表索引；version 11 给 `ai_channels` 增加 `responses_continuation`（默认 `auto`），version 12 为 `agent_sessions` 增加 `pending_plan_json`；version 13 增加 `approved_plan_json`，保存计划批准、文件写入状态、内容哈希与实施模型；version 14 新增追加式历史五张表；version 15 新增 `native_tool_runs` 与 `native_model_attempt_budgets`；version 16 为 `native_goals` 增加 `bound_branch_id`，把目标完成证据绑定到历史分支；version 17 新增 `native_file_revisions` 与 `native_file_rollbacks`，按路径记录受控写入并保存文件回滚操作；version 18 为 `native_goals` 增加 `criteria_json`、`criteria_version`、`continue_count`，并新增 `native_goal_verifications`。业务表现在是 22 张。
 
 后续只能追加比当前最新版本更大的连续版本，禁止改已发布的 SQL，禁止插队。新历史成为权威来源后，旧版程序不能继续写同一数据库；发布回退使用升级前备份，不设破坏性降级迁移。
 
@@ -190,7 +190,11 @@ Cron 自动化：`workspace_id`（级联删除）、`name`、`prompt`、`cron`�
 
 ### `native_goals`
 
-会话目标：`session_record_id`（级联删除）、`title`、`status`（`active` / `completed` / `cleared`）、`progress_json`（`[{item, done}]`）、`note`、`bound_branch_id`。每个会话同时只有一条非 `cleared` 目标。
+会话目标：`session_record_id`（级联删除）、`title`、`status`（`active` / `completed` / `cleared`）、`progress_json`（`[{item, done}]`）、`note`、`bound_branch_id`、`criteria_json`（版本化验收条件）、`criteria_version`、`continue_count`。每个会话同时只有一条非 `cleared` 目标。`complete` 只写核验记录；条件或绑定分支变化后，旧记录不再作为当前证据。
+
+### `native_goal_verifications`
+
+一次目标核验：`goal_id`、`session_record_id`、`criteria_version`、`branch_id`、`status`（`passed` / `failed` / `timed_out` / `cancelled` / `budget_exhausted`）、`evidence_json`、`failure_reason`、`continue_count`、`created_at`。证据来自已提交的工具结果和后端读到的产物，不接受模型自行声明测试通过。
 
 ### `native_file_revisions`
 
@@ -245,4 +249,4 @@ sqlite3 "$HOME/Library/Application Support/com.wenyuan.noxcode/noxcode.db" \
   "SELECT version, description, success FROM _sqlx_migrations;"
 ```
 
-应看到 21 张业务表加 `_sqlx_migrations`，且 version 17 成功。
+应看到 22 张业务表加 `_sqlx_migrations`，且 version 18 成功。

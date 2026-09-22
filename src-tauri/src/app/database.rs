@@ -860,7 +860,7 @@ mod tests {
             );
             assert_eq!(
                 status.current_description.as_deref(),
-                Some("message file rollback revisions and operations")
+                Some("goal acceptance criteria and verification records")
             );
         });
     }
@@ -916,6 +916,7 @@ mod tests {
                 "native_context_anchors",
                 "native_file_revisions",
                 "native_file_rollbacks",
+                "native_goal_verifications",
                 "native_goals",
                 "native_history_branches",
                 "native_history_links",
@@ -934,7 +935,7 @@ mod tests {
                 .map(|table| table.name.as_str())
                 .collect::<Vec<_>>();
 
-            assert_eq!(stats.table_count, 21);
+            assert_eq!(stats.table_count, 22);
             assert_eq!(names, expected_tables);
             assert!(!names.contains(&MIGRATION_TABLE_NAME));
             assert_eq!(

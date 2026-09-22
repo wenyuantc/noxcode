@@ -45,6 +45,26 @@ export function GoalRow({ item }: { item: GroupedSessionItem }) {
         </ul>
       ) : null}
       {goal.note ? <p className="mt-1 text-xs text-muted-foreground">{goal.note}</p> : null}
+      {goal.verificationStatus ? (
+        <div className="mt-1 space-y-0.5 text-xs text-muted-foreground">
+          <p>
+            {t(`goalVerify.${goal.verificationStatus}`, {
+              defaultValue: goal.verificationStatus,
+            })}
+            {goal.continueRemaining != null
+              ? ` · ${t("goalContinueRemaining", { count: goal.continueRemaining })}`
+              : ""}
+          </p>
+          {goal.failureReason ? <p>{goal.failureReason}</p> : null}
+          {goal.evidence.length > 0 ? (
+            <ul>
+              {goal.evidence.map((entry, index) => (
+                <li key={`${index}-${entry}`}>{entry}</li>
+              ))}
+            </ul>
+          ) : null}
+        </div>
+      ) : null}
     </div>
   );
 }

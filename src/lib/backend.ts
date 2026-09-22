@@ -797,6 +797,12 @@ export function runNativeAutomationNow(id: string): Promise<string> {
   return invoke("run_native_automation_now", { id });
 }
 
+export function listNativeGoalVerifications(
+  sessionRecordId: string,
+): Promise<{ status: string; failure_reason: string | null; evidence: string[] }[]> {
+  return invoke("list_native_goal_verifications", { sessionRecordId });
+}
+
 export function listNativeHistoryBoundaries(
   sessionRecordId: string,
 ): Promise<NativeHistoryBoundaries> {

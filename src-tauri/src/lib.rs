@@ -158,6 +158,7 @@ pub fn run() {
             native::session::preview_native_file_rollback,
             native::session::apply_native_file_rollback,
             native::history::list_native_history_boundaries,
+            native::goals::list_native_goal_verifications,
             native::scheduler::list_native_automations,
             native::scheduler::create_native_automation,
             native::scheduler::update_native_automation,

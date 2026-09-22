@@ -36,6 +36,7 @@ import {
   parseThinkingDurationSeconds,
   parseRetryLine,
   parsePlanLine,
+  parseGoalLine,
   parseSubagentResult,
   parseSubagentTag,
   sanitizeSubagentLabel,
@@ -1478,6 +1479,21 @@ describe("sessionLines", () => {
       });
       expect(step.actionType).toBe("screenshot");
       expect(step.verb).toBe("截图");
+    });
+  });
+
+  it("reads goal verification evidence and remaining continuations", () => {
+    const parsed = parseGoalLine(
+      '[GOAL] {"title":"做出产物","status":"active","checklist":[],"continue_count":1,"continue_limit":3,"verification":{"status":"failed","failure_reason":"没有可读取的测试结果","evidence":["单元测试：没有可读取的测试结果"]}}',
+    );
+    expect(parsed).toMatchObject({
+      cleared: false,
+      title: "做出产物",
+      status: "active",
+      verificationStatus: "failed",
+      failureReason: "没有可读取的测试结果",
+      evidence: ["单元测试：没有可读取的测试结果"],
+      continueRemaining: 2,
     });
   });
 });

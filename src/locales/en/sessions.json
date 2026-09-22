@@ -411,6 +411,14 @@
   "fileRollbackUnsupported": "Not rolled back",
   "fileRollbackClose": "Close preview",
   "goalCleared": "Goal cleared",
+  "goalContinueRemaining": "{{count}} automatic continuations left",
+  "goalVerify": {
+    "passed": "Verification passed",
+    "failed": "Verification failed",
+    "timed_out": "Verification timed out",
+    "cancelled": "Verification cancelled",
+    "budget_exhausted": "Automatic continuation paused"
+  },
   "goalStatus": {
     "active": "in progress",
     "completed": "completed"

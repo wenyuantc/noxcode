@@ -529,7 +529,7 @@ pub fn tool_contracts() -> Vec<ToolContract> {
         ),
         (
             "Goal",
-            "维护会话目标与进度清单",
+            "维护会话目标、验收条件并核验完成",
             true,
             false,
             true,
@@ -744,13 +744,27 @@ pub fn automation_specs() -> Vec<ToolSpec> {
         ),
         spec(
             "Goal",
-            "Maintain the session goal shown to the user: action=set (new goal with optional checklist), update (change title/checklist/note), complete, clear. Checklist items are strings or {item, done}.",
+            "Maintain the session goal. set stores a title, checklist, and versioned acceptance criteria. update replaces them and drops previous verification. complete requests verification and does not check the goal off by itself: test criteria require a committed Bash result whose arguments contain command, artifact criteria are read by the backend, and subjective criteria need that artifact text plus a read-only review. Failure, timeout, cancellation, or missing evidence keeps the goal active. After three correctable failures automatic continuation pauses. clear removes the goal. Checklist items are strings or {item, done}. Each criterion is {kind: test|artifact|subjective, description, command?, path?}.",
             json!({
                 "type": "object",
                 "properties": {
                     "action": {"type": "string", "enum": ["set", "update", "complete", "clear"]},
                     "title": {"type": "string"},
                     "checklist": {"type": "array", "items": {}},
+                    "criteria": {
+                        "type": "array",
+                        "description": "Versioned acceptance criteria. Changing them invalidates old evidence.",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "kind": {"type": "string", "enum": ["test", "artifact", "subjective"]},
+                                "description": {"type": "string"},
+                                "command": {"type": "string", "description": "For test: substring matched against a committed Bash invocation."},
+                                "path": {"type": "string", "description": "Workspace-relative artifact path. Absolute paths and .. are rejected."}
+                            },
+                            "required": ["kind", "description"]
+                        }
+                    },
                     "note": {"type": "string"}
                 },
                 "required": ["action"]

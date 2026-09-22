@@ -411,6 +411,14 @@
   "fileRollbackUnsupported": "不能自动回滚",
   "fileRollbackClose": "关闭预览",
   "goalCleared": "目标已清除",
+  "goalContinueRemaining": "剩余自动继续 {{count}} 次",
+  "goalVerify": {
+    "passed": "核验通过",
+    "failed": "核验未通过",
+    "timed_out": "核验超时",
+    "cancelled": "核验已取消",
+    "budget_exhausted": "自动继续已暂停"
+  },
   "goalStatus": {
     "active": "进行中",
     "completed": "已完成"
