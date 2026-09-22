@@ -45,6 +45,7 @@ import {
   sendNativeInput,
   updateNativeSettings,
 } from "@/lib/backend";
+import { composerHasSubmittable, composerPrimaryAction } from "@/lib/composerPrimaryAction";
 import {
   appendComposerTrigger,
   collectFilesFromDataTransfer,
@@ -448,6 +449,18 @@ export function Composer({ compact = false }: { compact?: boolean }) {
   const working =
     Boolean(live) && (pendingCount > 0 || (turnState !== "waiting_input" && turnState !== "ended"));
   const sendBusy = sending || applyingConfig;
+  const hasSubmittable = composerHasSubmittable({
+    draft,
+    attachmentCount: attachments.length,
+    hasPills: hasPills(pills),
+  });
+  const primaryAction = composerPrimaryAction({ working, hasSubmittable, sendBusy });
+  const primaryLabel =
+    primaryAction === "stop"
+      ? t("sessions:stop")
+      : working
+        ? t("sessions:queuedInput.add")
+        : t("sessions:send");
 
   const skipMessage = (skip: ComposerImageSkip) => {
     if (skip.reason === "size") return t("sessions:imageTooLarge", { name: skip.name });
@@ -1262,22 +1275,6 @@ export function Composer({ compact = false }: { compact?: boolean }) {
               open={contextOpen}
               onOpenChange={setContextOpen}
             />
-            {working && live ? (
-              <Button
-                size="icon"
-                variant="outline"
-                className="size-8 rounded-lg border-destructive/40 text-destructive hover:bg-destructive/10"
-                title={t("sessions:stop")}
-                aria-label={t("sessions:stop")}
-                onClick={() =>
-                  void stopNativeSession(live.session_record_id).catch((reason) =>
-                    setError(String(reason)),
-                  )
-                }
-              >
-                <Square className="size-3.5" />
-              </Button>
-            ) : null}
             {live || steer.snapshot?.turn_id ? (
               <Button
                 size="icon"
@@ -1302,13 +1299,29 @@ export function Composer({ compact = false }: { compact?: boolean }) {
             ) : null}
             <Button
               size="icon"
-              className="size-8 cursor-pointer rounded-lg shadow-2xs transition-all hover:opacity-95 active:scale-[0.98]"
-              title={working ? t("sessions:queuedInput.add") : t("sessions:send")}
-              aria-label={working ? t("sessions:queuedInput.add") : t("sessions:send")}
-              onClick={() => void send()}
-              disabled={sendBusy || (!draft.trim() && attachments.length === 0 && !hasPills(pills))}
+              variant={primaryAction === "stop" ? "outline" : "default"}
+              className={
+                primaryAction === "stop"
+                  ? "size-8 rounded-lg border-destructive/40 text-destructive hover:bg-destructive/10"
+                  : "size-8 cursor-pointer rounded-lg shadow-2xs transition-all hover:opacity-95 active:scale-[0.98]"
+              }
+              title={primaryLabel}
+              aria-label={primaryLabel}
+              onClick={() => {
+                if (primaryAction === "stop") {
+                  if (!live) return;
+                  void stopNativeSession(live.session_record_id).catch((reason) =>
+                    setError(String(reason)),
+                  );
+                  return;
+                }
+                void send();
+              }}
+              disabled={primaryAction === "send" && (sendBusy || !hasSubmittable)}
             >
-              {sendBusy ? (
+              {primaryAction === "stop" ? (
+                <Square className="size-3.5" />
+              ) : sendBusy ? (
                 <Loader2 className="size-3.5 animate-spin" />
               ) : (
                 <ArrowUp className="size-3.5" />
