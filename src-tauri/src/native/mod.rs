@@ -7,6 +7,7 @@ pub(crate) mod artifacts;
 pub(crate) mod channels;
 pub(crate) mod commands;
 pub(crate) mod goals;
+pub(crate) mod history;
 pub(crate) mod hooks_config;
 pub(crate) mod images;
 pub(crate) mod input_queue;

@@ -380,6 +380,30 @@ export interface NativeMemoryEntry {
   body: string;
 }
 
+export interface NativeHistoryBoundary {
+  message_id: string;
+  ordinal: number;
+  role: string;
+  turn_id: string | null;
+  selectable_before: boolean;
+  selectable_after: boolean;
+}
+
+export interface NativeCapabilityGap {
+  kind: string;
+  status: string;
+  reason: string;
+}
+
+export interface NativeHistoryBoundaries {
+  session_record_id: string;
+  branch_id: string;
+  revision: number;
+  legacy_baseline: boolean;
+  gaps: NativeCapabilityGap[];
+  boundaries: NativeHistoryBoundary[];
+}
+
 export interface NativeAutomation {
   id: string;
   workspace_id: string;

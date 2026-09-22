@@ -5,7 +5,6 @@ use std::hash::{Hash, Hasher};
 
 use sqlx::SqlitePool;
 
-use crate::app::shared::now_sqlite;
 use crate::native::agent::truncate::sanitize_tool_message_pairs;
 use crate::native::model::types::{Message, Role};
 
@@ -48,37 +47,26 @@ pub async fn save_transcript(
     if session_record_id.trim().is_empty() {
         return Err("会话标识不能为空".to_string());
     }
-    let prepared = prepare_transcript_messages(messages);
-    let messages_json = serde_json::to_string(&prepared)
-        .map_err(|error| format!("序列化会话上下文失败: {error}"))?;
-    let now = now_sqlite();
-    sqlx::query(
-        r#"
-        INSERT INTO native_session_transcripts (
-            session_record_id, profile_id, workspace_id, model, turns,
-            messages_json, created_at, updated_at, deleted_at
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $7, NULL)
-        ON CONFLICT(session_record_id) DO UPDATE SET
-            profile_id = excluded.profile_id,
-            workspace_id = excluded.workspace_id,
-            model = excluded.model,
-            turns = excluded.turns,
-            messages_json = excluded.messages_json,
-            updated_at = excluded.updated_at,
-            deleted_at = NULL
-        "#,
+    let mut owned = messages.to_vec();
+    crate::native::history::commit_model_context(
+        pool,
+        crate::native::history::HistoryWrite {
+            session_record_id,
+            profile_id: meta.profile_id.as_deref(),
+            workspace_id: meta.workspace_id.as_deref(),
+            model: &meta.model,
+            turns: meta.turns,
+            messages: &mut owned,
+            turn_id: None,
+            attempt_id: None,
+            expected_revision: None,
+            request_id: None,
+            links: &[],
+            legacy_baseline: false,
+        },
     )
-    .bind(session_record_id)
-    .bind(meta.profile_id.as_deref())
-    .bind(meta.workspace_id.as_deref())
-    .bind(&meta.model)
-    .bind(i64::from(meta.turns))
-    .bind(&messages_json)
-    .bind(&now)
-    .execute(pool)
     .await
-    .map_err(|error| format!("保存会话上下文失败: {error}"))?;
-    Ok(())
+    .map(|_| ())
 }
 
 pub async fn load_transcript(
@@ -89,31 +77,10 @@ pub async fn load_transcript(
     if id.is_empty() {
         return Ok(None);
     }
-    let row = sqlx::query_as::<_, (String,)>(
-        r#"
-        SELECT messages_json
-        FROM native_session_transcripts
-        WHERE session_record_id = $1 AND deleted_at IS NULL
-        LIMIT 1
-        "#,
-    )
-    .bind(id)
-    .fetch_optional(pool)
-    .await
-    .map_err(|error| format!("读取会话上下文失败: {error}"))?;
-    let Some((messages_json,)) = row else {
-        return Ok(None);
-    };
-    let mut messages: Vec<Message> = serde_json::from_str(&messages_json)
-        .map_err(|error| format!("解析会话上下文失败: {error}"))?;
-    for message in &mut messages {
-        message.images.clear();
-    }
-    sanitize_tool_message_pairs(&mut messages);
-    if messages.is_empty() {
-        Ok(None)
-    } else {
-        Ok(Some(messages))
+    crate::native::history::ensure_legacy_imported(pool, id).await?;
+    match crate::native::history::load_projection(pool, id).await? {
+        Some(messages) if !messages.is_empty() => Ok(Some(messages)),
+        _ => Ok(None),
     }
 }
 
@@ -171,6 +138,7 @@ mod tests {
                 name: String::new(),
                 reasoning_content: String::new(),
                 images: Vec::new(),
+                history_id: String::new(),
             },
         ];
         let prepared = prepare_transcript_messages(&messages);
@@ -239,6 +207,7 @@ mod tests {
                 name: String::new(),
                 reasoning_content: String::new(),
                 images: Vec::new(),
+                history_id: String::new(),
             },
             Message::tool_result("call_1", "readme contents"),
         ];
@@ -272,6 +241,7 @@ mod tests {
                 name: String::new(),
                 reasoning_content: String::new(),
                 images: Vec::new(),
+                history_id: String::new(),
             },
         ];
         save_transcript(&pool, "sess-orphan", &messages, &meta())

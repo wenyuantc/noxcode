@@ -530,6 +530,7 @@ mod tests {
                 name: String::new(),
                 reasoning_content: String::new(),
                 images: Vec::new(),
+                history_id: String::new(),
             },
             Message::tool_result("toolu_1", "ok"),
         ];

@@ -860,7 +860,7 @@ mod tests {
             );
             assert_eq!(
                 status.current_description.as_deref(),
-                Some("agent_sessions.approved_plan_json durable approved plans")
+                Some("append-only native history, branches, and context anchors")
             );
         });
     }
@@ -913,7 +913,12 @@ mod tests {
                 "git_checkpoints",
                 "native_api_call_logs",
                 "native_automations",
+                "native_context_anchors",
                 "native_goals",
+                "native_history_branches",
+                "native_history_links",
+                "native_history_messages",
+                "native_history_requests",
                 "native_session_transcripts",
                 "native_tool_artifacts",
                 "ssh_configs",
@@ -925,7 +930,7 @@ mod tests {
                 .map(|table| table.name.as_str())
                 .collect::<Vec<_>>();
 
-            assert_eq!(stats.table_count, 12);
+            assert_eq!(stats.table_count, 17);
             assert_eq!(names, expected_tables);
             assert!(!names.contains(&MIGRATION_TABLE_NAME));
             assert_eq!(

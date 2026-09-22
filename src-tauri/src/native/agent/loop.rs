@@ -97,8 +97,11 @@ pub(crate) type ChildModelLoader = Arc<
         + Send
         + Sync,
 >;
-pub(crate) type TranscriptCheckpoint =
-    Arc<dyn Fn(Vec<Message>) -> Pin<Box<dyn Future<Output = ()> + Send>> + Send + Sync>;
+pub(crate) type TranscriptCheckpoint = Arc<
+    dyn Fn(Vec<Message>) -> Pin<Box<dyn Future<Output = Result<Vec<Message>, String>> + Send>>
+        + Send
+        + Sync,
+>;
 
 #[derive(Debug, Default)]
 pub struct AgentDiagnostics {
@@ -493,7 +496,7 @@ impl AgentRunner {
                     }
                     self.messages
                         .push(Message::user_with_images(text, input.images));
-                    self.checkpoint_transcript().await;
+                    self.checkpoint_transcript().await?;
                     mailbox
                         .finish_input(
                             &input.receipt.input_id,
@@ -558,7 +561,7 @@ impl AgentRunner {
         &mut self,
         client: &ModelClient,
         instructions: Option<String>,
-    ) -> Option<CompactBoundary> {
+    ) -> Result<Option<CompactBoundary>, String> {
         self.compact_now_with(client, CompactTrigger::Manual, instructions)
             .await
     }
@@ -569,7 +572,7 @@ impl AgentRunner {
         client: &ModelClient,
         trigger: CompactTrigger,
         instructions: Option<String>,
-    ) -> Option<CompactBoundary> {
+    ) -> Result<Option<CompactBoundary>, String> {
         let client = self.observe_client(client);
         self.run_compaction(Some(&client), trigger, instructions)
             .await
@@ -581,7 +584,7 @@ impl AgentRunner {
         client: Option<&ModelClient>,
         trigger: CompactTrigger,
         instructions: Option<String>,
-    ) -> Option<CompactBoundary> {
+    ) -> Result<Option<CompactBoundary>, String> {
         let pre_tokens = total_message_tokens(&self.messages);
         let pre_messages = self.messages.len();
         let mut source: Option<&str> = None;
@@ -611,7 +614,7 @@ impl AgentRunner {
                 compacted = true;
             }
             if !compacted {
-                return None;
+                return Ok(None);
             }
         }
         let source = source.unwrap_or("local");
@@ -643,18 +646,20 @@ impl AgentRunner {
         ));
         self.emit(boundary.line());
         self.emit_context_usage();
-        self.checkpoint_transcript().await;
-        Some(boundary)
+        self.checkpoint_transcript().await?;
+        Ok(Some(boundary))
     }
 
-    async fn checkpoint_transcript(&self) {
+    async fn checkpoint_transcript(&mut self) -> Result<(), String> {
         if self.depth > 0 {
-            return;
+            return Ok(());
         }
-        let Some(hook) = &self.on_checkpoint else {
-            return;
+        let Some(hook) = self.on_checkpoint.clone() else {
+            return Ok(());
         };
-        hook(self.messages.clone()).await;
+        let stamped = hook(self.messages.clone()).await?;
+        apply_history_ids(&mut self.messages, &stamped);
+        Ok(())
     }
 
     pub fn set_rollout_budget(&mut self, budget: Arc<RolloutBudget>) {
@@ -1157,7 +1162,7 @@ impl AgentRunner {
             thinking_enabled,
         });
         self.begin_user_turn(user, images).await?;
-        self.checkpoint_transcript().await;
+        self.checkpoint_transcript().await?;
         let mut client = self.observe_client(client);
         let mut model = model.to_string();
         let mut effort = effort.map(ToOwned::to_owned);
@@ -1174,7 +1179,7 @@ impl AgentRunner {
             }
             self.inject_user_steer().await?;
             if self.inject_steer_messages() {
-                self.checkpoint_transcript().await;
+                self.checkpoint_transcript().await?;
             }
             let mut last_turn = self.prepare_model_call(Some(&client)).await?;
             if self.pending_steer_finish {
@@ -1224,7 +1229,7 @@ impl AgentRunner {
                 Err(error) => {
                     self.release_model_reservation();
                     self.emit_delta_clear();
-                    if self.try_reactive_compaction(&client, &error).await {
+                    if self.try_reactive_compaction(&client, &error).await? {
                         continue;
                     }
                     return Err(error.into());
@@ -1294,14 +1299,14 @@ impl AgentRunner {
         }
         self.messages.push(assistant);
         self.emit_delta_clear();
-        self.checkpoint_transcript().await;
+        self.checkpoint_transcript().await?;
         if self.ctx.cancel.is_cancelled() {
             return Err("已取消".to_string());
         }
         if reason == FinishReason::ContextLimit {
             self.clear_output_recovery();
             let error = ModelError::new(ModelErrorKind::ContextLimit, "模型上下文已达上限");
-            if self.try_reactive_compaction(client, &error).await {
+            if self.try_reactive_compaction(client, &error).await? {
                 return Ok(TurnControl::Continue);
             }
             return Err(error.into());
@@ -1315,7 +1320,7 @@ impl AgentRunner {
                 .is_some_and(|quota| quota.remaining() == 0)
         {
             let text = self.finish_incomplete_output();
-            self.checkpoint_transcript().await;
+            self.checkpoint_transcript().await?;
             return Ok(TurnControl::Stop(text));
         }
         self.output_continuations += 1;
@@ -1364,9 +1369,13 @@ impl AgentRunner {
     }
 
     /// 供应商报上下文溢出时被动压缩再重试；连续两次仍溢出则放弃。
-    async fn try_reactive_compaction(&mut self, client: &ModelClient, error: &ModelError) -> bool {
+    async fn try_reactive_compaction(
+        &mut self,
+        client: &ModelClient,
+        error: &ModelError,
+    ) -> Result<bool, String> {
         if error.kind != ModelErrorKind::ContextLimit || self.reactive_compactions >= 2 {
-            return false;
+            return Ok(false);
         }
         self.reactive_compactions += 1;
         self.emit(format!(
@@ -1376,11 +1385,11 @@ impl AgentRunner {
         // 被动压缩不再依赖阈值判断，直接做全量摘要。
         let boundary = self
             .run_compaction(Some(client), CompactTrigger::Reactive, None)
-            .await;
+            .await?;
         if boundary.is_none() {
             self.emit("[工具] 被动压缩无法再缩减上下文，停止重试");
         }
-        boundary.is_some()
+        Ok(boundary.is_some())
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1402,11 +1411,11 @@ impl AgentRunner {
             thinking_enabled,
         });
         self.begin_user_turn(user, Vec::new()).await?;
-        self.checkpoint_transcript().await;
+        self.checkpoint_transcript().await?;
         let client = self.observe_child_client(parent, client, spec);
         loop {
             if self.inject_steer_messages() {
-                self.checkpoint_transcript().await;
+                self.checkpoint_transcript().await?;
             }
             let mut last_turn = self.prepare_model_call(Some(&client)).await?;
             if self.pending_steer_finish {
@@ -1449,7 +1458,7 @@ impl AgentRunner {
                 Ok(value) => value,
                 Err(error) => {
                     self.release_model_reservation();
-                    if self.try_reactive_compaction(&client, &error).await {
+                    if self.try_reactive_compaction(&client, &error).await? {
                         continue;
                     }
                     return Err(error.into());
@@ -1479,7 +1488,7 @@ impl AgentRunner {
             match self.consume_assistant_serial(assistant, last_turn).await? {
                 TurnControl::Stop(text) => {
                     if self.inject_steer_messages() {
-                        self.checkpoint_transcript().await;
+                        self.checkpoint_transcript().await?;
                         continue;
                     }
                     if !self.seal_background_messages() {
@@ -1509,7 +1518,7 @@ impl AgentRunner {
         replies: Vec<Message>,
     ) -> Result<String, String> {
         self.begin_user_turn(user, Vec::new()).await?;
-        self.checkpoint_transcript().await;
+        self.checkpoint_transcript().await?;
         let mut queue = VecDeque::from(replies);
         loop {
             let mut last_turn = self.prepare_model_call(None).await?;
@@ -1626,7 +1635,7 @@ impl AgentRunner {
         if let Some(mut request) = self.pending_manual_compact.take() {
             if self
                 .run_compaction(client, CompactTrigger::Manual, request.instructions.take())
-                .await
+                .await?
                 .is_none()
             {
                 self.emit("[工具] 当前上下文太短，无需压缩");
@@ -1637,7 +1646,7 @@ impl AgentRunner {
             } else {
                 CompactTrigger::Auto
             };
-            self.run_compaction(client, trigger, None).await;
+            self.run_compaction(client, trigger, None).await?;
         } else {
             self.pending_downshift_compact = false;
         }
@@ -1966,14 +1975,14 @@ impl AgentRunner {
                 text
             };
             if !last_turn && self.stop_hooks_want_continue(&text).await {
-                self.checkpoint_transcript().await;
+                self.checkpoint_transcript().await?;
                 return Ok(TurnControl::Continue);
             }
-            self.checkpoint_transcript().await;
+            self.checkpoint_transcript().await?;
             return Ok(TurnControl::Stop(text));
         }
         self.execute_tool_calls(tool_calls, client).await?;
-        self.checkpoint_transcript().await;
+        self.checkpoint_transcript().await?;
         Ok(TurnControl::Continue)
     }
 
@@ -3002,6 +3011,17 @@ fn truncate_chars(text: &str, max: usize) -> String {
     format!("{prefix}…")
 }
 
+fn apply_history_ids(target: &mut [Message], stamped: &[Message]) {
+    if target.len() != stamped.len() {
+        return;
+    }
+    for (target, stamped) in target.iter_mut().zip(stamped.iter()) {
+        if target.history_id.is_empty() && !stamped.history_id.is_empty() {
+            target.history_id = stamped.history_id.clone();
+        }
+    }
+}
+
 pub fn assistant_tool_call(id: &str, name: &str, arguments: &str) -> Message {
     Message {
         role: Role::Assistant,
@@ -3015,6 +3035,7 @@ pub fn assistant_tool_call(id: &str, name: &str, arguments: &str) -> Message {
         name: String::new(),
         reasoning_content: String::new(),
         images: Vec::new(),
+        history_id: String::new(),
     }
 }
 
@@ -3099,10 +3120,26 @@ mod tests {
         runner.on_checkpoint = Some(Arc::new(move |messages| {
             let captured = captured.clone();
             Box::pin(async move {
-                captured.lock().await.push(messages);
+                captured.lock().await.push(messages.clone());
+                Ok(messages)
             })
         }));
         snapshots
+    }
+
+    #[tokio::test]
+    async fn checkpoint_failure_stops_before_the_next_model_call() {
+        let (mut runner, root) = temp_runner();
+        runner.on_checkpoint = Some(Arc::new(|_messages| {
+            Box::pin(async { Err("保存会话历史失败: disk".to_string()) })
+        }));
+        let error = runner
+            .run_scripted("hi", vec![Message::assistant_text("should not run")])
+            .await
+            .unwrap_err();
+        assert!(error.contains("保存会话历史失败"));
+        assert_eq!(runner.turns, 0);
+        fs::remove_dir_all(root).unwrap();
     }
 
     async fn mock_child_model(
@@ -3207,6 +3244,7 @@ mod tests {
             name: String::new(),
             reasoning_content: String::new(),
             images: Vec::new(),
+            history_id: String::new(),
         }
     }
 
@@ -5560,6 +5598,7 @@ mod tests {
                             if messages.iter().any(|m| m.role == Role::Assistant) {
                                 flag.cancel();
                             }
+                            Ok(messages)
                         })
                     }));
                 } else {
@@ -5678,6 +5717,7 @@ mod tests {
         assert!(runner
             .run_compaction(None, CompactTrigger::Manual, None)
             .await
+            .unwrap()
             .is_some());
         assert_eq!(runner.output_continuations, 3);
         assert!(runner.output_partial.is_empty());

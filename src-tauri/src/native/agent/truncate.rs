@@ -741,6 +741,7 @@ mod tests {
                 name: String::new(),
                 reasoning_content: String::new(),
                 images: Vec::new(),
+                history_id: String::new(),
             },
             Message::tool_result("call_1", "result"),
             Message::assistant_text("done"),
@@ -783,6 +784,7 @@ mod tests {
                 name: String::new(),
                 reasoning_content: String::new(),
                 images: Vec::new(),
+                history_id: String::new(),
             },
         ];
         sanitize_tool_message_pairs(&mut messages);

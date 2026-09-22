@@ -45,6 +45,9 @@ pub struct Message {
     pub reasoning_content: String,
     #[serde(default)]
     pub images: Vec<NativeImage>,
+    /// 已提交历史中的稳定身份。空字符串表示尚未写入历史。
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub history_id: String,
 }
 
 impl Message {
@@ -57,6 +60,7 @@ impl Message {
             name: String::new(),
             reasoning_content: String::new(),
             images: Vec::new(),
+            history_id: String::new(),
         }
     }
 
@@ -69,6 +73,7 @@ impl Message {
             name: String::new(),
             reasoning_content: String::new(),
             images: Vec::new(),
+            history_id: String::new(),
         }
     }
 
@@ -87,6 +92,7 @@ impl Message {
             name: String::new(),
             reasoning_content: String::new(),
             images: Vec::new(),
+            history_id: String::new(),
         }
     }
 
@@ -99,6 +105,7 @@ impl Message {
             name: String::new(),
             reasoning_content: String::new(),
             images: Vec::new(),
+            history_id: String::new(),
         }
     }
 }

@@ -29,6 +29,7 @@ use crate::native::agent::r#loop::AgentDiagnosticsSnapshot;
 use crate::native::agent::r#loop::{AgentRunner, NativeEvent, TranscriptCheckpoint};
 use crate::native::api_logs::sqlite_call_log_sink;
 use crate::native::channels::{fetch_channel_record, require_channel_api_key};
+use crate::native::history::{commit_model_context, HistoryWrite};
 use crate::native::input_queue::{NativeInputQueue, NativeInputQueueSnapshot};
 use crate::native::live_model::{write_live_model, LiveModelSnapshot, SharedLiveModel};
 use crate::native::manager::{
@@ -161,16 +162,39 @@ fn attach_transcript_checkpoint(
         let last_fingerprint = last_fingerprint.clone();
         Box::pin(async move {
             let model = model.lock().await.clone();
-            persist_runner_transcript(
-                &app,
-                &session_record_id,
-                &profile_id,
-                &workspace_id,
-                &model,
-                &messages,
-                last_fingerprint.as_ref(),
+            let fingerprint = transcript_fingerprint(&messages);
+            let mut last = last_fingerprint.lock().await;
+            if last.as_ref() == Some(&fingerprint) {
+                return Ok(messages);
+            }
+            let pool = sqlite_pool(&app)
+                .await
+                .map_err(|error| format!("保存会话历史失败: {error}"))?;
+            let turns = user_turn_count(&messages);
+            let mut owned = messages;
+            let receipt = commit_model_context(
+                &pool,
+                HistoryWrite {
+                    session_record_id: &session_record_id,
+                    profile_id: Some(profile_id.as_str()),
+                    workspace_id: Some(workspace_id.as_str()),
+                    model: &model,
+                    turns,
+                    messages: &mut owned,
+                    turn_id: None,
+                    attempt_id: None,
+                    expected_revision: None,
+                    request_id: None,
+                    links: &[],
+                    legacy_baseline: false,
+                },
             )
-            .await;
+            .await?;
+            if receipt.changed {
+                let _ = app.emit("native-history-committed", &receipt);
+            }
+            *last = Some(transcript_fingerprint(&owned));
+            Ok(owned)
         })
     });
     runner.on_checkpoint = Some(hook);
@@ -2676,7 +2700,7 @@ async fn apply_session_configuration(
     let compacted = if runner.context_window.should_compact(&runner.messages) {
         runner
             .compact_now_with(&next.client, CompactTrigger::Downshift, None)
-            .await
+            .await?
             .is_some()
     } else {
         false
@@ -3778,20 +3802,34 @@ async fn run_native_loop(
                                 runner.on_event.as_ref(),
                             )
                             .await;
-                            if runner
+                            match runner
                                 .compact_now(&run.client, request.instructions.take())
                                 .await
-                                .is_none()
                             {
-                                emit_native_line(
-                                    &app,
-                                    &session_record_id,
-                                    &profile_id,
-                                    Some(&workspace_id),
-                                    &kind,
-                                    "[工具] 当前上下文太短，无需压缩".to_string(),
-                                )
-                                .await;
+                                Ok(None) => {
+                                    emit_native_line(
+                                        &app,
+                                        &session_record_id,
+                                        &profile_id,
+                                        Some(&workspace_id),
+                                        &kind,
+                                        "[工具] 当前上下文太短，无需压缩".to_string(),
+                                    )
+                                    .await;
+                                }
+                                Ok(Some(_)) => {}
+                                Err(error) => {
+                                    emit_native_line(
+                                        &app,
+                                        &session_record_id,
+                                        &profile_id,
+                                        Some(&workspace_id),
+                                        &kind,
+                                        format!("[ERROR] {error}"),
+                                    )
+                                    .await;
+                                    break None;
+                                }
                             }
                             persist_runner_transcript(
                                 &app,
@@ -4164,14 +4202,18 @@ pub async fn fork_native_session(
         .iter()
         .filter(|message| message.role == crate::native::model::types::Role::User)
         .count() as u32;
-    save_transcript(
+    let source_branch = crate::native::history::active_branch_id(&pool, &session_record_id)
+        .await?
+        .ok_or_else(|| "该会话没有可分叉的历史".to_string())?;
+    crate::native::history::create_referencing_branch(
         &pool,
-        &new_id,
-        &messages,
-        &NativeTranscriptMeta {
+        crate::native::history::BranchReference {
+            new_session_id: &new_id,
+            source_branch_id: &source_branch,
+            boundary_message_id: None,
             profile_id: None,
-            workspace_id: source.workspace_id.clone(),
-            model,
+            workspace_id: source.workspace_id.as_deref(),
+            model: &model,
             turns,
         },
     )
@@ -4181,7 +4223,7 @@ pub async fn fork_native_session(
         &new_id,
         "stdout",
         Some(&format!(
-            "[续聊] 从会话 {session_record_id} 分叉，共复制 {} 条消息",
+            "[续聊] 从会话 {session_record_id} 分叉，共引用 {} 条消息",
             messages.len()
         )),
     )

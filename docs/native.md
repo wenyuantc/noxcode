@@ -71,16 +71,20 @@ P4 把进程内编程 Agent 接到渠道 + 工作区外壳。数据流仍是 `Re
 
 ## 上下文持久化
 
-`agent_session_events` 只服务 UI 回放；模型续聊只读 `native_session_transcripts`。两表没有数据库级同步约束。
+`agent_session_events` 只服务 UI 回放。模型续聊的权威记录是追加式历史：`native_history_messages` 保留原文和稳定消息身份，`native_context_anchors` 是可重建的上下文投影。`native_session_transcripts.messages_json` 只缓存当前投影，供兼容读取。压缩替换投影中的工具结果或折叠旧回合，不删除历史，也不改消息身份。
 
-顶层 runner 在这些边界同步 UPSERT transcript（fingerprint 未变则跳过）：
+顶层 runner 在这些边界把历史、分支修订号和投影放进同一事务（fingerprint 未变则跳过）：
 
 - 用户消息进入 `messages` 之后、下一次模型调用之前
 - 新回合输入、用户转向或子 Agent 定向 steer 注入之后（未执行的排队消息不进入 transcript）
 - 每一轮 assistant 文本，或 assistant + 对应 tool 结果写完整之后
 - `run_native_loop` 退出前再 flush 一次（覆盖错误 / 取消）
 
-保存前会去掉 system、图片，并清洗孤立 tool pair。子 Agent 不写父会话 transcript。硬中断时至少能恢复当前用户任务和已完成的模型 / 工具轮次。
+事务用 `BEGIN IMMEDIATE` 一开始就拿写锁。遇到 `database is locked`（含 SQLite 517 `BUSY_SNAPSHOT`）会回滚并重试最多 5 次，短暂并发写入不会把回合判失败。其他保存错误仍向上返回并停止该回合，而且不会发出 `native-history-committed`。提交成功后才发出该事件（含 `branch_id`、`revision`、`message_ids`）。投影会去掉 system、图片字节，并排除尚未配对的工具调用；原始历史仍保留该工具调用，图片标为不可恢复。子 Agent 不写父会话 transcript。
+
+`list_native_history_boundaries` 返回活动分支、修订号、能力缺口和每条消息前后是否可选。会拆开工具调用与结果的位置 `selectable_after` 为假。旧会话只在 transcript 行还在时建立兼容基线；压缩前丢失的原文、图片，以及没有消息归属的旧检查点记为 `unrecoverable`，不推测关联。`/fork` 新会话引用源分支的历史，不复制消息行；删除源会话不会级联删除这些行。仍被活动分支引用的历史不参与过期清理。
+
+硬中断时至少能恢复当前用户任务和已完成的模型 / 工具轮次。尚未提交的半截模型响应不进入投影。
 
 ## 工具契约与结果预算
 
@@ -126,7 +130,7 @@ P4 把进程内编程 Agent 接到渠道 + 工作区外壳。数据流仍是 `Re
 - `CronUpdate(id, name?, prompt?, cron?, enabled?, channel_id?, model?)` 仅主 Agent 可用，计划模式禁止调用；只能更新当前工作区的自动化，至少提供一个更新字段。未提供字段保持不变，名称/提示词/cron 不接受空白；渠道和模型可用空字符串清除，清除渠道同时清除模型。修改渠道/模型会校验有效组合；仅 cron 或启停变化重算下次执行时间，改名或改提示词保留调度时间及既有运行记录，不立即执行。
 - 目标（[`goals.rs`](../src-tauri/src/native/goals.rs)）：`Goal(action=set|update|complete|clear, title, checklist, note)` 维护会话的当前目标与进度清单，`GoalRead` 读取；每次变更写 `[GOAL] {json}` 行，前端渲染为 `GoalRow`。
 - `ReadSessionContext`：不带 `session_id` 列出同工作区最近会话（标题、时间、轮数、最后回复摘录）；带 `session_id` 仍校验工作区归属，再返回最近的用户 / 助手对话摘录。
-- `/fork [checkpoint_id]` → `fork_native_session`：把已结束会话的 transcript 复制到一条新的会话记录（标题加「（分叉）」，`resume_session_id` 指向源会话），可选先回滚到某个 Git 检查点；新会话可直接续聊。
+- `/fork [checkpoint_id]` → `fork_native_session`：新建已结束会话（标题加「（分叉）」，`resume_session_id` 指向源会话），活动分支引用源历史而不是复制消息行。可选先回滚到某个 Git 检查点；文件回滚改走预览与应用之前，这个检查点参数仍会直接恢复工作区。新会话可直接续聊。
 - Composer 斜杠：自定义命令来自工作区 `.noxcode/commands`、`.claude/commands`、`.zcode/commands`、已启用插件 `commands/` 与 `$APPCONFIG/native-commands/`。内置 `/mode` `/model` `/effort` `/plan` `/new` `/clear` `/help` `/diff` `/context` `/permissions` `/memory` `/mcp` `/plugins` 由前端执行；`/init` `/goal` `/review` `/create-skill` `/create-subagent` 展开成提示词后走普通 Agent 回合。`/create-skill name` 写入 `.noxcode/skills/<name>/SKILL.md`；`/create-subagent name` 写入 `.noxcode/agents/<name>.md`。
 - 以上工具通过 `ToolCtx.session_scope`（数据库池、工作区、渠道、模型）访问数据库，只对主 Agent 可见（`ReadSessionContext` 子 Agent 也可用）。
 

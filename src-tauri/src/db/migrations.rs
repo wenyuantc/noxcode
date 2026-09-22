@@ -443,6 +443,82 @@ pub fn get_all_migrations() -> Vec<Migration> {
             sql: "ALTER TABLE agent_sessions ADD COLUMN approved_plan_json TEXT;",
             kind: tauri_plugin_sql::MigrationKind::Up,
         },
+        Migration {
+            version: 14,
+            description: "append-only native history, branches, and context anchors",
+            sql: r#"
+                CREATE TABLE native_history_branches (
+                    id TEXT PRIMARY KEY,
+                    session_record_id TEXT NOT NULL,
+                    source_session_id TEXT,
+                    source_branch_id TEXT,
+                    boundary_message_id TEXT,
+                    revision INTEGER NOT NULL DEFAULT 0,
+                    active INTEGER NOT NULL DEFAULT 1,
+                    sealed INTEGER NOT NULL DEFAULT 0,
+                    legacy_baseline INTEGER NOT NULL DEFAULT 0,
+                    gaps_json TEXT NOT NULL DEFAULT '[]',
+                    format_version INTEGER NOT NULL DEFAULT 1,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    deleted_at TEXT
+                );
+                CREATE INDEX idx_native_history_branches_session
+                    ON native_history_branches(session_record_id, active, created_at);
+                CREATE UNIQUE INDEX idx_native_history_one_active_branch
+                    ON native_history_branches(session_record_id)
+                    WHERE active = 1 AND deleted_at IS NULL;
+
+                CREATE TABLE native_history_messages (
+                    id TEXT PRIMARY KEY,
+                    session_record_id TEXT NOT NULL,
+                    branch_id TEXT NOT NULL,
+                    turn_id TEXT,
+                    attempt_id TEXT,
+                    ordinal INTEGER NOT NULL,
+                    role TEXT NOT NULL,
+                    content TEXT NOT NULL,
+                    tool_calls_json TEXT NOT NULL DEFAULT '[]',
+                    tool_call_id TEXT NOT NULL DEFAULT '',
+                    name TEXT NOT NULL DEFAULT '',
+                    reasoning_content TEXT NOT NULL DEFAULT '',
+                    images_unrecoverable INTEGER NOT NULL DEFAULT 0,
+                    format_version INTEGER NOT NULL DEFAULT 1,
+                    created_at TEXT NOT NULL
+                );
+                CREATE INDEX idx_native_history_messages_branch
+                    ON native_history_messages(branch_id, ordinal);
+
+                CREATE TABLE native_context_anchors (
+                    branch_id TEXT PRIMARY KEY,
+                    session_record_id TEXT NOT NULL,
+                    revision INTEGER NOT NULL,
+                    projection_json TEXT NOT NULL,
+                    format_version INTEGER NOT NULL DEFAULT 1,
+                    updated_at TEXT NOT NULL
+                );
+
+                CREATE TABLE native_history_links (
+                    id TEXT PRIMARY KEY,
+                    branch_id TEXT NOT NULL,
+                    message_id TEXT NOT NULL,
+                    link_kind TEXT NOT NULL,
+                    target_id TEXT NOT NULL,
+                    created_at TEXT NOT NULL
+                );
+                CREATE UNIQUE INDEX idx_native_history_links_identity
+                    ON native_history_links(branch_id, message_id, link_kind, target_id);
+
+                CREATE TABLE native_history_requests (
+                    request_id TEXT PRIMARY KEY,
+                    branch_id TEXT NOT NULL,
+                    revision INTEGER NOT NULL,
+                    message_ids_json TEXT NOT NULL,
+                    created_at TEXT NOT NULL
+                );
+            "#,
+            kind: tauri_plugin_sql::MigrationKind::Up,
+        },
     ]
 }
 
@@ -511,7 +587,7 @@ mod tests {
         for (index, migration) in get_all_migrations().iter().enumerate() {
             assert_eq!(migration.version, index as i64 + 1);
         }
-        assert_eq!(latest_migration_version(), 13);
+        assert_eq!(latest_migration_version(), 14);
         assert_eq!(
             get_all_migrations()
                 .last()
@@ -611,7 +687,7 @@ mod tests {
     }
 
     #[test]
-    fn latest_schema_has_twelve_tables_without_profiles() {
+    fn latest_schema_has_history_tables_without_profiles() {
         tauri::async_runtime::block_on(async {
             let pool = setup_test_pool().await;
             let tables: Vec<String> = sqlx::query(table_names_query())
@@ -632,7 +708,12 @@ mod tests {
                     "git_checkpoints",
                     "native_api_call_logs",
                     "native_automations",
+                    "native_context_anchors",
                     "native_goals",
+                    "native_history_branches",
+                    "native_history_links",
+                    "native_history_messages",
+                    "native_history_requests",
                     "native_session_transcripts",
                     "native_tool_artifacts",
                     "ssh_configs",

@@ -60,6 +60,7 @@ import type {
   NativeApiCallLogPage,
   NativeUsageAnalytics,
   NativeAutomation,
+  NativeHistoryBoundaries,
   NativeBackgroundProcess,
   NativeBackgroundProcesses,
   NativeBackgroundTask,
@@ -790,6 +791,12 @@ export function deleteNativeAutomation(id: string): Promise<boolean> {
 
 export function runNativeAutomationNow(id: string): Promise<string> {
   return invoke("run_native_automation_now", { id });
+}
+
+export function listNativeHistoryBoundaries(
+  sessionRecordId: string,
+): Promise<NativeHistoryBoundaries> {
+  return invoke("list_native_history_boundaries", { sessionRecordId });
 }
 
 export function forkNativeSession(
