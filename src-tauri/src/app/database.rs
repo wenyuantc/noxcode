@@ -860,7 +860,7 @@ mod tests {
             );
             assert_eq!(
                 status.current_description.as_deref(),
-                Some("append-only native history, branches, and context anchors")
+                Some("tool run ledger and persisted model attempt budget")
             );
         });
     }
@@ -919,8 +919,10 @@ mod tests {
                 "native_history_links",
                 "native_history_messages",
                 "native_history_requests",
+                "native_model_attempt_budgets",
                 "native_session_transcripts",
                 "native_tool_artifacts",
+                "native_tool_runs",
                 "ssh_configs",
                 "workspaces",
             ];
@@ -930,7 +932,7 @@ mod tests {
                 .map(|table| table.name.as_str())
                 .collect::<Vec<_>>();
 
-            assert_eq!(stats.table_count, 17);
+            assert_eq!(stats.table_count, 19);
             assert_eq!(names, expected_tables);
             assert!(!names.contains(&MIGRATION_TABLE_NAME));
             assert_eq!(

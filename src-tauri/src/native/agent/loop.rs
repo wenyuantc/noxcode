@@ -24,6 +24,7 @@ use crate::native::model::types::{
     Message, NativeImage, Role, StreamDelta, ToolCall, ToolSpec, Usage,
 };
 use crate::native::model::usage_to_delta;
+use crate::native::recovery::{PlannedCall, RecoveryState, RecoveryStep, UNKNOWN_RESULT};
 use crate::native::settings::DEFAULT_NATIVE_MAX_TURNS;
 use crate::native::subagents::{
     custom_tools_are_read_only, effective_custom_tools, find_native_subagent, ChildModelSettings,
@@ -204,6 +205,8 @@ pub struct AgentRunner {
     tool_seq: u32,
     pub live_model: Option<SharedLiveModel>,
     live_model_revision: u64,
+    pub recovery: Option<Arc<RecoveryState>>,
+    pending_recovery: Vec<RecoveryStep>,
 }
 
 enum TurnControl {
@@ -331,6 +334,8 @@ impl AgentRunner {
             tool_seq: 0,
             live_model: None,
             live_model_revision: 0,
+            recovery: None,
+            pending_recovery: Vec::new(),
         }
     }
 
@@ -847,13 +852,18 @@ impl AgentRunner {
         }
     }
 
-    async fn emit_tool_start(&mut self, call: &ToolCall) {
-        self.emit_tool_start_with_tag(call, None).await;
+    async fn emit_tool_start(&mut self, call: &ToolCall) -> Result<(), String> {
+        self.emit_tool_start_with_tag(call, None).await
     }
 
-    async fn emit_tool_start_with_tag(&mut self, call: &ToolCall, tag_override: Option<&str>) {
+    async fn emit_tool_start_with_tag(
+        &mut self,
+        call: &ToolCall,
+        tag_override: Option<&str>,
+    ) -> Result<(), String> {
+        self.ledger_started(&call.id).await?;
         if self.started_tool_ids.contains(&call.id) {
-            return;
+            return Ok(());
         }
         let (mcp_server, mcp_tool) = self.mcp_display(&call.name).await;
         let line = tool_start_line_ex(
@@ -886,10 +896,15 @@ impl AgentRunner {
             },
             Vec::new(),
         );
+        Ok(())
     }
 
-    async fn emit_tool_result(&mut self, call: &ToolCall, output: &ToolOutput) {
-        self.emit_tool_result_with_tag(call, output, None).await;
+    async fn emit_tool_result(
+        &mut self,
+        call: &ToolCall,
+        output: &ToolOutput,
+    ) -> Result<(), String> {
+        self.emit_tool_result_with_tag(call, output, None).await
     }
 
     async fn emit_tool_result_with_tag(
@@ -897,9 +912,9 @@ impl AgentRunner {
         call: &ToolCall,
         output: &ToolOutput,
         tag_override: Option<&str>,
-    ) {
+    ) -> Result<(), String> {
         if !self.started_tool_ids.contains(&call.id) {
-            self.emit_tool_start_with_tag(call, tag_override).await;
+            self.emit_tool_start_with_tag(call, tag_override).await?;
         }
         let duration_ms = self
             .tool_started_ms
@@ -937,6 +952,7 @@ impl AgentRunner {
             },
             output.images.clone(),
         );
+        Ok(())
     }
 
     /// Drop the fragments shown so far: either the complete line is about to
@@ -1573,6 +1589,13 @@ impl AgentRunner {
         self.output_continuations = 0;
         self.clear_output_recovery();
         self.reactive_compactions = 0;
+        self.drain_pending_recovery().await?;
+        if let Some(recovery) = &self.recovery {
+            if recovery.attempts_exhausted().await? {
+                recovery.complete_turn().await?;
+            }
+        }
+        self.bind_recovery_turn().await;
         let mut text = user.to_string();
         if let Some(suffix) = self.turn_suffix.take() {
             text = format!("{text}\n\n{suffix}");
@@ -2007,7 +2030,7 @@ impl AgentRunner {
             self.emit(line);
         }
         let text = assistant.content.clone();
-        let tool_calls = assistant.tool_calls.clone();
+        let mut tool_calls = assistant.tool_calls.clone();
         if !text.is_empty() {
             self.emit_assistant_text(&text);
         }
@@ -2023,20 +2046,22 @@ impl AgentRunner {
             };
             return Ok(TurnControl::Stop(text));
         }
-        for mut call in tool_calls {
+        for call in &mut tool_calls {
+            self.assign_call_id(call);
+        }
+        self.persist_tool_plan(&tool_calls).await?;
+        for call in tool_calls {
             if self.ctx.cancel.is_cancelled() {
                 return Err("已取消".to_string());
             }
-            self.assign_call_id(&mut call);
             if call.name == "Agent" {
                 let output = self.reject_nested_agent(&call).await;
-                self.push_tool_output(&call, output).await;
+                self.push_tool_output(&call, output).await?;
                 continue;
             }
-            self.emit_tool_start(&call).await;
+            self.emit_tool_start(&call).await?;
             let output = self.execute_logged_tool(&call).await;
-            self.emit_tool_result(&call, &output).await;
-            self.append_tool_message(&call, output);
+            self.record_tool_result(&call, output).await?;
         }
         Ok(TurnControl::Continue)
     }
@@ -2096,6 +2121,7 @@ impl AgentRunner {
         for call in &mut calls {
             self.assign_call_id(call);
         }
+        self.persist_tool_plan(&calls).await?;
         let registry = self.contract_registry();
         let mut index = 0;
         while index < calls.len() {
@@ -2105,7 +2131,7 @@ impl AgentRunner {
                         call,
                         ToolOutput::error(crate::native::steer::SUPERSEDED),
                     )
-                    .await;
+                    .await?;
                 }
                 return Ok(());
             }
@@ -2139,10 +2165,9 @@ impl AgentRunner {
                 }
             }
             let call = &calls[index];
-            self.emit_tool_start(call).await;
+            self.emit_tool_start(call).await?;
             let output = self.execute_logged_tool(call).await;
-            self.emit_tool_result(call, &output).await;
-            self.append_tool_message(call, output);
+            self.record_tool_result(call, output).await?;
             index += 1;
         }
         Ok(())
@@ -2153,9 +2178,11 @@ impl AgentRunner {
         let mut slot: Vec<Option<ToolOutput>> = vec![None; calls.len()];
         let mut join_set = JoinSet::new();
         for (pos, call) in calls.iter().enumerate() {
-            self.emit_tool_start(call).await;
+            self.emit_tool_start(call).await?;
             if let Some(rejection) = self.repeat_guard(call) {
-                slot[pos] = Some(ToolOutput::error(rejection));
+                let output = ToolOutput::error(rejection);
+                self.ledger_result(call, &output).await?;
+                slot[pos] = Some(output);
                 continue;
             }
             let ctx = self.ctx.clone();
@@ -2170,6 +2197,7 @@ impl AgentRunner {
         }
         while let Some(joined) = join_set.join_next().await {
             let (pos, output) = joined.map_err(|error| format!("并行工具任务失败: {error}"))?;
+            self.ledger_result(&calls[pos], &output).await?;
             slot[pos] = Some(output);
         }
         if self.ctx.cancel.is_cancelled() {
@@ -2177,8 +2205,7 @@ impl AgentRunner {
         }
         for (call, output) in calls.iter().zip(slot) {
             let output = output.unwrap_or_else(|| ToolOutput::error("工具未返回结果"));
-            self.emit_tool_result(call, &output).await;
-            self.append_tool_message(call, output);
+            self.record_tool_result(call, output).await?;
         }
         Ok(())
     }
@@ -2315,7 +2342,7 @@ impl AgentRunner {
         if self.depth > 0 {
             for call in calls {
                 let output = self.reject_nested_agent(call).await;
-                self.push_tool_output(call, output).await;
+                self.push_tool_output(call, output).await?;
             }
             return Ok(());
         }
@@ -2398,7 +2425,7 @@ impl AgentRunner {
             }
             let tag = format_subagent_log_tag(job.index, &job.spec.kind, &job.spec.description);
             tags.insert(job.call.id.clone(), tag.clone());
-            self.emit_tool_start_with_tag(&job.call, Some(&tag)).await;
+            self.emit_tool_start_with_tag(&job.call, Some(&tag)).await?;
             if !self.ctx.execution_current() {
                 slot[pos] = Some((
                     job.call,
@@ -2539,13 +2566,17 @@ impl AgentRunner {
         }
         for item in slot.into_iter().flatten() {
             let tag = tags.get(&item.0.id).map(String::as_str);
-            self.push_tool_output_with_tag(&item.0, item.1, tag).await;
+            self.push_tool_output_with_tag(&item.0, item.1, tag).await?;
         }
         Ok(())
     }
 
-    async fn push_tool_output(&mut self, call: &ToolCall, output: ToolOutput) {
-        self.push_tool_output_with_tag(call, output, None).await;
+    async fn push_tool_output(
+        &mut self,
+        call: &ToolCall,
+        output: ToolOutput,
+    ) -> Result<(), String> {
+        self.push_tool_output_with_tag(call, output, None).await
     }
 
     async fn push_tool_output_with_tag(
@@ -2553,9 +2584,169 @@ impl AgentRunner {
         call: &ToolCall,
         output: ToolOutput,
         tag: Option<&str>,
-    ) {
-        self.emit_tool_result_with_tag(call, &output, tag).await;
+    ) -> Result<(), String> {
+        self.ledger_result(call, &output).await?;
+        self.emit_tool_result_with_tag(call, &output, tag).await?;
         self.append_tool_message(call, output);
+        Ok(())
+    }
+
+    async fn record_tool_result(
+        &mut self,
+        call: &ToolCall,
+        output: ToolOutput,
+    ) -> Result<(), String> {
+        self.ledger_result(call, &output).await?;
+        self.emit_tool_result(call, &output).await?;
+        self.append_tool_message(call, output);
+        Ok(())
+    }
+
+    fn call_has_side_effect(&self, name: &str) -> bool {
+        self.contract_registry().resolve(name).side_effect_scope
+            != crate::native::tools::SideEffectScope::None
+    }
+
+    async fn bind_recovery_turn(&self) {
+        let Some(recovery) = &self.recovery else {
+            return;
+        };
+        if recovery.turn().is_some() {
+            return;
+        }
+        let Some(mailbox) = &self.ctx.user_steer else {
+            return;
+        };
+        if let Some(turn_id) = mailbox.snapshot().await.turn_id {
+            recovery.bind_turn(&turn_id);
+        }
+    }
+
+    async fn persist_tool_plan(&self, calls: &[ToolCall]) -> Result<(), String> {
+        let Some(recovery) = &self.recovery else {
+            return Ok(());
+        };
+        let planned = calls
+            .iter()
+            .map(|call| PlannedCall {
+                call_id: call.id.clone(),
+                name: call.name.clone(),
+                arguments: call.arguments.clone(),
+                side_effect: self.call_has_side_effect(&call.name),
+            })
+            .collect::<Vec<_>>();
+        recovery.commit_plan(&planned).await
+    }
+
+    async fn ledger_started(&self, call_id: &str) -> Result<(), String> {
+        let Some(recovery) = &self.recovery else {
+            return Ok(());
+        };
+        recovery.mark_started(call_id).await
+    }
+
+    async fn ledger_result(&self, call: &ToolCall, output: &ToolOutput) -> Result<(), String> {
+        let Some(recovery) = &self.recovery else {
+            return Ok(());
+        };
+        recovery
+            .commit_result(&call.id, &output.text, !output.ok)
+            .await
+    }
+
+    fn tool_result_present(&self, call_id: &str) -> bool {
+        self.messages
+            .iter()
+            .any(|message| message.role == Role::Tool && message.tool_call_id == call_id)
+    }
+
+    pub async fn apply_tool_recovery(&mut self) -> Result<(), String> {
+        let Some(recovery) = &self.recovery else {
+            return Ok(());
+        };
+        let runs = recovery.settle_interrupted().await?;
+        let assembly = RecoveryState::assemble(&self.messages, &runs);
+        if let Some(assistant) = assembly.assistant {
+            self.messages.push(assistant);
+        }
+        self.pending_recovery = assembly
+            .steps
+            .into_iter()
+            .filter(|step| {
+                let call_id = match step {
+                    RecoveryStep::Reuse { call_id, .. }
+                    | RecoveryStep::Execute { call_id, .. }
+                    | RecoveryStep::Unknown { call_id, .. } => call_id,
+                };
+                !self.tool_result_present(call_id)
+            })
+            .collect();
+        Ok(())
+    }
+
+    async fn drain_pending_recovery(&mut self) -> Result<(), String> {
+        if self.pending_recovery.is_empty() {
+            return Ok(());
+        }
+        let steps = std::mem::take(&mut self.pending_recovery);
+        for step in steps {
+            if self.ctx.cancel.is_cancelled() {
+                return Err("已取消".to_string());
+            }
+            match step {
+                RecoveryStep::Reuse {
+                    call_id,
+                    name,
+                    text,
+                    is_error,
+                } => {
+                    let call = ToolCall {
+                        id: call_id,
+                        name,
+                        arguments: String::new(),
+                    };
+                    let output = if is_error {
+                        ToolOutput::error(text)
+                    } else {
+                        ToolOutput::text(text)
+                    };
+                    self.append_tool_message(&call, output);
+                }
+                RecoveryStep::Unknown { call_id, name } => {
+                    let call = ToolCall {
+                        id: call_id,
+                        name,
+                        arguments: String::new(),
+                    };
+                    self.append_tool_message(&call, ToolOutput::error(UNKNOWN_RESULT));
+                }
+                RecoveryStep::Execute {
+                    call_id,
+                    name,
+                    arguments,
+                } => {
+                    let call = ToolCall {
+                        id: call_id,
+                        name,
+                        arguments,
+                    };
+                    if !self.ctx.execution_current() {
+                        let output = ToolOutput::error(crate::native::steer::SUPERSEDED);
+                        self.ledger_result(&call, &output).await?;
+                        self.append_tool_message(&call, output);
+                        continue;
+                    }
+                    self.ledger_started(&call.id).await?;
+                    self.emit_tool_start(&call).await?;
+                    let output = self.execute_logged_tool(&call).await;
+                    self.ledger_result(&call, &output).await?;
+                    self.emit_tool_result(&call, &output).await?;
+                    self.append_tool_message(&call, output);
+                }
+            }
+        }
+        self.checkpoint_transcript().await?;
+        Ok(())
     }
 
     /// 先按契约结果预算裁决（超预算的 Artifact 策略落盘、只留预览），再按会话的
@@ -3300,6 +3491,93 @@ mod tests {
             .collect();
         assert_eq!(starts.len(), 4);
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn committed_tool_results_are_reused_and_unknown_writes_are_not_replayed() {
+        use sqlx::Row;
+
+        let (mut runner, root) = temp_runner();
+        let pool = crate::db::test_support::setup_migrated_pool().await;
+        let recovery = Arc::new(RecoveryState::new(pool.clone(), "sess-live", 7));
+        recovery.bind_turn("turn-live");
+        runner.recovery = Some(recovery);
+        runner
+            .consume_assistant(
+                assistant_tool_calls(&[
+                    ("read-1", "Read", r#"{"file_path":"hello.txt"}"#),
+                    (
+                        "write-1",
+                        "Write",
+                        r#"{"file_path":"out.txt","content":"v1"}"#,
+                    ),
+                ]),
+                false,
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(fs::read_to_string(root.join("out.txt")).unwrap(), "v1");
+        let rows = sqlx::query(
+            "SELECT call_id, status FROM native_tool_runs WHERE session_record_id = 'sess-live' ORDER BY call_index",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        let stored: Vec<(String, String)> = rows
+            .iter()
+            .map(|row| (row.get("call_id"), row.get("status")))
+            .collect();
+        assert_eq!(
+            stored,
+            vec![
+                ("read-1".to_string(), "committed".to_string()),
+                ("write-1".to_string(), "committed".to_string()),
+            ]
+        );
+
+        let recovery = Arc::new(RecoveryState::new(pool.clone(), "sess-resume", 7));
+        recovery.bind_turn("turn-resume");
+        recovery
+            .commit_plan(&[
+                PlannedCall {
+                    call_id: "read-old".into(),
+                    name: "Read".into(),
+                    arguments: r#"{"file_path":"hello.txt"}"#.into(),
+                    side_effect: false,
+                },
+                PlannedCall {
+                    call_id: "write-old".into(),
+                    name: "Write".into(),
+                    arguments: r#"{"file_path":"nope.txt","content":"replayed"}"#.into(),
+                    side_effect: true,
+                },
+            ])
+            .await
+            .unwrap();
+        recovery.mark_started("read-old").await.unwrap();
+        recovery.mark_started("write-old").await.unwrap();
+        recovery
+            .commit_result("read-old", "已提交的读取结果", false)
+            .await
+            .unwrap();
+
+        let (mut resumed, resumed_root) = temp_runner();
+        resumed.recovery = Some(Arc::new(RecoveryState::new(pool, "sess-resume", 7)));
+        resumed.apply_tool_recovery().await.unwrap();
+        resumed
+            .begin_user_turn("continue", Vec::new())
+            .await
+            .unwrap();
+        assert!(!resumed_root.join("nope.txt").exists());
+        assert!(resumed.messages.iter().any(|message| {
+            message.tool_call_id == "read-old" && message.content.contains("已提交的读取结果")
+        }));
+        assert!(resumed.messages.iter().any(|message| {
+            message.tool_call_id == "write-old" && message.content.contains(UNKNOWN_RESULT)
+        }));
+        let _ = fs::remove_dir_all(root);
+        let _ = fs::remove_dir_all(resumed_root);
     }
 
     #[tokio::test]

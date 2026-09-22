@@ -2667,6 +2667,9 @@ async fn apply_session_configuration(
         },
     );
     update_agent_session_channel(&pool, session_record_id, &next.channel_id).await?;
+    if let Some(recovery) = run.client.recovery_state() {
+        next.client = next.client.with_recovery(recovery);
+    }
     let runtime = {
         let mut manager = manager_state.lock().await;
         let session = manager
@@ -3358,6 +3361,17 @@ async fn run_native_loop(
     runner.lite_model = run.lite_model.clone();
     runner.ctx.hook_agent = Some(hook_agent_handler(&run));
     runner.live_model = Some(live_model.clone());
+    if let Ok(pool) = sqlite_pool(&app).await {
+        let recovery = Arc::new(crate::native::recovery::RecoveryState::new(
+            pool,
+            session_record_id.clone(),
+            run.client.attempt_limit(),
+        ));
+        run.client = run.client.clone().with_recovery(recovery.clone());
+        runner.recovery = Some(recovery);
+    } else {
+        eprintln!("[native] 无法打开数据库，工具恢复账本未启用");
+    }
     let execution_target = if runner.ctx.ssh.is_some() {
         Some(crate::app::shared::EXECUTION_TARGET_SSH.to_string())
     } else {
@@ -3616,6 +3630,13 @@ async fn run_native_loop(
 
     let mut next = Some(first_prompt);
     let mut last_error: Option<String> = None;
+    if let Err(error) = runner.apply_tool_recovery().await {
+        if let Some(tx) = &runner.on_event {
+            let _ = tx.send(NativeEvent::Line(format!("[ERROR] {error}")));
+        }
+        last_error = Some(error);
+        next = None;
+    }
     let await_followups = true;
     while let Some(prompt) = next.take() {
         if cancel.is_cancelled() {
@@ -3671,7 +3692,18 @@ async fn run_native_loop(
             )
             .await
         {
-            Ok(_) => {}
+            Ok(_) => {
+                if let Some(recovery) = &runner.recovery {
+                    if let Err(error) = recovery.complete_turn().await {
+                        last_error = Some(error.clone());
+                        if let Some(tx) = &runner.on_event {
+                            let _ = tx.send(NativeEvent::Line(format!("[ERROR] {error}")));
+                        }
+                        let _ = next_loop_step(await_followups, NativeLoopEvent::Error);
+                        break;
+                    }
+                }
+            }
             Err(error) => {
                 last_error = Some(error.clone());
                 if !is_cancelled_run_error(&error) {
@@ -4332,7 +4364,7 @@ async fn apply_plan_implementation_model(
     app: &AppHandle,
     manager_state: &Arc<Mutex<NativeAgentManager>>,
     session_record_id: &str,
-    next: NativeRunSettings,
+    mut next: NativeRunSettings,
     request_id: &str,
     authorization: &PlanAuthorization,
 ) -> Result<(), String> {
@@ -4377,15 +4409,26 @@ async fn apply_plan_implementation_model(
                     .clone()
             })
             .or_else(|| Some(crate::app::shared::EXECUTION_TARGET_LOCAL.to_string()));
+        let recovery = session.live_model.as_ref().and_then(|slot| {
+            slot.lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .client
+                .recovery_state()
+        });
         (
             workspace_id,
             profile_id,
             session_kind,
             input_queue_id,
             execution_target,
+            recovery,
         )
     };
-    let (workspace_id, profile_id, session_kind, input_queue_id, execution_target) = snapshot;
+    let (workspace_id, profile_id, session_kind, input_queue_id, execution_target, recovery) =
+        snapshot;
+    if let Some(recovery) = recovery {
+        next.client = next.client.with_recovery(recovery);
+    }
     let pool = sqlite_pool(app).await?;
     let next = bind_run_to_session(
         next,

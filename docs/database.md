@@ -10,7 +10,7 @@ React (UI) → Tauri IPC commands → Rust service layer → SQLite
 
 | 路径 | 职责 |
 | --- | --- |
-| [`src-tauri/src/db/migrations.rs`](../src-tauri/src/db/migrations.rs) | 迁移清单（version 1 baseline + version 2 去掉档案 + version 3 `agent_sessions.title` + version 4 `agent_sessions.pinned` + version 5 `agent_sessions.context_usage_json` + version 6 `ssh_configs.algorithms_json` + version 7 `activity_logs` + version 8 `native_tool_artifacts` / call log `operation`、`model_role` / `ai_channels.lite_model` + version 9 `native_automations`、`native_goals` + version 10 `agent_sessions.archived` + version 11 `ai_channels.responses_continuation` + version 12 `agent_sessions.pending_plan_json` + version 13 `agent_sessions.approved_plan_json` + version 14 追加式历史） |
+| [`src-tauri/src/db/migrations.rs`](../src-tauri/src/db/migrations.rs) | 迁移清单（version 1 baseline + version 2 去掉档案 + version 3 `agent_sessions.title` + version 4 `agent_sessions.pinned` + version 5 `agent_sessions.context_usage_json` + version 6 `ssh_configs.algorithms_json` + version 7 `activity_logs` + version 8 `native_tool_artifacts` / call log `operation`、`model_role` / `ai_channels.lite_model` + version 9 `native_automations`、`native_goals` + version 10 `agent_sessions.archived` + version 11 `ai_channels.responses_continuation` + version 12 `agent_sessions.pending_plan_json` + version 13 `agent_sessions.approved_plan_json` + version 14 追加式历史 + version 15 工具执行账本与模型尝试预算） |
 | [`src-tauri/src/db/models.rs`](../src-tauri/src/db/models.rs) | 行模型与 IPC DTO |
 | [`src-tauri/src/app/shared.rs`](../src-tauri/src/app/shared.rs) | `sqlite_pool` / `database_path` / `now_sqlite` / `new_id` |
 | [`src-tauri/src/app/database.rs`](../src-tauri/src/app/database.rs) | 健康检查、备份、恢复 |
@@ -32,7 +32,7 @@ React (UI) → Tauri IPC commands → Rust service layer → SQLite
 
 ## 迁移
 
-`tauri-plugin-sql` 在启动时按 `get_all_migrations()` 升级。版本号必须连续 `1..N`，由 `migration_versions_are_contiguous` 强制。当前最新版本是 **14**：version 6 只为 `ssh_configs` 增加 `algorithms_json`，不增加表；version 7 新增 `activity_logs`；version 8 新增 `native_tool_artifacts`，并给 `native_api_call_logs` 加 `operation`（默认 `agent_step`）与 `model_role`（默认 `main`）、给 `ai_channels` 加 `lite_model`；version 9 新增 `native_automations`（Cron 自动化）与 `native_goals`（会话目标）；version 10 增加 `agent_sessions.archived`（默认 `0`）及列表索引；version 11 给 `ai_channels` 增加 `responses_continuation`（默认 `auto`），version 12 为 `agent_sessions` 增加 `pending_plan_json`；version 13 增加 `approved_plan_json`，保存计划批准、文件写入状态、内容哈希与实施模型；version 14 新增追加式历史五张表。业务表现在是 17 张。
+`tauri-plugin-sql` 在启动时按 `get_all_migrations()` 升级。版本号必须连续 `1..N`，由 `migration_versions_are_contiguous` 强制。当前最新版本是 **15**：version 6 只为 `ssh_configs` 增加 `algorithms_json`，不增加表；version 7 新增 `activity_logs`；version 8 新增 `native_tool_artifacts`，并给 `native_api_call_logs` 加 `operation`（默认 `agent_step`）与 `model_role`（默认 `main`）、给 `ai_channels` 加 `lite_model`；version 9 新增 `native_automations`（Cron 自动化）与 `native_goals`（会话目标）；version 10 增加 `agent_sessions.archived`（默认 `0`）及列表索引；version 11 给 `ai_channels` 增加 `responses_continuation`（默认 `auto`），version 12 为 `agent_sessions` 增加 `pending_plan_json`；version 13 增加 `approved_plan_json`，保存计划批准、文件写入状态、内容哈希与实施模型；version 14 新增追加式历史五张表；version 15 新增 `native_tool_runs` 与 `native_model_attempt_budgets`。业务表现在是 19 张。
 
 后续只能追加比当前最新版本更大的连续版本，禁止改已发布的 SQL，禁止插队。新历史成为权威来源后，旧版程序不能继续写同一数据库；发布回退使用升级前备份，不设破坏性降级迁移。
 
@@ -55,6 +55,8 @@ workspaces     ──CASCADE──► git_checkpoints
 native_api_call_logs        无外键（日志需在会话删除后仍可查）
 native_session_transcripts  无外键（主键 session_record_id 对应 agent_sessions.id）
 native_history_*            无外键（分支可引用源会话消息；删除源会话不得级联删历史）
+native_tool_runs            无外键（工具执行账本在会话删除后仍可对照）
+native_model_attempt_budgets 无外键（重试预算按会话与回合保留）
 activity_logs               无外键（checkpoint 回滚 / 清除审计需独立保留）
 ```
 
@@ -72,6 +74,10 @@ CASCADE：删会话会清事件和 checkpoint 行；删工作区会清该工作�
 同一事务写入历史行、分支修订号、上下文锚点和 transcript 投影。提交成功后才发出 `native-history-committed`。保存失败向上返回，回合停止。
 
 仍被活动分支的投影、保留列表或分支自身引用的消息，保留期清理不会删除。旧 transcript 只在行还在时导入为兼容基线，并标明压缩前原文、图片和无法对应的旧检查点不可恢复。
+
+### 工具恢复账本（version 15）
+
+`native_tool_runs` 按会话、回合和 `call_id` 记录一批工具调用的计划、开始和提交结果。状态是 `planned`、`started`、`committed` 或 `unknown`。`native_model_attempt_budgets` 记录同一回合已经用掉的模型请求次数和上限。恢复语义见 [`native.md`](native.md)。
 
 ## 十二张既有业务表
 
@@ -231,4 +237,4 @@ sqlite3 "$HOME/Library/Application Support/com.wenyuan.noxcode/noxcode.db" \
   "SELECT version, description, success FROM _sqlx_migrations;"
 ```
 
-应看到 17 张业务表加 `_sqlx_migrations`，且 version 14 成功。
+应看到 19 张业务表加 `_sqlx_migrations`，且 version 15 成功。

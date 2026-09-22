@@ -23,6 +23,7 @@ pub(crate) mod plans;
 pub(crate) mod plugins;
 pub(crate) mod prompt;
 pub(crate) mod protocol;
+pub(crate) mod recovery;
 pub(crate) mod scheduler;
 pub(crate) mod session;
 pub(crate) mod settings;

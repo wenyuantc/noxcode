@@ -519,6 +519,39 @@ pub fn get_all_migrations() -> Vec<Migration> {
             "#,
             kind: tauri_plugin_sql::MigrationKind::Up,
         },
+        Migration {
+            version: 15,
+            description: "tool run ledger and persisted model attempt budget",
+            sql: r#"
+                CREATE TABLE native_tool_runs (
+                    id TEXT PRIMARY KEY,
+                    session_record_id TEXT NOT NULL,
+                    turn_id TEXT NOT NULL,
+                    call_id TEXT NOT NULL,
+                    call_index INTEGER NOT NULL,
+                    name TEXT NOT NULL,
+                    arguments TEXT NOT NULL,
+                    side_effect INTEGER NOT NULL,
+                    status TEXT NOT NULL,
+                    result_text TEXT,
+                    result_error INTEGER NOT NULL DEFAULT 0,
+                    updated_at TEXT NOT NULL
+                );
+                CREATE UNIQUE INDEX idx_native_tool_runs_call
+                    ON native_tool_runs(session_record_id, turn_id, call_id);
+
+                CREATE TABLE native_model_attempt_budgets (
+                    session_record_id TEXT NOT NULL,
+                    turn_id TEXT NOT NULL,
+                    used INTEGER NOT NULL,
+                    max_attempts INTEGER NOT NULL,
+                    completed INTEGER NOT NULL DEFAULT 0,
+                    updated_at TEXT NOT NULL,
+                    PRIMARY KEY (session_record_id, turn_id)
+                );
+            "#,
+            kind: tauri_plugin_sql::MigrationKind::Up,
+        },
     ]
 }
 
@@ -587,7 +620,7 @@ mod tests {
         for (index, migration) in get_all_migrations().iter().enumerate() {
             assert_eq!(migration.version, index as i64 + 1);
         }
-        assert_eq!(latest_migration_version(), 14);
+        assert_eq!(latest_migration_version(), 15);
         assert_eq!(
             get_all_migrations()
                 .last()
@@ -714,8 +747,10 @@ mod tests {
                     "native_history_links",
                     "native_history_messages",
                     "native_history_requests",
+                    "native_model_attempt_budgets",
                     "native_session_transcripts",
                     "native_tool_artifacts",
+                    "native_tool_runs",
                     "ssh_configs",
                     "workspaces",
                 ]

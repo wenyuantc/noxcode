@@ -13,6 +13,7 @@ use crate::native::protocol::{
     channel_chat_url, channel_models_url, model_list_next_page, parse_model_list_json,
     PROTOCOL_ANTHROPIC, PROTOCOL_CODEX, PROTOCOL_OPENAI,
 };
+use crate::native::recovery::{require_local_anchor, RecoveryState};
 use crate::native::tools::CancelFlag;
 
 use super::anthropic::{
@@ -293,6 +294,7 @@ pub struct ModelClient {
     /// so a child agent does not probe the same 400 again.
     continuation_unsupported: Arc<AtomicBool>,
     stream_idle: Duration,
+    recovery: Option<Arc<RecoveryState>>,
 }
 
 #[derive(Debug, Clone)]
@@ -322,6 +324,8 @@ impl Clone for ModelClient {
             continuations: Arc::new(Mutex::new(HashMap::new())),
             continuation_unsupported: self.continuation_unsupported.clone(),
             stream_idle: self.stream_idle,
+            // 子 Agent 不共享父会话账本，避免子请求消耗父回合的重试预算。
+            recovery: None,
         }
     }
 }
@@ -345,6 +349,7 @@ impl ModelClient {
             continuations: self.continuations.clone(),
             continuation_unsupported: self.continuation_unsupported.clone(),
             stream_idle: self.stream_idle,
+            recovery: self.recovery.clone(),
         }
     }
 }
@@ -365,7 +370,21 @@ impl ModelClient {
             continuations: Arc::new(Mutex::new(HashMap::new())),
             continuation_unsupported: Arc::new(AtomicBool::new(false)),
             stream_idle: DEFAULT_STREAM_IDLE,
+            recovery: None,
         })
+    }
+
+    pub fn with_recovery(mut self, recovery: Arc<RecoveryState>) -> Self {
+        self.recovery = Some(recovery);
+        self
+    }
+
+    pub fn recovery_state(&self) -> Option<Arc<RecoveryState>> {
+        self.recovery.clone()
+    }
+
+    pub fn attempt_limit(&self) -> u32 {
+        self.config.retry.max_retries.saturating_add(1).max(1)
     }
 
     pub fn with_stream_idle(mut self, idle: Duration) -> Self {
@@ -689,7 +708,24 @@ impl ModelClient {
         let attempts = self.config.retry.max_retries.saturating_add(1);
         let call_id = new_id();
         let mut last_error = ModelError::new(ModelErrorKind::Transport, "模型请求失败");
-        for attempt in 0..attempts {
+        let start = if let Some(recovery) = &self.recovery {
+            recovery
+                .used_now()
+                .await
+                .map_err(|error| ModelError::new(ModelErrorKind::Transport, error))?
+        } else {
+            0
+        };
+        if start >= attempts {
+            return Err(ModelError::new(ModelErrorKind::Transport, "重试次数已用尽"));
+        }
+        for attempt in start..attempts {
+            if let Some(recovery) = &self.recovery {
+                recovery
+                    .note_model_attempt()
+                    .await
+                    .map_err(|error| ModelError::new(ModelErrorKind::Transport, error))?;
+            }
             let mut retry_after_hint: Option<Duration> = None;
             if self.is_cancelled() {
                 self.emit_call_log(
@@ -761,6 +797,9 @@ impl ModelClient {
                                 Some(i64::from(timed.status)),
                                 None,
                             );
+                            if let Some(recovery) = &self.recovery {
+                                let _ = recovery.release_successful_attempt().await;
+                            }
                             return Ok(result);
                         }
                         Err(mut error) => {
@@ -1264,6 +1303,14 @@ impl ModelClient {
         }
         let mut continuations = self.continuations.lock().ok()?;
         let state = continuations.get(key).cloned()?;
+        if self
+            .recovery
+            .as_ref()
+            .is_some_and(|recovery| recovery.missing_local_anchor())
+            && require_local_anchor(false, Some(state.response_id.as_str())).is_err()
+        {
+            return None;
+        }
         // A compacted or freshly started message list must not be attached to
         // an old server response. The anchor check also isolates child agents
         // that share the same ModelClient instance.
