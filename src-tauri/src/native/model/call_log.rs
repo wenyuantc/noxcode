@@ -261,6 +261,15 @@ pub fn sse_event_is_meaningful(event: &SseEvent) -> bool {
     sse_data_is_meaningful(&event.event, std::slice::from_ref(&event.data))
 }
 
+/// 心跳、ping 和空注释不刷新流空闲计时。终止标记和用量事件算协议进展。
+pub fn sse_event_refreshes_idle(event: &SseEvent) -> bool {
+    if event.event.eq_ignore_ascii_case("ping") {
+        return false;
+    }
+    let data = event.data.trim();
+    !data.is_empty() && !data.eq_ignore_ascii_case("ping")
+}
+
 /// Single-event view of [`provider_reported_usage`].
 pub fn sse_event_reports_usage(event: &SseEvent) -> bool {
     json_has_usage_object_str(&event.data)

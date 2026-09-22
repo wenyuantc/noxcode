@@ -1,5 +1,7 @@
 use std::time::Duration;
 
+use super::response::ModelErrorKind;
+
 #[derive(Debug, Clone, Copy)]
 pub struct RetryConfig {
     pub max_retries: u32,
@@ -113,6 +115,28 @@ pub fn parse_retry_after(value: &str) -> Option<Duration> {
 
 pub fn is_retryable_status(status: u16) -> bool {
     matches!(status, 408 | 409 | 429) || status >= 500
+}
+
+pub fn is_retryable_model_error(kind: ModelErrorKind, status: Option<u16>, message: &str) -> bool {
+    match kind {
+        ModelErrorKind::Cancelled | ModelErrorKind::ContextLimit => false,
+        ModelErrorKind::FirstByteTimeout
+        | ModelErrorKind::StreamIdle
+        | ModelErrorKind::RequestTimeout
+        | ModelErrorKind::Network
+        | ModelErrorKind::IncompleteStream => status_allows_retry(status),
+        ModelErrorKind::Transport | ModelErrorKind::Provider | ModelErrorKind::InvalidResponse => {
+            is_retryable_error(status, message)
+        }
+    }
+}
+
+fn status_allows_retry(status: Option<u16>) -> bool {
+    match status {
+        Some(401 | 403 | 404) => false,
+        Some(status) if (400..500).contains(&status) && !is_retryable_status(status) => false,
+        _ => true,
+    }
 }
 
 pub fn is_retryable_error(status: Option<u16>, message: &str) -> bool {

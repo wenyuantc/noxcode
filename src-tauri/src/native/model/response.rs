@@ -30,12 +30,40 @@ impl FinishReason {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ModelErrorKind {
+    /// 连接或读流失败，且不能归入更具体的超时、断线分类。
     Transport,
+    /// 在总期限内没有收到有效协议数据。
+    FirstByteTimeout,
+    /// 已有协议进展后，空闲超过期限。心跳不刷新这个计时。
+    StreamIdle,
+    /// 整个请求超过首包/总期限。
+    RequestTimeout,
+    /// 连接被重置、提前关闭或无法建立。
+    Network,
+    /// 流结束了，但没有协议规定的终止事件。
     IncompleteStream,
+    /// SSE/JSON 无法按协议解析。
     InvalidResponse,
     Provider,
     ContextLimit,
     Cancelled,
+}
+
+impl ModelErrorKind {
+    pub fn label_zh(self) -> &'static str {
+        match self {
+            Self::Transport => "传输失败",
+            Self::FirstByteTimeout => "首包等待",
+            Self::StreamIdle => "流空闲",
+            Self::RequestTimeout => "请求总期限",
+            Self::Network => "网络中断",
+            Self::IncompleteStream => "无合法终止",
+            Self::InvalidResponse => "协议错误",
+            Self::Provider => "提供商错误",
+            Self::ContextLimit => "上下文上限",
+            Self::Cancelled => "用户取消",
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

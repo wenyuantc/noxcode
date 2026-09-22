@@ -23,9 +23,9 @@ use super::call_log::{
     detect_response_encoding, extract_request_model, extract_thinking_level,
     first_meaningful_event_offset, logged_usage_from_parsed, parse_usage_from_body,
     provider_reported_usage, redact_and_truncate_json, redact_and_truncate_text,
-    request_thinking_enabled, sse_event_is_meaningful, sse_event_reports_usage, CallLogContext,
-    NativeApiCallLogInsert, CALL_STATUS_CANCELLED, CALL_STATUS_FAILED, CALL_STATUS_SUCCESS,
-    MODEL_ROLE_MAIN, OPERATION_AGENT_STEP,
+    request_thinking_enabled, sse_event_is_meaningful, sse_event_refreshes_idle,
+    sse_event_reports_usage, CallLogContext, NativeApiCallLogInsert, CALL_STATUS_CANCELLED,
+    CALL_STATUS_FAILED, CALL_STATUS_SUCCESS, MODEL_ROLE_MAIN, OPERATION_AGENT_STEP,
 };
 use super::openai::{
     build_openai_body, parse_max_output_token_limit, parse_openai_json, parse_openai_sse,
@@ -37,8 +37,8 @@ use super::responses::{
     ResponsesStreamState,
 };
 use super::retry::{
-    format_http_error, format_retry_line, is_retryable_error, parse_retry_after, redact_secrets,
-    RetryConfig,
+    format_http_error, format_retry_line, is_retryable_model_error, parse_retry_after,
+    redact_secrets, RetryConfig,
 };
 use super::sse::{SseEvent, SseStreamParser};
 use super::types::{Message, StreamDelta, ToolSpec, Usage};
@@ -49,6 +49,7 @@ use super::types::{Message, StreamDelta, ToolSpec, Usage};
 /// fallback parser, hence the much larger guard.
 const SSE_TEXT_BUFFER_LIMIT: usize = 256 * 1024;
 const BODY_TEXT_BUFFER_LIMIT: usize = 8 * 1024 * 1024;
+const DEFAULT_STREAM_IDLE: Duration = Duration::from_secs(60);
 
 type ParsedResponse = ModelResponse;
 
@@ -57,6 +58,85 @@ struct StreamScan {
     first_token_ms: Option<i64>,
     usage_reported: bool,
     saw_sse_event: bool,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum StreamTimeout {
+    FirstByte,
+    Idle,
+    Total,
+}
+
+struct StreamClock {
+    started: Instant,
+    total: Duration,
+    idle: Duration,
+    last_progress: Option<Instant>,
+}
+
+impl StreamClock {
+    fn new(started: Instant, total: Duration, idle: Duration) -> Self {
+        Self {
+            started,
+            total,
+            idle,
+            last_progress: None,
+        }
+    }
+
+    fn has_progress(&self) -> bool {
+        self.last_progress.is_some()
+    }
+
+    fn mark_progress(&mut self, now: Instant) {
+        self.last_progress = Some(now);
+    }
+
+    fn deadline(&self) -> (Instant, StreamTimeout) {
+        let total_at = self.started + self.total;
+        let Some(progress) = self.last_progress else {
+            return (total_at, StreamTimeout::FirstByte);
+        };
+        let idle_at = progress + self.idle;
+        if idle_at <= total_at {
+            (idle_at, StreamTimeout::Idle)
+        } else {
+            (total_at, StreamTimeout::Total)
+        }
+    }
+}
+
+fn timeout_error(phase: StreamTimeout) -> ModelError {
+    let (kind, message) = match phase {
+        StreamTimeout::FirstByte => (ModelErrorKind::FirstByteTimeout, "首包等待超时"),
+        StreamTimeout::Idle => (ModelErrorKind::StreamIdle, "流空闲超时"),
+        StreamTimeout::Total => (ModelErrorKind::RequestTimeout, "请求超过总期限"),
+    };
+    ModelError::new(kind, message)
+}
+
+fn classify_reqwest(error: &reqwest::Error, saw_progress: bool) -> ModelError {
+    if error.is_timeout() {
+        return timeout_error(if saw_progress {
+            StreamTimeout::Total
+        } else {
+            StreamTimeout::FirstByte
+        });
+    }
+    let detail = error.to_string();
+    let lower = detail.to_ascii_lowercase();
+    let kind = if error.is_connect()
+        || lower.contains("connection")
+        || lower.contains("reset")
+        || lower.contains("broken pipe")
+        || lower.contains("eof")
+        || lower.contains("closed")
+    {
+        ModelErrorKind::Network
+    } else {
+        ModelErrorKind::Transport
+    };
+    ModelError::new(kind, format!("{}: {detail}", kind.label_zh()))
 }
 
 struct TimedHttpBody {
@@ -68,6 +148,8 @@ struct TimedHttpBody {
     usage_reported: bool,
     /// 服务端 `Retry-After`（限流 / 过载时给出），重试等待优先采用。
     retry_after: Option<Duration>,
+    /// 读流过程中已判定的超时、断线或取消。有值时不再把缓冲正文当成成功响应。
+    failure: Option<ModelError>,
     /// `Some` when the body arrived as SSE and was consumed incrementally by
     /// the protocol state machine. `None` means the text fallback still owns
     /// parsing (complete JSON payloads, empty bodies, gateway errors).
@@ -210,6 +292,7 @@ pub struct ModelClient {
     /// Sticky: this gateway rejected `previous_response_id`. Shared across clones
     /// so a child agent does not probe the same 400 again.
     continuation_unsupported: Arc<AtomicBool>,
+    stream_idle: Duration,
 }
 
 #[derive(Debug, Clone)]
@@ -238,6 +321,7 @@ impl Clone for ModelClient {
             // `previous_response_id`.
             continuations: Arc::new(Mutex::new(HashMap::new())),
             continuation_unsupported: self.continuation_unsupported.clone(),
+            stream_idle: self.stream_idle,
         }
     }
 }
@@ -260,6 +344,7 @@ impl ModelClient {
             prompt_cache_key: self.prompt_cache_key.clone(),
             continuations: self.continuations.clone(),
             continuation_unsupported: self.continuation_unsupported.clone(),
+            stream_idle: self.stream_idle,
         }
     }
 }
@@ -279,7 +364,13 @@ impl ModelClient {
             prompt_cache_key: None,
             continuations: Arc::new(Mutex::new(HashMap::new())),
             continuation_unsupported: Arc::new(AtomicBool::new(false)),
+            stream_idle: DEFAULT_STREAM_IDLE,
         })
+    }
+
+    pub fn with_stream_idle(mut self, idle: Duration) -> Self {
+        self.stream_idle = idle.max(Duration::from_millis(1));
+        self
     }
 
     pub fn with_prompt_cache(mut self, mode: PromptCacheMode) -> Self {
@@ -581,7 +672,13 @@ impl ModelClient {
             thinking_enabled: false,
         };
         let body = self.build_body(&request, false)?;
-        let timed = self.post_raw(&url, &body).await?;
+        let timed = self
+            .post_raw(&url, &body)
+            .await
+            .map_err(|error| error.message)?;
+        if let Some(error) = timed.failure {
+            return Err(error.message);
+        }
         if (200..300).contains(&timed.status) {
             return Ok(());
         }
@@ -621,6 +718,36 @@ impl ModelClient {
                     );
                     return Err(ModelError::new(ModelErrorKind::Cancelled, "已取消"));
                 }
+                Ok(timed) if timed.failure.is_some() => {
+                    last_error = timed.failure.clone().unwrap_or_else(|| {
+                        ModelError::new(ModelErrorKind::Transport, "模型请求失败")
+                    });
+                    let cancelled = last_error.kind == ModelErrorKind::Cancelled;
+                    self.emit_call_log(
+                        &call_id,
+                        i64::from(attempt.saturating_add(1)),
+                        body,
+                        Some(&timed),
+                        None,
+                        if cancelled {
+                            CALL_STATUS_CANCELLED
+                        } else {
+                            CALL_STATUS_FAILED
+                        },
+                        Some(i64::from(timed.status)),
+                        Some(&last_error.message),
+                    );
+                    if cancelled
+                        || self.should_stop_retry(
+                            &last_error,
+                            Some(timed.status),
+                            attempt,
+                            attempts,
+                        )
+                    {
+                        return Err(last_error);
+                    }
+                }
                 Ok(mut timed) if (200..300).contains(&timed.status) => {
                     match self.take_parsed_response(&mut timed) {
                         Ok(result) => {
@@ -655,12 +782,7 @@ impl ModelClient {
                         Some(i64::from(timed.status)),
                         Some(&last_error.message),
                     );
-                    if self.should_stop_retry(
-                        &last_error.message,
-                        Some(timed.status),
-                        attempt,
-                        attempts,
-                    ) {
+                    if self.should_stop_retry(&last_error, Some(timed.status), attempt, attempts) {
                         return Err(last_error);
                     }
                 }
@@ -683,25 +805,17 @@ impl ModelClient {
                         Some(i64::from(timed.status)),
                         Some(&last_error.message),
                     );
-                    if self.should_stop_retry(
-                        &last_error.message,
-                        Some(timed.status),
-                        attempt,
-                        attempts,
-                    ) {
+                    if self.should_stop_retry(&last_error, Some(timed.status), attempt, attempts) {
                         return Err(last_error);
                     }
                 }
                 Err(error) => {
-                    let cancelled = self.is_cancelled() || error == "已取消";
-                    last_error = ModelError::new(
-                        if cancelled {
-                            ModelErrorKind::Cancelled
-                        } else {
-                            ModelErrorKind::Transport
-                        },
-                        error,
-                    );
+                    let cancelled = error.kind == ModelErrorKind::Cancelled || self.is_cancelled();
+                    last_error = if cancelled {
+                        ModelError::new(ModelErrorKind::Cancelled, "已取消")
+                    } else {
+                        error
+                    };
                     self.emit_call_log(
                         &call_id,
                         i64::from(attempt.saturating_add(1)),
@@ -716,10 +830,7 @@ impl ModelClient {
                         None,
                         Some(&last_error.message),
                     );
-                    if cancelled {
-                        return Err(ModelError::new(ModelErrorKind::Cancelled, "已取消"));
-                    }
-                    if self.should_stop_retry(&last_error.message, None, attempt, attempts) {
+                    if cancelled || self.should_stop_retry(&last_error, None, attempt, attempts) {
                         return Err(last_error);
                     }
                 }
@@ -751,14 +862,14 @@ impl ModelClient {
 
     fn should_stop_retry(
         &self,
-        error: &str,
+        error: &ModelError,
         status: Option<u16>,
         attempt: u32,
         attempts: u32,
     ) -> bool {
-        parse_max_output_token_limit(error).is_some()
-            || is_continuation_rejection(error)
-            || !is_retryable_error(status, error)
+        parse_max_output_token_limit(&error.message).is_some()
+            || is_continuation_rejection(&error.message)
+            || !is_retryable_model_error(error.kind, status, &error.message)
             || attempt + 1 >= attempts
     }
 
@@ -779,23 +890,24 @@ impl ModelClient {
     }
 
     async fn wait_before_retry(&self, delay: Duration) -> Result<(), String> {
-        let Some(cancel) = &self.cancel else {
-            tokio::time::sleep(delay).await;
-            return Ok(());
-        };
-        let mut remaining = delay;
-        while remaining > Duration::ZERO {
-            if cancel.is_cancelled() {
-                return Err("已取消".to_string());
+        tokio::select! {
+            biased;
+            _ = self.cancelled_signal() => Err("已取消".to_string()),
+            _ = tokio::time::sleep(delay) => {
+                if self.is_cancelled() {
+                    Err("已取消".to_string())
+                } else {
+                    Ok(())
+                }
             }
-            let slice = remaining.min(Duration::from_millis(200));
-            tokio::time::sleep(slice).await;
-            remaining = remaining.saturating_sub(slice);
         }
-        if cancel.is_cancelled() {
-            return Err("已取消".to_string());
+    }
+
+    async fn cancelled_signal(&self) {
+        match &self.cancel {
+            Some(cancel) => cancel.cancelled().await,
+            None => std::future::pending::<()>().await,
         }
-        Ok(())
     }
 
     fn apply_auth(&self, mut request: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
@@ -834,7 +946,7 @@ impl ModelClient {
     /// Read the response body chunk by chunk. A 2xx SSE body is parsed as it
     /// arrives so text and reasoning fragments reach the delta hook before the
     /// model finishes; every other shape falls back to the buffered text.
-    async fn post_raw(&self, url: &str, body: &Value) -> Result<TimedHttpBody, String> {
+    async fn post_raw(&self, url: &str, body: &Value) -> Result<TimedHttpBody, ModelError> {
         let started = Instant::now();
         let request = self
             .http
@@ -842,12 +954,14 @@ impl ModelClient {
             .header("content-type", "application/json")
             .header("accept", "text/event-stream, application/json");
         let response = self
-            .apply_auth(request)
-            .json(body)
-            .send()
-            .await
-            .map_err(|error| format!("模型请求失败: {error}"))?;
+            .send_observing(self.apply_auth(request).json(body), started)
+            .await?;
         let status = response.status().as_u16();
+        let is_sse = response
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .is_some_and(|value| value.to_ascii_lowercase().contains("text/event-stream"));
         let retry_after = response
             .headers()
             .get("retry-after")
@@ -860,45 +974,83 @@ impl ModelClient {
         let mut parser = SseStreamParser::new();
         let mut scan = StreamScan::default();
         let mut bytes = Vec::new();
-        let mut stream = response.bytes_stream();
+        let mut stream = std::pin::pin!(response.bytes_stream());
+        let mut clock = StreamClock::new(started, self.config.timeout, self.stream_idle);
         let mut cancelled = false;
-        while let Some(chunk) = stream.next().await {
+        let mut failure = None;
+        while failure.is_none() && !cancelled {
             if self.is_cancelled() {
                 cancelled = true;
                 break;
             }
-            let chunk = chunk.map_err(|error| format!("读取模型响应失败: {error}"))?;
-            let limit = if scan.saw_sse_event {
-                SSE_TEXT_BUFFER_LIMIT
-            } else {
-                BODY_TEXT_BUFFER_LIMIT
-            };
-            if bytes.len() < limit {
-                bytes.extend_from_slice(&chunk);
+            let now = Instant::now();
+            let (deadline, phase) = clock.deadline();
+            if now >= deadline {
+                failure = Some(timeout_error(phase));
+                break;
             }
-            self.absorb_events(
-                parser.push_bytes(&chunk),
-                state.as_mut(),
-                started,
-                &mut scan,
-            );
+            let wait = deadline.saturating_duration_since(now);
+            tokio::select! {
+                biased;
+                _ = self.cancelled_signal() => {
+                    cancelled = true;
+                    break;
+                }
+                _ = tokio::time::sleep(wait) => {
+                    failure = Some(timeout_error(phase));
+                    break;
+                }
+                next = stream.next() => {
+                    match next {
+                        None => break,
+                        Some(Err(error)) => {
+                            failure = Some(classify_reqwest(&error, clock.has_progress()));
+                            break;
+                        }
+                        Some(Ok(chunk)) => {
+                            let limit = if scan.saw_sse_event {
+                                SSE_TEXT_BUFFER_LIMIT
+                            } else {
+                                BODY_TEXT_BUFFER_LIMIT
+                            };
+                            if bytes.len() < limit {
+                                bytes.extend_from_slice(&chunk);
+                            }
+                            let events = parser.push_bytes(&chunk);
+                            let refreshed = if is_sse {
+                                events.iter().any(sse_event_refreshes_idle)
+                            } else {
+                                !chunk.is_empty()
+                            };
+                            self.absorb_events(events, state.as_mut(), started, &mut scan);
+                            if refreshed {
+                                clock.mark_progress(Instant::now());
+                            }
+                        }
+                    }
+                }
+            }
         }
-        self.absorb_events(parser.finish(), state.as_mut(), started, &mut scan);
+        if failure.is_none() && !cancelled {
+            self.absorb_events(parser.finish(), state.as_mut(), started, &mut scan);
+        }
         if !cancelled && self.is_cancelled() {
             cancelled = true;
         }
         let text = String::from_utf8_lossy(&bytes).into_owned();
         let parsed = match state {
-            Some(state) if scan.saw_sse_event => Some(state.finish()),
+            Some(state) if scan.saw_sse_event && failure.is_none() && !cancelled => {
+                Some(state.finish())
+            }
             _ => None,
         };
         if !scan.saw_sse_event {
-            // A complete JSON payload only becomes meaningful once the whole
-            // body has arrived, which is what the per-chunk scan used to
-            // detect on its last iteration.
             scan.usage_reported = provider_reported_usage(&text);
             if first_meaningful_event_offset(&text).is_some() {
                 scan.first_token_ms = Some(elapsed_ms(started));
+                if !is_sse {
+                    clock.mark_progress(started);
+                }
             }
         }
         Ok(TimedHttpBody {
@@ -909,8 +1061,35 @@ impl ModelClient {
             cancelled,
             usage_reported: scan.usage_reported,
             retry_after,
+            failure,
             parsed,
         })
+    }
+
+    async fn send_observing(
+        &self,
+        request: reqwest::RequestBuilder,
+        started: Instant,
+    ) -> Result<reqwest::Response, ModelError> {
+        let deadline = started + self.config.timeout;
+        let pending = request.send();
+        tokio::pin!(pending);
+        if self.is_cancelled() {
+            return Err(ModelError::new(ModelErrorKind::Cancelled, "已取消"));
+        }
+        let now = Instant::now();
+        if now >= deadline {
+            return Err(timeout_error(StreamTimeout::FirstByte));
+        }
+        let wait = deadline.saturating_duration_since(now);
+        tokio::select! {
+            biased;
+            _ = self.cancelled_signal() => {
+                Err(ModelError::new(ModelErrorKind::Cancelled, "已取消"))
+            }
+            _ = tokio::time::sleep(wait) => Err(timeout_error(StreamTimeout::FirstByte)),
+            result = &mut pending => result.map_err(|error| classify_reqwest(&error, false)),
+        }
     }
 
     fn absorb_events(
@@ -1508,6 +1687,60 @@ mod tests {
             let _ = stream.write_all(b"0\r\n\r\n").await;
         });
         format!("http://{addr}")
+    }
+
+    async fn serve_paced_sse(chunks: Vec<(u64, String)>, hold_ms: u64) -> String {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind mock server");
+        let addr = listener.local_addr().expect("local addr");
+        tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("accept");
+            let _ = read_http_request(&mut stream).await;
+            let header = "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n";
+            if stream.write_all(header.as_bytes()).await.is_err() {
+                return;
+            }
+            for (delay_ms, body) in chunks {
+                if delay_ms > 0 {
+                    tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+                }
+                let chunk = format!("{:x}\r\n{body}\r\n", body.len());
+                if stream.write_all(chunk.as_bytes()).await.is_err() {
+                    return;
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(hold_ms)).await;
+            let _ = stream.write_all(b"0\r\n\r\n").await;
+        });
+        format!("http://{addr}")
+    }
+
+    fn progress_event(protocol: &str) -> String {
+        match protocol {
+            PROTOCOL_ANTHROPIC => {
+                "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"text\":\"hi\"}}\n\n".to_string()
+            }
+            PROTOCOL_CODEX => {
+                "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"hi\"}\n\n".to_string()
+            }
+            _ => "data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\n".to_string(),
+        }
+    }
+
+    fn client_limits(base_url: String, protocol: &str, total_ms: u64, idle_ms: u64) -> ModelClient {
+        ModelClient::new(ModelClientConfig {
+            protocol: protocol.to_string(),
+            base_url,
+            api_key: "sk-secret-key".to_string(),
+            extra_headers: HashMap::new(),
+            retry: RetryConfig::none(),
+            timeout: Duration::from_millis(total_ms),
+            network: NetworkSettings::default(),
+            responses_continuation: ResponsesContinuationMode::Disabled,
+        })
+        .expect("client")
+        .with_stream_idle(Duration::from_millis(idle_ms))
     }
 
     #[tokio::test]
@@ -2486,6 +2719,7 @@ mod tests {
             cancelled: false,
             usage_reported: false,
             retry_after: None,
+            failure: None,
             parsed: Some(Err(ModelError::new(
                 ModelErrorKind::IncompleteStream,
                 "missing terminal",
@@ -2508,6 +2742,117 @@ mod tests {
             let error = chat_hi_on(client_with_protocol(serve_once(200,body).await, protocol)).await.unwrap_err();
             assert_eq!(error.kind, kind);
         }
+    }
+
+    #[tokio::test]
+    async fn three_protocols_classify_first_byte_idle_and_cancel() {
+        for protocol in [PROTOCOL_OPENAI, PROTOCOL_ANTHROPIC, PROTOCOL_CODEX] {
+            let started = Instant::now();
+            let base = serve_paced_sse(Vec::new(), 3_000).await;
+            let error = chat_hi_on(client_limits(base, protocol, 350, 5_000))
+                .await
+                .unwrap_err();
+            assert_eq!(error.kind, ModelErrorKind::FirstByteTimeout, "{protocol}");
+            assert!(error.message.contains("首包等待"), "{protocol}");
+            assert!(started.elapsed() < Duration::from_millis(1_500));
+
+            let started = Instant::now();
+            let base = serve_paced_sse(vec![(0, progress_event(protocol))], 3_000).await;
+            let error = chat_hi_on(client_limits(base, protocol, 5_000, 200))
+                .await
+                .unwrap_err();
+            assert_eq!(
+                error.kind,
+                ModelErrorKind::StreamIdle,
+                "{protocol} {}",
+                error.message
+            );
+            assert!(error.message.contains("流空闲"), "{protocol}");
+            assert!(
+                started.elapsed() < Duration::from_millis(1_200),
+                "{protocol} {:?}",
+                started.elapsed()
+            );
+
+            let base = serve_paced_sse(Vec::new(), 3_000).await;
+            let cancel = CancelFlag::new();
+            let flag = cancel.clone();
+            tokio::spawn(async move {
+                tokio::time::sleep(Duration::from_millis(40)).await;
+                flag.cancel();
+            });
+            let started = Instant::now();
+            let error = chat_hi_on(client_limits(base, protocol, 5_000, 5_000).with_cancel(cancel))
+                .await
+                .unwrap_err();
+            assert_eq!(error.kind, ModelErrorKind::Cancelled, "{protocol}");
+            assert!(started.elapsed() < Duration::from_millis(800));
+        }
+    }
+
+    #[tokio::test]
+    async fn heartbeats_do_not_extend_stream_idle() {
+        let mut chunks = vec![(0, progress_event(PROTOCOL_OPENAI))];
+        for _ in 0..20 {
+            chunks.push((40, ": ping\n\n".to_string()));
+        }
+        let started = Instant::now();
+        let base = serve_paced_sse(chunks, 0).await;
+        let error = chat_hi_on(client_limits(base, PROTOCOL_OPENAI, 5_000, 200))
+            .await
+            .unwrap_err();
+        assert_eq!(error.kind, ModelErrorKind::StreamIdle);
+        assert!(
+            started.elapsed() < Duration::from_millis(500),
+            "{:?}",
+            started.elapsed()
+        );
+    }
+
+    #[tokio::test]
+    async fn retries_stop_at_six_and_surface_backoff() {
+        let counter = Arc::new(AtomicU32::new(0));
+        let responses = (0..8).map(|_| (503, "busy".to_string())).collect();
+        let base = serve_sequence_counted(responses, Some(counter.clone())).await;
+        let lines = Arc::new(Mutex::new(Vec::new()));
+        let captured = lines.clone();
+        let client = client_with_retry(base, RetryConfig::fixed(6, 1)).with_retry_hook(Arc::new(
+            move |line| {
+                captured.lock().expect("retry lines").push(line.to_string());
+            },
+        ));
+        let error = chat_hi_on(client).await.unwrap_err();
+        assert_eq!(error.kind, ModelErrorKind::Provider);
+        assert_eq!(counter.load(Ordering::SeqCst), 7);
+        let lines = lines.lock().expect("retry lines");
+        assert_eq!(lines.len(), 6);
+        assert!(lines[0].contains("[重试] "));
+        assert!(lines[0].contains("第 1/6 次重试"));
+        assert!(lines[5].contains("第 6/6 次重试"));
+    }
+
+    #[tokio::test]
+    async fn cancel_during_backoff_does_not_send_another_attempt() {
+        let counter = Arc::new(AtomicU32::new(0));
+        let base = serve_sequence_counted(
+            vec![(503, "busy".to_string()), (503, "again".to_string())],
+            Some(counter.clone()),
+        )
+        .await;
+        let cancel = CancelFlag::new();
+        let flag = cancel.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(30)).await;
+            flag.cancel();
+        });
+        let started = Instant::now();
+        let error =
+            chat_hi_on(client_with_retry(base, RetryConfig::fixed(6, 500)).with_cancel(cancel))
+                .await
+                .unwrap_err();
+        assert_eq!(error.kind, ModelErrorKind::Cancelled);
+        assert!(started.elapsed() < Duration::from_millis(400));
+        assert_eq!(counter.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test]
