@@ -460,8 +460,7 @@
         "ssh-secret-index.json in the app config directory",
         "mcp-servers.json, native-settings.json (including hooks), network-settings.json, and quick-prompts.json in the app config directory",
         "The global skills directory ~/.noxcode/skills",
-        "Git checkpoint objects inside repositories",
-        "Local UI state such as window size"
+        "Git checkpoint objects inside repositories"
       ]
     },
     "actions": {

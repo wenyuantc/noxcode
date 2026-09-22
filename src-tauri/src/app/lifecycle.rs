@@ -244,8 +244,7 @@ async fn drain<R: Runtime>(
         "sessions_and_window",
         session_deadline,
         async move {
-            let save = crate::window_state::persist_main_window_async(&session_app);
-            let sessions = async {
+            let sessions =
                 if let Some(manager) = session_app.try_state::<Arc<Mutex<NativeAgentManager>>>() {
                     let count = manager.lock().await.len();
                     session_log.record(
@@ -256,14 +255,12 @@ async fn drain<R: Runtime>(
                         .await
                 } else {
                     Ok((0, 0))
-                }
-            };
-            let (window, sessions) = tokio::join!(save, sessions);
+                };
             let sessions = match sessions {
                 Ok((count, timed_out)) => json!({"count": count, "timed_out": timed_out}),
                 Err(error) => json!({"error": error}),
             };
-            json!({"window": window, "sessions": sessions})
+            json!({"sessions": sessions})
         },
     )
     .await;

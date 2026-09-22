@@ -10,9 +10,12 @@ pub fn show_main_window_handle<R: Runtime>(app: &AppHandle<R>) -> Result<(), Str
     };
 
     let _ = window.unminimize();
+    let _ = window.center();
     window
         .show()
         .map_err(|error| format!("显示主窗口失败: {error}"))?;
+    // macOS 首次 show 可能改掉隐藏期间设好的坐标，显示后再居中一次。
+    let _ = window.center();
     window
         .set_focus()
         .map_err(|error| format!("聚焦主窗口失败: {error}"))?;
