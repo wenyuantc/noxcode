@@ -25,7 +25,7 @@ P4 把进程内编程 Agent 接到渠道 + 工作区外壳。数据流仍是 `Re
 5. 无 `resume_session_id` 时插入 `agent_sessions`（`status=running`），并写出一次启动状态（渠道 banner / 权限说明 / MCP 状态）。有 `resume_session_id` 时：runtime 仍在则把 prompt 放入同一 live 的 `input_queue`，在当前回合完整结束后执行；runtime 已不在则校验工作区后原位重激活（刷新 `started_at` / 渠道 / 执行上下文，清空 `ended_at` / `exit_code`，保留 ID、标题、置顶、`created_at`、累计 token、旧事件和 checkpoint），并静默从同一 ID 的 transcript 恢复。冷启动不把「续聊 / 已恢复」或重复启动状态写进聊天；MCP 连接失败仍写出。发出 `native-session`。
 6. 组装系统提示：identity → 子 Agent 策略 → 环境 → Git → 全局模板 → `AGENTS.md` / `CLAUDE.md` → skills。
 7. 若工作区是 git 仓：`create_checkpoint(kind=session_start)`，失败只打日志。
-8. `auto_checkpoint_after_tool_call=true` 时，`Write` / `Edit` / `ApplyPatch` 成功后异步 `create_checkpoint(kind=after_tool_call)`，同一会话同时只允许一个在途打点；关闭开关不影响会话开始或回滚前检查点。
+8. `auto_checkpoint_after_tool_call=true` 时，`Write` / `Edit` / `ApplyPatch` 成功后异步 `create_checkpoint(kind=after_tool_call)`，同一会话同时只允许一个在途打点；同一开关打开时，这些受控写入还会同步记下路径级 before/after，供消息回滚使用。关闭开关后不再记路径快照，预览会说明文件回滚不可用。整库打点的在途跳过不影响路径记录。关闭开关不影响会话开始或回滚前检查点。
 9. 按当前 `workspace_id` 筛选并连接 `enabled=true` 且 `scope=all` 或命中 `scope=workspaces` / `workspace_ids` 的 MCP server。
 10. `run_native_loop` 转发 stdout / delta / context usage / 权限 / 计划提问 / 计划模式变化；退出时写 tokens、status、`native-exit`，并从 manager 移除。主窗口未聚焦且 `desktop_notifications=true` 时，会话结束 / 失败、权限确认和计划问题会发桌面通知。托盘 / 进程退出走 `shutdown_all_sessions`：拒绝待确认，工作中任务 cancel，空闲任务正常 `Finish`，有限等待 join，再关 SSH pool。
 
@@ -132,7 +132,8 @@ P4 把进程内编程 Agent 接到渠道 + 工作区外壳。数据流仍是 `Re
 - `CronUpdate(id, name?, prompt?, cron?, enabled?, channel_id?, model?)` 仅主 Agent 可用，计划模式禁止调用；只能更新当前工作区的自动化，至少提供一个更新字段。未提供字段保持不变，名称/提示词/cron 不接受空白；渠道和模型可用空字符串清除，清除渠道同时清除模型。修改渠道/模型会校验有效组合；仅 cron 或启停变化重算下次执行时间，改名或改提示词保留调度时间及既有运行记录，不立即执行。
 - 目标（[`goals.rs`](../src-tauri/src/native/goals.rs)）：`Goal(action=set|update|complete|clear, title, checklist, note)` 维护会话的当前目标与进度清单，`GoalRead` 读取；每次变更写 `[GOAL] {json}` 行，前端渲染为 `GoalRow`。
 - `ReadSessionContext`：不带 `session_id` 列出同工作区最近会话（标题、时间、轮数、最后回复摘录）；带 `session_id` 仍校验工作区归属，再返回最近的用户 / 助手对话摘录。
-- `/fork` → `fork_native_session`：从最新已提交边界新建已结束会话（标题加「（分叉）」，`resume_session_id` 指向源会话），活动分支引用源历史而不是复制消息行。不回滚文件；带检查点的文件修改要等预览和应用。消息菜单还可以从某条用户消息之前或之后分叉，或在当前会话回退：回退封存原分支、建立新的活动分支，不删除后面的历史。默认保留到所选消息。会拆开工具调用的位置不能选。工作中拒绝修改边界。计划正文留在历史里，旧审批和运行授权不继承；已完成目标仍保留来源分支，但不能当作新分支的完成证据。聊天展示从最后一条 `[分支]` 标记重新开始。实现见 [`history.rs`](../src-tauri/src/native/history.rs)。
+- `/fork` → `fork_native_session`：从最新已提交边界新建已结束会话（标题加「（分叉）」，`resume_session_id` 指向源会话），活动分支引用源历史而不是复制消息行。不回滚文件；带检查点参数会拒绝，文件回滚要先预览再应用。消息菜单还可以从某条用户消息之前或之后分叉，或在当前会话回退：回退封存原分支、建立新的活动分支，不删除后面的历史。默认保留到所选消息。会拆开工具调用的位置不能选。工作中拒绝修改边界。计划正文留在历史里，旧审批和运行授权不继承；已完成目标仍保留来源分支，但不能当作新分支的完成证据。聊天展示从最后一条 `[分支]` 标记重新开始。实现见 [`history.rs`](../src-tauri/src/native/history.rs)。
+- 消息上的「回滚文件」先调用 `preview_native_file_rollback`，列出新增、删除、修改、冲突和不能自动回滚的项，并写明不撤销外部 API、消息发送，以及 Bash / MCP 等无法归属的副作用。确认时按「仅对话 / 仅文件 / 对话和文件」调用 `apply_native_file_rollback`。凭据和分支修订号在应用前重算，不一致则不写任何文件；任一冲突也不写。文件成功之后才切换对话，仅文件不改分支。回滚直接写绑定的本地、SSH 或隔离 worktree 根，不改 Git HEAD 和用户 index，也不回退到工作区默认目录。执行目标在回滚期间拒绝应用内的受控写入。中途失败按已保存的备份补偿；补偿时若文件又被改过，状态变为 `needs_recovery` 并保留备份。恢复会话时先处理未完成的回滚，`needs_recovery` 会挡住继续执行。实现见 [`file_rollback.rs`](../src-tauri/src/native/file_rollback.rs)。
 - Composer 斜杠：自定义命令来自工作区 `.noxcode/commands`、`.claude/commands`、`.zcode/commands`、已启用插件 `commands/` 与 `$APPCONFIG/native-commands/`。内置 `/mode` `/model` `/effort` `/plan` `/new` `/clear` `/help` `/diff` `/context` `/permissions` `/memory` `/mcp` `/plugins` 由前端执行；`/init` `/goal` `/review` `/create-skill` `/create-subagent` 展开成提示词后走普通 Agent 回合。`/create-skill name` 写入 `.noxcode/skills/<name>/SKILL.md`；`/create-subagent name` 写入 `.noxcode/agents/<name>.md`。
 - 以上工具通过 `ToolCtx.session_scope`（数据库池、工作区、渠道、模型）访问数据库，只对主 Agent 可见（`ReadSessionContext` 子 Agent 也可用）。
 

@@ -558,6 +558,47 @@ pub fn get_all_migrations() -> Vec<Migration> {
             sql: "ALTER TABLE native_goals ADD COLUMN bound_branch_id TEXT;",
             kind: tauri_plugin_sql::MigrationKind::Up,
         },
+        Migration {
+            version: 17,
+            description: "message file rollback revisions and operations",
+            sql: r#"
+                CREATE TABLE native_file_revisions (
+                    id TEXT PRIMARY KEY,
+                    session_record_id TEXT NOT NULL,
+                    call_id TEXT NOT NULL,
+                    tool_name TEXT NOT NULL,
+                    path TEXT NOT NULL,
+                    execution_target TEXT NOT NULL,
+                    target_root TEXT NOT NULL,
+                    change_kind TEXT NOT NULL,
+                    before_sha TEXT,
+                    after_sha TEXT,
+                    before_text TEXT,
+                    after_text TEXT,
+                    created_at TEXT NOT NULL
+                );
+                CREATE INDEX idx_native_file_revisions_session
+                    ON native_file_revisions(session_record_id, created_at);
+
+                CREATE TABLE native_file_rollbacks (
+                    id TEXT PRIMARY KEY,
+                    session_record_id TEXT NOT NULL,
+                    request_id TEXT NOT NULL UNIQUE,
+                    message_id TEXT NOT NULL,
+                    edge TEXT NOT NULL,
+                    mode TEXT NOT NULL,
+                    target_root TEXT NOT NULL,
+                    execution_target TEXT NOT NULL,
+                    preview_token TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    backup_json TEXT NOT NULL,
+                    error TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+            "#,
+            kind: tauri_plugin_sql::MigrationKind::Up,
+        },
     ]
 }
 
@@ -626,7 +667,7 @@ mod tests {
         for (index, migration) in get_all_migrations().iter().enumerate() {
             assert_eq!(migration.version, index as i64 + 1);
         }
-        assert_eq!(latest_migration_version(), 16);
+        assert_eq!(latest_migration_version(), 17);
         assert_eq!(
             get_all_migrations()
                 .last()

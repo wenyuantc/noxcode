@@ -4,6 +4,9 @@ import { getLocalePreference } from "@/lib/i18n/locale";
 
 import type {
   NativeBoundaryInput,
+  FileRollbackInput,
+  FileRollbackPreview,
+  FileRollbackPreviewInput,
   NativeSteerReceipt,
   NativeSteerSnapshot,
   ActivityLog,
@@ -815,6 +818,16 @@ export function applyNativeHistoryBoundary(
   input: NativeBoundaryInput,
 ): Promise<string> {
   return invoke("apply_native_history_boundary", { action, input });
+}
+
+export function previewNativeFileRollback(
+  input: FileRollbackPreviewInput,
+): Promise<FileRollbackPreview> {
+  return invoke("preview_native_file_rollback", { input });
+}
+
+export function applyNativeFileRollback(input: FileRollbackInput): Promise<string> {
+  return invoke("apply_native_file_rollback", { input });
 }
 
 export function listNativeMemories(workspaceId: string): Promise<NativeMemoryView> {

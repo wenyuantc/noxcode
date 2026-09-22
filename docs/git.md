@@ -130,4 +130,4 @@ ref：`refs/noxcode/checkpoints/<session_id>/<seq>`。author / committer 固定 
 
 ## Native 自动打点（P4.4）
 
-`native/session.rs` 在会话开始时尝试 `create_checkpoint(kind=session_start)`。`auto_checkpoint_after_tool_call=true`（默认）时，`Write` / `Edit` / `ApplyPatch` 成功后由 `ToolCtx.on_mutation` 异步打 `after_tool_call`，同一会话同时只允许一个在途打点；关闭该设置只禁用工具后的自动打点，失败只警告。`delete_agent_session` 先 `delete_checkpoints_for_session`，`delete_workspace` 先 `clear_workspace_checkpoints`，避免 CASCADE 删行后 `refs/noxcode/*` 泄漏。
+`native/session.rs` 在会话开始时尝试 `create_checkpoint(kind=session_start)`。`auto_checkpoint_after_tool_call=true`（默认）时，`Write` / `Edit` / `ApplyPatch` 成功后由 `ToolCtx.on_mutation` 异步打 `after_tool_call`，同一会话同时只允许一个在途打点；关闭该设置只禁用工具后的自动打点，失败只警告。这个整库检查点不是某一条消息的改动归属。消息级文件回滚另记路径的 before/after，应用时直接写文件，不调用 `git checkout`，因此 HEAD 和用户 index 保持不变。`delete_agent_session` 先 `delete_checkpoints_for_session`，`delete_workspace` 先 `clear_workspace_checkpoints`，避免 CASCADE 删行后 `refs/noxcode/*` 泄漏。

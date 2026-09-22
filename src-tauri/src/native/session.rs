@@ -1680,6 +1680,7 @@ fn attach_mutation_checkpoint(
     let enabled = crate::native::settings::load_native_settings(app)
         .map(|settings| settings.auto_checkpoint_after_tool_call)
         .unwrap_or(true);
+    runner.ctx.record_file_revisions = enabled;
     if !enabled {
         runner.ctx.on_mutation = None;
         return;
@@ -2054,6 +2055,12 @@ async fn start_native_session_locked(
         .filter(|item| !item.is_empty())
         .map(ToOwned::to_owned);
     if let Some(resume_id) = resume_id.as_deref() {
+        let pool = sqlite_pool(&app).await?;
+        if crate::native::file_rollback::has_unsettled(&pool, resume_id).await? {
+            let files = live_files_for_session(&app, &manager_state, &pool, resume_id).await?;
+            crate::native::file_rollback::block_until_rollback_settled(&pool, resume_id, &files)
+                .await?;
+        }
         let runtime = {
             let manager = manager_state.lock().await;
             if let Some(session) = manager.get_session(resume_id) {
@@ -4258,6 +4265,178 @@ pub async fn fork_native_session(
     )
     .await;
     Ok(new_id)
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct NativeFileRollbackPreviewInput {
+    pub session_record_id: String,
+    pub message_id: String,
+    pub edge: Option<String>,
+    pub mode: String,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct NativeFileRollbackInput {
+    pub session_record_id: String,
+    pub message_id: String,
+    pub edge: Option<String>,
+    pub mode: String,
+    pub expected_revision: i64,
+    pub token: String,
+    pub request_id: String,
+}
+
+async fn live_files_for_session(
+    app: &AppHandle,
+    manager_state: &Mutex<NativeAgentManager>,
+    pool: &sqlx::SqlitePool,
+    session_record_id: &str,
+) -> Result<crate::native::file_rollback::LiveFiles, String> {
+    let record = sqlx::query_as::<_, AgentSessionRecord>(
+        "SELECT * FROM agent_sessions WHERE id = $1 LIMIT 1",
+    )
+    .bind(session_record_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(|error| format!("读取会话失败: {error}"))?
+    .ok_or_else(|| format!("会话不存在: {session_record_id}"))?;
+    let stored = record
+        .working_dir
+        .as_deref()
+        .map(str::trim)
+        .filter(|item| !item.is_empty())
+        .map(ToOwned::to_owned);
+    let live_root = manager_state
+        .lock()
+        .await
+        .effective_plan_cwd(session_record_id);
+    let root = live_root
+        .or(stored)
+        .ok_or_else(|| "会话没有绑定工作目录，不能回滚文件".to_string())?;
+    if record.execution_target == crate::app::shared::EXECUTION_TARGET_SSH {
+        let config_id = record
+            .ssh_config_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|item| !item.is_empty())
+            .ok_or_else(|| "SSH 会话缺少配置".to_string())?;
+        let config = fetch_ssh_config_record_by_id(pool, config_id).await?;
+        return Ok(crate::native::file_rollback::LiveFiles::ssh(
+            SshToolRuntime {
+                app: app.clone(),
+                config,
+                root,
+                authorized_paths: Vec::new(),
+            },
+        ));
+    }
+    if record.execution_target != crate::app::shared::EXECUTION_TARGET_LOCAL {
+        return Err(format!("未知的执行目标 {}", record.execution_target));
+    }
+    Ok(crate::native::file_rollback::LiveFiles::disk(
+        crate::app::shared::EXECUTION_TARGET_LOCAL,
+        root,
+    ))
+}
+
+fn files_rollback_enabled(app: &AppHandle) -> bool {
+    crate::native::settings::load_native_settings(app)
+        .map(|settings| settings.auto_checkpoint_after_tool_call)
+        .unwrap_or(true)
+}
+
+/// 按消息边界预览可回滚的文件。不写文件，也不改对话分支。
+#[tauri::command]
+pub async fn preview_native_file_rollback(
+    app: AppHandle,
+    state: State<'_, Arc<Mutex<NativeAgentManager>>>,
+    input: NativeFileRollbackPreviewInput,
+) -> Result<crate::native::file_rollback::FileRollbackPreview, String> {
+    let session_record_id = input.session_record_id.trim().to_string();
+    let message_id = input.message_id.trim().to_string();
+    if session_record_id.is_empty() || message_id.is_empty() {
+        return Err("会话和消息不能为空".to_string());
+    }
+    let _operation = lock_agent_session_operation(&state, &session_record_id).await;
+    ensure_idle_for_boundary(&state, &session_record_id).await?;
+    let pool = sqlite_pool(&app).await?;
+    require_unarchived_session_with(&pool, &session_record_id).await?;
+    let files = live_files_for_session(&app, &state, &pool, &session_record_id).await?;
+    let edge = crate::native::history::BoundaryEdge::parse(input.edge.as_deref())?;
+    crate::native::file_rollback::preview(
+        &pool,
+        &session_record_id,
+        &message_id,
+        edge,
+        &input.mode,
+        files_rollback_enabled(&app),
+        &files,
+    )
+    .await
+}
+
+/// 用预览凭据应用文件回滚。对话切换只在文件成功之后发生。
+#[tauri::command]
+pub async fn apply_native_file_rollback(
+    app: AppHandle,
+    state: State<'_, Arc<Mutex<NativeAgentManager>>>,
+    input: NativeFileRollbackInput,
+) -> Result<String, String> {
+    let session_record_id = input.session_record_id.trim().to_string();
+    let message_id = input.message_id.trim().to_string();
+    let request_id = input.request_id.trim().to_string();
+    if session_record_id.is_empty() || message_id.is_empty() || request_id.is_empty() {
+        return Err("会话、消息和请求标识不能为空".to_string());
+    }
+    let _operation = lock_agent_session_operation(&state, &session_record_id).await;
+    ensure_idle_for_boundary(&state, &session_record_id).await?;
+    let pool = sqlite_pool(&app).await?;
+    require_unarchived_session_with(&pool, &session_record_id).await?;
+    let files = live_files_for_session(&app, &state, &pool, &session_record_id).await?;
+    let edge = crate::native::history::BoundaryEdge::parse(input.edge.as_deref())?;
+    let source = sqlx::query_as::<_, AgentSessionRecord>(
+        "SELECT * FROM agent_sessions WHERE id = $1 LIMIT 1",
+    )
+    .bind(&session_record_id)
+    .fetch_optional(&pool)
+    .await
+    .map_err(|error| format!("读取会话失败: {error}"))?
+    .ok_or_else(|| format!("会话不存在: {session_record_id}"))?;
+    let model = sqlx::query_scalar::<_, String>(
+        "SELECT model FROM native_session_transcripts WHERE session_record_id = $1",
+    )
+    .bind(&session_record_id)
+    .fetch_optional(&pool)
+    .await
+    .map_err(|error| format!("读取会话模型失败: {error}"))?
+    .unwrap_or_default();
+    let receipt = crate::native::file_rollback::commit_rollback(
+        &pool,
+        crate::native::file_rollback::RollbackCommit {
+            session_record_id: &session_record_id,
+            message_id: &message_id,
+            edge,
+            mode: &input.mode,
+            expected_revision: input.expected_revision,
+            token: &input.token,
+            request_id: &request_id,
+            files_enabled: files_rollback_enabled(&app),
+            workspace_id: source.workspace_id.as_deref(),
+            model: &model,
+        },
+        &files,
+    )
+    .await?;
+    if receipt.changed_conversation {
+        if let Some(branch_id) = receipt.branch_id.as_deref() {
+            record_branch_display(&pool, &session_record_id, branch_id).await?;
+        }
+        state
+            .lock()
+            .await
+            .invalidate_plan_authorization(&session_record_id);
+    }
+    Ok(session_record_id)
 }
 
 #[derive(Debug, Clone, serde::Deserialize)]

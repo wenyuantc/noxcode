@@ -179,6 +179,10 @@ pub struct ToolCtx {
     /// 钩子载荷里的会话 id。
     pub session_record_id: String,
     pub on_mutation: Option<MutationHook>,
+    /// 为受控写入保存消息级文件快照。关闭自动检查点时保持 false，预览会说明文件回滚不可用。
+    pub record_file_revisions: bool,
+    /// 子 Agent 的写入记在父工具调用上，这样回滚能沿消息边界找到它们。
+    pub file_attribution_call_id: Option<String>,
     /// 计划模式变化通知；子 Agent 不应向父会话广播该事件。
     pub on_plan_mode_change: Option<PlanModeChangeHook>,
     /// 父 Agent 的后台任务注册表（TaskOutput / TaskStop / SendMessage）。
@@ -271,6 +275,8 @@ impl ToolCtx {
             hook_agent: None,
             session_record_id: String::new(),
             on_mutation: None,
+            record_file_revisions: false,
+            file_attribution_call_id: None,
             on_plan_mode_change: None,
             background: None,
             coordinator: None,
@@ -556,14 +562,162 @@ pub async fn execute_tool(ctx: &ToolCtx, name: &str, arguments: &str) -> Result<
 
 pub async fn execute_tool_call(ctx: &ToolCtx, call: &ToolCall) -> Result<ToolOutput, String> {
     let prepared = preflight_tool(ctx, call).await?;
-    let result = run_with_contract_timeout(
-        prepared.execution_ctx.as_ref().unwrap_or(ctx),
-        &prepared.contract,
-        &prepared.name,
-        &prepared.arguments,
+    let exec_owned = prepared.execution_ctx.clone();
+    let exec = exec_owned.as_ref().unwrap_or(ctx);
+    let name = prepared.name.clone();
+    let arguments = prepared.arguments.clone();
+    if is_controlled_mutation(&name)
+        && crate::native::file_rollback::target_locked(&mutation_root_key(exec))
+    {
+        return Err("执行目标正在回滚文件，请稍后再写入".to_string());
+    }
+    let before = if exec.record_file_revisions && is_controlled_mutation(&name) {
+        Some(snapshot_mutation_files(exec, &name, &arguments).await)
+    } else {
+        None
+    };
+    let result = run_with_contract_timeout(exec, &prepared.contract, &name, &arguments).await;
+    let output = finalize_tool(ctx, prepared, result).await?;
+    if output.ok {
+        if let Some(before) = before {
+            record_controlled_mutation(exec, call, &name, before).await?;
+        }
+    }
+    Ok(output)
+}
+
+fn is_controlled_mutation(name: &str) -> bool {
+    matches!(name, "Write" | "Edit" | "ApplyPatch")
+}
+
+fn mutation_root_key(ctx: &ToolCtx) -> String {
+    if let Some(ssh) = ctx.ssh_for_exec() {
+        ssh.root
+    } else {
+        ctx.active_workspace_root().to_string_lossy().into_owned()
+    }
+}
+
+fn mutation_target_label(ctx: &ToolCtx) -> &'static str {
+    if ctx.ssh.is_some() {
+        "ssh"
+    } else {
+        "local"
+    }
+}
+
+fn relative_mutation_path(ctx: &ToolCtx, path: &str) -> Result<String, String> {
+    if let Some(ssh) = ctx.ssh_for_exec() {
+        let resolved = ssh.resolve(path)?;
+        let root = ssh.root.trim_end_matches('/');
+        if resolved.trim_end_matches('/') == root {
+            return Err("工作区外路径".to_string());
+        }
+        return resolved
+            .strip_prefix(&format!("{root}/"))
+            .map(ToOwned::to_owned)
+            .ok_or_else(|| "工作区外路径".to_string());
+    }
+    let absolute = ctx.workspace_for_exec().resolve_for_write(path)?;
+    let root = super::paths::resolve_under_workspace(&ctx.active_workspace_root(), ".")?;
+    absolute
+        .strip_prefix(&root)
+        .map(|path| path.to_string_lossy().replace('\\', "/"))
+        .map_err(|_| "工作区外路径".to_string())
+}
+
+async fn read_mutation_text(ctx: &ToolCtx, path: &str) -> Result<Option<String>, String> {
+    if let Some(ssh) = ctx.ssh_for_exec() {
+        if !ssh.exists(path).await? {
+            return Ok(None);
+        }
+        return ssh.read(path).await.map(Some);
+    }
+    let resolved = ctx.workspace_for_exec().resolve_for_write(path)?;
+    if !resolved.exists() {
+        return Ok(None);
+    }
+    if !resolved.is_file() {
+        return Err("不是文件".to_string());
+    }
+    match std::fs::read_to_string(&resolved) {
+        Ok(text) => Ok(Some(text)),
+        Err(error) if error.kind() == std::io::ErrorKind::InvalidData => {
+            Err("不是文本，不能做文件回滚".to_string())
+        }
+        Err(error) => Err(format!("读取失败: {error}")),
+    }
+}
+
+async fn snapshot_mutation_files(
+    ctx: &ToolCtx,
+    name: &str,
+    arguments: &str,
+) -> Vec<crate::native::file_rollback::CapturedFile> {
+    let mut files = Vec::new();
+    for path in super::lsp::mutation_paths(name, arguments) {
+        match relative_mutation_path(ctx, &path) {
+            Ok(relative) => match read_mutation_text(ctx, &path).await {
+                Ok(text) => files.push(crate::native::file_rollback::CapturedFile {
+                    path: relative,
+                    before: text,
+                    after: None,
+                    unsupported: None,
+                }),
+                Err(reason) => files.push(crate::native::file_rollback::CapturedFile {
+                    path: relative,
+                    before: None,
+                    after: None,
+                    unsupported: Some(reason),
+                }),
+            },
+            Err(reason) => files.push(crate::native::file_rollback::CapturedFile {
+                path,
+                before: None,
+                after: None,
+                unsupported: Some(reason),
+            }),
+        }
+    }
+    files
+}
+
+async fn record_controlled_mutation(
+    ctx: &ToolCtx,
+    call: &ToolCall,
+    name: &str,
+    mut files: Vec<crate::native::file_rollback::CapturedFile>,
+) -> Result<(), String> {
+    let Some(scope) = ctx.session_scope.as_ref() else {
+        return Ok(());
+    };
+    if ctx.session_record_id.trim().is_empty() {
+        return Ok(());
+    }
+    for file in &mut files {
+        if file.unsupported.is_some() {
+            continue;
+        }
+        file.after = read_mutation_text(ctx, &file.path).await.ok().flatten();
+    }
+    let call_id = ctx
+        .file_attribution_call_id
+        .clone()
+        .filter(|id| !id.is_empty())
+        .unwrap_or_else(|| call.id.clone());
+    if call_id.is_empty() {
+        return Ok(());
+    }
+    crate::native::file_rollback::record_files(
+        &scope.pool,
+        &ctx.session_record_id,
+        &call_id,
+        name,
+        mutation_target_label(ctx),
+        &mutation_root_key(ctx),
+        &files,
     )
-    .await;
-    finalize_tool(ctx, prepared, result).await
+    .await
 }
 
 pub(crate) struct PreparedTool {
@@ -2633,6 +2787,83 @@ mod tests {
         assert!(err.contains("钩子阻断"));
         assert!(!root.join("c.txt").exists());
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn controlled_writes_record_the_parent_call_and_refuse_a_locked_target() {
+        let pool = crate::db::test_support::setup_migrated_pool().await;
+        let root = tempfile::tempdir().unwrap();
+        let mut ctx = ctx_for(root.path());
+        ctx.allow_all_high_risk
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        ctx.record_file_revisions = true;
+        ctx.session_record_id = "sess-rollback".into();
+        ctx.session_scope = Some(SessionScope {
+            pool: pool.clone(),
+            workspace_id: None,
+            channel_id: "c".into(),
+            model: "m".into(),
+            on_goal: None,
+        });
+        let wrote = execute_tool_call(
+            &ctx,
+            &ToolCall {
+                id: "write-1".into(),
+                name: "Write".into(),
+                arguments: r#"{"file_path":"a.txt","content":"hello"}"#.into(),
+            },
+        )
+        .await
+        .expect("write");
+        assert!(wrote.ok);
+        let mut child = ctx.fork_for_child();
+        child.file_attribution_call_id = Some("agent-1".into());
+        execute_tool_call(
+            &child,
+            &ToolCall {
+                id: "child-write".into(),
+                name: "Write".into(),
+                arguments: r#"{"file_path":"b.txt","content":"from-child"}"#.into(),
+            },
+        )
+        .await
+        .expect("child write");
+        let rows: Vec<(String, String, String)> = sqlx::query_as(
+            "SELECT call_id, path, change_kind FROM native_file_revisions ORDER BY path ASC",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            rows,
+            vec![
+                (
+                    "write-1".to_string(),
+                    "a.txt".to_string(),
+                    "added".to_string()
+                ),
+                (
+                    "agent-1".to_string(),
+                    "b.txt".to_string(),
+                    "added".to_string()
+                ),
+            ]
+        );
+        let locked = ctx.active_workspace_root().to_string_lossy().into_owned();
+        assert!(crate::native::file_rollback::acquire_target(&locked));
+        let refused = execute_tool_call(
+            &ctx,
+            &ToolCall {
+                id: "write-2".into(),
+                name: "Write".into(),
+                arguments: r#"{"file_path":"c.txt","content":"no"}"#.into(),
+            },
+        )
+        .await
+        .expect_err("locked");
+        assert!(refused.contains("正在回滚"));
+        assert!(!root.path().join("c.txt").exists());
+        crate::native::file_rollback::release_target(&locked);
     }
 
     #[tokio::test]

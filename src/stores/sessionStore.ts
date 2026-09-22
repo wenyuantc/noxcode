@@ -93,6 +93,7 @@ interface SessionState {
   selectSession: (id: string | null) => void;
   ensureHistory: (sessionId: string) => Promise<void>;
   loadHistory: (sessionId: string) => Promise<void>;
+  refreshHistory: (sessionId: string) => Promise<void>;
   loadEarlierHistory: (sessionId: string) => Promise<boolean>;
   onStarted: (session: AgentSessionStarted) => boolean;
   onStdout: (output: AgentSessionOutput) => void;
@@ -287,6 +288,36 @@ export const useSessionStore = create<SessionState>((set, get) => ({
       }));
       return false;
     }
+  },
+  refreshHistory: async (sessionId) => {
+    const limit = 2000;
+    const events = await getAgentSessionLogLines(sessionId, undefined, limit);
+    const hasMore = events.length >= limit;
+    set((state) => {
+      const liveLines = new Map((state.lines[sessionId] ?? []).map((line) => [line.id, line]));
+      const history = events.map(
+        (event) =>
+          liveLines.get(event.id) ??
+          hydrateSessionLine({
+            id: event.id,
+            sessionId,
+            text: event.message ?? "",
+            createdAt: event.created_at,
+          }),
+      );
+      const ids = new Set(history.map((line) => line.id));
+      return {
+        lines: {
+          ...state.lines,
+          [sessionId]: [
+            ...history,
+            ...(state.lines[sessionId] ?? []).filter((line) => !ids.has(line.id)),
+          ],
+        },
+        historyLoaded: { ...state.historyLoaded, [sessionId]: true },
+        hasMoreEarlier: { ...state.hasMoreEarlier, [sessionId]: hasMore },
+      };
+    });
   },
   loadHistory: async (sessionId) => {
     get().selectSession(sessionId);

@@ -2456,6 +2456,9 @@ impl AgentRunner {
                 _ => None,
             };
             let mut child = self.spawn_child_with_quota(&job.spec, job.index, batch_quota.clone());
+            if !job.call.id.is_empty() {
+                child.ctx.file_attribution_call_id = Some(job.call.id.clone());
+            }
             self.diagnostics
                 .subagents_started
                 .fetch_add(1, Ordering::AcqRel);

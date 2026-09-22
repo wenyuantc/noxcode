@@ -398,6 +398,41 @@ export interface NativeBoundaryInput {
   request_id: string;
 }
 
+export type FileRollbackMode = "conversation" | "files" | "both";
+
+export interface FileRollbackPreview {
+  token: string;
+  available: boolean;
+  unavailable_reason: string | null;
+  session_record_id: string;
+  message_id: string;
+  edge: string;
+  mode: FileRollbackMode | string;
+  branch_id: string;
+  revision: number;
+  execution_target: string;
+  target_root: string;
+  added: string[];
+  modified: string[];
+  deleted: string[];
+  conflicts: string[];
+  unsupported: string[];
+  side_effects: string[];
+}
+
+export interface FileRollbackPreviewInput {
+  session_record_id: string;
+  message_id: string;
+  edge?: "before" | "after";
+  mode: FileRollbackMode;
+}
+
+export interface FileRollbackInput extends FileRollbackPreviewInput {
+  expected_revision: number;
+  token: string;
+  request_id: string;
+}
+
 export interface NativeCapabilityGap {
   kind: string;
   status: string;

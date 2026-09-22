@@ -1181,6 +1181,42 @@ fn preview_text(content: &str) -> String {
     }
 }
 
+fn rewind_already_applied(
+    ordered: &[&RawMessage],
+    retained: &[String],
+    stored_boundary: Option<&str>,
+    requested: &str,
+    edge: BoundaryEdge,
+) -> Result<bool, String> {
+    let Some(position) = ordered.iter().position(|row| row.id == requested) else {
+        return Ok(stored_boundary == Some(requested));
+    };
+    let messages = ordered
+        .iter()
+        .map(|row| row.to_message())
+        .collect::<Result<Vec<_>, _>>()?;
+    let flags = pair_flags(&messages);
+    let end = match edge {
+        BoundaryEdge::After => {
+            if !flags[position].1 {
+                return Ok(false);
+            }
+            position + 1
+        }
+        BoundaryEdge::Before => {
+            if !flags[position].0 {
+                return Ok(false);
+            }
+            position
+        }
+    };
+    let cut = ordered[..end]
+        .iter()
+        .map(|row| row.id.as_str())
+        .collect::<Vec<_>>();
+    Ok(cut.len() == retained.len() && cut.iter().zip(retained).all(|(id, kept)| *id == kept))
+}
+
 fn cut_retained(
     ordered: &[&RawMessage],
     boundary_message_id: &str,
@@ -1189,7 +1225,7 @@ fn cut_retained(
     let position = ordered
         .iter()
         .position(|row| row.id == boundary_message_id)
-        .ok_or_else(|| save_error("边界消息不存在"))?;
+        .ok_or_else(|| save_error("该消息不在当前分支"))?;
     let messages = ordered
         .iter()
         .map(|row| row.to_message())
@@ -1308,6 +1344,70 @@ pub async fn create_referencing_branch(
             .map_err(|error| save_error(error.to_string()))?;
         return Ok(receipt);
     }
+    let source = sqlx::query(
+        r#"
+        SELECT session_record_id, format_version, revision, active, boundary_message_id
+        FROM native_history_branches
+        WHERE id = $1 AND deleted_at IS NULL
+        "#,
+    )
+    .bind(source_branch_id)
+    .fetch_optional(&mut *tx)
+    .await
+    .map_err(|error| save_error(error.to_string()))?
+    .ok_or_else(|| save_error("来源分支不存在"))?;
+    let format_version: i64 = source.get("format_version");
+    if format_version != FORMAT_VERSION {
+        return Err(save_error(format!("不支持的历史格式版本 {format_version}")));
+    }
+    let source_session_id: String = source.get("session_record_id");
+    let source_revision: i64 = source.get("revision");
+    if seal_source && source_session_id != new_session_id {
+        return Err(save_error("回退必须保留当前会话"));
+    }
+    if seal_source && source.get::<i64, _>("active") != 1 {
+        return Err(save_error("来源分支已不是活动分支"));
+    }
+    if !seal_source && load_active_branch(&mut tx, new_session_id).await?.is_some() {
+        return Err(save_error("目标会话已有活动分支"));
+    }
+    let anchor = load_anchor(&mut tx, source_branch_id).await?;
+    let rows = load_messages(&mut tx, source_branch_id, &anchor.retained_message_ids).await?;
+    let ordered = order_retained(&rows, &anchor.retained_message_ids)?;
+    let requested = nonempty(boundary_message_id);
+    if seal_source {
+        if let Some(requested) = requested {
+            let stored_boundary = source.get::<Option<String>, _>("boundary_message_id");
+            if rewind_already_applied(
+                &ordered,
+                &anchor.retained_message_ids,
+                stored_boundary.as_deref(),
+                requested,
+                edge,
+            )? {
+                let message_ids = anchor
+                    .items
+                    .iter()
+                    .map(|item| item.message_id.clone())
+                    .collect();
+                tx.commit()
+                    .await
+                    .map_err(|error| save_error(error.to_string()))?;
+                return Ok(HistoryCommitReceipt {
+                    session_record_id: new_session_id.to_string(),
+                    branch_id: source_branch_id.to_string(),
+                    revision: source_revision,
+                    message_ids,
+                    changed: false,
+                });
+            }
+        }
+    }
+    if let Some(expected) = expected_revision {
+        if expected != source_revision {
+            return Err(save_error("分支修订号不匹配"));
+        }
+    }
     if seal_source {
         let sealed = sqlx::query(
             r#"
@@ -1325,38 +1425,8 @@ pub async fn create_referencing_branch(
         if sealed.rows_affected() != 1 {
             return Err(save_error("来源分支已不是活动分支"));
         }
-    } else if load_active_branch(&mut tx, new_session_id).await?.is_some() {
-        return Err(save_error("目标会话已有活动分支"));
     }
-    let source = sqlx::query(
-        r#"
-        SELECT session_record_id, format_version, revision FROM native_history_branches
-        WHERE id = $1 AND deleted_at IS NULL
-        "#,
-    )
-    .bind(source_branch_id)
-    .fetch_optional(&mut *tx)
-    .await
-    .map_err(|error| save_error(error.to_string()))?
-    .ok_or_else(|| save_error("来源分支不存在"))?;
-    let format_version: i64 = source.get("format_version");
-    if format_version != FORMAT_VERSION {
-        return Err(save_error(format!("不支持的历史格式版本 {format_version}")));
-    }
-    let source_session_id: String = source.get("session_record_id");
-    let source_revision: i64 = source.get("revision");
-    if let Some(expected) = expected_revision {
-        if expected != source_revision {
-            return Err(save_error("分支修订号不匹配"));
-        }
-    }
-    if seal_source && source_session_id != new_session_id {
-        return Err(save_error("回退必须保留当前会话"));
-    }
-    let anchor = load_anchor(&mut tx, source_branch_id).await?;
-    let rows = load_messages(&mut tx, source_branch_id, &anchor.retained_message_ids).await?;
-    let ordered = order_retained(&rows, &anchor.retained_message_ids)?;
-    let retained_ids = match nonempty(boundary_message_id) {
+    let retained_ids = match requested {
         Some(boundary_message_id) => cut_retained(&ordered, boundary_message_id, edge)?,
         None => ordered.iter().map(|row| row.id.clone()).collect(),
     };
@@ -2253,6 +2323,116 @@ mod tests {
             .unwrap();
         assert_eq!(projected.content, "stub");
         assert_eq!(projected.role, Role::Tool);
+    }
+
+    #[tokio::test]
+    async fn repeated_rewind_stays_on_the_current_boundary() {
+        let pool = setup_migrated_pool().await;
+        sqlx::query("INSERT INTO agent_sessions (id) VALUES ('sess')")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let mut messages = vec![Message::user("one"), Message::user("two")];
+        let committed = commit_model_context(&pool, write("sess", &mut messages, None, None, &[]))
+            .await
+            .unwrap();
+        let first = create_referencing_branch(
+            &pool,
+            reference(
+                "sess",
+                &committed.branch_id,
+                Some(&messages[0].history_id),
+                BoundaryEdge::After,
+                Some(committed.revision),
+                Some("rw-1"),
+                true,
+            ),
+        )
+        .await
+        .unwrap();
+        assert!(first.changed);
+        let second = create_referencing_branch(
+            &pool,
+            reference(
+                "sess",
+                &first.branch_id,
+                Some(&messages[0].history_id),
+                BoundaryEdge::After,
+                Some(first.revision),
+                Some("rw-2"),
+                true,
+            ),
+        )
+        .await
+        .unwrap();
+        assert!(!second.changed);
+        assert_eq!(second.branch_id, first.branch_id);
+        let branches: i64 = sqlx::query_scalar(
+            "SELECT COUNT(1) FROM native_history_branches WHERE session_record_id = 'sess'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(branches, 2);
+        let before = create_referencing_branch(
+            &pool,
+            reference(
+                "sess",
+                &first.branch_id,
+                Some(&messages[0].history_id),
+                BoundaryEdge::Before,
+                Some(first.revision),
+                Some("rw-before"),
+                true,
+            ),
+        )
+        .await
+        .unwrap();
+        assert!(before.changed);
+        assert!(load_projection(&pool, "sess")
+            .await
+            .unwrap()
+            .unwrap()
+            .is_empty());
+        let again = create_referencing_branch(
+            &pool,
+            reference(
+                "sess",
+                &before.branch_id,
+                Some(&messages[0].history_id),
+                BoundaryEdge::Before,
+                Some(before.revision),
+                Some("rw-before-2"),
+                true,
+            ),
+        )
+        .await
+        .unwrap();
+        assert!(!again.changed);
+        assert_eq!(again.branch_id, before.branch_id);
+        let keep = create_referencing_branch(
+            &pool,
+            reference(
+                "sess",
+                &before.branch_id,
+                Some(&messages[0].history_id),
+                BoundaryEdge::After,
+                Some(before.revision),
+                Some("rw-after-gone"),
+                true,
+            ),
+        )
+        .await
+        .unwrap();
+        assert!(!keep.changed);
+        assert_eq!(keep.branch_id, before.branch_id);
+        let branches_after: i64 = sqlx::query_scalar(
+            "SELECT COUNT(1) FROM native_history_branches WHERE session_record_id = 'sess'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(branches_after, 3);
     }
 
     #[tokio::test]
