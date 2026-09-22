@@ -1,0 +1,4 @@
+{
+  "name": "noxcode",
+  "install": "bash .cursor/install.sh"
+}
