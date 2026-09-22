@@ -275,8 +275,8 @@
       "hint": "[补充要求]"
     },
     "fork": {
-      "description": "分叉当前会话",
-      "hint": "[checkpoint]"
+      "description": "从最新边界分叉对话",
+      "hint": ""
     },
     "compact": {
       "description": "压缩上下文",
@@ -392,6 +392,11 @@
     "reset": "重置"
   },
   "forkNeedsSession": "/fork 需要先选中一个会话。",
+  "branchForkAfter": "分叉并保留此消息",
+  "branchForkBefore": "分叉到此消息之前",
+  "branchRewindAfter": "回退并保留此消息",
+  "branchRewindBefore": "回退到此消息之前",
+  "branchWorking": "会话正在工作，请等待结束或停止后再修改对话边界",
   "goalCleared": "目标已清除",
   "goalStatus": {
     "active": "进行中",

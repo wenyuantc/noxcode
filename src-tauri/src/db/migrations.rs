@@ -552,6 +552,12 @@ pub fn get_all_migrations() -> Vec<Migration> {
             "#,
             kind: tauri_plugin_sql::MigrationKind::Up,
         },
+        Migration {
+            version: 16,
+            description: "goal completion evidence is bound to a history branch",
+            sql: "ALTER TABLE native_goals ADD COLUMN bound_branch_id TEXT;",
+            kind: tauri_plugin_sql::MigrationKind::Up,
+        },
     ]
 }
 
@@ -620,7 +626,7 @@ mod tests {
         for (index, migration) in get_all_migrations().iter().enumerate() {
             assert_eq!(migration.version, index as i64 + 1);
         }
-        assert_eq!(latest_migration_version(), 15);
+        assert_eq!(latest_migration_version(), 16);
         assert_eq!(
             get_all_migrations()
                 .last()

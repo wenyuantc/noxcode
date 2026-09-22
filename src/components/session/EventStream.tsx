@@ -9,6 +9,7 @@ import {
   buildTurnBlocks,
   changedFilesFromItems,
   groupSessionLines,
+  linesAfterActiveBranch,
   hasToolResult,
   lineToneClass,
   parseTodoList,
@@ -27,6 +28,8 @@ import {
 } from "@/lib/sessionScroll";
 import { attachLiveFragments, EMPTY_STREAM, turnSegmentReactKey } from "@/lib/sessionStream";
 import { cn } from "@/lib/utils";
+import { listNativeHistoryBoundaries } from "@/lib/backend";
+import type { NativeHistoryBoundary, NativeHistoryBoundaries } from "@/lib/types";
 import { useSessionStore } from "@/stores/sessionStore";
 import { AssistantMarkdown } from "./AssistantMarkdown";
 import { BackgroundNoticeRow } from "./BackgroundNoticeRow";
@@ -177,7 +180,8 @@ export const EventStream = memo(function EventStream({
   active?: boolean;
 }) {
   const { t } = useTranslation("sessions");
-  const lines = useSessionStore((state) => state.lines[sessionId]) ?? EMPTY_LINES;
+  const storedLines = useSessionStore((state) => state.lines[sessionId]) ?? EMPTY_LINES;
+  const lines = useMemo(() => linesAfterActiveBranch(storedLines), [storedLines]);
   const stream = useSessionStore((state) => state.stream[sessionId]) ?? EMPTY_STREAM;
   const turnState = useSessionStore((state) => state.turnState[sessionId]);
   const planQuestion = useSessionStore(
@@ -195,6 +199,33 @@ export const EventStream = memo(function EventStream({
     }
     return undefined;
   }, [blocks]);
+  const [historyView, setHistoryView] = useState<NativeHistoryBoundaries | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    void listNativeHistoryBoundaries(sessionId)
+      .then((view) => {
+        if (!cancelled) setHistoryView(view);
+      })
+      .catch(() => {
+        if (!cancelled) setHistoryView(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [sessionId, storedLines.length]);
+  const boundaryByBlock = useMemo(() => {
+    const users = (historyView?.boundaries ?? []).filter((item) => item.role === "user");
+    const map = new Map<string, NativeHistoryBoundary>();
+    let cursor = 0;
+    for (const block of blocks) {
+      if (!block.user) continue;
+      const boundary = users[cursor];
+      cursor += 1;
+      if (boundary) map.set(block.id, boundary);
+    }
+    return map;
+  }, [blocks, historyView]);
+  const loadHistory = useSessionStore((state) => state.loadHistory);
   const working = turnState === "working";
   const virtualize = blocks.length > VIRTUALIZE_AFTER;
   const layoutSignature = `${blocks
@@ -390,6 +421,10 @@ export const EventStream = memo(function EventStream({
         nowMs={isLast && working ? nowMs : undefined}
         editableUser={view.id === lastUserBlockId}
         showAsk={isLast && hasAsk}
+        boundary={boundaryByBlock.get(block.id)}
+        revision={historyView?.revision ?? 0}
+        boundaryLocked={working}
+        onBranched={(nextId) => void loadHistory(nextId)}
       />
     );
   };
@@ -491,6 +526,10 @@ const TurnBlockView = memo(function TurnBlockView({
   nowMs,
   editableUser,
   showAsk,
+  boundary,
+  revision,
+  boundaryLocked,
+  onBranched,
 }: {
   block: SessionTurnBlock;
   sessionId: string;
@@ -498,6 +537,10 @@ const TurnBlockView = memo(function TurnBlockView({
   nowMs?: number;
   editableUser: boolean;
   showAsk?: boolean;
+  boundary?: NativeHistoryBoundary;
+  revision: number;
+  boundaryLocked: boolean;
+  onBranched: (sessionId: string) => void;
 }) {
   const { t } = useTranslation("sessions");
   const showWork =
@@ -522,7 +565,18 @@ const TurnBlockView = memo(function TurnBlockView({
           createdAt={block.user.createdAt}
           sessionId={sessionId}
           editable={editableUser}
-          working={working}
+          working={working || boundaryLocked}
+          boundary={
+            boundary
+              ? {
+                  messageId: boundary.message_id,
+                  revision,
+                  selectableBefore: boundary.selectable_before,
+                  selectableAfter: boundary.selectable_after,
+                }
+              : undefined
+          }
+          onBranched={onBranched}
         />
       ) : null}
       {showWork ? (

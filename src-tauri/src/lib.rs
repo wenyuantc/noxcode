@@ -154,6 +154,7 @@ pub fn run() {
             native::session::compact_native_session,
             native::session::dream_native_memory,
             native::session::fork_native_session,
+            native::session::apply_native_history_boundary,
             native::history::list_native_history_boundaries,
             native::scheduler::list_native_automations,
             native::scheduler::create_native_automation,

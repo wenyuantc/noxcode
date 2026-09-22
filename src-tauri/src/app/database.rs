@@ -860,7 +860,7 @@ mod tests {
             );
             assert_eq!(
                 status.current_description.as_deref(),
-                Some("tool run ledger and persisted model attempt budget")
+                Some("goal completion evidence is bound to a history branch")
             );
         });
     }

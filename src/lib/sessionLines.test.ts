@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  linesAfterActiveBranch,
   buildTurnBlocks,
   buildTurnSegments,
   changedFilesFromItems,
@@ -58,6 +59,16 @@ function line(id: string, text: string, createdAt = id) {
 }
 
 describe("sessionLines", () => {
+  it("shows the conversation from the latest branch marker", () => {
+    const lines = [
+      line("1", "[USER_INPUT] old"),
+      line("2", "old answer"),
+      line("3", "[分支] branch-2 已按消息边界重建对话"),
+      line("4", "[USER_INPUT] kept"),
+    ];
+    expect(linesAfterActiveBranch(lines).map((item) => item.id)).toEqual(["3", "4"]);
+  });
+
   it("classifies prefixes", () => {
     expect(classifyLine("[USER_INPUT] hello")).toBe("user");
     expect(classifyLine("[读取] README.md")).toBe("tool");

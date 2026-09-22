@@ -632,6 +632,17 @@ export function summarizeRetry(items: GroupedSessionItem[]): {
   };
 }
 
+export const BRANCH_DISPLAY_PREFIX = "[分支]";
+
+/** 回退或分叉后，展示从最后一条分支标记开始，更早的事件仍留在库里。 */
+export function linesAfterActiveBranch(lines: RawSessionLine[]): RawSessionLine[] {
+  let marker = -1;
+  for (let index = 0; index < lines.length; index += 1) {
+    if (lines[index]?.text.startsWith(BRANCH_DISPLAY_PREFIX)) marker = index;
+  }
+  return marker < 0 ? lines : lines.slice(marker);
+}
+
 export function classifyLine(text: string): SessionLineKind {
   const line = text.trimStart();
   const body = sessionLineBody(line);

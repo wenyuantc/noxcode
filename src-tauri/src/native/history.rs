@@ -56,6 +56,23 @@ pub struct HistoryBoundary {
     pub turn_id: Option<String>,
     pub selectable_before: bool,
     pub selectable_after: bool,
+    pub preview: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BoundaryEdge {
+    Before,
+    After,
+}
+
+impl BoundaryEdge {
+    pub fn parse(value: Option<&str>) -> Result<Self, String> {
+        match value.map(str::trim).filter(|item| !item.is_empty()) {
+            None | Some("after") => Ok(Self::After),
+            Some("before") => Ok(Self::Before),
+            Some(other) => Err(save_error(format!("未知的边界位置: {other}"))),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -1113,6 +1130,7 @@ pub async fn list_boundaries(
             turn_id: row.turn_id.clone(),
             selectable_before: flag.0,
             selectable_after: flag.1,
+            preview: preview_text(&row.content),
         });
     }
     let mut gaps = branch.gaps;
@@ -1153,6 +1171,82 @@ pub async fn list_boundaries(
     })
 }
 
+fn preview_text(content: &str) -> String {
+    let mut chars = content.chars();
+    let text: String = chars.by_ref().take(80).collect();
+    if chars.next().is_some() {
+        format!("{text}…")
+    } else {
+        text
+    }
+}
+
+fn cut_retained(
+    ordered: &[&RawMessage],
+    boundary_message_id: &str,
+    edge: BoundaryEdge,
+) -> Result<Vec<String>, String> {
+    let position = ordered
+        .iter()
+        .position(|row| row.id == boundary_message_id)
+        .ok_or_else(|| save_error("边界消息不存在"))?;
+    let messages = ordered
+        .iter()
+        .map(|row| row.to_message())
+        .collect::<Result<Vec<_>, _>>()?;
+    let flags = pair_flags(&messages);
+    let end = match edge {
+        BoundaryEdge::After => {
+            if !flags[position].1 {
+                return Err(save_error("该位置会拆开工具调用"));
+            }
+            position + 1
+        }
+        BoundaryEdge::Before => {
+            if !flags[position].0 {
+                return Err(save_error("该位置会拆开工具调用"));
+            }
+            position
+        }
+    };
+    Ok(ordered[..end].iter().map(|row| row.id.clone()).collect())
+}
+
+async fn detach_branch_state(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    session_record_id: &str,
+    source_branch_id: &str,
+) -> Result<(), String> {
+    sqlx::query(
+        r#"
+        UPDATE agent_sessions
+        SET pending_plan_json = NULL,
+            approved_plan_json = CASE
+                WHEN approved_plan_json IS NULL THEN NULL
+                ELSE json_set(approved_plan_json, '$.status', 'cancelled')
+            END
+        WHERE id = $1
+        "#,
+    )
+    .bind(session_record_id)
+    .execute(&mut **tx)
+    .await
+    .map_err(|error| save_error(error.to_string()))?;
+    sqlx::query(
+        r#"
+        UPDATE native_goals
+        SET bound_branch_id = COALESCE(NULLIF(bound_branch_id, ''), $1)
+        WHERE session_record_id = $2 AND status = 'completed'
+        "#,
+    )
+    .bind(source_branch_id)
+    .bind(session_record_id)
+    .execute(&mut **tx)
+    .await
+    .map_err(|error| save_error(error.to_string()))?;
+    Ok(())
+}
+
 fn order_retained<'a>(
     rows: &'a [RawMessage],
     retained: &[String],
@@ -1179,6 +1273,11 @@ pub struct BranchReference<'a> {
     pub workspace_id: Option<&'a str>,
     pub model: &'a str,
     pub turns: u32,
+    pub edge: BoundaryEdge,
+    pub expected_revision: Option<i64>,
+    pub request_id: Option<&'a str>,
+    /// 回退：封存当前活动分支并在同一会话建立新分支，不删除后续历史。
+    pub seal_source: bool,
 }
 
 pub async fn create_referencing_branch(
@@ -1193,18 +1292,45 @@ pub async fn create_referencing_branch(
         workspace_id,
         model,
         turns,
+        edge,
+        expected_revision,
+        request_id,
+        seal_source,
     } = reference;
     let new_session_id = new_session_id.trim();
     if new_session_id.is_empty() {
         return Err(save_error("会话标识不能为空"));
     }
     let mut tx = begin_write(pool).await?;
-    if load_active_branch(&mut tx, new_session_id).await?.is_some() {
+    if let Some(receipt) = replay_request(&mut tx, new_session_id, request_id).await? {
+        tx.commit()
+            .await
+            .map_err(|error| save_error(error.to_string()))?;
+        return Ok(receipt);
+    }
+    if seal_source {
+        let sealed = sqlx::query(
+            r#"
+            UPDATE native_history_branches
+            SET active = 0, sealed = 1, updated_at = $1
+            WHERE id = $2 AND session_record_id = $3 AND active = 1 AND deleted_at IS NULL
+            "#,
+        )
+        .bind(now_sqlite())
+        .bind(source_branch_id)
+        .bind(new_session_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(|error| save_error(error.to_string()))?;
+        if sealed.rows_affected() != 1 {
+            return Err(save_error("来源分支已不是活动分支"));
+        }
+    } else if load_active_branch(&mut tx, new_session_id).await?.is_some() {
         return Err(save_error("目标会话已有活动分支"));
     }
     let source = sqlx::query(
         r#"
-        SELECT session_record_id, format_version FROM native_history_branches
+        SELECT session_record_id, format_version, revision FROM native_history_branches
         WHERE id = $1 AND deleted_at IS NULL
         "#,
     )
@@ -1218,29 +1344,21 @@ pub async fn create_referencing_branch(
         return Err(save_error(format!("不支持的历史格式版本 {format_version}")));
     }
     let source_session_id: String = source.get("session_record_id");
+    let source_revision: i64 = source.get("revision");
+    if let Some(expected) = expected_revision {
+        if expected != source_revision {
+            return Err(save_error("分支修订号不匹配"));
+        }
+    }
+    if seal_source && source_session_id != new_session_id {
+        return Err(save_error("回退必须保留当前会话"));
+    }
     let anchor = load_anchor(&mut tx, source_branch_id).await?;
     let rows = load_messages(&mut tx, source_branch_id, &anchor.retained_message_ids).await?;
     let ordered = order_retained(&rows, &anchor.retained_message_ids)?;
-    let retained_ids: Vec<String> = if let Some(boundary_message_id) = nonempty(boundary_message_id)
-    {
-        let position = ordered
-            .iter()
-            .position(|row| row.id == boundary_message_id)
-            .ok_or_else(|| save_error("边界消息不存在"))?;
-        let prefix: Vec<Message> = ordered[..=position]
-            .iter()
-            .map(|row| row.to_message())
-            .collect::<Result<_, _>>()?;
-        let flags = pair_flags(&prefix);
-        if flags.last().is_some_and(|flag| !flag.1) {
-            return Err(save_error("该位置会拆开工具调用"));
-        }
-        ordered[..=position]
-            .iter()
-            .map(|row| row.id.clone())
-            .collect()
-    } else {
-        ordered.iter().map(|row| row.id.clone()).collect()
+    let retained_ids = match nonempty(boundary_message_id) {
+        Some(boundary_message_id) => cut_retained(&ordered, boundary_message_id, edge)?,
+        None => ordered.iter().map(|row| row.id.clone()).collect(),
     };
     let retained_set: HashSet<&str> = retained_ids.iter().map(String::as_str).collect();
     let items = if boundary_message_id.is_some() {
@@ -1274,10 +1392,8 @@ pub async fn create_referencing_branch(
     };
     let projection_json =
         serde_json::to_string(&stored).map_err(|error| save_error(error.to_string()))?;
-    let boundary = stored
-        .items
-        .last()
-        .map(|item| item.message_id.clone())
+    let boundary = nonempty(boundary_message_id)
+        .map(ToOwned::to_owned)
         .or_else(|| stored.retained_message_ids.last().cloned());
     sqlx::query(
         r#"
@@ -1374,11 +1490,32 @@ pub async fn create_referencing_branch(
         legacy_baseline: false,
     };
     upsert_transcript(&mut tx, new_session_id, &write, &projected).await?;
-    let message_ids = stored
+    if seal_source {
+        detach_branch_state(&mut tx, new_session_id, source_branch_id).await?;
+    }
+    let message_ids: Vec<String> = stored
         .items
         .iter()
         .map(|item| item.message_id.clone())
         .collect();
+    if let Some(request_id) = nonempty(request_id) {
+        let ids_json =
+            serde_json::to_string(&message_ids).map_err(|error| save_error(error.to_string()))?;
+        sqlx::query(
+            r#"
+            INSERT INTO native_history_requests (
+                request_id, branch_id, revision, message_ids_json, created_at
+            ) VALUES ($1, $2, 1, $3, $4)
+            "#,
+        )
+        .bind(request_id)
+        .bind(&branch_id)
+        .bind(ids_json)
+        .bind(&now)
+        .execute(&mut *tx)
+        .await
+        .map_err(|error| save_error(error.to_string()))?;
+    }
     tx.commit()
         .await
         .map_err(|error| save_error(error.to_string()))?;
@@ -1688,6 +1825,10 @@ mod tests {
                 workspace_id: None,
                 model: "m",
                 turns: 1,
+                edge: BoundaryEdge::After,
+                expected_revision: None,
+                request_id: None,
+                seal_source: false,
             },
         )
         .await
@@ -1719,6 +1860,219 @@ mod tests {
         assert_eq!(surviving, 2);
         let still = load_projection(&pool, "fork").await.unwrap().unwrap();
         assert_eq!(still.len(), 2);
+    }
+
+    fn reference<'a>(
+        new_session_id: &'a str,
+        source_branch_id: &'a str,
+        boundary_message_id: Option<&'a str>,
+        edge: BoundaryEdge,
+        expected_revision: Option<i64>,
+        request_id: Option<&'a str>,
+        seal_source: bool,
+    ) -> BranchReference<'a> {
+        BranchReference {
+            new_session_id,
+            source_branch_id,
+            boundary_message_id,
+            profile_id: None,
+            workspace_id: None,
+            model: "m",
+            turns: 1,
+            edge,
+            expected_revision,
+            request_id,
+            seal_source,
+        }
+    }
+
+    #[tokio::test]
+    async fn rewind_seals_the_old_branch_and_keeps_later_history() {
+        let pool = setup_migrated_pool().await;
+        sqlx::query("INSERT INTO agent_sessions (id, pending_plan_json, approved_plan_json) VALUES ('sess', '{\"request_id\":\"req\",\"plan\":\"正文\",\"created_at\":\"t\"}', '{\"authorization_id\":\"a\",\"request_id\":\"req\",\"body\":\"正文\",\"feedback\":\"\",\"cwd\":\"/tmp\",\"path\":\"/tmp/p.md\",\"cwd_resolved\":true,\"content_hash\":\"h\",\"saved_hash\":\"h\",\"status\":\"saved\",\"ai_channel_id\":\"c\",\"model\":\"m\"}')")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let mut messages = vec![
+            Message::user("one"),
+            Message::user("two"),
+            Message::user("three"),
+        ];
+        let committed = commit_model_context(&pool, write("sess", &mut messages, None, None, &[]))
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO native_goals (id, session_record_id, title, status, progress_json, bound_branch_id) VALUES ('goal', 'sess', '完成登录', 'completed', '[]', $1)")
+            .bind(&committed.branch_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let later = messages[2].history_id.clone();
+        let receipt = create_referencing_branch(
+            &pool,
+            reference(
+                "sess",
+                &committed.branch_id,
+                Some(&messages[0].history_id),
+                BoundaryEdge::After,
+                Some(committed.revision),
+                Some("rewind-1"),
+                true,
+            ),
+        )
+        .await
+        .unwrap();
+        assert_ne!(receipt.branch_id, committed.branch_id);
+        assert_eq!(receipt.message_ids, vec![messages[0].history_id.clone()]);
+        let sealed: (i64, i64) =
+            sqlx::query_as("SELECT active, sealed FROM native_history_branches WHERE id = $1")
+                .bind(&committed.branch_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(sealed, (0, 1));
+        let still: i64 =
+            sqlx::query_scalar("SELECT COUNT(1) FROM native_history_messages WHERE id = $1")
+                .bind(&later)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(still, 1);
+        let projection = load_projection(&pool, "sess").await.unwrap().unwrap();
+        assert_eq!(projection.len(), 1);
+        assert_eq!(projection[0].content, "one");
+        let stale = commit_model_context(&pool, write("sess", &mut messages, Some(0), None, &[]))
+            .await
+            .unwrap_err();
+        assert!(stale.contains("分支修订号不匹配"));
+        let again = create_referencing_branch(
+            &pool,
+            reference(
+                "sess",
+                &committed.branch_id,
+                Some(&messages[0].history_id),
+                BoundaryEdge::After,
+                Some(committed.revision),
+                Some("rewind-1"),
+                true,
+            ),
+        )
+        .await
+        .unwrap();
+        assert_eq!(again.branch_id, receipt.branch_id);
+        assert!(!again.changed);
+        let pending: Option<String> =
+            sqlx::query_scalar("SELECT pending_plan_json FROM agent_sessions WHERE id = 'sess'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert!(pending.is_none());
+        let approved: String =
+            sqlx::query_scalar("SELECT approved_plan_json FROM agent_sessions WHERE id = 'sess'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert!(approved.contains("正文"));
+        assert!(approved.contains("cancelled"));
+        let stored_goal: String =
+            sqlx::query_scalar("SELECT status FROM native_goals WHERE id = 'goal'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(stored_goal, "completed");
+        let visible = crate::native::goals::current_goal(&pool, "sess")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_ne!(visible.status, "completed");
+        assert!(!visible.counts_as_complete(Some(receipt.branch_id.as_str())));
+    }
+
+    #[tokio::test]
+    async fn fork_before_message_omits_it_and_keeps_the_source_branch() {
+        let pool = setup_migrated_pool().await;
+        let mut messages = vec![Message::user("keep"), Message::user("drop")];
+        let committed =
+            commit_model_context(&pool, write("source", &mut messages, None, None, &[]))
+                .await
+                .unwrap();
+        let forked = create_referencing_branch(
+            &pool,
+            reference(
+                "fork",
+                &committed.branch_id,
+                Some(&messages[1].history_id),
+                BoundaryEdge::Before,
+                Some(committed.revision),
+                Some("fork-1"),
+                false,
+            ),
+        )
+        .await
+        .unwrap();
+        let projection = load_projection(&pool, "fork").await.unwrap().unwrap();
+        assert_eq!(projection.len(), 1);
+        assert_eq!(projection[0].content, "keep");
+        let source_active: i64 =
+            sqlx::query_scalar("SELECT active FROM native_history_branches WHERE id = $1")
+                .bind(&committed.branch_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(source_active, 1);
+        let traced: (String, String) = sqlx::query_as(
+            "SELECT source_branch_id, boundary_message_id FROM native_history_branches WHERE id = $1",
+        )
+        .bind(&forked.branch_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(traced.0, committed.branch_id);
+        assert_eq!(traced.1, messages[1].history_id);
+        let split = create_referencing_branch(
+            &pool,
+            reference(
+                "bad",
+                &committed.branch_id,
+                Some(&messages[0].history_id),
+                BoundaryEdge::After,
+                Some(99),
+                None,
+                false,
+            ),
+        )
+        .await
+        .unwrap_err();
+        assert!(split.contains("分支修订号不匹配"));
+    }
+
+    #[tokio::test]
+    async fn rewind_rejects_a_split_tool_pair() {
+        let pool = setup_migrated_pool().await;
+        let mut messages = vec![
+            Message::user("go"),
+            assistant_call("call_b"),
+            Message::tool_result("call_b", "ok"),
+        ];
+        let committed = commit_model_context(&pool, write("sess", &mut messages, None, None, &[]))
+            .await
+            .unwrap();
+        let error = create_referencing_branch(
+            &pool,
+            reference(
+                "sess",
+                &committed.branch_id,
+                Some(&messages[1].history_id),
+                BoundaryEdge::After,
+                Some(committed.revision),
+                Some("split"),
+                true,
+            ),
+        )
+        .await
+        .unwrap_err();
+        assert!(error.contains("拆开工具调用"));
+        let active = active_branch_id(&pool, "sess").await.unwrap().unwrap();
+        assert_eq!(active, committed.branch_id);
     }
 
     #[tokio::test]

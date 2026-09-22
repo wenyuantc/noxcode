@@ -31,6 +31,7 @@ pub struct NativeGoalRecord {
     pub note: Option<String>,
     pub created_at: String,
     pub updated_at: String,
+    pub bound_branch_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -43,6 +44,9 @@ pub struct NativeGoal {
     pub checklist: Vec<GoalChecklistItem>,
     pub note: Option<String>,
     pub updated_at: String,
+    /// 完成状态所属的历史分支。分支变化后，旧完成记录不再作为当前证据。
+    #[serde(default)]
+    pub bound_branch_id: Option<String>,
 }
 
 impl NativeGoal {
@@ -56,6 +60,18 @@ impl NativeGoal {
             checklist,
             note: record.note,
             updated_at: record.updated_at,
+            bound_branch_id: record.bound_branch_id,
+        }
+    }
+
+    pub fn counts_as_complete(&self, active_branch: Option<&str>) -> bool {
+        if self.status != "completed" {
+            return false;
+        }
+        match (self.bound_branch_id.as_deref(), active_branch) {
+            (Some(bound), Some(active)) => bound == active,
+            (None, _) => true,
+            _ => false,
         }
     }
 
@@ -99,7 +115,21 @@ pub async fn current_goal(
     .fetch_optional(pool)
     .await
     .map_err(|error| format!("读取目标失败: {error}"))?;
-    Ok(record.map(NativeGoal::from_record))
+    let Some(record) = record else {
+        return Ok(None);
+    };
+    let mut goal = NativeGoal::from_record(record);
+    let active = crate::native::history::active_branch_id(pool, session_record_id).await?;
+    if goal.status == "completed" && !goal.counts_as_complete(active.as_deref()) {
+        goal.status = "active".to_string();
+        let notice = "来源分支的完成记录不能作为当前分支的完成证据";
+        goal.note = Some(match goal.note.take() {
+            Some(note) if note.contains(notice) => note,
+            Some(note) => format!("{note}\n{notice}"),
+            None => notice.to_string(),
+        });
+    }
+    Ok(Some(goal))
 }
 
 fn normalize_checklist(items: Vec<GoalChecklistItem>) -> Vec<GoalChecklistItem> {
@@ -144,8 +174,10 @@ pub async fn apply_goal_action(
             }
             let id = new_id();
             let checklist = normalize_checklist(checklist.unwrap_or_default());
+            let branch_id =
+                crate::native::history::active_branch_id(pool, session_record_id).await?;
             sqlx::query(
-                "INSERT INTO native_goals (id, session_record_id, workspace_id, title, status, progress_json, note, created_at, updated_at) VALUES ($1, $2, $3, $4, 'active', $5, $6, $7, $8)",
+                "INSERT INTO native_goals (id, session_record_id, workspace_id, title, status, progress_json, note, created_at, updated_at, bound_branch_id) VALUES ($1, $2, $3, $4, 'active', $5, $6, $7, $8, $9)",
             )
             .bind(&id)
             .bind(session_record_id)
@@ -155,6 +187,7 @@ pub async fn apply_goal_action(
             .bind(note.map(str::trim).filter(|item| !item.is_empty()))
             .bind(&now)
             .bind(&now)
+            .bind(branch_id)
             .execute(pool)
             .await
             .map_err(|error| format!("创建目标失败: {error}"))?;
@@ -185,8 +218,10 @@ pub async fn apply_goal_action(
                 Some(value) => Some(value.trim().to_string()).filter(|item| !item.is_empty()),
                 None => existing.note.clone(),
             };
+            let branch_id =
+                crate::native::history::active_branch_id(pool, session_record_id).await?;
             sqlx::query(
-                "UPDATE native_goals SET title = $1, status = $2, progress_json = $3, note = $4, updated_at = $5 WHERE id = $6",
+                "UPDATE native_goals SET title = $1, status = $2, progress_json = $3, note = $4, updated_at = $5, bound_branch_id = COALESCE($7, bound_branch_id) WHERE id = $6",
             )
             .bind(&title)
             .bind(status)
@@ -194,6 +229,7 @@ pub async fn apply_goal_action(
             .bind(&note)
             .bind(&now)
             .bind(&existing.id)
+            .bind(branch_id)
             .execute(pool)
             .await
             .map_err(|error| format!("更新目标失败: {error}"))?;

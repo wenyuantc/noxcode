@@ -275,8 +275,8 @@
       "hint": "[notes]"
     },
     "fork": {
-      "description": "Fork this session",
-      "hint": "[checkpoint]"
+      "description": "Fork the conversation at the latest boundary",
+      "hint": ""
     },
     "compact": {
       "description": "Compact context",
@@ -392,6 +392,11 @@
     "reset": "reset"
   },
   "forkNeedsSession": "/fork needs a selected session.",
+  "branchForkAfter": "Fork, keeping this message",
+  "branchForkBefore": "Fork before this message",
+  "branchRewindAfter": "Rewind, keeping this message",
+  "branchRewindBefore": "Rewind before this message",
+  "branchWorking": "The session is working. Wait or stop before changing the conversation boundary.",
   "goalCleared": "Goal cleared",
   "goalStatus": {
     "active": "in progress",

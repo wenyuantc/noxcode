@@ -132,7 +132,7 @@ P4 把进程内编程 Agent 接到渠道 + 工作区外壳。数据流仍是 `Re
 - `CronUpdate(id, name?, prompt?, cron?, enabled?, channel_id?, model?)` 仅主 Agent 可用，计划模式禁止调用；只能更新当前工作区的自动化，至少提供一个更新字段。未提供字段保持不变，名称/提示词/cron 不接受空白；渠道和模型可用空字符串清除，清除渠道同时清除模型。修改渠道/模型会校验有效组合；仅 cron 或启停变化重算下次执行时间，改名或改提示词保留调度时间及既有运行记录，不立即执行。
 - 目标（[`goals.rs`](../src-tauri/src/native/goals.rs)）：`Goal(action=set|update|complete|clear, title, checklist, note)` 维护会话的当前目标与进度清单，`GoalRead` 读取；每次变更写 `[GOAL] {json}` 行，前端渲染为 `GoalRow`。
 - `ReadSessionContext`：不带 `session_id` 列出同工作区最近会话（标题、时间、轮数、最后回复摘录）；带 `session_id` 仍校验工作区归属，再返回最近的用户 / 助手对话摘录。
-- `/fork [checkpoint_id]` → `fork_native_session`：新建已结束会话（标题加「（分叉）」，`resume_session_id` 指向源会话），活动分支引用源历史而不是复制消息行。可选先回滚到某个 Git 检查点；文件回滚改走预览与应用之前，这个检查点参数仍会直接恢复工作区。新会话可直接续聊。
+- `/fork` → `fork_native_session`：从最新已提交边界新建已结束会话（标题加「（分叉）」，`resume_session_id` 指向源会话），活动分支引用源历史而不是复制消息行。不回滚文件；带检查点的文件修改要等预览和应用。消息菜单还可以从某条用户消息之前或之后分叉，或在当前会话回退：回退封存原分支、建立新的活动分支，不删除后面的历史。默认保留到所选消息。会拆开工具调用的位置不能选。工作中拒绝修改边界。计划正文留在历史里，旧审批和运行授权不继承；已完成目标仍保留来源分支，但不能当作新分支的完成证据。聊天展示从最后一条 `[分支]` 标记重新开始。实现见 [`history.rs`](../src-tauri/src/native/history.rs)。
 - Composer 斜杠：自定义命令来自工作区 `.noxcode/commands`、`.claude/commands`、`.zcode/commands`、已启用插件 `commands/` 与 `$APPCONFIG/native-commands/`。内置 `/mode` `/model` `/effort` `/plan` `/new` `/clear` `/help` `/diff` `/context` `/permissions` `/memory` `/mcp` `/plugins` 由前端执行；`/init` `/goal` `/review` `/create-skill` `/create-subagent` 展开成提示词后走普通 Agent 回合。`/create-skill name` 写入 `.noxcode/skills/<name>/SKILL.md`；`/create-subagent name` 写入 `.noxcode/agents/<name>.md`。
 - 以上工具通过 `ToolCtx.session_scope`（数据库池、工作区、渠道、模型）访问数据库，只对主 Agent 可见（`ReadSessionContext` 子 Agent 也可用）。
 

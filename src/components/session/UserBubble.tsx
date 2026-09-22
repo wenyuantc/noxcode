@@ -1,7 +1,8 @@
-import { ArrowUp, Check, Copy, Pencil, X } from "lucide-react";
+import { ArrowUp, Check, Copy, GitFork, Pencil, Undo2, X } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 
+import { applyNativeHistoryBoundary } from "@/lib/backend";
 import { submitSessionPrompt } from "@/lib/sessionSubmission";
 import { resolveComposerPlanMode } from "@/lib/planMode";
 import { resolveSessionSelection } from "@/lib/sessionModel";
@@ -22,6 +23,8 @@ export function UserBubble({
   sessionId,
   editable,
   working,
+  boundary,
+  onBranched,
 }: {
   text: string;
   images?: NativeToolImage[];
@@ -29,12 +32,20 @@ export function UserBubble({
   sessionId: string;
   editable: boolean;
   working: boolean;
+  boundary?: {
+    messageId: string;
+    revision: number;
+    selectableBefore: boolean;
+    selectableAfter: boolean;
+  };
+  onBranched?: (sessionId: string) => void;
 }) {
   const { t } = useTranslation(["sessions", "common"]);
   const [copied, setCopied] = useState(false);
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(text);
   const [sending, setSending] = useState(false);
+  const [branchError, setBranchError] = useState("");
   const copiedTimer = useRef<number>(0);
   const workspaceId = useWorkspaceStore((state) => state.activeWorkspaceId);
   const session = useWorkspaceStore((state) =>
@@ -63,6 +74,27 @@ export function UserBubble({
   useEffect(() => {
     return () => window.clearTimeout(copiedTimer.current);
   }, []);
+
+  const branchAt = async (action: "fork" | "rewind", edge: "before" | "after") => {
+    if (!boundary || working || sending || archived) return;
+    setBranchError("");
+    setSending(true);
+    try {
+      const nextId = await applyNativeHistoryBoundary(action, {
+        session_record_id: sessionId,
+        message_id: boundary.messageId,
+        edge,
+        expected_revision: boundary.revision,
+        request_id: crypto.randomUUID(),
+      });
+      await useWorkspaceStore.getState().refreshSessions();
+      onBranched?.(nextId);
+    } catch (error) {
+      setBranchError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setSending(false);
+    }
+  };
 
   const copy = async () => {
     await navigator.clipboard.writeText(text);
@@ -191,6 +223,49 @@ export function UserBubble({
           </div>
         ) : null}
       </div>
+      {boundary ? (
+        <div className="flex flex-wrap justify-end gap-1">
+          <button
+            type="button"
+            className="inline-flex cursor-pointer items-center gap-1 rounded-md px-1.5 py-0.5 text-meta text-muted-foreground hover:bg-muted hover:text-foreground disabled:cursor-not-allowed disabled:opacity-40"
+            disabled={working || sending || archived || !boundary.selectableAfter}
+            title={working ? t("sessions:branchWorking") : t("sessions:branchForkAfter")}
+            onClick={() => void branchAt("fork", "after")}
+          >
+            <GitFork className="size-3" />
+            {t("sessions:branchForkAfter")}
+          </button>
+          <button
+            type="button"
+            className="cursor-pointer rounded-md px-1.5 py-0.5 text-meta text-muted-foreground hover:bg-muted hover:text-foreground disabled:cursor-not-allowed disabled:opacity-40"
+            disabled={working || sending || archived || !boundary.selectableBefore}
+            title={working ? t("sessions:branchWorking") : t("sessions:branchForkBefore")}
+            onClick={() => void branchAt("fork", "before")}
+          >
+            {t("sessions:branchForkBefore")}
+          </button>
+          <button
+            type="button"
+            className="inline-flex cursor-pointer items-center gap-1 rounded-md px-1.5 py-0.5 text-meta text-muted-foreground hover:bg-muted hover:text-foreground disabled:cursor-not-allowed disabled:opacity-40"
+            disabled={working || sending || archived || !boundary.selectableAfter}
+            title={working ? t("sessions:branchWorking") : t("sessions:branchRewindAfter")}
+            onClick={() => void branchAt("rewind", "after")}
+          >
+            <Undo2 className="size-3" />
+            {t("sessions:branchRewindAfter")}
+          </button>
+          <button
+            type="button"
+            className="cursor-pointer rounded-md px-1.5 py-0.5 text-meta text-muted-foreground hover:bg-muted hover:text-foreground disabled:cursor-not-allowed disabled:opacity-40"
+            disabled={working || sending || archived || !boundary.selectableBefore}
+            title={working ? t("sessions:branchWorking") : t("sessions:branchRewindBefore")}
+            onClick={() => void branchAt("rewind", "before")}
+          >
+            {t("sessions:branchRewindBefore")}
+          </button>
+        </div>
+      ) : null}
+      {branchError ? <p className="text-meta text-destructive">{branchError}</p> : null}
     </div>
   );
 }

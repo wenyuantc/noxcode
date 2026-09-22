@@ -3,6 +3,7 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { getLocalePreference } from "@/lib/i18n/locale";
 
 import type {
+  NativeBoundaryInput,
   NativeSteerReceipt,
   NativeSteerSnapshot,
   ActivityLog,
@@ -807,6 +808,13 @@ export function forkNativeSession(
     sessionRecordId,
     checkpointId: checkpointId?.trim() ? checkpointId.trim() : null,
   });
+}
+
+export function applyNativeHistoryBoundary(
+  action: "fork" | "rewind",
+  input: NativeBoundaryInput,
+): Promise<string> {
+  return invoke("apply_native_history_boundary", { action, input });
 }
 
 export function listNativeMemories(workspaceId: string): Promise<NativeMemoryView> {

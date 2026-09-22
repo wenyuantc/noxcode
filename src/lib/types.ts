@@ -387,6 +387,15 @@ export interface NativeHistoryBoundary {
   turn_id: string | null;
   selectable_before: boolean;
   selectable_after: boolean;
+  preview: string;
+}
+
+export interface NativeBoundaryInput {
+  session_record_id: string;
+  message_id: string;
+  edge?: "before" | "after";
+  expected_revision: number;
+  request_id: string;
 }
 
 export interface NativeCapabilityGap {
