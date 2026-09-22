@@ -366,6 +366,7 @@ pub async fn invalidate_persisted<'e>(
 pub async fn reference(pool: &SqlitePool, session: &str) -> Result<Option<String>, String> {
     Ok(load_approved(pool, session)
         .await?
+        .filter(|plan| plan.status != PlanSaveStatus::Cancelled)
         .and_then(|plan| plan.last_saved_path().map(ToOwned::to_owned))
         .map(|path| {
             format!(
