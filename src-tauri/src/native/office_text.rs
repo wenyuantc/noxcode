@@ -441,8 +441,8 @@ impl<'a> OleFile<'a> {
         let mut fat = Vec::new();
         for sid in fat_sectors {
             let chunk = sector_bytes(bytes, sid, sector_size)?;
-            for entry in chunk.chunks_exact(4) {
-                fat.push(u32::from_le_bytes(entry.try_into().unwrap_or([0; 4])));
+            for entry in chunk.as_chunks::<4>().0 {
+                fat.push(u32::from_le_bytes(*entry));
             }
         }
         Ok(Self {
@@ -455,15 +455,17 @@ impl<'a> OleFile<'a> {
     fn stream(&self, name: &str) -> Result<Vec<u8>, String> {
         let dir_start = read_u32(self.bytes, 0x30).unwrap_or(0xFFFF_FFFF);
         let directory = self.chain(dir_start, None)?;
-        for entry in directory.chunks_exact(128) {
+        for entry in directory.as_chunks::<128>().0 {
             let name_len = u16::from_le_bytes(entry[64..66].try_into().unwrap_or([0, 0])) as usize;
             if !(2..=64).contains(&name_len) {
                 continue;
             }
             let label = String::from_utf16_lossy(
                 &entry[..name_len - 2]
-                    .chunks_exact(2)
-                    .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+                    .as_chunks::<2>()
+                    .0
+                    .iter()
+                    .map(|pair| u16::from_le_bytes(*pair))
                     .collect::<Vec<_>>(),
             );
             if label != name {
