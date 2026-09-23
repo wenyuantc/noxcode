@@ -1,0 +1,66 @@
+{
+  "components": [
+    {
+      "id": "pdfium",
+      "role": "pdf-page-images",
+      "delivery": "bundled",
+      "version": "chromium/8066",
+      "render_crate": "0.9.4",
+      "required_to_start": false,
+      "platforms": ["windows", "macos", "linux"],
+      "install": "把清单里的库放进应用资源目录 pdfium/。Windows x64 用 pdfium.dll，Linux x64 用 libpdfium.so，macOS x64 和 arm64 用 libpdfium.dylib。不从系统目录查找替代品。",
+      "upgrade": "升级时用清单中的同一版本替换 pdfium/ 下的那个文件，文件名不变。",
+      "missing": "应用仍可启动。PDF 文本提取继续可用。页面图返回 component_missing，数据库健康检查写明该放到哪个路径。",
+      "libraries": [
+        {"target": "x86_64-pc-windows-msvc", "file_name": "pdfium.dll"},
+        {"target": "x86_64-unknown-linux-gnu", "file_name": "libpdfium.so"},
+        {"target": "x86_64-apple-darwin", "file_name": "libpdfium.dylib"},
+        {"target": "aarch64-apple-darwin", "file_name": "libpdfium.dylib"}
+      ]
+    },
+    {
+      "id": "pdfjs",
+      "role": "pdf-preview",
+      "delivery": "library",
+      "version": "5.4.296",
+      "required_to_start": false,
+      "platforms": ["windows", "macos", "linux"],
+      "install": "pdfjs-dist 随前端打进安装包，三个桌面系统用同一份，不另装系统组件。",
+      "upgrade": "升级应用时一起更新前端依赖。",
+      "missing": "预览对话框不能画 PDF 页面。模型仍可使用文本提取；装了 Pdfium 时仍可走页面图。"
+    },
+    {
+      "id": "docx-preview",
+      "role": "document-preview",
+      "delivery": "library",
+      "version": "0.4.1",
+      "required_to_start": false,
+      "platforms": ["windows", "macos", "linux"],
+      "install": "docx-preview 随前端打进安装包。Word 和 Excel 的文本提取在进程内完成，不依赖这个库，也不依赖系统里的 Office。",
+      "upgrade": "升级应用时一起更新前端依赖。",
+      "missing": ".docx 预览退回正文文本。xls、xlsx 和旧版 .doc 本来就用进程内解析。"
+    },
+    {
+      "id": "playwright",
+      "role": "browser",
+      "delivery": "on-demand",
+      "version": "mcp-preset",
+      "required_to_start": false,
+      "platforms": ["windows", "macos", "linux"],
+      "install": "三个系统都由用户安装 Node.js，再在 MCP 设置里加入 Playwright 预设。应用启动不安装浏览器。",
+      "upgrade": "浏览器包的版本由本机 Node 和已保存的 MCP 配置决定。应用启动时不拉取 latest。",
+      "missing": "基础应用可启动。未安装 Node 时数据库健康检查提示先安装 Node，再启用 Playwright。浏览器工具不可用。"
+    },
+    {
+      "id": "node",
+      "role": "js-runtime",
+      "delivery": "on-demand",
+      "version": "user-installed",
+      "required_to_start": false,
+      "platforms": ["windows", "macos", "linux"],
+      "install": "只给浏览器 MCP 用。三个系统都使用用户自己的 Node，安装包不携带 JS 运行时。文档预览和 PDF 预览用的是已编译进应用的库。",
+      "upgrade": "用户自行升级 Node。应用不替换用户的 Node。",
+      "missing": "未检测到 node 时，数据库健康检查提示安装 Node 后再启用 Playwright。聊天、PDF 文本和文档预览不受影响。"
+    }
+  ]
+}

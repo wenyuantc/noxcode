@@ -631,6 +631,9 @@ mod tests {
             name: "large.png".into(),
             mime_type: "image/png".into(),
             data_base64: "AAAA".repeat(MAX_IMAGE_BYTES / 8 / 3),
+            attachment_id: String::new(),
+            page: None,
+            time_range: None,
         };
         let images = vec![image; 8];
         let id = uuid::Uuid::new_v4().to_string();
@@ -643,6 +646,9 @@ mod tests {
             name: "other.png".into(),
             mime_type: "image/png".into(),
             data_base64: "AAAA".repeat(8),
+            attachment_id: String::new(),
+            page: None,
+            time_range: None,
         };
         assert!(mailbox
             .accept(

@@ -441,6 +441,14 @@ pub async fn delete_agent_session<R: Runtime>(
             eprintln!("[native] 清理会话 artifact 失败: {error}");
         }
     }
+    let media = crate::native::attachments::AttachmentService::new(
+        std::path::PathBuf::new(),
+        pool.clone(),
+        "session-delete",
+    );
+    if let Err(error) = media.seal_session(&session_id).await {
+        eprintln!("[native] 清理会话附件引用失败: {error}");
+    }
     delete_agent_session_row(&pool, &session_id).await
 }
 

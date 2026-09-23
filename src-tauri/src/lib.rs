@@ -61,6 +61,9 @@ pub fn run() {
                     app::database::log_database_startup_status(&app_handle).await;
                 });
             }
+            if let Ok(dir) = app.path().resource_dir() {
+                native::components::remember_resource_dir(&dir);
+            }
             native::artifacts::spawn_startup_prune(app.handle());
             Ok(())
         })
@@ -126,6 +129,8 @@ pub fn run() {
             native::images::stage_composer_image,
             native::images::stage_composer_image_from_path,
             native::images::delete_composer_images,
+            native::images::extract_attachment_text,
+            native::images::extract_staged_attachment_text,
             native::session::restore_session_worktree,
             native::session::start_native_session,
             native::session::stop_native_session,

@@ -3,7 +3,7 @@ import { useTranslation } from "react-i18next";
 import { Button } from "@/components/ui/button";
 import { useNativeSteer } from "@/hooks/useNativeSteer";
 import { deleteComposerImages, stageComposerImage } from "@/lib/backend";
-import { filterComposerImageFiles } from "@/lib/composerImages";
+import { COMPOSER_FILE_ACCEPT, filterComposerImageFiles } from "@/lib/composerImages";
 
 export function PermissionSteerEditor({
   sessionId,
@@ -81,7 +81,7 @@ export function PermissionSteerEditor({
             ref={picker}
             type="file"
             multiple
-            accept="image/png,image/jpeg,image/gif,image/webp"
+            accept={COMPOSER_FILE_ACCEPT}
             className="hidden"
             aria-label={t("steer.attach")}
             onChange={(event) => {

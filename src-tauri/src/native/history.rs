@@ -8,7 +8,9 @@ use sqlx::{Row, SqlitePool};
 
 use crate::app::shared::{new_id, now_sqlite};
 use crate::native::agent::truncate::sanitize_tool_message_pairs;
-use crate::native::model::types::{Message, Role, ToolCall};
+use crate::native::model::types::{
+    AttachmentUse, Message, NativeImage, PdfUseMode, Role, ToolCall,
+};
 
 const FORMAT_VERSION: i64 = 1;
 const LOCK_ATTEMPTS: u32 = 5;
@@ -228,6 +230,7 @@ impl RawMessage {
             name: self.name.clone(),
             reasoning_content: self.reasoning_content.clone(),
             images: Vec::new(),
+            media: Vec::new(),
             history_id: self.id.clone(),
         })
     }
@@ -351,10 +354,7 @@ async fn commit_in_tx(
     if let Some(receipt) = replay_request(tx, session_record_id, request.request_id).await? {
         return Ok(receipt);
     }
-    let had_images = request
-        .messages
-        .iter()
-        .any(|message| !message.images.is_empty());
+    let had_images = request.messages.iter().any(images_lack_attachment_ref);
     let mut branch = match load_active_branch(tx, session_record_id).await? {
         Some(branch) => branch,
         None => {
@@ -825,6 +825,37 @@ async fn query_messages(
         .collect()
 }
 
+fn images_lack_attachment_ref(message: &Message) -> bool {
+    message
+        .images
+        .iter()
+        .any(|image| image.attachment_id.is_empty())
+}
+
+fn uses_from_images(images: &[NativeImage]) -> Vec<AttachmentUse> {
+    images
+        .iter()
+        .filter(|image| !image.attachment_id.is_empty())
+        .map(|image| {
+            if image.mime_type == "application/pdf" {
+                AttachmentUse::Pdf {
+                    attachment_id: image.attachment_id.clone(),
+                    mode: PdfUseMode::Auto,
+                    pages: None,
+                }
+            } else if image.mime_type.starts_with("video/") {
+                AttachmentUse::Video {
+                    attachment_id: image.attachment_id.clone(),
+                }
+            } else {
+                AttachmentUse::Image {
+                    attachment_id: image.attachment_id.clone(),
+                }
+            }
+        })
+        .collect()
+}
+
 async fn insert_message(
     tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
     session_record_id: &str,
@@ -836,7 +867,7 @@ async fn insert_message(
 ) -> Result<RawMessage, String> {
     let id = new_id();
     let calls = tool_calls_json(message)?;
-    let images_unrecoverable = !message.images.is_empty();
+    let images_unrecoverable = images_lack_attachment_ref(message);
     sqlx::query(
         r#"
         INSERT INTO native_history_messages (
@@ -864,6 +895,16 @@ async fn insert_message(
     .execute(&mut **tx)
     .await
     .map_err(|error| save_error(error.to_string()))?;
+    let media = if message.media.is_empty() {
+        uses_from_images(&message.images)
+    } else {
+        message.media.clone()
+    };
+    if !media.is_empty() {
+        crate::native::attachments::replace_owner_uses(tx, "message", &id, &media, &now_sqlite())
+            .await
+            .map_err(|error| save_error(error.to_string()))?;
+    }
     Ok(RawMessage {
         id,
         branch_id: branch_id.to_string(),
@@ -1017,6 +1058,15 @@ pub async fn load_projection(
             message.content = override_value.content.clone();
             message.reasoning_content = override_value.reasoning_content.clone();
             message.tool_calls = override_value.tool_calls.clone();
+        }
+        if !message.history_id.is_empty() {
+            message.media = crate::native::attachments::load_owner_uses_tx(
+                &mut tx,
+                "message",
+                &message.history_id,
+            )
+            .await
+            .map_err(|error| save_error(error.to_string()))?;
         }
         messages.push(message);
     }
@@ -2266,6 +2316,9 @@ mod tests {
                 name: "a.png".to_string(),
                 mime_type: "image/png".to_string(),
                 data_base64: "AAAA".to_string(),
+                attachment_id: String::new(),
+                page: None,
+                time_range: None,
             }],
         )];
         commit_model_context(&pool, write("sess", &mut messages, None, None, &[]))
@@ -2433,6 +2486,131 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(branches_after, 3);
+    }
+
+    #[tokio::test]
+    async fn fork_reloads_attachment_bytes_and_missing_file_is_diagnosed() {
+        use base64::engine::general_purpose::STANDARD as BASE64;
+        use base64::Engine;
+
+        let dir = tempfile::tempdir().unwrap();
+        let pool = setup_migrated_pool().await;
+        let service = crate::native::attachments::AttachmentService::new(
+            dir.path().to_path_buf(),
+            pool.clone(),
+            "composer",
+        );
+        let image = image::DynamicImage::ImageRgb8(image::RgbImage::from_pixel(
+            2,
+            2,
+            image::Rgb([4, 5, 6]),
+        ));
+        let mut cursor = std::io::Cursor::new(Vec::new());
+        image
+            .write_to(&mut cursor, image::ImageFormat::Png)
+            .unwrap();
+        let bytes = cursor.into_inner();
+        let stored = service
+            .import_bytes("shot.png", &bytes, "composer")
+            .await
+            .unwrap();
+        let encoded = BASE64.encode(&bytes);
+        let mut messages = vec![Message::user_with_images(
+            "look",
+            vec![NativeImage {
+                name: "shot.png".to_string(),
+                mime_type: "image/png".to_string(),
+                data_base64: encoded.clone(),
+                attachment_id: stored.id.clone(),
+                page: None,
+                time_range: None,
+            }],
+        )];
+        let committed =
+            commit_model_context(&pool, write("source", &mut messages, None, None, &[]))
+                .await
+                .unwrap();
+        service.release_draft("composer").await.unwrap();
+        let flag: i64 = sqlx::query_scalar(
+            "SELECT images_unrecoverable FROM native_history_messages WHERE session_record_id = 'source'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(flag, 0);
+        let stored_text: String = sqlx::query_scalar(
+            "SELECT content FROM native_history_messages WHERE session_record_id = 'source'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert!(!stored_text.contains(&encoded));
+        let gaps = list_boundaries(&pool, "source").await.unwrap();
+        assert!(gaps.gaps.iter().all(|gap| gap.kind != "images"));
+
+        let mut resumed = load_projection(&pool, "source").await.unwrap().unwrap();
+        assert_eq!(resumed[0].media.len(), 1);
+        assert!(resumed[0].images.is_empty());
+        crate::native::images::hydrate_message_media(&pool, dir.path(), &mut resumed)
+            .await
+            .unwrap();
+        assert_eq!(
+            BASE64
+                .decode(resumed[0].images[0].data_base64.trim())
+                .unwrap(),
+            bytes
+        );
+
+        create_referencing_branch(
+            &pool,
+            reference(
+                "fork",
+                &committed.branch_id,
+                None,
+                BoundaryEdge::After,
+                Some(committed.revision),
+                Some("fork-media"),
+                false,
+            ),
+        )
+        .await
+        .unwrap();
+        sqlx::query("UPDATE native_history_branches SET deleted_at = $1 WHERE id = $2")
+            .bind(crate::app::shared::now_sqlite())
+            .bind(&committed.branch_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert!(service.gc().await.unwrap().is_empty());
+        let relative: String =
+            sqlx::query_scalar("SELECT relative_path FROM native_attachments WHERE id = $1")
+                .bind(&stored.id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert!(dir.path().join(&relative).is_file());
+
+        let mut forked = load_projection(&pool, "fork").await.unwrap().unwrap();
+        assert_eq!(forked[0].media[0].attachment_id(), stored.id);
+        crate::native::images::hydrate_message_media(&pool, dir.path(), &mut forked)
+            .await
+            .unwrap();
+        assert_eq!(
+            BASE64
+                .decode(forked[0].images[0].data_base64.trim())
+                .unwrap(),
+            bytes
+        );
+
+        std::fs::remove_file(dir.path().join(relative)).unwrap();
+        let mut missing = load_projection(&pool, "fork").await.unwrap().unwrap();
+        crate::native::images::hydrate_message_media(&pool, dir.path(), &mut missing)
+            .await
+            .unwrap();
+        assert!(missing[0].images.is_empty());
+        assert!(missing[0].content.contains("[附件缺失]"));
+        assert!(missing[0].content.contains(&stored.id));
+        assert!(!missing[0].content.contains(&encoded));
     }
 
     #[tokio::test]

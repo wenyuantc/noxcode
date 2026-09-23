@@ -5,6 +5,73 @@ export const COMPOSER_IMAGE_MIMES = ["image/png", "image/jpeg", "image/gif", "im
 
 export const COMPOSER_IMAGE_EXTENSIONS = ["png", "jpg", "jpeg", "gif", "webp"] as const;
 
+export const COMPOSER_TEXT_EXTENSIONS = [
+  "html",
+  "htm",
+  "txt",
+  "md",
+  "markdown",
+  "json",
+  "csv",
+  "xml",
+  "css",
+  "js",
+  "jsx",
+  "mjs",
+  "cjs",
+  "ts",
+  "tsx",
+  "py",
+  "rs",
+  "go",
+  "java",
+  "kt",
+  "c",
+  "h",
+  "cc",
+  "cpp",
+  "hpp",
+  "cs",
+  "rb",
+  "php",
+  "sh",
+  "bash",
+  "zsh",
+  "yml",
+  "yaml",
+  "toml",
+  "sql",
+  "log",
+  "vue",
+  "svelte",
+] as const;
+
+export const COMPOSER_OFFICE_EXTENSIONS = ["xls", "xlsx", "doc", "docx"] as const;
+
+export const COMPOSER_ATTACHMENT_EXTENSIONS = [
+  ...COMPOSER_IMAGE_EXTENSIONS,
+  "pdf",
+  "mp4",
+  ...COMPOSER_TEXT_EXTENSIONS,
+  ...COMPOSER_OFFICE_EXTENSIONS,
+] as const;
+
+export const COMPOSER_FILE_ACCEPT = [
+  "image/png",
+  "image/jpeg",
+  "image/gif",
+  "image/webp",
+  "application/pdf",
+  "video/mp4",
+  ...COMPOSER_ATTACHMENT_EXTENSIONS.map((extension) => `.${extension}`),
+].join(",");
+
+export const COMPOSER_DIALOG_FILTERS = [
+  { name: "附件", extensions: [...COMPOSER_ATTACHMENT_EXTENSIONS] },
+];
+
+const TEXT_EXTENSIONS = new Set<string>(COMPOSER_TEXT_EXTENSIONS);
+
 export type ComposerImageSkipReason = "mime" | "size" | "limit";
 
 export type ComposerTriggerChar = "@" | "/" | "$";
@@ -46,7 +113,8 @@ export function composerImageExtension(name: string): string | null {
 }
 
 export function composerImageMimeFromName(name: string): string | null {
-  switch (composerImageExtension(name)) {
+  const extension = composerImageExtension(name);
+  switch (extension) {
     case "png":
       return "image/png";
     case "jpg":
@@ -56,9 +124,43 @@ export function composerImageMimeFromName(name: string): string | null {
       return "image/gif";
     case "webp":
       return "image/webp";
+    case "pdf":
+      return "application/pdf";
+    case "mp4":
+      return "video/mp4";
+    case "xls":
+      return "application/vnd.ms-excel";
+    case "xlsx":
+      return "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
+    case "doc":
+      return "application/msword";
+    case "docx":
+      return "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
     default:
-      return null;
+      if (!extension || !TEXT_EXTENSIONS.has(extension)) return null;
+      if (extension === "html" || extension === "htm") return "text/html";
+      if (extension === "json") return "application/json";
+      if (extension === "xml") return "application/xml";
+      return "text/plain";
   }
+}
+
+export function composerMediaByteLimit(name: string, mime = ""): number {
+  const kind = mime.trim().toLowerCase() || composerImageMimeFromName(name) || "";
+  if (
+    kind === "application/pdf" ||
+    kind === "application/vnd.ms-excel" ||
+    kind === "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" ||
+    kind === "application/msword" ||
+    kind === "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+  ) {
+    return 32 * 1024 * 1024;
+  }
+  if (kind === "video/mp4") return 6 * 1024 * 1024;
+  if (kind.startsWith("text/") || kind === "application/json" || kind === "application/xml") {
+    return 1024 * 1024;
+  }
+  return MAX_COMPOSER_IMAGE_BYTES;
 }
 
 export function isComposerImageMime(mime: string): boolean {
@@ -81,7 +183,7 @@ export function filterComposerImageFiles<T extends ComposerImageFileLike>(
       skipped.push({ name: file.name || "image", reason: "mime" });
       continue;
     }
-    if (file.size > MAX_COMPOSER_IMAGE_BYTES) {
+    if (file.size > composerMediaByteLimit(file.name, file.type)) {
       skipped.push({ name: file.name || "image", reason: "size" });
       continue;
     }
@@ -174,6 +276,26 @@ export function selectedComposerImageIds<T extends { id: string; selected: boole
   items: readonly T[],
 ): string[] {
   return items.filter((item) => item.selected).map((item) => item.id);
+}
+
+/** 与发送前的模型能力一致：PDF 走文本路径，图片和视频分别要求 image / video。返回文案时调用方必须保留附件。 */
+export function mediaBlockedByModel(
+  names: readonly string[],
+  inputTypes: readonly string[],
+): string | null {
+  const allowed = new Set(inputTypes);
+  for (const name of names) {
+    const mime = composerImageMimeFromName(name);
+    if (!mime) continue;
+    const label = fileNameFromPath(name);
+    if (mime === "video/mp4" && !allowed.has("video")) {
+      return `当前模型不能接收视频，已保留附件 ${label}`;
+    }
+    if (mime.startsWith("image/") && !allowed.has("image")) {
+      return `当前模型不能接收图片，已保留附件 ${label}`;
+    }
+  }
+  return null;
 }
 
 export function appendComposerTrigger(draft: string, trigger: ComposerTriggerChar): string {

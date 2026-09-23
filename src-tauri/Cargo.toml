@@ -50,7 +50,16 @@ xcap = "=0.4.1"
 # 默认 feature `xdo` 会链 libxdo（运行时外部依赖）。Linux 改走纯 Rust 的 x11rb。
 enigo = { version = "=0.3.0", default-features = false, features = ["x11rb"] }
 # 0.25.8+ 抬高 MSRV；钉在 1.83 可编译的 0.25.6。
-image = { version = "=0.25.6", default-features = false, features = ["png"] }
+image = { version = "=0.25.6", default-features = false, features = ["png", "jpeg", "gif", "webp"] }
+zip = { version = "2", default-features = false, features = ["deflate"] }
+lopdf = { version = "0.45.0", default-features = false }
+calamine = "0.26.1"
+cfb = "0.7"
+pdfium-render = { version = "0.9.4", default-features = false, features = ["image_025", "thread_safe", "pdfium_latest"] }
+
+[features]
+default = []
+media-faults = []
 
 # 后台电脑控制：只增加已在 lockfile 里的 crate，不引入新的运行时外部命令。
 [target.'cfg(target_os = "linux")'.dependencies]

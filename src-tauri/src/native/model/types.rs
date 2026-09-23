@@ -22,11 +22,57 @@ pub struct NativeImage {
     pub name: String,
     pub mime_type: String,
     pub data_base64: String,
+    /// 受管附件标识。空字符串表示仍是旧的内联图片。
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub attachment_id: String,
+    /// PDF 页面图的页码。降级摘要要保留它，不能只留文件名。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub page: Option<u32>,
+    /// 视频片段的时间范围，例如 `0-3.5s`。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub time_range: Option<String>,
 }
 
 impl NativeImage {
     pub fn data_url(&self) -> String {
         format!("data:{};base64,{}", self.mime_type, self.data_base64)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum PdfUseMode {
+    Auto,
+    Native,
+    Text,
+    Pages,
+}
+
+/// 持久引用。历史、事件和账本只保存这里的标识，不保存媒体字节。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "lowercase")]
+pub enum AttachmentUse {
+    Image {
+        attachment_id: String,
+    },
+    Pdf {
+        attachment_id: String,
+        mode: PdfUseMode,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pages: Option<Vec<u32>>,
+    },
+    Video {
+        attachment_id: String,
+    },
+}
+
+impl AttachmentUse {
+    pub fn attachment_id(&self) -> &str {
+        match self {
+            Self::Image { attachment_id }
+            | Self::Pdf { attachment_id, .. }
+            | Self::Video { attachment_id } => attachment_id,
+        }
     }
 }
 
@@ -45,6 +91,9 @@ pub struct Message {
     pub reasoning_content: String,
     #[serde(default)]
     pub images: Vec<NativeImage>,
+    /// 有序媒体引用。旧 `images` 只用于兼容读取。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub media: Vec<AttachmentUse>,
     /// 已提交历史中的稳定身份。空字符串表示尚未写入历史。
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub history_id: String,
@@ -60,6 +109,7 @@ impl Message {
             name: String::new(),
             reasoning_content: String::new(),
             images: Vec::new(),
+            media: Vec::new(),
             history_id: String::new(),
         }
     }
@@ -73,6 +123,7 @@ impl Message {
             name: String::new(),
             reasoning_content: String::new(),
             images: Vec::new(),
+            media: Vec::new(),
             history_id: String::new(),
         }
     }
@@ -92,6 +143,7 @@ impl Message {
             name: String::new(),
             reasoning_content: String::new(),
             images: Vec::new(),
+            media: Vec::new(),
             history_id: String::new(),
         }
     }
@@ -105,6 +157,7 @@ impl Message {
             name: String::new(),
             reasoning_content: String::new(),
             images: Vec::new(),
+            media: Vec::new(),
             history_id: String::new(),
         }
     }

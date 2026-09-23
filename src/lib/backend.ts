@@ -598,6 +598,26 @@ export function deleteComposerImages(paths: string[]): Promise<void> {
   return invoke("delete_composer_images", { paths });
 }
 
+export interface OfficeSheet {
+  name: string;
+  rows: string[][];
+}
+
+export interface OfficePreview {
+  kind: "sheet" | "document";
+  sheets: OfficeSheet[];
+  paragraphs: string[];
+  truncated: boolean;
+}
+
+export function extractAttachmentText(name: string, dataBase64: string): Promise<OfficePreview> {
+  return invoke("extract_attachment_text", { name, dataBase64 });
+}
+
+export function extractStagedAttachmentText(path: string): Promise<OfficePreview> {
+  return invoke("extract_staged_attachment_text", { path });
+}
+
 export function stopNativeSession(sessionRecordId: string): Promise<void> {
   return invoke("stop_native_session", { sessionRecordId });
 }
@@ -651,8 +671,12 @@ export function onNativeSteer(
   return listen<NativeSteerSnapshot>("native-steer", (event) => callback(event.payload));
 }
 
-export function sendNativeInput(sessionRecordId: string, input: string): Promise<NativeInputQueue> {
-  return invoke("send_native_input", { sessionRecordId, input });
+export function sendNativeInput(
+  sessionRecordId: string,
+  input: string,
+  imagePaths: string[] = [],
+): Promise<NativeInputQueue> {
+  return invoke("send_native_input", { sessionRecordId, input, imagePaths });
 }
 
 export function listNativeQueuedInputs(sessionRecordId: string): Promise<NativeInputQueue> {

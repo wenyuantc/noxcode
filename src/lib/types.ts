@@ -1068,6 +1068,7 @@ export interface AppHealthCheck {
   git_available: boolean;
   git_version: string | null;
   checked_at: string;
+  media_notice: string | null;
 }
 
 export interface DatabaseBackupResult {

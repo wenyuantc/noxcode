@@ -366,6 +366,9 @@ pub struct AppHealthCheck {
     pub git_available: bool,
     pub git_version: Option<String>,
     pub checked_at: String,
+    /// Pdfium 等可选组件缺失时的修复说明。基础应用不依赖该组件。
+    #[serde(default)]
+    pub media_notice: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
