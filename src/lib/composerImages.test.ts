@@ -8,6 +8,7 @@ import {
   filterComposerImageFiles,
   filterComposerImagePaths,
   isComposerImageFile,
+  mediaBlockedByModel,
   mergeComposerImageItems,
   removeComposerImagesByIds,
   selectedComposerImageIds,
@@ -23,7 +24,33 @@ describe("composerImageMimeFromName", () => {
     expect(composerImageMimeFromName("a.PNG")).toBe("image/png");
     expect(composerImageMimeFromName("b.jpeg")).toBe("image/jpeg");
     expect(composerImageMimeFromName("c.webp")).toBe("image/webp");
-    expect(composerImageMimeFromName("note.txt")).toBeNull();
+    expect(composerImageMimeFromName("doc.pdf")).toBe("application/pdf");
+    expect(composerImageMimeFromName("clip.mp4")).toBe("video/mp4");
+    expect(composerImageMimeFromName("qwen3.8-27b-Test2.html")).toBe("text/html");
+    expect(composerImageMimeFromName("indicator_import_template.xls")).toBe(
+      "application/vnd.ms-excel",
+    );
+    expect(composerImageMimeFromName("说明.docx")).toBe(
+      "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    );
+    expect(composerImageMimeFromName("note.txt")).toBe("text/plain");
+    expect(composerImageMimeFromName("note.bin")).toBeNull();
+  });
+});
+
+describe("mediaBlockedByModel", () => {
+  it("allows pdf on text models and keeps image or video that the model cannot take", () => {
+    expect(mediaBlockedByModel(["notes.pdf"], ["text"])).toBeNull();
+    expect(mediaBlockedByModel(["qwen3.8-27b-Test2.html"], ["text"])).toBeNull();
+    expect(mediaBlockedByModel(["indicator_import_template.xls"], ["text"])).toBeNull();
+    expect(mediaBlockedByModel(["说明.doc"], ["text"])).toBeNull();
+    expect(mediaBlockedByModel(["shot.png"], ["text"])).toBe(
+      "当前模型不能接收图片，已保留附件 shot.png",
+    );
+    expect(mediaBlockedByModel(["clip.mp4"], ["text", "image"])).toBe(
+      "当前模型不能接收视频，已保留附件 clip.mp4",
+    );
+    expect(mediaBlockedByModel(["clip.mp4", "shot.png"], ["text", "image", "video"])).toBeNull();
   });
 });
 
@@ -33,12 +60,27 @@ describe("filterComposerImageFiles", () => {
       file("ok.png", "image/png"),
       file("shot.jpg", "", 32),
       file("doc.pdf", "application/pdf"),
+      file("clip.mp4", "video/mp4"),
+      file("qwen3.8-27b-Test2.html", "text/html"),
+      file("indicator_import_template.xls", "application/vnd.ms-excel"),
+      file("说明.docx", ""),
+      file("note.bin", ""),
       file("big.png", "image/png", 9 * 1024 * 1024),
+      file("big.html", "text/html", 2 * 1024 * 1024),
     ]);
-    expect(accepted.map((item) => item.name)).toEqual(["ok.png", "shot.jpg"]);
+    expect(accepted.map((item) => item.name)).toEqual([
+      "ok.png",
+      "shot.jpg",
+      "doc.pdf",
+      "clip.mp4",
+      "qwen3.8-27b-Test2.html",
+      "indicator_import_template.xls",
+      "说明.docx",
+    ]);
     expect(skipped).toEqual([
-      { name: "doc.pdf", reason: "mime" },
+      { name: "note.bin", reason: "mime" },
       { name: "big.png", reason: "size" },
+      { name: "big.html", reason: "size" },
     ]);
   });
 
@@ -74,11 +116,16 @@ describe("filterComposerImagePaths", () => {
     const { accepted, skipped } = filterComposerImagePaths([
       "/tmp/ok.png",
       String.raw`C:\Users\me\shot.JPEG`,
-      "/tmp/note.txt",
+      "/tmp/qwen3.8-27b-Test2.html",
+      "/tmp/note.bin",
       "  ",
     ]);
-    expect(accepted).toEqual(["/tmp/ok.png", String.raw`C:\Users\me\shot.JPEG`]);
-    expect(skipped).toEqual([{ name: "note.txt", reason: "mime" }]);
+    expect(accepted).toEqual([
+      "/tmp/ok.png",
+      String.raw`C:\Users\me\shot.JPEG`,
+      "/tmp/qwen3.8-27b-Test2.html",
+    ]);
+    expect(skipped).toEqual([{ name: "note.bin", reason: "mime" }]);
   });
 });
 

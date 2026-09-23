@@ -1,5 +1,6 @@
 use std::time::Duration;
 
+use base64::Engine;
 use tauri::AppHandle;
 
 use crate::app::ssh::exec::{
@@ -60,6 +61,27 @@ impl SshToolRuntime {
             Some(1) => Ok(false),
             _ => Err(format!("检查远程文件失败: {}", output.stderr_lossy())),
         }
+    }
+
+    pub async fn read_bytes(&self, path: &str, max_bytes: u64) -> Result<Vec<u8>, String> {
+        let command = ssh_read_bounded_base64_command("/", &self.resolve(path)?, max_bytes)?;
+        let output = execute_ssh_command(&self.app, &self.config, &command, true).await?;
+        if !output.success() {
+            return Err(output.stderr_lossy());
+        }
+        let decoded = base64::engine::general_purpose::STANDARD
+            .decode(
+                output
+                    .stdout_lossy()
+                    .chars()
+                    .filter(|ch| !ch.is_whitespace())
+                    .collect::<String>(),
+            )
+            .map_err(|error| format!("远端附件不是合法 base64: {error}"))?;
+        if decoded.len() as u64 > max_bytes {
+            return Err("declared_size_exceeded: 远端附件超过读取上限".to_string());
+        }
+        Ok(decoded)
     }
 
     pub async fn read(&self, path: &str) -> Result<String, String> {
@@ -268,6 +290,20 @@ fn stdout_or_err(output: SshCommandOutput) -> Result<String, String> {
     }
 }
 
+pub fn ssh_read_bounded_base64_command(
+    root: &str,
+    path: &str,
+    max_bytes: u64,
+) -> Result<String, String> {
+    let resolved = resolve_under_workspace_posix(root, path)?;
+    let limit = max_bytes.saturating_add(1);
+    Ok(format!(
+        "{}head -c {limit} {} | base64",
+        ssh_path_guard(root, &resolved)?,
+        shell_escape_single_quoted(&resolved)
+    ))
+}
+
 pub fn ssh_read_command(root: &str, path: &str) -> Result<String, String> {
     let resolved = resolve_under_workspace_posix(root, path)?;
     Ok(format!(
@@ -377,6 +413,15 @@ pub fn ssh_bash_command(root: &str, command: &str) -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tc_pdf_007_ssh_read_is_bounded_base64_and_does_not_use_local_cat() {
+        let command = ssh_read_bounded_base64_command("/workspace", "docs/a.pdf", 32).unwrap();
+        assert!(command.contains("head -c 33"));
+        assert!(command.contains("| base64"));
+        assert!(command.contains("a.pdf"));
+        assert!(!command.contains("cat "));
+    }
 
     #[tokio::test]
     async fn approved_ssh_glob_uses_requested_directory_and_grants_do_not_leak() {

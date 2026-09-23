@@ -480,6 +480,13 @@ impl ModelClient {
     ) -> Result<Value, String> {
         let mut body = self.build_body_inner(request, stream, previous_response_id)?;
         self.apply_prompt_cache(&mut body);
+        let limit = crate::native::media_plan::budget_for_model(request.model).max_request_bytes;
+        let size = crate::native::media_plan::serialized_len(&body);
+        if size > limit {
+            return Err(format!(
+                "media_budget_exceeded: 请求 {size} 字节，上限 {limit}"
+            ));
+        }
         Ok(body)
     }
 
@@ -489,6 +496,11 @@ impl ModelClient {
         stream: bool,
         previous_response_id: Option<&str>,
     ) -> Result<Value, String> {
+        crate::native::media_plan::preflight_message_media(
+            &self.config.protocol,
+            request.model,
+            request.messages,
+        )?;
         match self.config.protocol.as_str() {
             PROTOCOL_ANTHROPIC => Ok(build_anthropic_body(
                 request.messages,
@@ -527,7 +539,7 @@ impl ModelClient {
                 if start >= request.messages.len() {
                     return Ok(body);
                 }
-                let (_, input) = responses_input(&request.messages[start..]);
+                let (_, input) = responses_input(&request.messages[start..], request.model);
                 if input.is_empty() {
                     return Ok(body);
                 }
@@ -535,7 +547,7 @@ impl ModelClient {
                 body["previous_response_id"] = Value::String(previous_response_id.to_string());
                 Ok(body)
             }
-            PROTOCOL_OPENAI => Ok(build_openai_body(
+            PROTOCOL_OPENAI => build_openai_body(
                 request.messages,
                 request.tools,
                 request.model,
@@ -543,7 +555,7 @@ impl ModelClient {
                 request.max_output_tokens,
                 request.thinking_enabled,
                 stream,
-            )),
+            ),
             other => Err(format!("不支持的渠道协议: {other}")),
         }
     }

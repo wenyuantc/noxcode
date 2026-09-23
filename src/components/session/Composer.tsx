@@ -50,8 +50,12 @@ import {
   appendComposerTrigger,
   collectFilesFromDataTransfer,
   fileNameFromPath,
+  COMPOSER_DIALOG_FILTERS,
+  COMPOSER_FILE_ACCEPT,
+  composerMediaByteLimit,
   filterComposerImageFiles,
   filterComposerImagePaths,
+  mediaBlockedByModel,
   mergeComposerImageItems,
   removeComposerImagesByIds,
   selectedComposerImageIds,
@@ -99,7 +103,9 @@ import { isNativePermissionMode, type NativeSubagent } from "@/lib/types";
 import {
   composerThinkingEnabled,
   composerThinkingLevels,
+  emptyChannelModel,
   resolveComposerThinkingLevel,
+  selectedInputTypes,
 } from "@/lib/modelCatalog";
 import { cn } from "@/lib/utils";
 import { ComposerSlashMenu } from "./ComposerSlashMenu";
@@ -124,10 +130,6 @@ import { SteerInputs } from "./SteerInputs";
 import { useNativeSteer } from "@/hooks/useNativeSteer";
 import { canClearSteerDraft } from "@/lib/nativeSteer";
 
-const IMAGE_DIALOG_FILTERS = [
-  { name: "Images", extensions: ["png", "jpg", "jpeg", "gif", "webp"] },
-];
-
 async function readFileAsBase64(file: File): Promise<string> {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
@@ -150,6 +152,7 @@ export function Composer({ compact = false }: { compact?: boolean }) {
   const workspaces = useWorkspaceStore((state) => state.workspaces);
   const sessionWorkspace = workspaces.find((item) => item.id === workspaceId);
   const channels = useChannelStore((state) => state.channels);
+  const catalog = useChannelStore((state) => state.catalog);
   const channelId = useChannelStore((state) => state.activeChannelId);
   const activeModelId = useChannelStore((state) => state.activeModelId);
   const defaultPlanMode = useUiStore((state) => state.composerPlanMode);
@@ -231,6 +234,13 @@ export function Composer({ compact = false }: { compact?: boolean }) {
   attachmentsRef.current = attachments;
 
   const selectedModel = channel?.models.find((item) => item.id === model);
+  const mediaWarning = mediaBlockedByModel(
+    attachments.map((item) => item.name),
+    selectedInputTypes(
+      selectedModel ?? emptyChannelModel(model),
+      catalog.find((entry) => entry.id === model) ?? null,
+    ),
+  );
   const efforts = composerThinkingLevels(selectedModel);
   const resolvedEffort = resolveComposerThinkingLevel(
     efforts,
@@ -463,7 +473,12 @@ export function Composer({ compact = false }: { compact?: boolean }) {
         : t("sessions:send");
 
   const skipMessage = (skip: ComposerImageSkip) => {
-    if (skip.reason === "size") return t("sessions:imageTooLarge", { name: skip.name });
+    if (skip.reason === "size") {
+      return t("sessions:imageTooLarge", {
+        name: skip.name,
+        limit: composerMediaByteLimit(skip.name) / (1024 * 1024),
+      });
+    }
     if (skip.reason === "limit") return t("sessions:imageLimit");
     return t("sessions:imageTypeUnsupported", { name: skip.name });
   };
@@ -504,8 +519,10 @@ export function Composer({ compact = false }: { compact?: boolean }) {
   };
 
   const addImagePaths = async (paths: string[]) => {
+    const { accepted, skipped } = filterComposerImagePaths(paths);
+    if (skipped.length > 0) setError(skipMessage(skipped[0]));
     const incoming: ComposerImageItem[] = [];
-    for (const source of paths) {
+    for (const source of accepted) {
       try {
         const path = await stageComposerImageFromPath(source);
         incoming.push({
@@ -568,7 +585,7 @@ export function Composer({ compact = false }: { compact?: boolean }) {
       if (isTauri()) {
         const selected = await open({
           multiple: true,
-          filters: IMAGE_DIALOG_FILTERS,
+          filters: COMPOSER_DIALOG_FILTERS,
         });
         const paths = selected == null ? [] : Array.isArray(selected) ? selected : [selected];
         if (paths.length > 0) await addImagePaths(paths);
@@ -778,6 +795,10 @@ export function Composer({ compact = false }: { compact?: boolean }) {
 
   const sendSteer = async () => {
     if (sendingRef.current || sending || steer.busy || applyingConfig) return;
+    if (mediaWarning) {
+      fail(mediaWarning);
+      return;
+    }
     const submitted = {
       sessionId: selectedSessionId,
       text: draft,
@@ -889,8 +910,8 @@ export function Composer({ compact = false }: { compact?: boolean }) {
     }
 
     if (working && live) {
-      if (attachments.length) {
-        fail("运行中追加指令暂不支持附件");
+      if (mediaWarning) {
+        fail(mediaWarning);
         return;
       }
       setSending(true);
@@ -898,11 +919,17 @@ export function Composer({ compact = false }: { compact?: boolean }) {
       setError(null);
       setInfo(null);
       try {
-        useSessionStore
-          .getState()
-          .onInputQueue(await sendNativeInput(live.session_record_id, nextPrompt));
+        useSessionStore.getState().onInputQueue(
+          await sendNativeInput(
+            live.session_record_id,
+            nextPrompt,
+            attachments.map((item) => item.path),
+          ),
+        );
+        attachmentsRef.current = [];
         setDraft("");
         setPills(initialComposerPills());
+        setAttachments([]);
       } catch (reason) {
         fail(String(reason));
       } finally {
@@ -914,6 +941,10 @@ export function Composer({ compact = false }: { compact?: boolean }) {
     if (sendBusy) return;
     if (!effectiveChannelId || !model) {
       fail(t("sessions:needChannel"));
+      return;
+    }
+    if (mediaWarning) {
+      fail(mediaWarning);
       return;
     }
     setError(null);
@@ -1117,7 +1148,7 @@ export function Composer({ compact = false }: { compact?: boolean }) {
         <input
           ref={fileInputRef}
           type="file"
-          accept="image/png,image/jpeg,image/gif,image/webp"
+          accept={COMPOSER_FILE_ACCEPT}
           multiple
           className="hidden"
           onChange={(event) => {
@@ -1126,6 +1157,11 @@ export function Composer({ compact = false }: { compact?: boolean }) {
             if (files.length > 0) void addImageFiles(files);
           }}
         />
+        {mediaWarning ? (
+          <p className="px-3 pt-2 text-xs text-destructive" role="alert">
+            {mediaWarning}
+          </p>
+        ) : null}
         <ComposerImageStrip
           images={attachments}
           onToggle={(id) => setAttachments((items) => toggleComposerImageSelected(items, id))}

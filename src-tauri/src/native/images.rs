@@ -42,23 +42,37 @@ pub fn load_native_images(paths: Option<&[String]>) -> NativeImageLoad {
             .file_name()
             .map(|value| value.to_string_lossy().into_owned())
             .unwrap_or_else(|| trimmed.to_string());
+        if !is_allowed_media_path(path) {
+            loaded.skipped.push(format!("{name}（不支持的附件类型）"));
+            continue;
+        }
         if loaded.images.len() >= MAX_NATIVE_IMAGES {
             loaded
                 .skipped
                 .push(format!("{name}（最多 {MAX_NATIVE_IMAGES} 张）"));
             continue;
         }
+        let limit = media_byte_limit(path);
         let size = fs::metadata(path).map(|meta| meta.len()).unwrap_or(0);
-        if size > MAX_NATIVE_IMAGE_BYTES {
-            loaded.skipped.push(format!("{name}（超过 8MB）"));
+        if size > limit {
+            loaded.skipped.push(format!("{name}（超过上限）"));
             continue;
         }
         match fs::read(path) {
             Ok(bytes) => {
+                if text_mime(image_extension(path).as_deref()).is_some()
+                    && std::str::from_utf8(&bytes).is_err()
+                {
+                    loaded.skipped.push(format!("{name}（不是 UTF-8 文本）"));
+                    continue;
+                }
                 loaded.images.push(NativeImage {
                     name,
-                    mime_type: image_mime_type(path).to_string(),
+                    mime_type: media_mime(path).to_string(),
                     data_base64: BASE64.encode(bytes),
+                    attachment_id: attachment_id_of(path),
+                    page: None,
+                    time_range: None,
                 });
                 loaded.loaded_paths.push(trimmed.to_string());
             }
@@ -88,34 +102,41 @@ pub fn load_steer_images(paths: &[String]) -> Result<NativeImageLoad, String> {
     let mut loaded = NativeImageLoad::default();
     for raw in unique {
         let path = Path::new(raw);
-        if !is_allowed_image_path(path) {
-            return Err(format!("不支持的图片类型：{raw}"));
+        if !is_allowed_media_path(path) {
+            return Err(format!("不支持的附件类型：{raw}"));
         }
         let metadata =
             fs::metadata(path).map_err(|error| format!("无法读取图片 {raw}：{error}"))?;
         if !metadata.is_file() || metadata.len() == 0 {
             return Err(format!("图片不是有效的非空文件：{raw}"));
         }
-        if metadata.len() > MAX_NATIVE_IMAGE_BYTES {
-            return Err(format!("图片超过 8MB：{raw}"));
+        let limit = media_byte_limit(path);
+        if metadata.len() > limit {
+            return Err(format!("附件超过大小上限：{raw}"));
         }
         let file = fs::File::open(path).map_err(|error| format!("无法读取图片 {raw}：{error}"))?;
         let mut bytes = Vec::new();
         // Metadata may change between inspection and reading. Bound the actual
         // read as well, so a growing file cannot bypass the attachment limit.
-        file.take(MAX_NATIVE_IMAGE_BYTES + 1)
+        file.take(limit + 1)
             .read_to_end(&mut bytes)
-            .map_err(|error| format!("读取图片失败 {raw}：{error}"))?;
-        if bytes.is_empty() || bytes.len() as u64 > MAX_NATIVE_IMAGE_BYTES {
-            return Err(format!("图片为空或超过 8MB：{raw}"));
+            .map_err(|error| format!("读取附件失败 {raw}：{error}"))?;
+        if bytes.is_empty() || bytes.len() as u64 > limit {
+            return Err(format!("附件为空或超过大小上限：{raw}"));
+        }
+        if !media_bytes_match_extension(path, &bytes) {
+            return Err(format!("附件内容与类型不符：{raw}"));
         }
         loaded.images.push(NativeImage {
             name: path
                 .file_name()
                 .map(|name| name.to_string_lossy().into_owned())
                 .unwrap_or_else(|| raw.to_string()),
-            mime_type: image_mime_type(path).to_string(),
+            mime_type: media_mime(path).to_string(),
             data_base64: BASE64.encode(bytes),
+            attachment_id: attachment_id_of(path),
+            page: None,
+            time_range: None,
         });
         loaded.loaded_paths.push(raw.to_string());
     }
@@ -144,11 +165,79 @@ pub fn image_log_lines(loaded: &NativeImageLoad) -> Vec<String> {
 }
 
 fn image_mime_type(path: &Path) -> &'static str {
-    match image_extension(path).as_deref() {
+    media_mime(path)
+}
+
+fn text_mime(extension: Option<&str>) -> Option<&'static str> {
+    match extension? {
+        "html" | "htm" => Some("text/html"),
+        "json" => Some("application/json"),
+        "xml" => Some("application/xml"),
+        "txt" | "md" | "markdown" | "csv" | "css" | "js" | "jsx" | "mjs" | "cjs" | "ts" | "tsx"
+        | "py" | "rs" | "go" | "java" | "kt" | "c" | "h" | "cc" | "cpp" | "hpp" | "cs" | "rb"
+        | "php" | "sh" | "bash" | "zsh" | "yml" | "yaml" | "toml" | "sql" | "log" | "vue"
+        | "svelte" => Some("text/plain"),
+        _ => None,
+    }
+}
+
+fn media_mime(path: &Path) -> &'static str {
+    let extension = image_extension(path);
+    if let Some(mime) = crate::native::office_text::office_mime(extension.as_deref()) {
+        return mime;
+    }
+    if let Some(mime) = text_mime(extension.as_deref()) {
+        return mime;
+    }
+    match extension.as_deref() {
         Some("jpg") | Some("jpeg") => "image/jpeg",
         Some("webp") => "image/webp",
         Some("gif") => "image/gif",
+        Some("pdf") => "application/pdf",
+        Some("mp4") => "video/mp4",
         _ => "image/png",
+    }
+}
+
+fn media_byte_limit(path: &Path) -> u64 {
+    let extension = image_extension(path);
+    if crate::native::office_text::office_mime(extension.as_deref()).is_some() {
+        return 32 * 1024 * 1024;
+    }
+    if text_mime(extension.as_deref()).is_some() {
+        return 1024 * 1024;
+    }
+    match image_extension(path).as_deref() {
+        Some("pdf") => 32 * 1024 * 1024,
+        Some("mp4") => 6 * 1024 * 1024,
+        _ => MAX_NATIVE_IMAGE_BYTES,
+    }
+}
+
+fn attachment_id_of(path: &Path) -> String {
+    let Some(parent) = path.parent() else {
+        return String::new();
+    };
+    let Some(objects) = parent.parent() else {
+        return String::new();
+    };
+    if objects.file_name().and_then(|name| name.to_str()) != Some("objects") {
+        return String::new();
+    }
+    path.file_stem()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_default()
+}
+
+fn media_bytes_match_extension(path: &Path, bytes: &[u8]) -> bool {
+    match image_extension(path).as_deref() {
+        Some("pdf") => bytes.starts_with(b"%PDF-"),
+        Some("mp4") => bytes.len() >= 12 && &bytes[4..8] == b"ftyp",
+        Some(ext) if crate::native::office_text::office_mime(Some(ext)).is_some() => {
+            crate::native::office_text::office_bytes_match(Some(ext), bytes)
+        }
+        Some(ext) if text_mime(Some(ext)).is_some() => std::str::from_utf8(bytes).is_ok(),
+        _ => true,
     }
 }
 
@@ -158,11 +247,18 @@ fn image_extension(path: &Path) -> Option<String> {
         .map(|ext| ext.to_ascii_lowercase())
 }
 
+fn is_allowed_media_path(path: &Path) -> bool {
+    let extension = image_extension(path);
+    text_mime(extension.as_deref()).is_some()
+        || crate::native::office_text::office_mime(extension.as_deref()).is_some()
+        || matches!(
+            extension.as_deref(),
+            Some("png" | "jpg" | "jpeg" | "gif" | "webp" | "pdf" | "mp4")
+        )
+}
+
 fn is_allowed_image_path(path: &Path) -> bool {
-    matches!(
-        image_extension(path).as_deref(),
-        Some("png" | "jpg" | "jpeg" | "gif" | "webp")
-    )
+    is_allowed_media_path(path)
 }
 
 pub fn attachments_dir(app_config_dir: &Path) -> PathBuf {
@@ -202,8 +298,20 @@ pub fn stage_image_bytes(
     name: &str,
     bytes: &[u8],
 ) -> Result<PathBuf, String> {
-    if bytes.len() as u64 > MAX_NATIVE_IMAGE_BYTES {
-        return Err(format!("{}（超过 8MB）", sanitize_attachment_name(name)));
+    let limit = media_byte_limit(Path::new(name));
+    if bytes.len() as u64 > limit {
+        return Err(format!(
+            "{}（超过大小上限）",
+            sanitize_attachment_name(name)
+        ));
+    }
+    if text_mime(image_extension(Path::new(name)).as_deref()).is_some()
+        && std::str::from_utf8(bytes).is_err()
+    {
+        return Err(format!(
+            "{} 不是 UTF-8 文本",
+            sanitize_attachment_name(name)
+        ));
     }
     let dir = attachments_dir(app_config_dir);
     fs::create_dir_all(&dir).map_err(|error| format!("无法创建附件目录: {error}"))?;
@@ -215,17 +323,90 @@ pub fn stage_image_bytes(
 
 pub fn stage_image_from_path(app_config_dir: &Path, source: &Path) -> Result<PathBuf, String> {
     if !source.is_file() {
-        return Err(format!("图片不存在: {}", source.display()));
+        return Err(format!("附件不存在: {}", source.display()));
     }
     if !is_allowed_image_path(source) {
-        return Err(format!("不支持的图片类型: {}", source.display()));
+        return Err(format!("不支持的附件类型: {}", source.display()));
     }
     let name = source
         .file_name()
         .map(|value| value.to_string_lossy().into_owned())
         .unwrap_or_else(|| "image.png".to_string());
-    let bytes = fs::read(source).map_err(|error| format!("读取图片失败: {error}"))?;
+    let bytes = fs::read(source).map_err(|error| format!("读取附件失败: {error}"))?;
     stage_image_bytes(app_config_dir, &name, &bytes)
+}
+
+pub async fn remember_loaded_media(
+    pool: &sqlx::SqlitePool,
+    root: &Path,
+    loaded: &mut NativeImageLoad,
+) -> Result<(), String> {
+    let service = crate::native::attachments::AttachmentService::new(
+        root.to_path_buf(),
+        pool.clone(),
+        "composer",
+    );
+    for image in &mut loaded.images {
+        if !image.attachment_id.is_empty() {
+            continue;
+        }
+        let bytes = BASE64
+            .decode(image.data_base64.trim())
+            .map_err(|_| format!("附件数据无效: {}", image.name))?;
+        let stored = service
+            .import_bytes(&image.name, &bytes, "composer")
+            .await
+            .map_err(|error| error.to_string())?;
+        image.attachment_id = stored.id;
+    }
+    Ok(())
+}
+
+pub async fn hydrate_message_media(
+    pool: &sqlx::SqlitePool,
+    root: &Path,
+    messages: &mut [crate::native::model::types::Message],
+) -> Result<(), String> {
+    let service = crate::native::attachments::AttachmentService::new(
+        root.to_path_buf(),
+        pool.clone(),
+        "composer",
+    );
+    for message in messages {
+        if message.media.is_empty() || !message.images.is_empty() {
+            continue;
+        }
+        for item in &message.media {
+            let described = match service.describe(item.attachment_id()).await {
+                Ok(described) => described,
+                Err(error) => {
+                    message
+                        .content
+                        .push_str(&format!("\n[附件缺失] {} {error}", item.attachment_id()));
+                    continue;
+                }
+            };
+            let bytes = match service.read_bytes(item.attachment_id()).await {
+                Ok(bytes) => bytes,
+                Err(error) => {
+                    message.content.push_str(&format!(
+                        "\n[附件缺失] {} {} {error}",
+                        described.id, described.original_name
+                    ));
+                    continue;
+                }
+            };
+            message.images.push(NativeImage {
+                name: described.original_name,
+                mime_type: described.mime,
+                data_base64: BASE64.encode(bytes),
+                attachment_id: described.id,
+                page: None,
+                time_range: None,
+            });
+        }
+    }
+    Ok(())
 }
 
 pub fn cleanup_staged_loaded_images(loaded: &NativeImageLoad) {
@@ -271,9 +452,48 @@ pub fn stage_composer_image(
     let dir = app_config_dir(&app)?;
     let bytes = BASE64
         .decode(data_base64.trim())
-        .map_err(|_| "图片数据无效".to_string())?;
+        .map_err(|_| "附件数据无效".to_string())?;
     let path = stage_image_bytes(&dir, &name, &bytes)?;
     Ok(path.to_string_lossy().into_owned())
+}
+
+#[tauri::command]
+pub fn extract_attachment_text(
+    name: String,
+    data_base64: String,
+) -> Result<crate::native::office_text::OfficePreview, String> {
+    if data_base64.len() > 32 * 1024 * 1024 * 4 / 3 + 16 {
+        return Err("附件超过大小上限".to_string());
+    }
+    let bytes = BASE64
+        .decode(data_base64.trim())
+        .map_err(|_| "附件数据无效".to_string())?;
+    if bytes.len() as u64 > 32 * 1024 * 1024 {
+        return Err("附件超过大小上限".to_string());
+    }
+    crate::native::office_text::preview_office(&name, &bytes)
+}
+
+#[tauri::command]
+pub fn extract_staged_attachment_text(
+    app: AppHandle,
+    path: String,
+) -> Result<crate::native::office_text::OfficePreview, String> {
+    let root = attachments_dir(&app_config_dir(&app)?)
+        .canonicalize()
+        .map_err(|error| format!("无法读取附件目录: {error}"))?;
+    let candidate = Path::new(path.trim())
+        .canonicalize()
+        .map_err(|_| "附件不存在".to_string())?;
+    if !candidate.starts_with(&root) {
+        return Err("只能预览已添加的附件".to_string());
+    }
+    let bytes = fs::read(&candidate).map_err(|error| format!("读取附件失败: {error}"))?;
+    let name = candidate
+        .file_name()
+        .map(|value| value.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    crate::native::office_text::preview_office(&name, &bytes)
 }
 
 #[tauri::command]
@@ -374,11 +594,32 @@ mod tests {
     }
 
     #[test]
+    fn stages_utf8_html_and_skips_other_files() {
+        let root = tempfile::tempdir().unwrap();
+        let html = root.path().join("qwen3.8-27b-Test2.html");
+        fs::write(&html, "<h1>你好</h1>").unwrap();
+        let staged = stage_image_from_path(root.path(), &html).unwrap();
+        let loaded = load_native_images(Some(&[staged.to_string_lossy().into_owned()]));
+        assert_eq!(loaded.images.len(), 1);
+        assert_eq!(loaded.images[0].mime_type, "text/html");
+        assert!(loaded.skipped.is_empty());
+        let bin = root.path().join("tool.bin");
+        fs::write(&bin, [0, 1]).unwrap();
+        let skipped = load_native_images(Some(&[bin.to_string_lossy().into_owned()]));
+        assert!(skipped.images.is_empty());
+        assert!(skipped.skipped[0].contains("不支持的附件类型"));
+        assert!(stage_image_bytes(root.path(), "bad.html", &[0xff, 0xfe]).is_err());
+    }
+
+    #[test]
     fn data_url_uses_mime_and_payload() {
         let image = NativeImage {
             name: "a.png".to_string(),
             mime_type: "image/png".to_string(),
             data_base64: "QQ==".to_string(),
+            attachment_id: String::new(),
+            page: None,
+            time_range: None,
         };
         assert_eq!(image.data_url(), "data:image/png;base64,QQ==");
     }

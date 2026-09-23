@@ -624,6 +624,86 @@ pub fn get_all_migrations() -> Vec<Migration> {
             "#,
             kind: tauri_plugin_sql::MigrationKind::Up,
         },
+        Migration {
+            version: 19,
+            description: "native attachments, refs, leases, and durable inputs",
+            sql: r#"
+                CREATE TABLE native_attachments (
+                    id TEXT PRIMARY KEY,
+                    relative_path TEXT NOT NULL,
+                    sha256 TEXT NOT NULL,
+                    byte_count INTEGER NOT NULL,
+                    mime TEXT NOT NULL,
+                    media_type TEXT NOT NULL,
+                    original_name TEXT NOT NULL,
+                    source_kind TEXT NOT NULL,
+                    metadata_json TEXT NOT NULL DEFAULT '{}',
+                    parent_attachment_id TEXT,
+                    variant_key TEXT,
+                    processor_version TEXT,
+                    status TEXT NOT NULL,
+                    file_status TEXT NOT NULL DEFAULT 'available',
+                    import_id TEXT,
+                    unreferenced_at TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+                CREATE UNIQUE INDEX idx_native_attachments_import
+                    ON native_attachments(import_id) WHERE import_id IS NOT NULL;
+                CREATE INDEX idx_native_attachments_status
+                    ON native_attachments(status, unreferenced_at);
+
+                CREATE TABLE native_attachment_refs (
+                    id TEXT PRIMARY KEY,
+                    attachment_id TEXT NOT NULL,
+                    owner_type TEXT NOT NULL,
+                    owner_id TEXT NOT NULL,
+                    position INTEGER NOT NULL,
+                    use_json TEXT NOT NULL,
+                    created_at TEXT NOT NULL
+                );
+                CREATE UNIQUE INDEX idx_native_attachment_refs_owner_pos
+                    ON native_attachment_refs(owner_type, owner_id, position);
+                CREATE INDEX idx_native_attachment_refs_attachment
+                    ON native_attachment_refs(attachment_id);
+
+                CREATE TABLE native_attachment_leases (
+                    id TEXT PRIMARY KEY,
+                    attachment_id TEXT NOT NULL,
+                    holder_kind TEXT NOT NULL,
+                    holder_id TEXT NOT NULL,
+                    instance_id TEXT NOT NULL,
+                    context_json TEXT NOT NULL DEFAULT '{}',
+                    expires_at TEXT,
+                    created_at TEXT NOT NULL
+                );
+                CREATE UNIQUE INDEX idx_native_attachment_leases_holder
+                    ON native_attachment_leases(holder_kind, holder_id, attachment_id);
+                CREATE INDEX idx_native_attachment_leases_attachment
+                    ON native_attachment_leases(attachment_id);
+
+                CREATE TABLE native_input_submissions (
+                    id TEXT PRIMARY KEY,
+                    session_record_id TEXT NOT NULL,
+                    branch_id TEXT,
+                    turn_id TEXT,
+                    mode TEXT NOT NULL,
+                    text TEXT NOT NULL,
+                    payload_hash TEXT NOT NULL,
+                    revision INTEGER NOT NULL,
+                    status TEXT NOT NULL,
+                    queue_position INTEGER,
+                    applied_message_id TEXT,
+                    prepare_json TEXT,
+                    error_code TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+                CREATE INDEX idx_native_input_submissions_session
+                    ON native_input_submissions(session_record_id, status, queue_position);
+            "#,
+            kind: tauri_plugin_sql::MigrationKind::Up,
+        },
     ]
 }
 
@@ -692,7 +772,7 @@ mod tests {
         for (index, migration) in get_all_migrations().iter().enumerate() {
             assert_eq!(migration.version, index as i64 + 1);
         }
-        assert_eq!(latest_migration_version(), 18);
+        assert_eq!(latest_migration_version(), 19);
         assert_eq!(
             get_all_migrations()
                 .last()
@@ -812,6 +892,9 @@ mod tests {
                     "ai_channels",
                     "git_checkpoints",
                     "native_api_call_logs",
+                    "native_attachment_leases",
+                    "native_attachment_refs",
+                    "native_attachments",
                     "native_automations",
                     "native_context_anchors",
                     "native_file_revisions",
@@ -822,6 +905,7 @@ mod tests {
                     "native_history_links",
                     "native_history_messages",
                     "native_history_requests",
+                    "native_input_submissions",
                     "native_model_attempt_budgets",
                     "native_session_transcripts",
                     "native_tool_artifacts",

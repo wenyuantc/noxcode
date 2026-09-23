@@ -13,10 +13,10 @@ pub fn build_openai_body(
     max_output_tokens: Option<u32>,
     thinking_enabled: bool,
     stream: bool,
-) -> Value {
+) -> Result<Value, String> {
     let mut body = json!({
         "model": model,
-        "messages": openai_messages(messages),
+        "messages": openai_messages(messages, model)?,
         "stream": stream,
     });
     if stream {
@@ -44,7 +44,12 @@ pub fn build_openai_body(
             body["reasoning_effort"] = json!(level);
         }
     }
-    body
+    crate::native::media_plan::preflight_message_media(
+        crate::native::protocol::PROTOCOL_OPENAI,
+        model,
+        messages,
+    )?;
+    Ok(body)
 }
 
 pub fn model_uses_thinking_toggle(model: &str) -> bool {
@@ -52,7 +57,7 @@ pub fn model_uses_thinking_toggle(model: &str) -> bool {
     id.contains("deepseek")
 }
 
-pub fn openai_messages(messages: &[Message]) -> Vec<Value> {
+pub fn openai_messages(messages: &[Message], model: &str) -> Result<Vec<Value>, String> {
     messages
         .iter()
         .map(|message| match message.role {
@@ -81,7 +86,7 @@ pub fn openai_messages(messages: &[Message]) -> Vec<Value> {
                 if need_content {
                     item["content"] = json!(message.content);
                 }
-                item
+                Ok(item)
             }
             Role::Tool => {
                 let mut item = json!({
@@ -92,29 +97,39 @@ pub fn openai_messages(messages: &[Message]) -> Vec<Value> {
                 if !message.name.is_empty() {
                     item["name"] = json!(message.name);
                 }
-                item
+                Ok(item)
             }
-            Role::System => json!({"role": "system", "content": message.content}),
-            Role::User => json!({
+            Role::System => Ok(json!({"role": "system", "content": message.content})),
+            Role::User => Ok(json!({
                 "role": "user",
-                "content": openai_user_content(message),
-            }),
+                "content": openai_user_content(message, model)?,
+            })),
         })
         .collect()
 }
 
-fn openai_user_content(message: &Message) -> Value {
+fn openai_user_content(message: &Message, model: &str) -> Result<Value, String> {
     if message.images.is_empty() {
-        return json!(message.content);
+        return Ok(json!(message.content));
     }
     let mut parts = vec![json!({"type": "text", "text": message.content})];
     for image in &message.images {
-        parts.push(json!({
-            "type": "image_url",
-            "image_url": {"url": image.data_url()},
-        }));
+        if image.mime_type.starts_with("image/") {
+            parts.push(json!({
+                "type": "image_url",
+                "image_url": {"url": image.data_url()},
+            }));
+        } else {
+            parts.push(crate::native::media_plan::binary_part(
+                crate::native::protocol::PROTOCOL_OPENAI,
+                model,
+                &image.name,
+                &image.mime_type,
+                &image.data_base64,
+            )?);
+        }
     }
-    json!(parts)
+    Ok(json!(parts))
 }
 
 pub fn openai_tools(tools: &[ToolSpec]) -> Vec<Value> {
@@ -558,6 +573,7 @@ mod tests {
                 name: String::new(),
                 reasoning_content: String::new(),
                 images: Vec::new(),
+                media: Vec::new(),
                 history_id: String::new(),
             },
             Message::tool_result("call_1", "fn main() {}"),
@@ -570,7 +586,8 @@ mod tests {
             Some(16384),
             true,
             true,
-        );
+        )
+        .unwrap();
         let wire = body["messages"].as_array().expect("messages");
         assert_eq!(wire[1]["tool_calls"][0]["id"], "call_1");
         assert_eq!(wire[2]["role"], "tool");
@@ -589,15 +606,17 @@ mod tests {
             Some(8192),
             true,
             true,
-        );
+        )
+        .unwrap();
         assert_eq!(on["thinking"]["type"], "enabled");
         assert_eq!(on["reasoning_effort"], "max");
 
-        let off = build_openai_body(&[], &[], "deepseek-v4-pro", None, Some(8192), false, false);
+        let off =
+            build_openai_body(&[], &[], "deepseek-v4-pro", None, Some(8192), false, false).unwrap();
         assert_eq!(off["thinking"]["type"], "disabled");
         assert!(off.get("reasoning_effort").is_none());
 
-        let gpt = build_openai_body(&[], &[], "gpt-4o", None, None, false, false);
+        let gpt = build_openai_body(&[], &[], "gpt-4o", None, None, false, false).unwrap();
         assert!(gpt.get("thinking").is_none());
     }
 
@@ -626,12 +645,59 @@ mod tests {
             name: "a.png".to_string(),
             mime_type: "image/png".to_string(),
             data_base64: "QQ==".to_string(),
+            attachment_id: String::new(),
+            page: None,
+            time_range: None,
         });
-        let body = build_openai_body(&[user], &[], "gpt-4o", None, None, false, false);
+        let body = build_openai_body(&[user], &[], "gpt-4o", None, None, false, false).unwrap();
         let content = body["messages"][0]["content"].as_array().expect("parts");
         assert_eq!(content[0]["type"], "text");
         assert_eq!(content[1]["type"], "image_url");
         assert_eq!(content[1]["image_url"]["url"], "data:image/png;base64,QQ==");
+    }
+
+    #[test]
+    fn tc_pdf_008_page_images_use_the_image_path_for_vision_models() {
+        let images = crate::native::pdf_doc::native_images_for_pages(vec![
+            crate::native::pdf_doc::PageImage {
+                page: 2,
+                png: b"\x89PNG\r\n\x1a\n".to_vec(),
+            },
+        ]);
+        let mut user = Message::user("看这一页");
+        user.images = images;
+        let body = build_openai_body(&[user], &[], "gpt-4o", None, None, false, false).unwrap();
+        let content = body["messages"][0]["content"].as_array().unwrap();
+        assert_eq!(content[1]["type"], "image_url");
+        let url = content[1]["image_url"]["url"].as_str().unwrap();
+        assert!(url.starts_with("data:image/png;base64,"));
+        assert!(!url.contains("application/pdf"));
+    }
+
+    #[test]
+    fn tc_vid_002_video_reaches_kimi_and_is_rejected_for_text_models() {
+        let mut user = Message::user("watch");
+        user.images.push(crate::native::model::types::NativeImage {
+            name: "clip.mp4".to_string(),
+            mime_type: "video/mp4".to_string(),
+            data_base64: base64::Engine::encode(
+                &base64::engine::general_purpose::STANDARD,
+                b"1234",
+            ),
+            attachment_id: String::new(),
+            page: None,
+            time_range: None,
+        });
+        let err = build_openai_body(&[user.clone()], &[], "gpt-4o", None, None, false, false)
+            .unwrap_err();
+        assert!(err.starts_with("video_unsupported"));
+        let body = build_openai_body(&[user], &[], "kimi-k2.6", None, None, false, false).unwrap();
+        let part = &body["messages"][0]["content"][1];
+        assert_eq!(part["type"], "video_url");
+        assert!(part["video_url"]["url"]
+            .as_str()
+            .unwrap()
+            .starts_with("data:video/mp4;base64,"));
     }
 
     #[test]

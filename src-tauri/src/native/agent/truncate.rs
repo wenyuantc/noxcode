@@ -741,6 +741,7 @@ mod tests {
                 name: String::new(),
                 reasoning_content: String::new(),
                 images: Vec::new(),
+                media: Vec::new(),
                 history_id: String::new(),
             },
             Message::tool_result("call_1", "result"),
@@ -784,6 +785,7 @@ mod tests {
                 name: String::new(),
                 reasoning_content: String::new(),
                 images: Vec::new(),
+                media: Vec::new(),
                 history_id: String::new(),
             },
         ];
@@ -809,6 +811,9 @@ mod tests {
             name: "shot.png".to_string(),
             mime_type: "image/png".to_string(),
             data_base64: "A".repeat(1_400_000),
+            attachment_id: String::new(),
+            page: None,
+            time_range: None,
         });
         assert!(message_tokens(&message) < 5_000);
     }
@@ -820,6 +825,9 @@ mod tests {
             name: "shot.png".to_string(),
             mime_type: "image/png".to_string(),
             data_base64: "A".repeat(100_000),
+            attachment_id: String::new(),
+            page: None,
+            time_range: None,
         });
         let mut messages = vec![Message::system("sys"), message];
         truncate_messages_tokens(&mut messages, 128_000, 80);

@@ -1546,9 +1546,16 @@ async fn enqueue_live_input(
     session_record_id: &str,
     input: &str,
     image_paths: Option<&[String]>,
+    attachment_pool: Option<&sqlx::SqlitePool>,
+    attachment_root: Option<&std::path::Path>,
 ) -> Result<Option<(NativeSessionInfo, NativeInputQueueSnapshot)>, String> {
     let trimmed = input.trim();
-    let loaded = crate::native::images::load_native_images(image_paths);
+    let mut loaded = crate::native::images::load_native_images(image_paths);
+    if !loaded.images.is_empty() {
+        if let (Some(pool), Some(root)) = (attachment_pool, attachment_root) {
+            crate::native::images::remember_loaded_media(pool, root, &mut loaded).await?;
+        }
+    }
     crate::native::images::cleanup_staged_loaded_images(&loaded);
     if trimmed.is_empty() && loaded.images.is_empty() {
         return Err("输入内容不能为空".to_string());
@@ -2076,11 +2083,17 @@ async fn start_native_session_locked(
                 None
             }
         };
+        let attachment_root = app
+            .path()
+            .app_config_dir()
+            .map_err(|error| format!("无法读取应用配置目录: {error}"))?;
         if let Some((info, queue)) = enqueue_live_input(
             manager_state.as_ref(),
             resume_id,
             &payload.prompt,
             payload.image_paths.as_deref(),
+            Some(&pool),
+            Some(&attachment_root),
         )
         .await?
         {
@@ -3446,7 +3459,15 @@ async fn run_native_loop(
     {
         if let Ok(pool) = sqlite_pool(&app).await {
             match load_transcript(&pool, resume_id).await {
-                Ok(Some(history)) => {
+                Ok(Some(mut history)) => {
+                    if let Ok(dir) = app.path().app_config_dir() {
+                        let _ = crate::native::images::hydrate_message_media(
+                            &pool,
+                            &dir.join(crate::native::images::ATTACHMENTS_DIR_NAME),
+                            &mut history,
+                        )
+                        .await;
+                    }
                     runner.messages.extend(history);
                     // 恢复到更小窗口的模型（或历史本就很长）时，第一次调用前按 downshift 压缩。
                     if runner.context_window.should_compact(&runner.messages) {
@@ -3620,7 +3641,15 @@ async fn run_native_loop(
         }
     });
 
-    let loaded_images = crate::native::images::load_native_images(image_paths.as_deref());
+    let mut loaded_images = crate::native::images::load_native_images(image_paths.as_deref());
+    if let (Ok(pool), Ok(dir)) = (sqlite_pool(&app).await, app.path().app_config_dir()) {
+        let _ = crate::native::images::remember_loaded_media(
+            &pool,
+            &dir.join(crate::native::images::ATTACHMENTS_DIR_NAME),
+            &mut loaded_images,
+        )
+        .await;
+    }
     crate::native::images::cleanup_staged_loaded_images(&loaded_images);
     for line in crate::native::images::image_log_lines(&loaded_images) {
         emit_native_line(
@@ -5721,14 +5750,27 @@ pub async fn send_native_input(
     state: State<'_, Arc<Mutex<NativeAgentManager>>>,
     session_record_id: String,
     input: String,
+    image_paths: Option<Vec<String>>,
 ) -> Result<NativeInputQueueSnapshot, String> {
     crate::app::lifecycle::require_running(&app)?;
     let _operation = lock_agent_session_operation(&state, &session_record_id).await;
-    require_unarchived_session_with(&sqlite_pool(&app).await?, &session_record_id).await?;
-    enqueue_live_input(state.inner().as_ref(), &session_record_id, &input, None)
-        .await?
-        .map(|(_, snapshot)| snapshot)
-        .ok_or_else(|| format!("会话 {session_record_id} 当前没有运行中的内置 Agent"))
+    let pool = sqlite_pool(&app).await?;
+    require_unarchived_session_with(&pool, &session_record_id).await?;
+    let attachment_root = app
+        .path()
+        .app_config_dir()
+        .map_err(|error| format!("无法读取应用配置目录: {error}"))?;
+    enqueue_live_input(
+        state.inner().as_ref(),
+        &session_record_id,
+        &input,
+        image_paths.as_deref(),
+        Some(&pool),
+        Some(&attachment_root),
+    )
+    .await?
+    .map(|(_, snapshot)| snapshot)
+    .ok_or_else(|| format!("会话 {session_record_id} 当前没有运行中的内置 Agent"))
 }
 
 #[tauri::command]
@@ -6602,7 +6644,7 @@ mod tests {
         closing_rx.await.unwrap();
         assert!(!finished.load(Ordering::SeqCst));
         assert!(
-            super::enqueue_live_input(&manager, "finish-test", "race", None)
+            super::enqueue_live_input(&manager, "finish-test", "race", None, None, None)
                 .await
                 .is_err()
         );
@@ -6966,10 +7008,11 @@ mod tests {
         });
         let manager = tokio::sync::Mutex::new(manager);
 
-        let (info, snapshot) = super::enqueue_live_input(&manager, "sess-1", "  下一条  ", None)
-            .await
-            .expect("enqueue")
-            .expect("live");
+        let (info, snapshot) =
+            super::enqueue_live_input(&manager, "sess-1", "  下一条  ", None, None, None)
+                .await
+                .expect("enqueue")
+                .expect("live");
         assert_eq!(info.session_record_id, "sess-1");
         assert!(matches!(
             rx.try_recv(),
@@ -6989,10 +7032,12 @@ mod tests {
             .unwrap();
         assert_eq!(item.text, "下一条");
         assert!(item.images.is_empty());
-        assert!(super::enqueue_live_input(&manager, "missing", "x", None)
-            .await
-            .expect("missing")
-            .is_none());
+        assert!(
+            super::enqueue_live_input(&manager, "missing", "x", None, None, None)
+                .await
+                .expect("missing")
+                .is_none()
+        );
     }
 
     #[tokio::test]
@@ -7045,10 +7090,17 @@ mod tests {
         });
         let manager = tokio::sync::Mutex::new(manager);
         let paths = [path.to_string_lossy().into_owned()];
-        super::enqueue_live_input(&manager, "sess-1", "   ", Some(paths.as_slice()))
-            .await
-            .expect("enqueue")
-            .expect("live");
+        super::enqueue_live_input(
+            &manager,
+            "sess-1",
+            "   ",
+            Some(paths.as_slice()),
+            None,
+            None,
+        )
+        .await
+        .expect("enqueue")
+        .expect("live");
         assert!(matches!(
             rx.try_recv(),
             Err(tokio::sync::mpsc::error::TryRecvError::Empty)

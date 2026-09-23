@@ -4,9 +4,9 @@ import { useTranslation } from "react-i18next";
 
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
-import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog";
 import type { ComposerImageItem } from "@/lib/composerImages";
 import { selectedComposerImageIds } from "@/lib/composerImages";
+import { AttachmentFace, AttachmentPreviewDialog } from "./AttachmentPreviewDialog";
 
 interface ComposerImageStripProps {
   images: ComposerImageItem[];
@@ -38,11 +38,7 @@ export function ComposerImageStrip({
             title={t("previewImage")}
             onClick={() => setPreviewId(image.id)}
           >
-            <img
-              src={image.previewUrl}
-              alt={t("composerImageAlt", { name: image.name })}
-              className="size-full object-cover"
-            />
+            <AttachmentFace name={image.name} source={image.previewUrl} />
           </button>
           <Checkbox
             checked={image.selected}
@@ -73,21 +69,15 @@ export function ComposerImageStrip({
           {t("removeSelectedImages")}
         </Button>
       ) : null}
-      <Dialog open={preview !== null} onOpenChange={(open) => !open && setPreviewId(null)}>
-        <DialogContent
-          showCloseButton
-          className="max-h-[90vh] max-w-4xl overflow-hidden bg-black/90 p-3 sm:max-w-4xl"
-        >
-          <DialogTitle className="sr-only">{preview?.name ?? t("previewImage")}</DialogTitle>
-          {preview ? (
-            <img
-              src={preview.previewUrl}
-              alt={t("composerImageAlt", { name: preview.name })}
-              className="max-h-[80vh] w-full rounded-lg object-contain"
-            />
-          ) : null}
-        </DialogContent>
-      </Dialog>
+      <AttachmentPreviewDialog
+        open={preview !== null}
+        name={preview?.name ?? ""}
+        source={preview?.previewUrl ?? ""}
+        filePath={preview?.path}
+        onOpenChange={(open) => {
+          if (!open) setPreviewId(null);
+        }}
+      />
     </div>
   );
 }

@@ -45,6 +45,7 @@ function sampleHealth(): AppHealthCheck {
     git_available: true,
     git_version: "2.43.0",
     checked_at: "2026-03-01T10:00:00Z",
+    media_notice: null,
   };
 }
 

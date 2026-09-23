@@ -806,13 +806,15 @@ fn core_tool_specs() -> Vec<ToolSpec> {
     vec![
         spec(
             "Read",
-            "Read a text file or image from the workspace or an allowed read root, including enabled skill directories in local sessions. Use absolute paths for external roots. For SQLite database contents use SQLiteQuery, not Read. Prefer this over cat in Bash.",
+            "Read a text file, image, PDF, or MP4 from the workspace or an allowed read root, including enabled skill directories in local sessions. PDF without a text layer fails instead of pretending the document was read. Use absolute paths for external roots. For SQLite database contents use SQLiteQuery, not Read. Prefer this over cat in Bash.",
             json!({
                 "type": "object",
                 "properties": {
                     "file_path": {"type": "string"},
                     "offset": {"type": "integer"},
-                    "limit": {"type": "integer"}
+                    "limit": {"type": "integer"},
+                    "pages": {"type": "array", "items": {"type": "integer"}, "description": "1-based PDF pages. Omit to read the whole document when it is within the page limit."},
+                    "mode": {"type": "string", "enum": ["text", "pages"], "description": "text extracts the text layer. pages requests page images and returns component_missing when the bundled Pdfium library is absent; it does not claim those pages were seen."}
                 },
                 "required": ["file_path"]
             }),
