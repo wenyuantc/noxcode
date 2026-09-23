@@ -25,7 +25,7 @@ pub fn build_anthropic_body(
     thinking_enabled: bool,
     stream: bool,
 ) -> Value {
-    let (system, wire_messages) = anthropic_messages(messages);
+    let (system, wire_messages) = anthropic_messages(messages, model);
     let requested = max_output_tokens.unwrap_or(8192).max(1);
     let mut max_tokens = requested;
     let mut body = json!({
@@ -115,7 +115,7 @@ pub fn anthropic_tools(tools: &[ToolSpec]) -> Vec<Value> {
         .collect()
 }
 
-pub fn anthropic_messages(messages: &[Message]) -> (String, Vec<Value>) {
+pub fn anthropic_messages(messages: &[Message], model: &str) -> (String, Vec<Value>) {
     let mut system = String::new();
     let mut wire = Vec::new();
     for message in messages {
@@ -128,7 +128,7 @@ pub fn anthropic_messages(messages: &[Message]) -> (String, Vec<Value>) {
             }
             Role::User => wire.push(json!({
                 "role": "user",
-                "content": anthropic_user_content(message),
+                "content": anthropic_user_content(message, model),
             })),
             Role::Assistant => {
                 let mut content = Vec::new();
@@ -167,20 +167,30 @@ pub fn anthropic_messages(messages: &[Message]) -> (String, Vec<Value>) {
     (system, wire)
 }
 
-fn anthropic_user_content(message: &Message) -> Value {
+fn anthropic_user_content(message: &Message, model: &str) -> Value {
     if message.images.is_empty() {
         return json!(message.content);
     }
     let mut parts = vec![json!({"type": "text", "text": message.content})];
     for image in &message.images {
-        parts.push(json!({
-            "type": "image",
-            "source": {
-                "type": "base64",
-                "media_type": image.mime_type,
-                "data": image.data_base64,
-            }
-        }));
+        if image.mime_type.starts_with("image/") {
+            parts.push(json!({
+                "type": "image",
+                "source": {
+                    "type": "base64",
+                    "media_type": image.mime_type,
+                    "data": image.data_base64,
+                }
+            }));
+        } else if let Ok(part) = crate::native::media_plan::binary_part(
+            crate::native::protocol::PROTOCOL_ANTHROPIC,
+            model,
+            &image.name,
+            &image.mime_type,
+            &image.data_base64,
+        ) {
+            parts.push(part);
+        }
     }
     json!(parts)
 }
@@ -530,6 +540,7 @@ mod tests {
                 name: String::new(),
                 reasoning_content: String::new(),
                 images: Vec::new(),
+                media: Vec::new(),
                 history_id: String::new(),
             },
             Message::tool_result("toolu_1", "ok"),
@@ -557,6 +568,9 @@ mod tests {
             name: "a.png".to_string(),
             mime_type: "image/png".to_string(),
             data_base64: "QQ==".to_string(),
+            attachment_id: String::new(),
+            page: None,
+            time_range: None,
         });
         let body = build_anthropic_body(
             &[user],

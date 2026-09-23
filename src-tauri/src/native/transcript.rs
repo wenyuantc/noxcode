@@ -124,6 +124,9 @@ mod tests {
                     name: "a.png".to_string(),
                     mime_type: "image/png".to_string(),
                     data_base64: "AAAA".to_string(),
+                    attachment_id: String::new(),
+                    page: None,
+                    time_range: None,
                 }],
             ),
             Message {
@@ -138,6 +141,7 @@ mod tests {
                 name: String::new(),
                 reasoning_content: String::new(),
                 images: Vec::new(),
+                media: Vec::new(),
                 history_id: String::new(),
             },
         ];
@@ -207,6 +211,7 @@ mod tests {
                 name: String::new(),
                 reasoning_content: String::new(),
                 images: Vec::new(),
+                media: Vec::new(),
                 history_id: String::new(),
             },
             Message::tool_result("call_1", "readme contents"),
@@ -241,6 +246,7 @@ mod tests {
                 name: String::new(),
                 reasoning_content: String::new(),
                 images: Vec::new(),
+                media: Vec::new(),
                 history_id: String::new(),
             },
         ];

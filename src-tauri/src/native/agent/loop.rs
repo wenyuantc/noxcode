@@ -1355,6 +1355,20 @@ impl AgentRunner {
 
     fn model_request_messages(&self) -> Vec<Message> {
         let mut messages = self.messages.clone();
+        let limits = crate::native::media_plan::budget_for_model(
+            self.model_turn
+                .as_ref()
+                .map(|cfg| cfg.model.as_str())
+                .unwrap_or(""),
+        );
+        let mut notices = crate::native::media_plan::shrink_message_images(&mut messages, &limits);
+        let (degraded, degraded_notices) =
+            crate::native::media_plan::degrade_history_media(messages, limits.max_request_bytes);
+        messages = degraded;
+        notices.extend(degraded_notices);
+        for notice in notices {
+            self.emit(&notice);
+        }
         if self.output_pending {
             messages.push(Message::system(OUTPUT_RECOVERY_REMINDER));
         }
@@ -3287,6 +3301,7 @@ pub fn assistant_tool_call(id: &str, name: &str, arguments: &str) -> Message {
         name: String::new(),
         reasoning_content: String::new(),
         images: Vec::new(),
+        media: Vec::new(),
         history_id: String::new(),
     }
 }
@@ -3496,6 +3511,7 @@ mod tests {
             name: String::new(),
             reasoning_content: String::new(),
             images: Vec::new(),
+            media: Vec::new(),
             history_id: String::new(),
         }
     }

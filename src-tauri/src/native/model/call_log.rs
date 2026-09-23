@@ -515,7 +515,16 @@ fn is_sensitive_key(key: &str) -> bool {
 fn is_image_payload_key(key: &str) -> bool {
     matches!(
         key.to_ascii_lowercase().as_str(),
-        "image_url" | "source" | "data_url" | "data" | "url" | "b64_json"
+        "image_url"
+            | "source"
+            | "data_url"
+            | "data"
+            | "url"
+            | "b64_json"
+            | "video_url"
+            | "file_data"
+            | "inlinedata"
+            | "inline_data"
     )
 }
 

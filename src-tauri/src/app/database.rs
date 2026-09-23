@@ -667,6 +667,9 @@ pub async fn health_check<R: Runtime>(app: AppHandle<R>) -> Result<AppHealthChec
         git_available,
         git_version,
         checked_at: now_sqlite(),
+        media_notice: crate::native::components::pdfium_startup_notice(
+            app.path().resource_dir().ok().as_deref(),
+        ),
     })
 }
 

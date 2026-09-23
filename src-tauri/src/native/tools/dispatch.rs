@@ -1941,6 +1941,33 @@ async fn load_patch_file(ctx: &ToolCtx, path: &str) -> Result<Option<String>, St
         .map_err(|error| format!("读取失败: {error}"))
 }
 
+fn is_pdf_path(path: &str) -> bool {
+    std::path::Path::new(path)
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("pdf"))
+}
+
+fn is_video_path(path: &str) -> bool {
+    std::path::Path::new(path)
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("mp4"))
+}
+
+fn read_media_bytes(path: &std::path::Path, max_bytes: u64) -> Result<Vec<u8>, String> {
+    use std::io::Read;
+    let file = std::fs::File::open(path).map_err(|error| format!("读取失败: {error}"))?;
+    let mut bytes = Vec::new();
+    file.take(max_bytes.saturating_add(1))
+        .read_to_end(&mut bytes)
+        .map_err(|error| format!("读取失败: {error}"))?;
+    if bytes.len() as u64 > max_bytes {
+        return Err("declared_size_exceeded: 附件超过读取上限".to_string());
+    }
+    Ok(bytes)
+}
+
 fn parse_args(arguments: &str) -> Result<Value, String> {
     if arguments.trim().is_empty() {
         return Ok(Value::Object(serde_json::Map::new()));
@@ -1953,6 +1980,87 @@ async fn call_read(ctx: &ToolCtx, arguments: &str) -> Result<ToolOutput, String>
     let path = string_arg(&args, "file_path")?;
     let offset = args.get("offset").and_then(Value::as_i64);
     let limit = args.get("limit").and_then(Value::as_i64);
+    if is_pdf_path(&path) {
+        let bytes = if let Some(ssh) = ctx.ssh_for_exec() {
+            ssh.read_bytes(&path, 32 * 1024 * 1024).await?
+        } else {
+            let resolved = ctx.workspace_for_read().resolve_for_read(&path)?;
+            read_media_bytes(&resolved, 32 * 1024 * 1024)?
+        };
+        let pages = args.get("pages").and_then(Value::as_array).map(|items| {
+            items
+                .iter()
+                .filter_map(Value::as_u64)
+                .map(|page| page as u32)
+                .collect::<Vec<_>>()
+        });
+        let mode = args.get("mode").and_then(Value::as_str).unwrap_or("text");
+        if mode == "pages" {
+            let temp = std::env::temp_dir().join(format!("nox-pdf-{}", uuid::Uuid::new_v4()));
+            let rendered = crate::native::pdf_doc::render_page_images(
+                &bytes,
+                pages.as_deref(),
+                &temp,
+                ctx.cancel.is_cancelled(),
+                false,
+            )
+            .map_err(|error| error.to_string())?;
+            let _ = std::fs::remove_dir_all(&temp);
+            let summary = rendered
+                .iter()
+                .map(|page| format!("第 {} 页", page.page))
+                .collect::<Vec<_>>()
+                .join("、");
+            return Ok(ToolOutput {
+                text: format!("PDF 页面图：{summary}"),
+                images: crate::native::pdf_doc::native_images_for_pages(rendered),
+                ok: true,
+            });
+        }
+        let report = crate::native::pdf_doc::read_pdf_text(&bytes, pages.as_deref())
+            .map_err(|error| error.to_string())?;
+        let mut text = format!("PDF 共 {} 页\n{}", report.page_count, report.text);
+        if !report.empty_pages.is_empty() {
+            text.push_str(&format!("\n空文本页: {:?}", report.empty_pages));
+        }
+        if report.truncated {
+            text.push_str("\n未完整读取");
+        }
+        return Ok(ToolOutput::text(text));
+    }
+    if is_video_path(&path) {
+        let bytes = if let Some(ssh) = ctx.ssh_for_exec() {
+            ssh.read_bytes(&path, 6 * 1024 * 1024).await?
+        } else {
+            let resolved = ctx.workspace_for_read().resolve_for_read(&path)?;
+            read_media_bytes(&resolved, 6 * 1024 * 1024)?
+        };
+        if bytes.len() < 12 || &bytes[4..8] != b"ftyp" {
+            return Err("video_invalid: 不是有效 MP4".to_string());
+        }
+        let name = std::path::Path::new(&path)
+            .file_name()
+            .map(|value| value.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "video.mp4".to_string());
+        return Ok(ToolOutput {
+            text: format!(
+                "[视频] {name}（{} 字节）已作为视频附件提供给模型。",
+                bytes.len()
+            ),
+            images: vec![crate::native::model::types::NativeImage {
+                name,
+                mime_type: "video/mp4".to_string(),
+                data_base64: base64::Engine::encode(
+                    &base64::engine::general_purpose::STANDARD,
+                    &bytes,
+                ),
+                attachment_id: String::new(),
+                page: None,
+                time_range: crate::native::media_plan::mp4_time_range(&bytes),
+            }],
+            ok: true,
+        });
+    }
     if let Some(ssh) = ctx.ssh_for_exec() {
         let raw = ssh.read(&path).await?;
         ctx.mark_read(

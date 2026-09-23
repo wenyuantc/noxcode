@@ -211,6 +211,9 @@ impl LocalWorkspace {
                 .unwrap_or_else(|| path.to_string()),
             mime_type: mime.to_string(),
             data_base64: BASE64.encode(bytes),
+            attachment_id: String::new(),
+            page: None,
+            time_range: None,
         })
     }
 

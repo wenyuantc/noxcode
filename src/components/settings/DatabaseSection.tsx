@@ -220,6 +220,9 @@ export function DatabaseSection() {
           onClose={() => setHealthError(null)}
         />
       ) : null}
+      {health?.media_notice ? (
+        <SettingFeedbackCallout variant="warning" message={health.media_notice} />
+      ) : null}
 
       {/* 数据库健康状态卡片 */}
       <SettingCard

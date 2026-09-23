@@ -15,7 +15,7 @@ pub fn build_responses_body(
     thinking_enabled: bool,
     stream: bool,
 ) -> Value {
-    let (instructions, input) = responses_input(messages);
+    let (instructions, input) = responses_input(messages, model);
     let mut body = json!({
         "model": model,
         "input": input,
@@ -52,7 +52,7 @@ pub fn responses_tools(tools: &[ToolSpec]) -> Vec<Value> {
         .collect()
 }
 
-pub fn responses_input(messages: &[Message]) -> (String, Vec<Value>) {
+pub fn responses_input(messages: &[Message], model: &str) -> (String, Vec<Value>) {
     let mut instructions = String::new();
     let mut input = Vec::new();
     for message in messages {
@@ -65,7 +65,7 @@ pub fn responses_input(messages: &[Message]) -> (String, Vec<Value>) {
             }
             Role::User => input.push(json!({
                 "role": "user",
-                "content": responses_user_content(message),
+                "content": responses_user_content(message, model),
             })),
             Role::Assistant => {
                 if !message.content.is_empty() {
@@ -90,16 +90,26 @@ pub fn responses_input(messages: &[Message]) -> (String, Vec<Value>) {
     (instructions, input)
 }
 
-fn responses_user_content(message: &Message) -> Value {
+fn responses_user_content(message: &Message, model: &str) -> Value {
     if message.images.is_empty() {
         return json!(message.content);
     }
     let mut parts = vec![json!({"type": "input_text", "text": message.content})];
     for image in &message.images {
-        parts.push(json!({
-            "type": "input_image",
-            "image_url": image.data_url(),
-        }));
+        if image.mime_type.starts_with("image/") {
+            parts.push(json!({
+                "type": "input_image",
+                "image_url": image.data_url(),
+            }));
+        } else if let Ok(part) = crate::native::media_plan::binary_part(
+            crate::native::protocol::PROTOCOL_CODEX,
+            model,
+            &image.name,
+            &image.mime_type,
+            &image.data_base64,
+        ) {
+            parts.push(part);
+        }
     }
     json!(parts)
 }
@@ -872,6 +882,7 @@ mod tests {
                 name: String::new(),
                 reasoning_content: String::new(),
                 images: Vec::new(),
+                media: Vec::new(),
                 history_id: String::new(),
             },
             Message::tool_result("call_1", "ok"),
@@ -900,6 +911,9 @@ mod tests {
             name: "a.png".to_string(),
             mime_type: "image/png".to_string(),
             data_base64: "QQ==".to_string(),
+            attachment_id: String::new(),
+            page: None,
+            time_range: None,
         });
         let body = build_responses_body(&[user], &[], "gpt-5.4", None, None, false, false);
         let content = body["input"][0]["content"].as_array().expect("parts");
