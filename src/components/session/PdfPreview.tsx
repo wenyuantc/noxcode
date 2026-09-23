@@ -113,6 +113,7 @@ export function PdfPreview({ source }: { source: string }) {
     const doc = docRef.current;
     const frame = frameRef.current;
     if (!doc || pageCount === 0 || !frame) return;
+    const pdf = doc;
     let cancelled = false;
     const renders: Array<{ cancel: () => void }> = [];
     const width = Math.max(280, frame.clientWidth - 32);
@@ -123,7 +124,7 @@ export function PdfPreview({ source }: { source: string }) {
         if (cancelled) return;
         const canvas = canvases.current[index];
         if (!canvas) continue;
-        const page = await doc.getPage(index + 1);
+        const page = await pdf.getPage(index + 1);
         if (cancelled) return;
         const base = page.getViewport({ scale: 1 });
         const cssScale = width / base.width;
