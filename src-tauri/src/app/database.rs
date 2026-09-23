@@ -863,7 +863,7 @@ mod tests {
             );
             assert_eq!(
                 status.current_description.as_deref(),
-                Some("goal acceptance criteria and verification records")
+                Some("native attachments, refs, leases, and durable inputs")
             );
         });
     }
@@ -915,6 +915,9 @@ mod tests {
                 "ai_channels",
                 "git_checkpoints",
                 "native_api_call_logs",
+                "native_attachment_leases",
+                "native_attachment_refs",
+                "native_attachments",
                 "native_automations",
                 "native_context_anchors",
                 "native_file_revisions",
@@ -925,6 +928,7 @@ mod tests {
                 "native_history_links",
                 "native_history_messages",
                 "native_history_requests",
+                "native_input_submissions",
                 "native_model_attempt_budgets",
                 "native_session_transcripts",
                 "native_tool_artifacts",
@@ -938,7 +942,7 @@ mod tests {
                 .map(|table| table.name.as_str())
                 .collect::<Vec<_>>();
 
-            assert_eq!(stats.table_count, 22);
+            assert_eq!(stats.table_count, 26);
             assert_eq!(names, expected_tables);
             assert!(!names.contains(&MIGRATION_TABLE_NAME));
             assert_eq!(

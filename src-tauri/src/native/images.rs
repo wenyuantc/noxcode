@@ -677,7 +677,11 @@ mod tests {
 
         let text = root.join("note.txt");
         fs::write(&text, b"hi").expect("text");
-        assert!(stage_image_from_path(&root, &text).is_err());
+        assert!(stage_image_from_path(&root, &text).is_ok());
+
+        let other = root.join("payload.exe");
+        fs::write(&other, b"MZ").expect("other");
+        assert!(stage_image_from_path(&root, &other).is_err());
         let _ = fs::remove_dir_all(root);
     }
 }

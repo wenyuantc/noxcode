@@ -229,7 +229,7 @@ async fn tc_att_004_cancel_and_finish_are_ordered_by_the_import_lock() {
 
 #[tokio::test]
 async fn tc_att_005_invalid_imports_do_not_commit_and_tamper_is_detected() {
-    let (dir, _pool, service) = setup("instance-a").await;
+    let (dir, pool, service) = setup("instance-a").await;
     let bytes = png_bytes();
     let good = service
         .begin_import("draft-keep", "keep.png", bytes.len() as u64, "image/png")
@@ -272,13 +272,14 @@ async fn tc_att_005_invalid_imports_do_not_commit_and_tamper_is_detected() {
     assert_eq!(service.ready_count().await.unwrap(), 1);
     assert_eq!(service.read_bytes(&kept.id).await.unwrap(), bytes);
 
-    let mut object = None;
-    for entry in walk(dir.path()) {
-        if entry.extension().and_then(|ext| ext.to_str()) == Some("bin") {
-            object = Some(entry);
-        }
-    }
-    let object = object.expect("managed object");
+    let relative: String =
+        sqlx::query_scalar("SELECT relative_path FROM native_attachments WHERE id = $1")
+            .bind(&kept.id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    let object = dir.path().join(relative);
+    assert!(object.is_file(), "managed object");
     let mut stored = fs::read(&object).unwrap();
     stored[0] ^= 0xff;
     fs::write(&object, stored).unwrap();
