@@ -9,7 +9,16 @@
 | 文件 | 职责 |
 | --- | --- |
 | `mod.rs` | 模块声明（`#![allow(dead_code)]`） |
-| `loop.rs` | `AgentRunner` 主循环：模型回合、工具批处理、steer 注入、transcript 检查点、预算预留 |
+| `loop/mod.rs` | `AgentRunner`、`NativeEvent` 等共享类型、常量与模块声明 |
+| `loop/runner.rs` | 主/子模型回合、输出续接与用户回合初始化 |
+| `loop/steer.rs` | steer 消息注入、用户输入接纳与回合封口 |
+| `loop/context.rs` | 上下文压缩、检查点与 token 预算 |
+| `loop/events.rs` | 事件发送、模型客户端观察与上下文用量事件 |
+| `loop/format.rs` | 工具事件展示文本与时间格式辅助函数 |
+| `loop/tools.rs` | 工具声明、批处理、执行与结果回填 |
+| `loop/subagents.rs` | 子 Agent 派生、批处理与并发任务 |
+| `loop/recovery.rs` | 工具调用恢复账本与中断续跑 |
+| `loop/tests.rs` | 主循环与上述各职责的原有内联测试 |
 | `compact.rs` | 上下文压缩（4 种触发 × 4 种来源）与 token 预算（`RolloutBudget` / `ChildQuota`） |
 | `truncate.rs` | 保守 token 估算、工具结果截断、请求前消息缩短、孤立 tool pair 清洗 |
 | `subagent.rs` | 子 Agent 参数解析、派生 runner、系统提示组装、结果截断 |
@@ -17,7 +26,7 @@
 
 ## 主循环
 
-`AgentRunner::run_with_client` 是主入口（`loop.rs:960`），每个用户回合的流程：
+`AgentRunner::run_with_client` 是主入口（`loop/runner.rs`），每个用户回合的流程：
 
 1. `begin_user_turn`：写入用户消息（可带图片），检查取消。
 2. `checkpoint_transcript`：把当前消息同步到 `native_session_transcripts`（子 Agent 跳过）。
@@ -27,7 +36,7 @@
 6. `consume_assistant`：思考行与文本 emit → 无工具调用则跑 stop 钩子（最多要求继续 3 次）后结束回合；有工具调用则 `execute_tool_calls`。
 7. 每轮结束再 `checkpoint_transcript`，循环直到模型给出最终文本。
 
-`run_scripted`（`loop.rs:1170`）是测试入口：从预置 `replies` 队列取 assistant 消息，不调模型。`run_child_with_client` 是子 Agent 专用入口，工具串行执行，`Agent` 调用直接拒绝（防嵌套）。
+`run_scripted`（`loop/runner.rs`）是测试入口：从预置 `replies` 队列取 assistant 消息，不调模型。`run_child_with_client` 是子 Agent 专用入口，工具串行执行，`Agent` 调用直接拒绝（防嵌套）。
 
 ### 工具批处理（`execute_tool_calls`）
 
@@ -39,7 +48,7 @@
 
 ### 压缩（compact.rs）
 
-统一入口 `run_compaction(trigger, instructions)`（`loop.rs:427`），来源链：**microcompact → model 摘要 → local 摘要 → reset**，取第一个能缩减的。
+统一入口 `run_compaction(trigger, instructions)`（`loop/context.rs`），来源链：**microcompact → model 摘要 → local 摘要 → reset**，取第一个能缩减的。
 
 | 触发 | 场景 |
 | --- | --- |
@@ -64,7 +73,7 @@
 
 ## 子 Agent 与后台任务
 
-`Agent` 工具调用经 `run_agent_batch`（`loop.rs:1940`）处理：
+`Agent` 工具调用经 `run_agent_batch`（`loop/subagents.rs`）处理：
 
 - 类型：`general` / `explore` / `custom`（`subagent.rs` 的 `SubagentKind`）。`explore` 强制只读白名单；`custom` 按档案限工具、轮次、技能与权限模式。
 - 计划模式的顶层 runner 仍向模型提供 `Agent` 工具及完整类型目录，但 `run_agent_batch` 只接受显式的 `SubagentKind::Explore`；缺省 general、显式 general 与所有 custom 均拒绝。普通只读 runner 与子 Agent 仍不提供 `Agent`。
@@ -75,7 +84,7 @@
 
 ## 事件与 transcript 同步
 
-`NativeEvent`（`loop.rs:222`）：`Line`（完整行，落库）、`Delta`（live 片段，不落库）、`Tool`（工具 start/result + 图片）、`ContextUsage`、`UserInput`、`Flush`。`on_event` / `on_usage` / `on_activity` 通道由 `session.rs` 接线转发给前端。
+`NativeEvent`（`loop/mod.rs`）：`Line`（完整行，落库）、`Delta`（live 片段，不落库）、`Tool`（工具 start/result + 图片）、`ContextUsage`、`UserInput`、`Flush`。`on_event` / `on_usage` / `on_activity` 通道由 `session.rs` 接线转发给前端。
 
 `checkpoint_transcript` 在以下边界 UPSERT transcript（fingerprint 未变则跳过）：用户消息进入后、steer 注入后、每轮 assistant 文本或工具结果写完整后、`run_native_loop` 退出前。子 Agent 不写父会话 transcript。
 
@@ -83,11 +92,11 @@
 
 | 常量 | 值 | 位置 |
 | --- | --- | --- |
-| `DEFAULT_CONTEXT_CHARS` | 120_000 | loop.rs |
-| `MAX_PARALLEL_TOOL_CALLS` | 8 | loop.rs |
-| `REPEAT_TOOL_LIMIT` | 3 | loop.rs |
-| `MAX_STOP_HOOK_CONTINUES` | 3 | loop.rs |
-| `FALLBACK_OUTPUT_TOKEN_GUARD` | 16_384 | loop.rs |
+| `DEFAULT_CONTEXT_CHARS` | 120_000 | loop/mod.rs |
+| `MAX_PARALLEL_TOOL_CALLS` | 8 | loop/mod.rs |
+| `REPEAT_TOOL_LIMIT` | 3 | loop/mod.rs |
+| `MAX_STOP_HOOK_CONTINUES` | 3 | loop/mod.rs |
+| `FALLBACK_OUTPUT_TOKEN_GUARD` | 16_384 | loop/mod.rs |
 | `DEFAULT_TOOL_RESULT_TOKEN_LIMIT` | 4_096 | truncate.rs |
 | `MAX_CONCURRENT_SUBAGENTS` | 3 | subagent.rs |
 | `SUBAGENT_RESULT_CHARS` | 16_000 | subagent.rs |
