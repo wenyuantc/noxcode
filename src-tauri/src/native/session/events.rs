@@ -812,6 +812,8 @@ pub(super) async fn forward_native_events(
                                         name: image.name.clone(),
                                         mime_type: image.mime_type.clone(),
                                         data_url: image.data_url(),
+                                        attachment_id: (!image.attachment_id.is_empty())
+                                            .then(|| image.attachment_id.clone()),
                                     })
                                     .collect(),
                             )
@@ -953,7 +955,24 @@ pub(super) fn persist_stdout_message(
         value["assistant"] = serde_json::to_value(assistant).unwrap_or(serde_json::Value::Null);
     }
     if let Some(images) = images {
-        if !images.is_empty() {
+        if tool.is_some_and(|event| event.mcp_server.is_some()) {
+            let references: Vec<_> = images
+                .iter()
+                .filter_map(|image| {
+                    image.attachment_id.as_ref().map(|id| {
+                        serde_json::json!({
+                            "name": image.name,
+                            "mime_type": image.mime_type,
+                            "data_url": "",
+                            "attachment_id": id,
+                        })
+                    })
+                })
+                .collect();
+            if !references.is_empty() {
+                value["images"] = serde_json::json!(references);
+            }
+        } else if !images.is_empty() {
             value["images"] = serde_json::to_value(images).unwrap_or(serde_json::Value::Null);
         }
     }
@@ -973,10 +992,39 @@ pub(super) fn native_images_for_output(
                     name: image.name.clone(),
                     mime_type: image.mime_type.clone(),
                     data_url: image.data_url(),
+                    attachment_id: (!image.attachment_id.is_empty())
+                        .then(|| image.attachment_id.clone()),
                 })
                 .collect(),
         )
     }
+}
+
+async fn retain_mcp_event_images(
+    pool: &sqlx::SqlitePool,
+    root: &std::path::Path,
+    event_id: &str,
+    images: &[NativeToolImage],
+) -> Result<(), String> {
+    let service = crate::native::attachments::AttachmentService::new(
+        crate::native::images::attachments_dir(root),
+        pool.clone(),
+        "tool",
+    );
+    for (position, image) in images.iter().enumerate() {
+        let Some(id) = image.attachment_id.as_deref() else {
+            continue;
+        };
+        service
+            .add_use(id, "event", event_id, position as i64, "{}")
+            .await
+            .map_err(|error| error.to_string())?;
+        service
+            .release_attachment_draft(id)
+            .await
+            .map_err(|error| error.to_string())?;
+    }
+    Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1000,6 +1048,20 @@ pub(super) async fn emit_native_output(
     let event_id = insert_session_event(&pool, session_record_id, "stdout", Some(&persisted))
         .await
         .ok();
+    if tool
+        .as_ref()
+        .is_some_and(|event| event.mcp_server.is_some())
+    {
+        if let (Some(id), Some(images)) = (event_id.as_deref(), images.as_deref()) {
+            let saved = match app.path().app_config_dir() {
+                Ok(root) => retain_mcp_event_images(&pool, &root, id, images).await,
+                Err(error) => Err(error.to_string()),
+            };
+            if let Err(error) = saved {
+                eprintln!("[native] 保存 MCP 截图引用失败: {error}");
+            }
+        }
+    }
     let _ = app.emit(
         "native-stdout",
         AgentSessionOutput {

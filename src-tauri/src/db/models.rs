@@ -816,6 +816,8 @@ pub struct NativeToolImage {
     pub name: String,
     pub mime_type: String,
     pub data_url: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attachment_id: Option<String>,
 }
 
 /// Stable identity for one model answer and its exact continuation fragments.

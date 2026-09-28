@@ -529,6 +529,9 @@
       "addServer": "添加服务器",
       "addPlaywright": "添加 Playwright 预设",
       "test": "测试",
+      "diagnose": "诊断",
+      "installPackage": "安装 MCP",
+      "installBrowser": "安装浏览器",
       "edit": "编辑",
       "create": "创建",
       "save": "保存",
@@ -547,7 +550,9 @@
       "deleteTitle": "删除 MCP 服务器",
       "deleteConfirm": "确定删除 MCP 服务器「{{name}}」吗？",
       "resetTitle": "重置 MCP 配置",
-      "resetConfirm": "重置将覆盖当前所有 MCP 配置并恢复默认示例，是否继续？"
+      "resetConfirm": "重置将覆盖当前所有 MCP 配置并恢复默认示例，是否继续？",
+      "installPackageConfirm": "在「{{name}}」的执行主机通过 npm 安装固定版本的 Playwright MCP？安装需要网络并会运行该包的 CLI。",
+      "installBrowserConfirm": "在「{{name}}」的执行主机下载 Chromium 浏览器？可能需要较大下载量。"
     },
     "validation": {
       "nameRequired": "MCP 服务器名称不能为空",
@@ -578,7 +583,9 @@
       "scopeWorkspaces": "指定工作区",
       "scopeHint": "默认所有工作区都连接此服务器。指定后，仅所选工作区会连接。",
       "scopeWorkspacesEmpty": "还没有工作区，请先打开或创建一个工作区。",
-      "scopePickWorkspaces": "选择工作区"
+      "scopePickWorkspaces": "选择工作区",
+      "testWorkspace": "测试工作区",
+      "localHost": "本机"
     },
     "preview": {
       "title": "导出片段预览"
@@ -593,9 +600,10 @@
       "playwrightAdded": "已加入 Playwright 预设，保存后生效。默认未启用。",
       "playwrightExists": "列表里已有 Playwright MCP，未重复添加。"
     },
-    "browserCapability": "浏览器自动化经 Playwright MCP 提供。本地需已安装 Node；SSH 工作区需远端具备 node 与浏览器依赖。",
+    "browserCapability": "浏览器自动化使用独立的 Playwright MCP 浏览器；当前不提供可与 Agent 共同操作同一页面的内嵌浏览器。本机非无头模式可查看外部浏览器窗口；SSH 浏览器和下载保留在远端主机，需通过远端图形环境查看。",
     "playwright": {
-      "notes": "Playwright MCP 预设。本地需 Node/npx；SSH 远端需 node 与浏览器依赖。启用后保存才会注入会话。"
+      "title": "Playwright 浏览器组件",
+      "notes": "Playwright MCP 固定版本预设。默认停用且不自动下载；需先在实际执行主机按需安装 Node、MCP 包与浏览器，再启用并保存。"
     },
     "exampleFilesystem": {
       "name": "示例：Filesystem（请按需启用）",
@@ -635,6 +643,7 @@
       "disabled": "已停用",
       "globalDir": "全局 ~/.noxcode/skills",
       "pluginDir": "插件",
+      "bundledDir": "内置技能",
       "ssh": "远程"
     },
     "source": {
@@ -643,7 +652,8 @@
       "workspace_agents": "工作区 .agents",
       "workspace_claude": "工作区 .claude",
       "plugin": "插件",
-      "global": "全局"
+      "global": "全局",
+      "bundled": "内置"
     },
     "delete": {
       "title": "删除技能",

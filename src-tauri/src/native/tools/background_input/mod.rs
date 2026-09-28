@@ -161,6 +161,10 @@ pub fn apply_background(
 }
 
 pub fn apply_foreground(state: &ComputerAppState, resolved: &ResolvedAction) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    if unsafe { libc::pthread_main_np() } == 0 {
+        return Err("前台注入需要应用主线程，已拒绝在工作线程执行".to_string());
+    }
     use enigo::{Axis, Coordinate, Direction, Enigo, Keyboard, Mouse, Settings};
 
     let mut enigo = Enigo::new(&Settings::default()).map_err(map_foreground_error)?;

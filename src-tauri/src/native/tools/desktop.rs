@@ -377,8 +377,9 @@ pub async fn execute(ctx: &ToolCtx, arguments: &str) -> Result<ToolOutput, Strin
     }
     let args = parse_computer_args(arguments)?;
     let state = ctx.computer_app_state.clone();
+    let main_thread = ctx.computer_main_thread.clone();
     let _guard = DESKTOP_LOCK.lock().await;
-    tokio::task::spawn_blocking(move || run_computer_action(args, &state))
+    tokio::task::spawn_blocking(move || run_computer_action(args, &state, main_thread.as_ref()))
         .await
         .map_err(|error| format!("电脑控制任务失败: {error}"))?
 }
@@ -386,6 +387,7 @@ pub async fn execute(ctx: &ToolCtx, arguments: &str) -> Result<ToolOutput, Strin
 fn run_computer_action(
     args: ComputerArgs,
     state: &std::sync::Arc<std::sync::Mutex<Option<ComputerAppState>>>,
+    main_thread: Option<&tauri::AppHandle>,
 ) -> Result<ToolOutput, String> {
     match args.action {
         ComputerAction::Wait => {
@@ -420,7 +422,13 @@ fn run_computer_action(
                 require_existing_state(guard.as_ref(), &args)?
             };
             let resolved = resolve_action(&args, &current)?;
-            apply_action(args.dispatch(), &args, &current, &resolved)?;
+            #[cfg(target_os = "macos")]
+            apply_macos_action(&args, &current, &resolved, main_thread)?;
+            #[cfg(not(target_os = "macos"))]
+            {
+                let _ = main_thread;
+                apply_action(args.dispatch(), &args, &current, &resolved)?;
+            }
             match snapshot_app(&current.target.identifier) {
                 Ok(fresh) => {
                     if let Ok(mut slot) = state.lock() {
@@ -435,6 +443,35 @@ fn run_computer_action(
             }
         }
     }
+}
+
+#[cfg(target_os = "macos")]
+fn apply_macos_action(
+    args: &ComputerArgs,
+    state: &ComputerAppState,
+    resolved: &super::background_input::ResolvedAction,
+    main_thread: Option<&tauri::AppHandle>,
+) -> Result<(), String> {
+    if args.dispatch() != ComputerDispatch::Foreground {
+        return apply_action(args.dispatch(), args, state, resolved);
+    }
+    let app = main_thread.ok_or("前台控制需要应用主线程，当前会话未提供调度器")?;
+    let state = state.clone();
+    let resolved = resolved.clone();
+    let args = args.clone();
+    let (tx, rx) = std::sync::mpsc::sync_channel(1);
+    // enigo's Unicode key mapping calls HIToolbox, which asserts off the AppKit main queue.
+    app.run_on_main_thread(move || {
+        let _ = tx.send(apply_action(
+            ComputerDispatch::Foreground,
+            &args,
+            &state,
+            &resolved,
+        ));
+    })
+    .map_err(|error| format!("无法在主线程调度前台输入: {error}"))?;
+    rx.recv()
+        .map_err(|error| format!("主线程前台输入中断: {error}"))?
 }
 
 fn snapshot_app(query: &str) -> Result<ComputerAppState, String> {
@@ -1128,6 +1165,36 @@ mod tests {
             .await
             .expect_err("need state");
         assert!(err.contains("get_app_state"), "{err}");
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn foreground_keys_require_main_thread_before_native_input() {
+        let args = parse_computer_args(
+            r#"{"action":"press_key","keys":["cmd","a"],"dispatch":"foreground"}"#,
+        )
+        .expect("valid keys");
+        let state = std::sync::Arc::new(std::sync::Mutex::new(Some(sample_state())));
+        let error = run_computer_action(args, &state, None).expect_err("missing main thread");
+        assert!(error.contains("主线程"), "{error}");
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn foreground_injection_rejects_a_worker_thread() {
+        let args = parse_computer_args(
+            r#"{"action":"press_key","keys":["cmd","a"],"dispatch":"foreground"}"#,
+        )
+        .expect("valid keys");
+        let state = sample_state();
+        let resolved = resolve_action(&args, &state).expect("resolved keys");
+        let error = std::thread::spawn(move || {
+            super::super::background_input::apply_foreground(&state, &resolved)
+        })
+        .join()
+        .expect("worker completed")
+        .expect_err("off-main input must not reach enigo");
+        assert!(error.contains("主线程"), "{error}");
     }
 
     #[test]

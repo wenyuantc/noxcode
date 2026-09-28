@@ -279,6 +279,17 @@ describe("sessionLines", () => {
     expect(groupSessionLines([line("2", withImages)])[0]?.images?.[0]?.data_url).toBe(
       "data:image/png;base64,QQ==",
     );
+    const savedScreenshot = JSON.stringify({
+      nox: 1,
+      line: "[工具结果] 截图",
+      images: [
+        { name: "shot.png", mime_type: "image/png", data_url: "", attachment_id: "shot-id" },
+      ],
+    });
+    expect(hydrateSessionLine(line("3", savedScreenshot)).images?.[0]?.attachment_id).toBe(
+      "shot-id",
+    );
+    expect(parseStdoutEnvelope(savedScreenshot)?.images?.[0]?.attachment_id).toBe("shot-id");
   });
 
   it("pairs tool results with the previous tool call", () => {

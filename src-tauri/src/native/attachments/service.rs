@@ -349,6 +349,24 @@ impl AttachmentService {
         Ok(removed)
     }
 
+    pub(crate) async fn release_attachment_draft(
+        &self,
+        attachment_id: &str,
+    ) -> Result<(), MediaError> {
+        let mut tx = self.begin().await?;
+        sqlx::query(
+            "DELETE FROM native_attachment_leases WHERE holder_kind = 'draft' AND attachment_id = $1 AND instance_id = $2",
+        )
+        .bind(attachment_id)
+        .bind(&self.instance_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(sql_err)?;
+        self.refresh_chain(&mut tx, attachment_id).await?;
+        tx.commit().await.map_err(sql_err)?;
+        Ok(())
+    }
+
     pub(crate) async fn add_use(
         &self,
         attachment_id: &str,

@@ -1,13 +1,46 @@
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use tauri::{AppHandle, Manager, Runtime};
+use tokio::process::Command;
 
-use crate::app::shared::new_id;
+use crate::app::shared::{new_id, sqlite_pool};
+use crate::app::ssh::configs::fetch_ssh_config_record_by_id;
+use crate::app::ssh::exec::{spawn_ssh_command, SshStreamEvent};
+use crate::app::ssh::shell::{remote_shell_bootstrap, shell_escape_single_quoted};
 use crate::db::models::{McpEnvVar, McpServerConfig, McpServersDocument, UpdateMcpServersPayload};
+use crate::engine::context::resolve_workspace_execution_context_with_pool;
 use crate::native::subagents::{SCOPE_ALL, SCOPE_WORKSPACES};
+use crate::native::tools::command_path;
+use crate::process_spawn::configure_tokio_command;
 
 const MCP_SERVERS_FILE_NAME: &str = "mcp-servers.json";
+const PLAYWRIGHT_PROBE_ARGS: &[&str] = &[
+    "--offline",
+    "--no-install",
+    "@playwright/mcp@0.0.82",
+    "--version",
+];
+const PLAYWRIGHT_INSTALL_ARGS: &[&str] = &[
+    "exec",
+    "--yes",
+    "--ignore-scripts",
+    "--package=@playwright/mcp@0.0.82",
+    "--",
+    "playwright-mcp",
+    "--version",
+];
+const PLAYWRIGHT_BROWSER_INSTALL_ARGS: &[&str] = &[
+    "exec",
+    "--yes",
+    "--ignore-scripts",
+    "--package=@playwright/mcp@0.0.82",
+    "--",
+    "playwright",
+    "install",
+    "chromium",
+];
 
 fn app_config_dir<R: Runtime>(app: &AppHandle<R>) -> Result<PathBuf, String> {
     app.path()
@@ -373,13 +406,226 @@ pub async fn export_mcp_servers_snippet<R: Runtime>(app: AppHandle<R>) -> Result
     Ok(render_mcp_export_snippet(&document))
 }
 
-/// 测试单个 MCP 服务器：连接 + 握手 + 列出工具。成功返回摘要，失败返回错误。
+fn saved_test_server(
+    document: &McpServersDocument,
+    server_id: &str,
+    workspace_id: &str,
+) -> Result<McpServerConfig, String> {
+    let server = document
+        .servers
+        .iter()
+        .find(|server| server.id == server_id)
+        .ok_or_else(|| "MCP 服务器不存在，请先保存配置".to_string())?;
+    if !server_matches_workspace(server, Some(workspace_id)) {
+        return Err("此 MCP 服务器不适用于所选工作区".to_string());
+    }
+    Ok(server.clone())
+}
+
+/// 在所选工作区的实际执行主机握手，不运行前端提交的临时命令。
 #[tauri::command]
 pub async fn test_mcp_server<R: Runtime>(
     app: AppHandle<R>,
-    server: McpServerConfig,
+    server_id: String,
+    workspace_id: String,
 ) -> Result<String, String> {
-    crate::native::tools::mcp::test_mcp_server_connection(&app, &server).await
+    let pool = sqlite_pool(&app).await?;
+    let context = resolve_workspace_execution_context_with_pool(&pool, &workspace_id).await?;
+    let server = saved_test_server(&load_mcp_document(&app)?, &server_id, &workspace_id)?;
+    let ssh_config = match context.ssh_config_id.as_deref() {
+        Some(id) => Some(fetch_ssh_config_record_by_id(&pool, id).await?),
+        None => None,
+    };
+    let summary =
+        crate::native::tools::mcp::test_mcp_server_connection(&app, &server, ssh_config.as_ref())
+            .await?;
+    let host = if server.transport == "stdio" {
+        context.target_host_label.as_deref().unwrap_or("本机")
+    } else {
+        server.url.as_deref().unwrap_or("HTTP MCP 端点")
+    };
+    Ok(format!("{host}：{summary}"))
+}
+
+async fn workspace_ssh_host<R: Runtime>(
+    app: &AppHandle<R>,
+    workspace_id: &str,
+) -> Result<(Option<crate::db::models::SshConfigRecord>, String), String> {
+    let pool = sqlite_pool(app).await?;
+    let context = resolve_workspace_execution_context_with_pool(&pool, workspace_id).await?;
+    let ssh = match context.ssh_config_id.as_deref() {
+        Some(id) => Some(fetch_ssh_config_record_by_id(&pool, id).await?),
+        None => None,
+    };
+    Ok((
+        ssh,
+        context
+            .target_host_label
+            .unwrap_or_else(|| "本机".to_string()),
+    ))
+}
+
+async fn run_on_host<R: Runtime>(
+    app: &AppHandle<R>,
+    ssh: Option<&crate::db::models::SshConfigRecord>,
+    program: &str,
+    args: &[&str],
+    timeout: Duration,
+) -> Result<String, String> {
+    let (ok, stdout, stderr) = if let Some(ssh) = ssh {
+        let command = std::iter::once(program)
+            .chain(args.iter().copied())
+            .map(shell_escape_single_quoted)
+            .collect::<Vec<_>>()
+            .join(" ");
+        let remote = format!("{}exec {command}", remote_shell_bootstrap());
+        let mut stream = spawn_ssh_command(app, ssh, &remote, true).await?;
+        let result = tokio::time::timeout(timeout, async {
+            let (mut stdout, mut stderr) = (Vec::new(), Vec::new());
+            let code = loop {
+                match stream.next().await {
+                    Some(SshStreamEvent::Stdout(bytes)) => stdout.extend_from_slice(&bytes),
+                    Some(SshStreamEvent::Stderr(bytes)) => stderr.extend_from_slice(&bytes),
+                    Some(SshStreamEvent::Exit(code)) => break code,
+                    Some(SshStreamEvent::Closed) | None => break -1,
+                }
+                if stdout.len() + stderr.len() > 1024 * 1024 {
+                    break -1;
+                }
+            };
+            (code == 0, stdout, stderr)
+        })
+        .await;
+        match result {
+            Ok((true, stdout, stderr)) => {
+                let _ = stream.close().await;
+                (true, stdout, stderr)
+            }
+            Ok((false, stdout, stderr)) => {
+                stream.terminate().await;
+                (false, stdout, stderr)
+            }
+            Err(_) => {
+                stream.terminate().await;
+                return Err("远端命令超时".to_string());
+            }
+        }
+    } else {
+        let path = command_path::resolve_program(program)?;
+        let mut command = Command::new(path);
+        command.args(args).kill_on_drop(true);
+        command_path::apply_augmented_path(&mut command);
+        configure_tokio_command(&mut command);
+        let output = tokio::time::timeout(timeout, command.output())
+            .await
+            .map_err(|_| "本机命令超时".to_string())?
+            .map_err(|error| format!("运行 {program} 失败: {error}"))?;
+        (output.status.success(), output.stdout, output.stderr)
+    };
+    let text = if stdout.is_empty() { &stderr } else { &stdout };
+    let summary = String::from_utf8_lossy(text)
+        .chars()
+        .take(600)
+        .collect::<String>();
+    if ok {
+        Ok(summary.trim().to_string())
+    } else {
+        Err(if summary.trim().is_empty() {
+            format!("{program} 执行失败")
+        } else {
+            summary.trim().to_string()
+        })
+    }
+}
+
+#[tauri::command]
+pub async fn diagnose_playwright<R: Runtime>(
+    app: AppHandle<R>,
+    workspace_id: String,
+) -> Result<String, String> {
+    let (ssh, host) = workspace_ssh_host(&app, &workspace_id).await?;
+    let node = run_on_host(
+        &app,
+        ssh.as_ref(),
+        "node",
+        &["--version"],
+        Duration::from_secs(10),
+    )
+    .await;
+    let Ok(node) = node else {
+        return Ok(format!(
+            "{host}：未检测到 Node，请先在此主机安装 Node 18 或更新版本"
+        ));
+    };
+    let major = node
+        .trim_start_matches('v')
+        .split('.')
+        .next()
+        .and_then(|item| item.parse::<u32>().ok())
+        .unwrap_or(0);
+    if major < 18 {
+        return Ok(format!(
+            "{host}：Node {node} 过旧，Playwright MCP 需要 Node 18+"
+        ));
+    }
+    let package = run_on_host(
+        &app,
+        ssh.as_ref(),
+        "npx",
+        PLAYWRIGHT_PROBE_ARGS,
+        Duration::from_secs(20),
+    )
+    .await;
+    Ok(match package {
+        Ok(version) => {
+            format!("{host}：Node {node}，Playwright MCP {version}；浏览器请用连接测试验证")
+        }
+        Err(_) => format!("{host}：Node {node}，未检测到固定版本的 Playwright MCP；可按需安装"),
+    })
+}
+
+#[tauri::command]
+pub async fn install_playwright_mcp<R: Runtime>(
+    app: AppHandle<R>,
+    workspace_id: String,
+    browser: bool,
+) -> Result<String, String> {
+    let (ssh, host) = workspace_ssh_host(&app, &workspace_id).await?;
+    let node = run_on_host(
+        &app,
+        ssh.as_ref(),
+        "node",
+        &["--version"],
+        Duration::from_secs(10),
+    )
+    .await?;
+    let major = node
+        .trim_start_matches('v')
+        .split('.')
+        .next()
+        .and_then(|item| item.parse::<u32>().ok())
+        .unwrap_or(0);
+    if major < 18 {
+        return Err(format!("{host} 的 Node {node} 过旧，需要 Node 18+"));
+    }
+    let args = if browser {
+        PLAYWRIGHT_BROWSER_INSTALL_ARGS
+    } else {
+        PLAYWRIGHT_INSTALL_ARGS
+    };
+    let result = run_on_host(
+        &app,
+        ssh.as_ref(),
+        "npm",
+        args,
+        Duration::from_secs(if browser { 600 } else { 120 }),
+    )
+    .await?;
+    Ok(if browser {
+        format!("{host}：Chromium 安装完成。{result}")
+    } else {
+        format!("{host}：Playwright MCP 已安装：{result}")
+    })
 }
 
 #[cfg(test)]
@@ -504,5 +750,35 @@ mod tests {
         assert!(server_matches_workspace(&scoped, Some("ws-1")));
         assert!(!server_matches_workspace(&scoped, Some("ws-2")));
         assert!(!server_matches_workspace(&scoped, None));
+    }
+
+    #[test]
+    fn test_server_uses_saved_config_and_workspace_scope() {
+        let mut server = default_mcp_servers().servers.remove(0);
+        server.id = "browser".to_string();
+        server.enabled = true;
+        server.scope = SCOPE_WORKSPACES.to_string();
+        server.workspace_ids = vec!["ws-ssh".to_string()];
+        let document = McpServersDocument {
+            servers: vec![server.clone()],
+        };
+
+        assert_eq!(
+            saved_test_server(&document, "browser", "ws-ssh")
+                .unwrap()
+                .command,
+            server.command
+        );
+        assert!(saved_test_server(&document, "browser", "ws-local").is_err());
+        assert!(saved_test_server(&document, "missing", "ws-ssh").is_err());
+    }
+
+    #[test]
+    fn playwright_probe_does_not_install_and_install_requires_explicit_action() {
+        assert!(PLAYWRIGHT_PROBE_ARGS.contains(&"--no-install"));
+        assert!(!PLAYWRIGHT_PROBE_ARGS.contains(&"--yes"));
+        assert!(PLAYWRIGHT_INSTALL_ARGS.contains(&"--yes"));
+        assert!(PLAYWRIGHT_INSTALL_ARGS.contains(&"--ignore-scripts"));
+        assert!(PLAYWRIGHT_BROWSER_INSTALL_ARGS.contains(&"chromium"));
     }
 }

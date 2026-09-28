@@ -359,6 +359,50 @@ async fn tc_att_008_source_change_and_oversize_do_not_commit() {
 }
 
 #[tokio::test]
+async fn tool_screenshot_event_reference_releases_only_its_draft_lease() {
+    let (_dir, pool, service) = setup("tool").await;
+    sqlx::query("INSERT INTO agent_sessions (id) VALUES ('session')")
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO agent_session_events (id, session_id, event_type) VALUES ('event', 'session', 'stdout')")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let bytes = png_bytes();
+    let first = service
+        .import_bytes("first.png", &bytes, "tool")
+        .await
+        .unwrap();
+    let pending = service
+        .import_bytes("pending.png", &bytes, "tool")
+        .await
+        .unwrap();
+    service
+        .add_use(&first.id, "event", "event", 0, "{}")
+        .await
+        .unwrap();
+    service.release_attachment_draft(&first.id).await.unwrap();
+    let first_leases: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM native_attachment_leases WHERE attachment_id = $1 AND holder_kind = 'draft'",
+    )
+    .bind(&first.id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    let pending_leases: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM native_attachment_leases WHERE attachment_id = $1 AND holder_kind = 'draft'",
+    )
+    .bind(&pending.id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(first_leases, 0);
+    assert_eq!(pending_leases, 1);
+    assert_eq!(service.read_bytes(&first.id).await.unwrap(), bytes);
+}
+
+#[tokio::test]
 async fn tc_auth_001_visibility_follows_branch_membership_not_workspace() {
     let (_dir, pool, service) = setup("instance-a").await;
     let bytes = png_bytes();

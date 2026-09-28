@@ -529,6 +529,9 @@
       "addServer": "Add server",
       "addPlaywright": "Add Playwright preset",
       "test": "Test",
+      "diagnose": "Diagnose",
+      "installPackage": "Install MCP",
+      "installBrowser": "Install browser",
       "edit": "Edit",
       "create": "Create",
       "save": "Save",
@@ -547,7 +550,9 @@
       "deleteTitle": "Delete MCP Server",
       "deleteConfirm": "Are you sure you want to delete MCP server \"{{name}}\"?",
       "resetTitle": "Reset MCP Configuration",
-      "resetConfirm": "Resetting will overwrite all current MCP servers with default examples. Continue?"
+      "resetConfirm": "Resetting will overwrite all current MCP servers with default examples. Continue?",
+      "installPackageConfirm": "Install the pinned Playwright MCP package with npm on the execution host of \"{{name}}\"? This uses the network and runs the package CLI.",
+      "installBrowserConfirm": "Download Chromium on the execution host of \"{{name}}\"? This may be a large download."
     },
     "validation": {
       "nameRequired": "MCP server name cannot be empty",
@@ -578,7 +583,9 @@
       "scopeWorkspaces": "Specific workspaces",
       "scopeHint": "Connect this server in every workspace by default, or restrict it to selected workspaces.",
       "scopeWorkspacesEmpty": "No workspaces yet. Open or create a workspace first.",
-      "scopePickWorkspaces": "Choose workspaces"
+      "scopePickWorkspaces": "Choose workspaces",
+      "testWorkspace": "Test workspace",
+      "localHost": "Local"
     },
     "preview": {
       "title": "Export snippet preview"
@@ -593,9 +600,10 @@
       "playwrightAdded": "Added the Playwright preset. Save to apply. It is disabled by default.",
       "playwrightExists": "A Playwright MCP server is already in the list."
     },
-    "browserCapability": "Browser automation is provided by Playwright MCP. Local runs need Node; SSH workspaces need node and browser dependencies on the remote host.",
+    "browserCapability": "Browser automation uses a separate Playwright MCP browser. An embedded page shared with the Agent is not available yet. View the external browser window locally when running headed; SSH browsers and downloads remain on the remote host and require remote desktop access to view.",
     "playwright": {
-      "notes": "Playwright MCP preset. Local needs Node/npx; SSH remotes need node and browser dependencies. Enable and save to inject it into sessions."
+      "title": "Playwright browser components",
+      "notes": "Pinned Playwright MCP preset. Disabled by default and never auto-downloaded. Install Node, the MCP package, and a browser on the execution host before enabling and saving."
     },
     "exampleFilesystem": {
       "name": "Example: Filesystem (enable if needed)",
@@ -635,6 +643,7 @@
       "disabled": "Disabled",
       "globalDir": "Global ~/.noxcode/skills",
       "pluginDir": "Plugins",
+      "bundledDir": "Built-in skills",
       "ssh": "Remote"
     },
     "source": {
@@ -643,7 +652,8 @@
       "workspace_agents": "Workspace .agents",
       "workspace_claude": "Workspace .claude",
       "plugin": "Plugin",
-      "global": "Global"
+      "global": "Global",
+      "bundled": "Built-in"
     },
     "delete": {
       "title": "Delete skill",

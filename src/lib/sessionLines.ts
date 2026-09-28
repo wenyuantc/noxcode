@@ -497,12 +497,21 @@ function parseEnvelopeImages(value: unknown): NativeToolImage[] | undefined {
   const images: NativeToolImage[] = [];
   for (const item of value) {
     if (!item || typeof item !== "object") continue;
-    const record = item as { name?: unknown; mime_type?: unknown; data_url?: unknown };
+    const record = item as {
+      name?: unknown;
+      mime_type?: unknown;
+      data_url?: unknown;
+      attachment_id?: unknown;
+    };
     if (typeof record.name !== "string" || typeof record.data_url !== "string") continue;
     images.push({
       name: record.name,
       mime_type: typeof record.mime_type === "string" ? record.mime_type : "image/png",
       data_url: record.data_url,
+      attachment_id:
+        typeof record.attachment_id === "string" && record.attachment_id.length > 0
+          ? record.attachment_id
+          : undefined,
     });
   }
   return images.length > 0 ? images : undefined;

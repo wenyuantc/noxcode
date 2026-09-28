@@ -3,6 +3,7 @@ import type { NativeSkill, Workspace } from "@/lib/types";
 export const SKILL_DIR_ALL = "all";
 export const SKILL_DIR_GLOBAL = "global";
 export const SKILL_DIR_PLUGIN = "plugin";
+export const SKILL_DIR_BUNDLED = "bundled";
 export const SKILL_DIR_WORKSPACE_PREFIX = "ws:";
 
 const PROJECT_MARKERS = [
@@ -19,6 +20,7 @@ export function normalizeSkillPath(path: string): string {
 export function skillWorkspaceDir(skill: Pick<NativeSkill, "source" | "dir">): string {
   if (skill.source === "global") return SKILL_DIR_GLOBAL;
   if (skill.source === "plugin") return SKILL_DIR_PLUGIN;
+  if (skill.source === "bundled") return SKILL_DIR_BUNDLED;
   const path = normalizeSkillPath(skill.dir);
   const lower = path.toLowerCase();
   for (const marker of PROJECT_MARKERS) {
@@ -45,12 +47,13 @@ export function skillBelongsToDir(
   if (dir === SKILL_DIR_ALL) return true;
   if (dir === SKILL_DIR_GLOBAL) return skill.source === "global";
   if (dir === SKILL_DIR_PLUGIN) return skill.source === "plugin";
+  if (dir === SKILL_DIR_BUNDLED) return skill.source === "bundled";
   if (parseWorkspaceSkillDirFilter(dir)) {
     return skill.source.startsWith("workspace_");
   }
   const root = normalizeSkillPath(dir);
   const project = skillWorkspaceDir(skill);
-  if (project === SKILL_DIR_GLOBAL || project === SKILL_DIR_PLUGIN) return false;
+  if ([SKILL_DIR_GLOBAL, SKILL_DIR_PLUGIN, SKILL_DIR_BUNDLED].includes(project)) return false;
   return project === root || project.startsWith(`${root}/`);
 }
 
@@ -61,7 +64,8 @@ export function uniqueSkillWorkspaceDirs(
   const out: string[] = [];
   for (const skill of skills) {
     const dir = skillWorkspaceDir(skill);
-    if (dir === SKILL_DIR_GLOBAL || dir === SKILL_DIR_PLUGIN || seen.has(dir)) continue;
+    if ([SKILL_DIR_GLOBAL, SKILL_DIR_PLUGIN, SKILL_DIR_BUNDLED].includes(dir) || seen.has(dir))
+      continue;
     seen.add(dir);
     out.push(dir);
   }

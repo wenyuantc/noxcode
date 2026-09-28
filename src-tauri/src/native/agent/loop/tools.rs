@@ -302,8 +302,20 @@ impl AgentRunner {
     pub(super) async fn record_tool_result(
         &mut self,
         call: &ToolCall,
-        output: ToolOutput,
+        mut output: ToolOutput,
     ) -> Result<(), String> {
+        if !output.images.is_empty() {
+            if let (Some(scope), Some(config_dir)) =
+                (&self.ctx.session_scope, &self.ctx.app_config_dir)
+            {
+                crate::native::images::remember_tool_images(
+                    &scope.pool,
+                    &config_dir.join(crate::native::images::ATTACHMENTS_DIR_NAME),
+                    &mut output.images,
+                )
+                .await?;
+            }
+        }
         self.ledger_result(call, &output).await?;
         self.emit_tool_result(call, &output).await?;
         self.append_tool_message(call, output);

@@ -16,26 +16,30 @@ use std::time::Duration;
 
 use futures_util::StreamExt;
 use serde_json::{json, Value};
-use tauri::{AppHandle, Runtime};
+use tauri::{AppHandle, Manager, Runtime};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStdin, ChildStdout, Command};
 use tokio::sync::mpsc;
 
 use crate::app::network_settings::{load_network_settings, proxy_env_vars};
+use crate::app::shared::new_id;
 use crate::app::ssh::exec::{spawn_ssh_command, SshCommandStream, SshStreamEvent};
 use crate::app::ssh::shell::{remote_shell_bootstrap, shell_escape_single_quoted};
 use crate::db::models::{McpServerConfig, SshConfigRecord, MCP_TRANSPORT_HTTP, MCP_TRANSPORT_SSE};
-use crate::native::model::types::ToolSpec;
+use crate::native::model::types::{NativeImage, ToolSpec};
 use crate::process_spawn::configure_tokio_command;
 
 use super::cancel::CancelFlag;
 use super::contract::ToolContract;
+use super::dispatch::ToolOutput;
 
 const MCP_PROTOCOL_VERSION: &str = "2025-03-26";
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(20);
 const CALL_TIMEOUT: Duration = Duration::from_secs(120);
 const HTTP_TIMEOUT: Duration = Duration::from_secs(120);
 const MAX_HTTP_BODY: usize = 16 * 1024 * 1024;
+const MAX_MCP_IMAGE_BYTES: usize = 8 * 1024 * 1024;
+const MAX_MCP_IMAGES: usize = 4;
 
 /// 服务端 `elicitation/create` 的处理：拿到 message 与 requestedSchema，返回 `{action, content}`。
 pub type ElicitHandler = Arc<
@@ -63,12 +67,14 @@ pub struct McpSession {
 struct McpLiveServer {
     id: String,
     name: String,
+    is_playwright: bool,
     tools: Vec<McpListedTool>,
     resources: Vec<McpResource>,
     prompts: Vec<McpPrompt>,
     capabilities: Value,
     transport: McpTransport,
     next_id: i64,
+    output_dir: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -176,7 +182,6 @@ impl SharedMcp {
         }
     }
 
-    /// 所有已连接工具的契约，供调度器一次性注册。
     pub async fn tool_contracts(&self) -> Vec<ToolContract> {
         match &self.inner {
             Some(inner) => inner.lock().await.tool_contracts(),
@@ -184,11 +189,30 @@ impl SharedMcp {
         }
     }
 
-    pub async fn call(&self, name: &str, arguments: &str) -> Result<String, String> {
-        match &self.inner {
-            Some(inner) => inner.lock().await.call(name, arguments).await,
-            None => Err(format!("unknown tool: {name}")),
+    pub async fn call(
+        &self,
+        name: &str,
+        arguments: &str,
+        cancel: &CancelFlag,
+    ) -> Result<ToolOutput, String> {
+        let inner = self
+            .inner
+            .as_ref()
+            .ok_or_else(|| format!("unknown tool: {name}"))?;
+        let mut session = inner.lock().await;
+        let result = tokio::select! {
+            biased;
+            _ = cancel.cancelled() => Err("MCP 工具已取消".to_string()),
+            result = session.call(name, arguments) => result,
+        };
+        if cancel.is_cancelled()
+            || result
+                .as_ref()
+                .is_err_and(|error| error.contains("超时") || error.contains("timed out"))
+        {
+            session.shutdown().await;
         }
+        result
     }
 
     /// 会话层注入 elicitation / sampling / roots 的处理器。
@@ -268,14 +292,85 @@ pub fn remote_mcp_shell_command(server: &McpServerConfig) -> Result<String, Stri
         }
         parts.push(format!("{key}={}", shell_escape_single_quoted(&env.value)));
     }
+    let launcher = if parts.is_empty() {
+        "exec "
+    } else {
+        "exec env "
+    };
     parts.push(shell_escape_single_quoted(server.command.trim()));
     for arg in &server.args {
         parts.push(shell_escape_single_quoted(arg));
     }
     Ok(format!(
-        "{}exec {}",
+        "{}{}{}",
         remote_shell_bootstrap(),
+        launcher,
         parts.join(" ")
+    ))
+}
+
+fn is_playwright_server(server: &McpServerConfig) -> bool {
+    server.transport == "stdio"
+        && server
+            .args
+            .iter()
+            .any(|arg| arg.starts_with("@playwright/mcp@"))
+}
+
+fn managed_playwright_args(
+    server: &McpServerConfig,
+    output_dir: &str,
+) -> Result<Vec<String>, String> {
+    if server.args.iter().any(|arg| {
+        [
+            "--user-data-dir",
+            "--output-dir",
+            "--cdp-endpoint",
+            "--extension",
+            "--endpoint",
+            "--config",
+            "--profile-dir-name",
+        ]
+        .iter()
+        .any(|flag| {
+            arg == flag
+                || arg
+                    .strip_prefix(flag)
+                    .is_some_and(|rest| rest.starts_with('='))
+        })
+    }) {
+        return Err(
+            "托管 Playwright MCP 不能接管已有浏览器或复用用户配置与共享输出目录".to_string(),
+        );
+    }
+    let mut args = server.args.clone();
+    if !args.iter().any(|arg| arg == "--isolated") {
+        args.push("--isolated".to_string());
+    }
+    args.extend(["--output-dir".to_string(), output_dir.to_string()]);
+    Ok(args)
+}
+
+fn managed_remote_command(server: &McpServerConfig, instance_id: &str) -> Result<String, String> {
+    if !instance_id
+        .chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || ch == '-')
+    {
+        return Err("浏览器实例 ID 无效".to_string());
+    }
+    let _ = managed_playwright_args(server, "$PLAYWRIGHT_OUTPUT_DIR")?;
+    let bootstrap = remote_shell_bootstrap();
+    let base = remote_mcp_shell_command(server)?;
+    let tail = base
+        .strip_prefix(&bootstrap)
+        .ok_or("远端 MCP 启动命令格式无效")?;
+    let isolation = if server.args.iter().any(|arg| arg == "--isolated") {
+        ""
+    } else {
+        " '--isolated'"
+    };
+    Ok(format!(
+        "{bootstrap}PLAYWRIGHT_OUTPUT_DIR=\"$HOME/.local/share/noxcode/playwright-downloads/{instance_id}\"; mkdir -p -- \"$PLAYWRIGHT_OUTPUT_DIR\" || exit 1; {tail}{isolation} '--output-dir' \"$PLAYWRIGHT_OUTPUT_DIR\""
     ))
 }
 
@@ -290,7 +385,7 @@ impl McpSession {
     pub fn tool_specs(&self) -> Vec<ToolSpec> {
         let mut specs = Vec::new();
         for server in &self.servers {
-            for tool in &server.tools {
+            for tool in server.exposed_tools() {
                 let description = if tool.description.trim().is_empty() {
                     format!("MCP tool {} from {}", tool.name, server.name)
                 } else {
@@ -370,7 +465,7 @@ impl McpSession {
     pub fn tool_contracts(&self) -> Vec<ToolContract> {
         let mut contracts = Vec::new();
         for server in &self.servers {
-            for tool in &server.tools {
+            for tool in server.exposed_tools() {
                 contracts.push(ToolContract::for_mcp(
                     &mcp_tool_name(&server.id, &tool.name),
                     tool.read_only_hint,
@@ -404,8 +499,7 @@ impl McpSession {
     fn locate(&self, name: &str) -> Option<(usize, McpCallKind)> {
         for (index, server) in self.servers.iter().enumerate() {
             if let Some(tool) = server
-                .tools
-                .iter()
+                .exposed_tools()
                 .find(|tool| mcp_tool_name(&server.id, &tool.name) == name)
             {
                 return Some((index, McpCallKind::Tool(tool.name.clone())));
@@ -444,7 +538,7 @@ impl McpSession {
         Some((server_id, tool))
     }
 
-    pub async fn call(&mut self, name: &str, arguments: &str) -> Result<String, String> {
+    pub async fn call(&mut self, name: &str, arguments: &str) -> Result<ToolOutput, String> {
         let (index, kind) = self
             .locate(name)
             .ok_or_else(|| format!("unknown tool: {name}"))?;
@@ -466,7 +560,7 @@ impl McpSession {
                         &handlers,
                     )
                     .await?;
-                format_tool_result(&response)
+                parse_tool_output(&response)
             }
             McpCallKind::Resources => {
                 match args.get("uri").and_then(Value::as_str).map(str::trim) {
@@ -479,9 +573,9 @@ impl McpSession {
                                 &handlers,
                             )
                             .await?;
-                        format_resource_read(&response)
+                        format_resource_read(&response).map(ToolOutput::text)
                     }
-                    _ => Ok(format_resource_list(&server.resources)),
+                    _ => Ok(ToolOutput::text(format_resource_list(&server.resources))),
                 }
             }
             McpCallKind::Prompt(prompt_name) => {
@@ -493,14 +587,14 @@ impl McpSession {
                         &handlers,
                     )
                     .await?;
-                format_prompt_result(&response)
+                format_prompt_result(&response).map(ToolOutput::text)
             }
         }
     }
 
     pub async fn shutdown(&mut self) {
         for server in &mut self.servers {
-            server.shutdown().await;
+            let _ = tokio::time::timeout(Duration::from_secs(3), server.shutdown()).await;
         }
         self.servers.clear();
     }
@@ -613,6 +707,12 @@ fn format_prompt_result(response: &Value) -> Result<String, String> {
 }
 
 impl McpLiveServer {
+    fn exposed_tools(&self) -> impl Iterator<Item = &McpListedTool> {
+        self.tools
+            .iter()
+            .filter(|tool| !self.is_playwright || tool.name != "browser_run_code_unsafe")
+    }
+
     fn next_request_id(&mut self) -> i64 {
         self.next_id += 1;
         self.next_id
@@ -817,8 +917,8 @@ impl McpLiveServer {
     async fn shutdown(&mut self) {
         match &mut self.transport {
             McpTransport::Local { child, stdin, .. } => {
-                let _ = stdin.shutdown().await;
                 terminate_local_child(child);
+                let _ = stdin.shutdown().await;
             }
             McpTransport::Ssh { stream, .. } => {
                 let _ = stream.eof().await;
@@ -1084,36 +1184,83 @@ async fn read_rpc_message(stdout: &mut BufReader<ChildStdout>) -> Result<Value, 
     serde_json::from_slice(&body).map_err(|error| format!("解析 MCP JSON 失败: {error}"))
 }
 
-fn format_tool_result(response: &Value) -> Result<String, String> {
+fn parse_tool_output(response: &Value) -> Result<ToolOutput, String> {
     if let Some(error) = response.get("error") {
-        let message = error
+        return Err(error
             .get("message")
             .and_then(Value::as_str)
-            .unwrap_or("MCP 工具调用失败");
-        return Err(message.to_string());
+            .unwrap_or("MCP 工具调用失败")
+            .to_string());
     }
-    let result = response.get("result").cloned().unwrap_or(Value::Null);
-    if let Some(content) = result.get("content").and_then(Value::as_array) {
-        let mut parts = Vec::new();
-        for item in content {
-            if let Some(text) = item.get("text").and_then(Value::as_str) {
-                parts.push(text.to_string());
-            } else {
-                parts.push(item.to_string());
+    let result = response.get("result").unwrap_or(&Value::Null);
+    let Some(content) = result.get("content").and_then(Value::as_array) else {
+        return Ok(ToolOutput::text(result.to_string()));
+    };
+    let mut parts = Vec::new();
+    let mut images = Vec::new();
+    for item in content {
+        match item.get("type").and_then(Value::as_str) {
+            Some("text") => {
+                if let Some(text) = item.get("text").and_then(Value::as_str) {
+                    parts.push(text.to_string());
+                }
             }
-        }
-        if result.get("isError").and_then(Value::as_bool) == Some(true) {
-            return Err(if parts.is_empty() {
-                "MCP 工具返回错误".to_string()
-            } else {
-                parts.join("\n")
-            });
-        }
-        if !parts.is_empty() {
-            return Ok(parts.join("\n"));
+            Some("image") => {
+                if images.len() == MAX_MCP_IMAGES {
+                    return Err("MCP 图片超过数量上限".to_string());
+                }
+                let mime = item.get("mimeType").and_then(Value::as_str).unwrap_or("");
+                let (format, ext) = match mime {
+                    "image/png" => (image::ImageFormat::Png, "png"),
+                    "image/jpeg" => (image::ImageFormat::Jpeg, "jpg"),
+                    "image/webp" => (image::ImageFormat::WebP, "webp"),
+                    "image/gif" => (image::ImageFormat::Gif, "gif"),
+                    _ => return Err(format!("MCP 图片类型不受支持：{mime}")),
+                };
+                let data = item.get("data").and_then(Value::as_str).unwrap_or("");
+                if data.len() > MAX_MCP_IMAGE_BYTES.div_ceil(3) * 4 {
+                    return Err("MCP 图片超过 8 MiB 上限".to_string());
+                }
+                let bytes =
+                    base64::Engine::decode(&base64::engine::general_purpose::STANDARD, data)
+                        .map_err(|_| "MCP 图片 base64 无效".to_string())?;
+                if bytes.len() > MAX_MCP_IMAGE_BYTES
+                    || image::guess_format(&bytes).ok() != Some(format)
+                {
+                    return Err("MCP 图片大小或格式无效".to_string());
+                }
+                let name = format!("mcp-screenshot-{}.{}", images.len() + 1, ext);
+                parts.push(format!("[图片] {name}（{} 字节）", bytes.len()));
+                images.push(NativeImage {
+                    name,
+                    mime_type: mime.to_string(),
+                    data_base64: data.to_string(),
+                    attachment_id: String::new(),
+                    page: None,
+                    time_range: None,
+                });
+            }
+            Some(kind) => parts.push(format!("[MCP {kind} 内容已省略]")),
+            None => parts.push("[MCP 未知内容已省略]".to_string()),
         }
     }
-    Ok(result.to_string())
+    let text = parts.join("\n");
+    if result.get("isError").and_then(Value::as_bool) == Some(true) {
+        return Err(if text.is_empty() {
+            "MCP 工具返回错误".to_string()
+        } else {
+            text
+        });
+    }
+    Ok(ToolOutput {
+        text,
+        images,
+        ok: true,
+    })
+}
+
+fn format_tool_result(response: &Value) -> Result<String, String> {
+    parse_tool_output(response).map(|output| output.text)
 }
 
 fn terminate_local_child(child: &mut Child) {
@@ -1318,16 +1465,19 @@ fn blank_server(server: &McpServerConfig, transport: McpTransport) -> McpLiveSer
     McpLiveServer {
         id: server.id.clone(),
         name: server.name.clone(),
+        is_playwright: is_playwright_server(server),
         tools: Vec::new(),
         resources: Vec::new(),
         prompts: Vec::new(),
         capabilities: json!({}),
         transport,
         next_id: 0,
+        output_dir: None,
     }
 }
 
-async fn spawn_local(
+async fn spawn_local<R: Runtime>(
+    app: &AppHandle<R>,
     server: &McpServerConfig,
     extra_env: &[(String, String)],
 ) -> Result<McpLiveServer, String> {
@@ -1336,8 +1486,26 @@ async fn spawn_local(
     }
     let program = super::command_path::resolve_program(server.command.trim())
         .map_err(|error| format!("启动 MCP 失败: {error}"))?;
+    let output_dir = if is_playwright_server(server) {
+        let _ = managed_playwright_args(server, "validation")?;
+        let dir = app
+            .path()
+            .app_data_dir()
+            .map_err(|error| format!("浏览器输出目录不可用：{error}"))?
+            .join("playwright-downloads")
+            .join(new_id());
+        std::fs::create_dir_all(&dir)
+            .map_err(|error| format!("创建浏览器下载目录失败：{error}"))?;
+        Some(dir)
+    } else {
+        None
+    };
     let mut command = Command::new(&program);
-    command.args(&server.args);
+    if let Some(dir) = output_dir.as_ref() {
+        command.args(managed_playwright_args(server, &dir.to_string_lossy())?);
+    } else {
+        command.args(&server.args);
+    }
     for (key, value) in extra_env {
         command.env(key, value);
     }
@@ -1376,14 +1544,16 @@ async fn spawn_local(
         .stdout
         .take()
         .ok_or_else(|| "MCP stdout 不可用".to_string())?;
-    Ok(blank_server(
+    let mut live = blank_server(
         server,
         McpTransport::Local {
             child: Box::new(child),
             stdin,
             stdout: BufReader::new(stdout),
         },
-    ))
+    );
+    live.output_dir = output_dir.map(|dir| format!("本机 {}", dir.display()));
+    Ok(live)
 }
 
 async fn spawn_remote<R: Runtime>(
@@ -1391,15 +1561,26 @@ async fn spawn_remote<R: Runtime>(
     ssh_config: &SshConfigRecord,
     server: &McpServerConfig,
 ) -> Result<McpLiveServer, String> {
-    let remote = remote_mcp_shell_command(server)?;
+    let instance_id = new_id();
+    let remote = if is_playwright_server(server) {
+        managed_remote_command(server, &instance_id)?
+    } else {
+        remote_mcp_shell_command(server)?
+    };
     let stream = spawn_ssh_command(app, ssh_config, &remote, true).await?;
-    Ok(blank_server(
+    let mut live = blank_server(
         server,
         McpTransport::Ssh {
             stream,
             pending: Vec::new(),
         },
-    ))
+    );
+    if is_playwright_server(server) {
+        live.output_dir = Some(format!(
+            "SSH 主机 ~/.local/share/noxcode/playwright-downloads/{instance_id}"
+        ));
+    }
+    Ok(live)
 }
 
 fn header_pairs(server: &McpServerConfig) -> Vec<(String, String)> {
@@ -1531,6 +1712,41 @@ async fn connect_sse(
     ))
 }
 
+fn validate_playwright_launch(server: &McpServerConfig) -> Result<(), String> {
+    if server.transport != "stdio"
+        || !server
+            .args
+            .iter()
+            .any(|arg| arg.contains("@playwright/mcp"))
+    {
+        return Ok(());
+    }
+    let packages: Vec<&str> = server
+        .args
+        .iter()
+        .filter(|arg| arg.contains("@playwright/mcp"))
+        .map(String::as_str)
+        .collect();
+    let fixed_version = packages.len() == 1
+        && packages[0]
+            .strip_prefix("@playwright/mcp@")
+            .is_some_and(|version| {
+                let parts: Vec<&str> = version.split('.').collect();
+                parts.len() == 3
+                    && parts.iter().all(|part| {
+                        !part.is_empty() && part.bytes().all(|byte| byte.is_ascii_digit())
+                    })
+            });
+    if fixed_version
+        && server.args.iter().any(|arg| arg == "--offline")
+        && server.args.iter().any(|arg| arg == "--no-install")
+        && !server.args.iter().any(|arg| arg == "-y" || arg == "--yes")
+    {
+        return Ok(());
+    }
+    Err("旧版 Playwright MCP 配置可能联网下载。请在设置中改用离线且固定版本的预设，并在执行主机显式安装浏览器组件".to_string())
+}
+
 pub async fn connect_mcp_servers<R: Runtime>(
     app: &AppHandle<R>,
     servers: &[McpServerConfig],
@@ -1553,6 +1769,10 @@ pub async fn connect_mcp_servers<R: Runtime>(
     };
     let handlers = session.handlers.clone();
     for server in servers {
+        if let Err(error) = validate_playwright_launch(server) {
+            warnings.push(format!("[MCP] {}：{error}", server.name));
+            continue;
+        }
         if cancel.is_cancelled() {
             warnings.push("[MCP] 已取消，剩余服务器未连接".to_string());
             break;
@@ -1579,7 +1799,7 @@ pub async fn connect_mcp_servers<R: Runtime>(
                 if let Some(ssh_config) = ssh_config {
                     spawn_remote(app, ssh_config, server).await
                 } else {
-                    spawn_local(server, &local_extra_env).await
+                    spawn_local(app, server, &local_extra_env).await
                 }
             }
         };
@@ -1600,13 +1820,18 @@ pub async fn connect_mcp_servers<R: Runtime>(
                     format!(
                         "{}（{} 个工具，{} 个资源，{} 个提示模板）",
                         live.name,
-                        live.tools.len(),
+                        live.exposed_tools().count(),
                         live.resources.len(),
                         live.prompts.len()
                     )
                 } else {
-                    format!("{}（{} 个工具）", live.name, live.tools.len())
+                    format!("{}（{} 个工具）", live.name, live.exposed_tools().count())
                 });
+                if let (Some(dir), Some(summary)) =
+                    (live.output_dir.as_deref(), connected.last_mut())
+                {
+                    summary.push_str(&format!("；自动命名输出目录：{dir}"));
+                }
                 session.servers.push(live);
             }
             Err(error) => {
@@ -1625,11 +1850,23 @@ pub async fn connect_mcp_servers<R: Runtime>(
     }
 }
 
+fn explain_test_handshake_failure(server: &McpServerConfig, error: &str) -> String {
+    if is_playwright_server(server) && error.contains("读取 MCP 响应失败: early eof") {
+        format!(
+            "Playwright MCP 在所选工作区的执行主机上提前退出。请先点“诊断”；若提示缺少固定版本组件，请确认后点“安装 MCP”，再重新测试。原始错误：{error}"
+        )
+    } else {
+        error.to_string()
+    }
+}
+
 /// 测试单个 MCP 服务器：连接 + 握手 + 列出工具。成功返回摘要，失败返回错误。
 pub async fn test_mcp_server_connection<R: Runtime>(
     app: &AppHandle<R>,
     server: &McpServerConfig,
+    ssh_config: Option<&SshConfigRecord>,
 ) -> Result<String, String> {
+    validate_playwright_launch(server)?;
     let handlers = McpHostHandlers::default();
     let mut live = match server.transport.as_str() {
         MCP_TRANSPORT_HTTP | MCP_TRANSPORT_SSE => {
@@ -1644,34 +1881,71 @@ pub async fn test_mcp_server_connection<R: Runtime>(
             }
         }
         _ => {
-            let extra_env = match load_network_settings(app) {
-                Ok(settings) => proxy_env_vars(&settings),
-                Err(error) => return Err(format!("读取网络设置失败：{error}")),
-            };
-            spawn_local(server, &extra_env).await?
+            if let Some(ssh_config) = ssh_config {
+                spawn_remote(app, ssh_config, server).await?
+            } else {
+                let extra_env = match load_network_settings(app) {
+                    Ok(settings) => proxy_env_vars(&settings),
+                    Err(error) => return Err(format!("读取网络设置失败：{error}")),
+                };
+                spawn_local(app, server, &extra_env).await?
+            }
         }
     };
     let summary = match handshake(&mut live, &handlers).await {
         Ok(()) => {
+            if server.transport == "stdio"
+                && server
+                    .args
+                    .iter()
+                    .any(|arg| arg.starts_with("@playwright/mcp@"))
+            {
+                let browser_ready = if live
+                    .tools
+                    .iter()
+                    .any(|tool| tool.name == "browser_snapshot")
+                {
+                    live.request(
+                        "tools/call",
+                        json!({"name": "browser_snapshot", "arguments": {}}),
+                        CALL_TIMEOUT,
+                        &handlers,
+                    )
+                    .await
+                    .and_then(|response| format_tool_result(&response))
+                    .map(|_| ())
+                } else {
+                    Err("Playwright MCP 未提供 browser_snapshot 工具".to_string())
+                };
+                if let Err(error) = browser_ready {
+                    live.shutdown().await;
+                    return Err(format!("MCP 已连接，但浏览器不可用：{error}"));
+                }
+            }
             let extras = live.resources.len() + live.prompts.len();
             if extras > 0 {
                 format!(
                     "连接成功：{} 个工具，{} 个资源，{} 个提示模板",
-                    live.tools.len(),
+                    live.exposed_tools().count(),
                     live.resources.len(),
                     live.prompts.len()
                 )
             } else {
-                format!("连接成功：{} 个工具", live.tools.len())
+                format!("连接成功：{} 个工具", live.exposed_tools().count())
             }
         }
         Err(error) => {
+            let detail = explain_test_handshake_failure(server, &error);
             live.shutdown().await;
-            return Err(format!("握手失败：{error}"));
+            return Err(format!("握手失败：{detail}"));
         }
     };
+    let downloads = live.output_dir.clone();
     live.shutdown().await;
-    Ok(summary)
+    Ok(match downloads {
+        Some(dir) => format!("{summary}；自动命名输出目录：{dir}"),
+        None => summary,
+    })
 }
 
 #[cfg(test)]
@@ -1698,6 +1972,184 @@ mod tests {
             headers: Vec::new(),
             oauth: None,
         }
+    }
+
+    #[test]
+    fn legacy_playwright_launch_cannot_auto_download() {
+        let mut server = sample_server();
+        server.args = vec!["-y".into(), "@playwright/mcp@latest".into()];
+        assert!(validate_playwright_launch(&server).is_err());
+        server.args = vec!["--no-install".into(), "@playwright/mcp@0.0.82".into()];
+        assert!(validate_playwright_launch(&server).is_err());
+        server.args.insert(0, "--offline".into());
+        assert!(validate_playwright_launch(&server).is_ok());
+        server.args.push("@playwright/mcp@latest".into());
+        assert!(validate_playwright_launch(&server).is_err());
+    }
+
+    #[test]
+    fn playwright_early_eof_points_to_explicit_workspace_diagnosis() {
+        let mut server = sample_server();
+        server.args = vec![
+            "--offline".into(),
+            "--no-install".into(),
+            "@playwright/mcp@0.0.82".into(),
+        ];
+        let failure = "读取 MCP 响应失败: early eof";
+        let explained = explain_test_handshake_failure(&server, failure);
+        assert!(explained.contains("诊断"), "{explained}");
+        assert!(explained.contains("安装 MCP"), "{explained}");
+        assert!(explained.contains("所选工作区"), "{explained}");
+        assert!(explained.contains(failure), "{explained}");
+        assert_eq!(
+            explain_test_handshake_failure(&sample_server(), failure),
+            failure
+        );
+        assert_eq!(
+            explain_test_handshake_failure(&server, "initialize 失败"),
+            "initialize 失败"
+        );
+    }
+
+    #[tokio::test]
+    async fn playwright_unsafe_code_is_not_exposed_or_callable() {
+        let mut server = sample_server();
+        server.args = vec!["@playwright/mcp@0.0.82".into()];
+        let listed = json!({"result": {"tools": [
+            {"name": "browser_snapshot", "inputSchema": {"type": "object"}},
+            {"name": "browser_run_code_unsafe", "inputSchema": {"type": "object"}}
+        ]}});
+        let mut live = blank_server(
+            &server,
+            McpTransport::Http {
+                client: reqwest::Client::new(),
+                url: "http://127.0.0.1:0".into(),
+                headers: vec![],
+                session_id: None,
+                bearer: None,
+                backlog: vec![],
+            },
+        );
+        live.tools = parse_listed_tools(&listed);
+        let mut session = McpSession {
+            servers: vec![live],
+            handlers: Arc::default(),
+        };
+        let snapshot = mcp_tool_name(&server.id, "browser_snapshot");
+        let unsafe_code = mcp_tool_name(&server.id, "browser_run_code_unsafe");
+        assert!(session.has_tool(&snapshot));
+        assert_eq!(session.tool_specs().len(), 1);
+        assert!(!session.has_tool(&unsafe_code));
+        assert!(session.contract_for(&unsafe_code).is_none());
+        assert!(session
+            .call(&unsafe_code, "{}")
+            .await
+            .unwrap_err()
+            .contains("unknown tool"));
+
+        let plain_server = sample_server();
+        let mut plain = blank_server(
+            &plain_server,
+            McpTransport::Http {
+                client: reqwest::Client::new(),
+                url: "http://127.0.0.1:0".into(),
+                headers: vec![],
+                session_id: None,
+                bearer: None,
+                backlog: vec![],
+            },
+        );
+        plain.tools = parse_listed_tools(&listed);
+        let plain_session = McpSession {
+            servers: vec![plain],
+            handlers: Arc::default(),
+        };
+        assert_eq!(plain_session.tool_specs().len(), 2);
+        assert!(plain_session.has_tool(&mcp_tool_name(&plain_server.id, "browser_run_code_unsafe")));
+    }
+
+    #[test]
+    fn playwright_instances_get_isolated_output_directories() {
+        let mut server = sample_server();
+        server.args = vec![
+            "--offline".into(),
+            "--no-install".into(),
+            "@playwright/mcp@0.0.82".into(),
+            "--isolated".into(),
+        ];
+        let args = managed_playwright_args(&server, "host/downloads/one").unwrap();
+        assert_eq!(
+            args.iter()
+                .filter(|arg| arg.as_str() == "--isolated")
+                .count(),
+            1
+        );
+        assert!(args
+            .windows(2)
+            .any(|pair| pair == ["--output-dir", "host/downloads/one"]));
+        server.args.push("--user-data-dir=/shared/profile".into());
+        assert!(managed_playwright_args(&server, "host/downloads/two").is_err());
+        server.args.pop();
+        for arg in [
+            "--cdp-endpoint=http://localhost:9222",
+            "--extension",
+            "--endpoint=http://localhost:3000",
+            "--config=browser.json",
+            "--profile-dir-name=Default",
+        ] {
+            server.args.push(arg.into());
+            assert!(
+                managed_playwright_args(&server, "host/downloads/two").is_err(),
+                "{arg}"
+            );
+            server.args.pop();
+        }
+        let remote = managed_remote_command(&server, "session-123").unwrap();
+        assert!(remote.contains("$HOME/.local/share/noxcode/playwright-downloads/session-123"));
+        assert!(remote.contains("'--output-dir' \"$PLAYWRIGHT_OUTPUT_DIR\""));
+    }
+
+    #[tokio::test]
+    async fn cancelling_a_pending_mcp_call_closes_the_session() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let mut live = blank_server(
+            &sample_server(),
+            McpTransport::Http {
+                client: reqwest::Client::builder().no_proxy().build().unwrap(),
+                url: format!("http://{}", listener.local_addr().unwrap()),
+                headers: vec![],
+                session_id: None,
+                bearer: None,
+                backlog: vec![],
+            },
+        );
+        live.tools.push(McpListedTool {
+            name: "wait".into(),
+            description: String::new(),
+            input_schema: json!({}),
+            read_only_hint: true,
+            destructive_hint: false,
+        });
+        let mcp = SharedMcp::from_session(McpSession {
+            servers: vec![live],
+            handlers: Arc::default(),
+        });
+        let cancel = CancelFlag::new();
+        let waiting = mcp.clone();
+        let signal = cancel.clone();
+        let task = tokio::spawn(async move {
+            waiting
+                .call(&mcp_tool_name("fs.tools", "wait"), "{}", &signal)
+                .await
+        });
+        let (_socket, _) = listener.accept().await.unwrap();
+        cancel.cancel();
+        let result = tokio::time::timeout(Duration::from_secs(2), task)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(result.unwrap_err().contains("已取消"));
+        assert!(!mcp.has_tool(&mcp_tool_name("fs.tools", "wait")).await);
     }
 
     #[tokio::test]
@@ -1737,14 +2189,14 @@ mod tests {
             shutdown_all_sessions(
                 &tokio::sync::Mutex::new(manager),
                 false,
-                started + Duration::from_secs(3)
+                started + Duration::from_secs(2)
             )
             .await
             .unwrap(),
             (1, 1)
         );
-        assert!(started.elapsed() >= Duration::from_secs(3));
-        assert!(started.elapsed() <= Duration::from_secs(3) + Duration::from_millis(1));
+        assert!(started.elapsed() >= Duration::from_secs(2));
+        assert!(started.elapsed() <= Duration::from_secs(2) + Duration::from_millis(1));
         tokio::task::yield_now().await;
         assert!(runner.is_finished());
         assert!(mcp.inner.as_ref().unwrap().try_lock().is_ok());
@@ -1774,6 +2226,25 @@ mod tests {
         assert!(command.contains("'pkg'"));
         let exec_tail = command.split("exec ").nth(1).expect("exec tail");
         assert!(!exec_tail.contains("&&"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn remote_mcp_environment_is_applied_before_exec() {
+        let mut server = sample_server();
+        server.command = "sh".into();
+        server.args = vec!["-c".into(), "test \"$TOKEN\" = \"a b\"".into()];
+        let script = remote_mcp_shell_command(&server).unwrap();
+        let output = std::process::Command::new("sh")
+            .arg("-lc")
+            .arg(script)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
     }
 
     #[test]
@@ -1816,6 +2287,35 @@ mod tests {
             }
         });
         assert_eq!(format_tool_result(&response).unwrap_err(), "boom");
+    }
+
+    #[test]
+    fn mcp_image_block_is_retained_without_base64_in_text() {
+        let data = base64::Engine::encode(
+            &base64::engine::general_purpose::STANDARD,
+            b"\x89PNG\r\n\x1a\n\x00\x00",
+        );
+        let response = json!({
+            "result": {"content": [
+                {"type": "text", "text": "Screenshot captured"},
+                {"type": "image", "mimeType": "image/png", "data": data},
+            ]}
+        });
+        let output = parse_tool_output(&response).unwrap();
+        assert_eq!(output.images.len(), 1);
+        assert_eq!(output.images[0].mime_type, "image/png");
+        assert!(!output.text.contains(&data));
+        assert!(output.text.contains("Screenshot captured"));
+    }
+
+    #[test]
+    fn mcp_image_block_rejects_invalid_base64_and_mime() {
+        for (mime, data) in [("image/png", "bad"), ("text/html", "QUJD")] {
+            let response = json!({"result": {"content": [
+                {"type": "image", "mimeType": mime, "data": data}
+            ]}});
+            assert!(parse_tool_output(&response).is_err());
+        }
     }
 
     #[test]

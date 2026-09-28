@@ -26,6 +26,7 @@ pub enum SkillSource {
     WorkspaceClaude,
     Plugin,
     Global,
+    Bundled,
 }
 
 impl SkillSource {
@@ -37,6 +38,7 @@ impl SkillSource {
             Self::WorkspaceClaude => "工作区 .claude",
             Self::Plugin => "插件",
             Self::Global => "全局",
+            Self::Bundled => "内置",
         }
     }
 
@@ -48,6 +50,7 @@ impl SkillSource {
             Self::WorkspaceClaude => 3,
             Self::Plugin => 4,
             Self::Global => 5,
+            Self::Bundled => 6,
         }
     }
 }
@@ -310,6 +313,37 @@ pub fn discover_plugin_skills(plugins: &[NativePlugin]) -> Vec<NativeSkill> {
     out
 }
 
+pub fn discover_bundled_skills() -> Vec<NativeSkill> {
+    [
+        (
+            "browser-operation",
+            include_str!("../../resources/skills/browser-operation/SKILL.md"),
+        ),
+        (
+            "gui-test",
+            include_str!("../../resources/skills/gui-test/SKILL.md"),
+        ),
+    ]
+    .into_iter()
+    .map(|(name, raw)| {
+        let meta = parse_skill_meta(raw, name);
+        NativeSkill {
+            name: meta.name,
+            description: meta.description,
+            source: SkillSource::Bundled,
+            dir: format!("builtin://skills/{name}"),
+            skill_md_path: format!("builtin://skills/{name}/SKILL.md"),
+            body: raw.to_string(),
+            extra_files: Vec::new(),
+            allowed_tools: meta.allowed_tools,
+            argument_hint: meta.argument_hint,
+            when_to_use: meta.when_to_use,
+            plugin: None,
+        }
+    })
+    .collect()
+}
+
 pub async fn load_session_skills(
     cwd: &str,
     ssh: Option<&SshToolRuntime>,
@@ -323,6 +357,7 @@ pub async fn load_session_skills(
     };
     items.extend(discover_plugin_skills(plugins));
     items.extend(discover_global_skills(config_dir));
+    items.extend(discover_bundled_skills());
     let merged = merge_skills(items);
     filter_disabled_skills(&merged, config_dir)
 }
@@ -411,13 +446,20 @@ pub fn render_skill(skill: &NativeSkill, ssh_session: bool) -> String {
             "\n\n附属文件不在远端工作区；不要用 Read 读取这些本机路径，继续用 Skill 查看。",
         );
     }
-    let mut header = format!(
-        "# {}（{}）\n目录: {}",
-        skill.name,
-        skill.source.label_zh(),
-        skill.dir
-    );
-    if !ssh_session {
+    let mut header = if skill.source == SkillSource::Bundled {
+        format!(
+            "# {}（内置）\n内容随应用提供；不存在可用 Read 访问的本机或远端技能目录。",
+            skill.name
+        )
+    } else {
+        format!(
+            "# {}（{}）\n目录: {}",
+            skill.name,
+            skill.source.label_zh(),
+            skill.dir
+        )
+    };
+    if !ssh_session && skill.source != SkillSource::Bundled {
         header.push_str(
             "\n附属文件可用 Read / Glob / Grep 只读访问，请使用上述目录下的绝对路径；相对路径仍以工作区为基准。",
         );
@@ -791,6 +833,7 @@ fn collect_discovered_skills(
     let plugins = load_enabled_plugins(config_dir, workspace_root);
     items.extend(discover_plugin_skills(&plugins));
     items.extend(discover_global_skills(config_dir));
+    items.extend(discover_bundled_skills());
     merge_skills_detailed(items)
 }
 
@@ -1147,6 +1190,37 @@ mod tests {
         assert!(validate_skill_name("-bad").is_err());
         assert!(validate_skill_name("bad-").is_err());
         assert!(validate_skill_name("").is_err());
+    }
+
+    #[test]
+    fn bundled_browser_skills_can_be_overridden_and_disabled() {
+        let bundled = discover_bundled_skills();
+        assert_eq!(bundled.len(), 2);
+        let browser = find_skill(&bundled, "browser-operation").unwrap();
+        assert_eq!(browser.source, SkillSource::Bundled);
+        assert!(browser.body.contains("browser_snapshot"));
+        let mut override_skill = browser.clone();
+        override_skill.source = SkillSource::WorkspaceNoxcode;
+        override_skill.body = "user override".into();
+        override_skill.skill_md_path = "/workspace/SKILL.md".into();
+        let merged = merge_skills(vec![browser.clone(), override_skill]);
+        assert_eq!(
+            find_skill(&merged, "browser-operation").unwrap().body,
+            "user override"
+        );
+        let dir = temp_root("noxcode-bundled-disabled");
+        fs::create_dir_all(&dir).unwrap();
+        save_skills_state(
+            &dir,
+            &SkillsState {
+                disabled_paths: vec![browser.skill_md_path.clone()],
+            },
+        )
+        .unwrap();
+        assert!(filter_disabled_skills(&bundled, Some(&dir))
+            .iter()
+            .all(|skill| skill.name != "browser-operation"));
+        let _ = fs::remove_dir_all(dir);
     }
 
     #[test]

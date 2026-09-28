@@ -210,6 +210,8 @@ pub struct ToolCtx {
     /// 本会话最近一次 `get_app_state` 的窗口树；元素下标只对这一轮有效。
     pub computer_app_state:
         std::sync::Arc<std::sync::Mutex<Option<super::app_target::ComputerAppState>>>,
+    /// macOS foreground input must run on the AppKit main thread.
+    pub computer_main_thread: Option<tauri::AppHandle>,
 }
 
 impl ToolCtx {
@@ -295,6 +297,7 @@ impl ToolCtx {
             worktree_fetch_before_create: false,
             computer_control_enabled: false,
             computer_app_state: std::sync::Arc::new(std::sync::Mutex::new(None)),
+            computer_main_thread: None,
         }
     }
 
@@ -903,9 +906,7 @@ async fn dispatch(ctx: &ToolCtx, name: &str, arguments: &str) -> Result<ToolOutp
             .map(ToolOutput::text),
         "ExitWorktree" => call_exit_worktree(ctx).await.map(ToolOutput::text),
         "Computer" => super::desktop::execute(ctx, arguments).await,
-        other if ctx.mcp.has_tool(other).await => {
-            ctx.mcp.call(other, arguments).await.map(ToolOutput::text)
-        }
+        other if ctx.mcp.has_tool(other).await => ctx.mcp.call(other, arguments, &ctx.cancel).await,
         other => Err(format!("unknown tool: {other}")),
     }
 }

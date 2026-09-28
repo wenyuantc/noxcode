@@ -9,7 +9,7 @@ use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine;
 use tauri::{AppHandle, Manager, Runtime};
 
-use crate::app::shared::new_id;
+use crate::app::shared::{new_id, sqlite_pool};
 use crate::native::model::types::NativeImage;
 
 pub const MAX_NATIVE_IMAGES: usize = 8;
@@ -336,17 +336,66 @@ pub fn stage_image_from_path(app_config_dir: &Path, source: &Path) -> Result<Pat
     stage_image_bytes(app_config_dir, &name, &bytes)
 }
 
+#[tauri::command]
+pub async fn get_native_tool_image<R: Runtime>(
+    app: AppHandle<R>,
+    attachment_id: String,
+) -> Result<String, String> {
+    uuid::Uuid::parse_str(&attachment_id).map_err(|_| "无效的截图附件 ID".to_string())?;
+    let pool = sqlite_pool(&app).await?;
+    let root = app
+        .path()
+        .app_config_dir()
+        .map_err(|error| error.to_string())?;
+    let service =
+        crate::native::attachments::AttachmentService::new(attachments_dir(&root), pool, "tool");
+    let descriptor = service
+        .describe(&attachment_id)
+        .await
+        .map_err(|error| error.to_string())?;
+    if !matches!(
+        descriptor.mime.as_str(),
+        "image/png" | "image/jpeg" | "image/webp" | "image/gif"
+    ) || descriptor.byte_count > MAX_NATIVE_IMAGE_BYTES
+    {
+        return Err("截图附件类型或大小不受支持".to_string());
+    }
+    let bytes = service
+        .read_bytes(&attachment_id)
+        .await
+        .map_err(|error| error.to_string())?;
+    Ok(format!(
+        "data:{};base64,{}",
+        descriptor.mime,
+        BASE64.encode(bytes)
+    ))
+}
+
 pub async fn remember_loaded_media(
     pool: &sqlx::SqlitePool,
     root: &Path,
     loaded: &mut NativeImageLoad,
 ) -> Result<(), String> {
-    let service = crate::native::attachments::AttachmentService::new(
-        root.to_path_buf(),
-        pool.clone(),
-        "composer",
-    );
-    for image in &mut loaded.images {
+    remember_images(pool, root, &mut loaded.images, "composer").await
+}
+
+pub async fn remember_tool_images(
+    pool: &sqlx::SqlitePool,
+    root: &Path,
+    images: &mut [NativeImage],
+) -> Result<(), String> {
+    remember_images(pool, root, images, "tool").await
+}
+
+async fn remember_images(
+    pool: &sqlx::SqlitePool,
+    root: &Path,
+    images: &mut [NativeImage],
+    owner: &str,
+) -> Result<(), String> {
+    let service =
+        crate::native::attachments::AttachmentService::new(root.to_path_buf(), pool.clone(), owner);
+    for image in images {
         if !image.attachment_id.is_empty() {
             continue;
         }
@@ -354,7 +403,7 @@ pub async fn remember_loaded_media(
             .decode(image.data_base64.trim())
             .map_err(|_| format!("附件数据无效: {}", image.name))?;
         let stored = service
-            .import_bytes(&image.name, &bytes, "composer")
+            .import_bytes(&image.name, &bytes, owner)
             .await
             .map_err(|error| error.to_string())?;
         image.attachment_id = stored.id;

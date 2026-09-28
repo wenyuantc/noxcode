@@ -12,6 +12,7 @@ import {
   setNativeSkillEnabled,
 } from "@/lib/backend";
 import {
+  SKILL_DIR_BUNDLED,
   SKILL_DIR_GLOBAL,
   SKILL_DIR_PLUGIN,
   normalizeSkillPath,
@@ -119,6 +120,7 @@ export function NativeSkillsSettingsCard() {
   const dirLabel = (dir: string) => {
     if (dir === SKILL_DIR_GLOBAL) return t("skills.filter.globalDir");
     if (dir === SKILL_DIR_PLUGIN) return t("skills.filter.pluginDir");
+    if (dir === SKILL_DIR_BUNDLED) return t("skills.filter.bundledDir");
     const workspaceIdFromFilter = parseWorkspaceSkillDirFilter(dir);
     const workspace = sortedWorkspaces.find((item) => item.id === workspaceIdFromFilter);
     if (workspace) return workspaceLabel(workspace);
@@ -231,16 +233,18 @@ export function NativeSkillsSettingsCard() {
                 <Switch checked={on} onCheckedChange={(checked) => void toggle(skill, checked)} />
               </div>
               <div className="flex flex-wrap gap-1.5">
-                <Button
-                  variant="outline"
-                  size="sm"
-                  className="h-7 gap-1 text-xs"
-                  onClick={() => void openNativeSkillPath(skill.dir)}
-                >
-                  <FolderOpen className="size-3.5" />
-                  {t("skills.openPath")}
-                </Button>
-                {skill.source !== "global" ? (
+                {skill.source !== "bundled" ? (
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    className="h-7 gap-1 text-xs"
+                    onClick={() => void openNativeSkillPath(skill.dir)}
+                  >
+                    <FolderOpen className="size-3.5" />
+                    {t("skills.openPath")}
+                  </Button>
+                ) : null}
+                {skill.source !== "global" && skill.source !== "bundled" ? (
                   <Button
                     variant="outline"
                     size="sm"
@@ -347,6 +351,7 @@ export function NativeSkillsSettingsCard() {
             <SelectContent>
               <SelectItem value={SKILL_DIR_GLOBAL}>{t("skills.filter.globalDir")}</SelectItem>
               <SelectItem value={SKILL_DIR_PLUGIN}>{t("skills.filter.pluginDir")}</SelectItem>
+              <SelectItem value={SKILL_DIR_BUNDLED}>{t("skills.filter.bundledDir")}</SelectItem>
               {sortedWorkspaces.map((workspace) => (
                 <SelectItem
                   key={workspace.id}
@@ -383,6 +388,7 @@ export function NativeSkillsSettingsCard() {
                   "workspace_agents",
                   "workspace_claude",
                   "plugin",
+                  "bundled",
                 ] as NativeSkillSource[]
               ).map((source) => (
                 <SelectItem key={source} value={source}>

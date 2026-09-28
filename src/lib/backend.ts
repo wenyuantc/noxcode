@@ -51,7 +51,6 @@ import type {
   GetNativeUsageAnalyticsInput,
   ListNativeApiCallLogsInput,
   McpServersDocument,
-  McpServerConfig,
   McpOAuthEvent,
   McpOAuthStart,
   McpOAuthStatus,
@@ -590,6 +589,10 @@ export function stageComposerImage(name: string, dataBase64: string): Promise<st
   return invoke("stage_composer_image", { name, dataBase64 });
 }
 
+export function getNativeToolImage(attachmentId: string): Promise<string> {
+  return invoke("get_native_tool_image", { attachmentId });
+}
+
 export function stageComposerImageFromPath(sourcePath: string): Promise<string> {
   return invoke("stage_composer_image_from_path", { sourcePath });
 }
@@ -1093,8 +1096,16 @@ export function exportMcpServersSnippet(): Promise<string> {
   return invoke("export_mcp_servers_snippet");
 }
 
-export function testMcpServer(server: McpServerConfig): Promise<string> {
-  return invoke("test_mcp_server", { server });
+export function testMcpServer(serverId: string, workspaceId: string): Promise<string> {
+  return invoke("test_mcp_server", { serverId, workspaceId });
+}
+
+export function diagnosePlaywright(workspaceId: string): Promise<string> {
+  return invoke("diagnose_playwright", { workspaceId });
+}
+
+export function installPlaywrightMcp(workspaceId: string, browser: boolean): Promise<string> {
+  return invoke("install_playwright_mcp", { workspaceId, browser });
 }
 
 export function startMcpOAuth(serverId: string): Promise<McpOAuthStart> {

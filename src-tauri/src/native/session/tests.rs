@@ -496,12 +496,43 @@ fn persist_stdout_message_wraps_tool_events() {
         name: "a.png".to_string(),
         mime_type: "image/png".to_string(),
         data_url: "data:image/png;base64,QQ==".to_string(),
+        attachment_id: None,
     }];
     let with_images =
         super::persist_stdout_message("[USER_INPUT] 看图", None, Some(images.as_slice()), None);
     let image_value: serde_json::Value = serde_json::from_str(&with_images).expect("envelope");
     assert_eq!(image_value["line"], "[USER_INPUT] 看图");
     assert_eq!(image_value["images"][0]["name"], "a.png");
+}
+
+#[test]
+fn mcp_screenshot_history_stores_reference_not_base64() {
+    use crate::db::models::{NativeToolEvent, NativeToolImage, NativeToolPhase};
+    let event = NativeToolEvent {
+        phase: NativeToolPhase::Result,
+        call_id: "shot".into(),
+        name: "mcp__playwright__browser_take_screenshot".into(),
+        title: String::new(),
+        args_summary: String::new(),
+        ok: Some(true),
+        duration_ms: None,
+        result_preview: None,
+        subagent_tag: None,
+        mcp_server: Some("playwright".into()),
+        mcp_tool: Some("browser_take_screenshot".into()),
+        image_names: vec!["shot.png".into()],
+    };
+    let images = [NativeToolImage {
+        name: "shot.png".into(),
+        mime_type: "image/png".into(),
+        data_url: "data:image/png;base64,AAAA".into(),
+        attachment_id: Some("attachment-1".into()),
+    }];
+    let persisted = super::persist_stdout_message("screenshot", Some(&event), Some(&images), None);
+    assert!(!persisted.contains("base64"));
+    let value: serde_json::Value = serde_json::from_str(&persisted).unwrap();
+    assert_eq!(value["images"][0]["attachment_id"], "attachment-1");
+    assert_eq!(value["images"][0]["data_url"], "");
 }
 
 #[test]

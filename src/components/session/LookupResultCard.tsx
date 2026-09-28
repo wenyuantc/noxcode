@@ -1,8 +1,11 @@
+import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 
 import { CodeBlock } from "@/components/code/CodeBlock";
 import { languageFromPath } from "@/lib/codeLanguage";
+import { getNativeToolImage } from "@/lib/backend";
 import type { GroupedSessionItem } from "@/lib/sessionLines";
+import type { NativeToolImage } from "@/lib/types";
 import {
   lookupPathText,
   parseReadResultLines,
@@ -12,6 +15,35 @@ import {
 } from "@/lib/sessionLines";
 import { cn } from "@/lib/utils";
 import { SqliteResultTable } from "./SqliteResultTable";
+
+function ToolImage({ image, alt }: { image: NativeToolImage; alt: string }) {
+  const [source, setSource] = useState(image.data_url);
+
+  useEffect(() => {
+    let current = true;
+    if (image.data_url) {
+      setSource(image.data_url);
+    } else if (image.attachment_id) {
+      setSource("");
+      void getNativeToolImage(image.attachment_id)
+        .then((dataUrl) => {
+          if (current) setSource(dataUrl);
+        })
+        .catch(() => {
+          if (current) setSource("");
+        });
+    }
+    return () => {
+      current = false;
+    };
+  }, [image.attachment_id, image.data_url]);
+
+  return source ? (
+    <img src={source} alt={alt} className="max-h-48 max-w-full rounded-md border" />
+  ) : (
+    <span className="text-xs text-muted-foreground">{image.name}</span>
+  );
+}
 
 export function LookupResultCard({ item }: { item: GroupedSessionItem }) {
   const { t } = useTranslation("sessions");
@@ -54,11 +86,10 @@ export function LookupResultCard({ item }: { item: GroupedSessionItem }) {
       {item.images?.length ? (
         <div className="mt-1 flex flex-wrap gap-2">
           {item.images.map((image) => (
-            <img
+            <ToolImage
               key={`${item.id}-${image.name}`}
-              src={image.data_url}
+              image={image}
               alt={t("toolImageAlt", { name: image.name })}
-              className="max-h-48 max-w-full rounded-md border"
             />
           ))}
         </div>

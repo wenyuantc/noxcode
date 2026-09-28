@@ -18,9 +18,11 @@ import { useTranslation } from "react-i18next";
 
 import {
   clearMcpOAuth,
+  diagnosePlaywright,
   exportMcpServersSnippet,
   getMcpOAuthStatus,
   getMcpServers,
+  installPlaywrightMcp,
   onNativeMcpOAuth,
   resetMcpServers,
   startMcpOAuth,
@@ -53,6 +55,7 @@ import { SettingCard } from "./SettingCard";
 import { SettingFeedbackCallout } from "./SettingFeedbackCallout";
 
 const EXAMPLE_FILESYSTEM_ID = "example-filesystem";
+const PLAYWRIGHT_MCP_PACKAGE = "@playwright/mcp@0.0.82";
 
 function createEmptyServer(): McpServerConfig {
   return {
@@ -403,6 +406,9 @@ export function McpSettingsTab() {
   const [deleteConfirming, setDeleteConfirming] = useState(false);
   const [togglingId, setTogglingId] = useState<string | null>(null);
   const [testingId, setTestingId] = useState<string | null>(null);
+  const [testWorkspaceId, setTestWorkspaceId] = useState("");
+  const [browserBusy, setBrowserBusy] = useState<"diagnose" | "package" | "browser" | null>(null);
+  const [browserStatus, setBrowserStatus] = useState<string | null>(null);
   // 列表加载失败需要持续可见，只有列表重新加载成功才清除；一次性操作结果统一走全局 toast。
   const [loadError, setLoadError] = useState<string | null>(null);
   const [modalError, setModalError] = useState<string | null>(null);
@@ -443,6 +449,12 @@ export function McpSettingsTab() {
       cancelled = true;
     };
   }, [t]);
+
+  useEffect(() => {
+    if (!workspaces.some((workspace) => workspace.id === testWorkspaceId)) {
+      setTestWorkspaceId(workspaces[0]?.id ?? "");
+    }
+  }, [workspaces, testWorkspaceId]);
 
   const patchForm = (patch: Partial<McpFormState>) => {
     setForm((current) => ({ ...current, ...patch }));
@@ -621,7 +633,7 @@ export function McpSettingsTab() {
     if (testingId !== null) return;
     setTestingId(server.id);
     try {
-      const summary = await testMcpServer(server);
+      const summary = await testMcpServer(server.id, testWorkspaceId);
       showToast({
         id: `mcp-server-test-${server.id}`,
         variant: "success",
@@ -635,6 +647,37 @@ export function McpSettingsTab() {
       });
     } finally {
       setTestingId(null);
+    }
+  };
+
+  const handleBrowserAction = async (action: "diagnose" | "package" | "browser") => {
+    if (!testWorkspaceId || browserBusy) return;
+    if (action !== "diagnose") {
+      const confirmed = await confirm(
+        t(
+          action === "browser"
+            ? "mcp.dialogs.installBrowserConfirm"
+            : "mcp.dialogs.installPackageConfirm",
+          {
+            name: workspaces.find((workspace) => workspace.id === testWorkspaceId)?.name ?? "",
+          },
+        ),
+        { title: t("mcp.playwright.title"), kind: "warning" },
+      );
+      if (!confirmed) return;
+    }
+    setBrowserBusy(action);
+    setBrowserStatus(null);
+    try {
+      const result =
+        action === "diagnose"
+          ? await diagnosePlaywright(testWorkspaceId)
+          : await installPlaywrightMcp(testWorkspaceId, action === "browser");
+      setBrowserStatus(result);
+    } catch (err) {
+      setBrowserStatus(errorMessage(err));
+    } finally {
+      setBrowserBusy(null);
     }
   };
 
@@ -701,9 +744,9 @@ export function McpSettingsTab() {
     openCreate({
       name: "playwright",
       command: "npx",
-      args: ["-y", "@playwright/mcp@latest"],
+      args: ["--offline", "--no-install", PLAYWRIGHT_MCP_PACKAGE, "--isolated", "--no-webmcp"],
       notes: t("mcp.playwright.notes"),
-      enabled: true,
+      enabled: false,
     });
   };
 
@@ -763,6 +806,81 @@ export function McpSettingsTab() {
           </div>
         }
       >
+        <div className="mb-3 flex flex-wrap items-center gap-2 text-xs">
+          <label className="font-medium text-muted-foreground" htmlFor="mcp-test-workspace">
+            {t("mcp.fields.testWorkspace")}
+          </label>
+          <Select
+            value={testWorkspaceId}
+            disabled={browserBusy !== null}
+            onValueChange={(value) => {
+              setTestWorkspaceId(value ?? "");
+              setBrowserStatus(null);
+            }}
+          >
+            <SelectTrigger id="mcp-test-workspace" className="h-8 w-full max-w-xs text-xs">
+              <SelectValue placeholder={t("mcp.fields.scopeWorkspacesEmpty")} />
+            </SelectTrigger>
+            <SelectContent>
+              {workspaces.map((workspace) => (
+                <SelectItem key={workspace.id} value={workspace.id} className="text-xs">
+                  {workspace.name} (
+                  {workspace.workspace_type === "ssh" ? "SSH" : t("mcp.fields.localHost")})
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+          <Button
+            type="button"
+            size="sm"
+            variant="outline"
+            className="h-8 gap-1 text-xs"
+            disabled={!testWorkspaceId || browserBusy !== null}
+            onClick={() => void handleBrowserAction("diagnose")}
+          >
+            {browserBusy === "diagnose" ? (
+              <Loader2 className="size-3 animate-spin" />
+            ) : (
+              <RefreshCw className="size-3" />
+            )}
+            {t("mcp.actions.diagnose")}
+          </Button>
+          <Button
+            type="button"
+            size="sm"
+            variant="outline"
+            className="h-8 gap-1 text-xs"
+            disabled={!testWorkspaceId || browserBusy !== null}
+            onClick={() => void handleBrowserAction("package")}
+          >
+            {browserBusy === "package" ? (
+              <Loader2 className="size-3 animate-spin" />
+            ) : (
+              <Download className="size-3" />
+            )}
+            {t("mcp.actions.installPackage")}
+          </Button>
+          <Button
+            type="button"
+            size="sm"
+            variant="outline"
+            className="h-8 gap-1 text-xs"
+            disabled={!testWorkspaceId || browserBusy !== null}
+            onClick={() => void handleBrowserAction("browser")}
+          >
+            {browserBusy === "browser" ? (
+              <Loader2 className="size-3 animate-spin" />
+            ) : (
+              <Download className="size-3" />
+            )}
+            {t("mcp.actions.installBrowser")}
+          </Button>
+        </div>
+        {browserStatus ? (
+          <p role="status" className="mb-3 break-words text-xs text-muted-foreground">
+            {browserStatus}
+          </p>
+        ) : null}
         {loading ? (
           <div className="flex h-36 items-center justify-center text-xs text-muted-foreground">
             <Loader2 className="mr-2 size-4 animate-spin text-primary" />
@@ -855,7 +973,7 @@ export function McpSettingsTab() {
                       variant="outline"
                       size="sm"
                       onClick={() => void handleTest(server)}
-                      disabled={testingId !== null}
+                      disabled={testingId !== null || !testWorkspaceId}
                       className="h-7 text-xs gap-1"
                     >
                       {testingId === server.id ? (

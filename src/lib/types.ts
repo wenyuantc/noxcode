@@ -785,6 +785,7 @@ export interface NativeToolImage {
   name: string;
   mime_type: string;
   data_url: string;
+  attachment_id?: string;
 }
 
 export interface NativeAssistantFragment {
@@ -1269,7 +1270,8 @@ export type NativeSkillSource =
   | "workspace_agents"
   | "workspace_claude"
   | "plugin"
-  | "global";
+  | "global"
+  | "bundled";
 
 export interface NativeSkill {
   name: string;
