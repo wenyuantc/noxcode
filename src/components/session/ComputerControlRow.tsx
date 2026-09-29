@@ -12,6 +12,7 @@ import {
   ZoomIn,
 } from "lucide-react";
 import { useEffect, useRef, useState, type ReactNode } from "react";
+import { createPortal } from "react-dom";
 import { useTranslation } from "react-i18next";
 
 import { CodeBlock } from "@/components/code/CodeBlock";
@@ -140,44 +141,47 @@ export function ComputerControlRow({
       </SegmentCard>
 
       {/* Lightbox Modal */}
-      {previewImage ? (
-        <div
-          role="dialog"
-          aria-modal="true"
-          className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm p-4 animate-in fade-in duration-150"
-          onClick={() => setPreviewImage(null)}
-        >
-          <div
-            className="relative flex flex-col max-h-[90vh] max-w-[92vw] overflow-hidden rounded-xl border border-white/10 bg-background/95 shadow-2xl"
-            onClick={(e) => e.stopPropagation()}
-          >
-            <div className="flex items-center justify-between border-b border-border/50 px-4 py-2.5 bg-muted/30">
-              <div className="flex items-center gap-2 min-w-0 pr-4">
-                <Camera className="size-4 text-purple-500 shrink-0" />
-                <span className="truncate text-xs font-medium text-foreground">
-                  {previewImage.title || previewImage.name || t("screenshotPreview")}
-                </span>
-              </div>
-              <button
-                type="button"
-                onClick={() => setPreviewImage(null)}
-                className="rounded-md p-1 text-muted-foreground hover:bg-muted hover:text-foreground transition-colors cursor-pointer"
-                title={t("closePreview")}
-                aria-label={t("closePreview")}
+      {previewImage && typeof document !== "undefined"
+        ? createPortal(
+            <div
+              role="dialog"
+              aria-modal="true"
+              className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm p-4 animate-in fade-in duration-150"
+              onClick={() => setPreviewImage(null)}
+            >
+              <div
+                className="relative flex flex-col max-h-[90vh] max-w-[92vw] overflow-hidden rounded-xl border border-white/10 bg-background/95 shadow-2xl"
+                onClick={(e) => e.stopPropagation()}
               >
-                <X className="size-4" />
-              </button>
-            </div>
-            <div className="flex-1 overflow-auto p-3 flex items-center justify-center bg-black/40">
-              <img
-                src={previewImage.url}
-                alt={previewImage.name || t("screenshotPreview")}
-                className="max-h-[80vh] max-w-full rounded-md object-contain select-none shadow-lg"
-              />
-            </div>
-          </div>
-        </div>
-      ) : null}
+                <div className="flex items-center justify-between border-b border-border/50 px-4 py-2.5 bg-muted/30">
+                  <div className="flex items-center gap-2 min-w-0 pr-4">
+                    <Camera className="size-4 text-purple-500 shrink-0" />
+                    <span className="truncate text-xs font-medium text-foreground">
+                      {previewImage.title || previewImage.name || t("screenshotPreview")}
+                    </span>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => setPreviewImage(null)}
+                    className="rounded-md p-1 text-muted-foreground hover:bg-muted hover:text-foreground transition-colors cursor-pointer"
+                    title={t("closePreview")}
+                    aria-label={t("closePreview")}
+                  >
+                    <X className="size-4" />
+                  </button>
+                </div>
+                <div className="flex-1 overflow-auto p-3 flex items-center justify-center bg-black/40">
+                  <img
+                    src={previewImage.url}
+                    alt={previewImage.name || t("screenshotPreview")}
+                    className="max-h-[80vh] max-w-full rounded-md object-contain select-none shadow-lg"
+                  />
+                </div>
+              </div>
+            </div>,
+            document.body,
+          )
+        : null}
     </>
   );
 }
