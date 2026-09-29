@@ -146,7 +146,7 @@ function renderSegment(
               <p
                 key={item.id}
                 className={cn(
-                  "text-xs whitespace-pre-wrap font-mono break-words",
+                  "text-xs whitespace-pre-wrap font-mono break-words [overflow-wrap:anywhere]",
                   lineToneClass(item.kind, item.text, item.ok),
                 )}
               >
@@ -464,7 +464,7 @@ export const EventStream = memo(function EventStream({
           ) : null}
           {virtualize ? (
             <div
-              className="relative mx-auto max-w-3xl"
+              className="relative mx-auto w-full max-w-3xl"
               style={{ height: virtualizer.getTotalSize() }}
             >
               {virtualizer.getVirtualItems().map((virtual) => (
@@ -484,7 +484,7 @@ export const EventStream = memo(function EventStream({
               ))}
             </div>
           ) : (
-            <div className="mx-auto flex max-w-3xl flex-col gap-4">
+            <div className="mx-auto flex w-full max-w-3xl flex-col gap-4">
               {blocks.map((block, index) => (
                 <div
                   key={block.id}
@@ -497,7 +497,7 @@ export const EventStream = memo(function EventStream({
               {blocks.length === 0 && hasAsk ? <PlanAskCard sessionId={sessionId} /> : null}
             </div>
           )}
-          <div className="mx-auto mt-4 max-w-3xl space-y-4">
+          <div className="mx-auto mt-4 w-full max-w-3xl space-y-4">
             <PendingPlanApproval sessionId={sessionId} />
             <BackgroundTasks sessionId={sessionId} />
             <BackgroundProcesses sessionId={sessionId} />

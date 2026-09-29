@@ -102,7 +102,10 @@ function markdownComponents(variant: "default" | "plan", codeFontSize: number): 
         return <CodeBlock code={text} language={language} className="mb-0" />;
       }
       return (
-        <code className="rounded bg-muted px-1 py-0.5 font-mono" style={{ fontSize: codeFontSize }}>
+        <code
+          className="rounded bg-muted px-1 py-0.5 font-mono break-all"
+          style={{ fontSize: codeFontSize }}
+        >
           {children}
         </code>
       );
@@ -144,7 +147,7 @@ export const AssistantMarkdown = memo(function AssistantMarkdown({
     [codeFontSize, variant],
   );
   return (
-    <div className="text-sm leading-6">
+    <div className="text-sm leading-6 break-words [overflow-wrap:anywhere]">
       <Markdown remarkPlugins={[remarkGfm]} components={components}>
         {text}
       </Markdown>

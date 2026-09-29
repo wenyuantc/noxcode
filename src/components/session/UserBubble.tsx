@@ -208,7 +208,7 @@ export function UserBubble({
     return (
       <div className="ml-auto flex w-full max-w-[80%] flex-col items-end gap-1.5">
         <SessionImageThumbs images={images} />
-        <div className="w-full rounded-2xl border border-ring/40 bg-secondary/90 shadow-sm transition-all focus-within:ring-2 focus-within:ring-ring/20">
+        <div className="w-full max-w-full rounded-2xl border border-ring/40 bg-secondary/90 shadow-sm transition-all focus-within:ring-2 focus-within:ring-ring/20">
           <textarea
             value={draft}
             autoFocus
@@ -225,7 +225,7 @@ export function UserBubble({
                 void resend();
               }
             }}
-            className="w-full resize-none bg-transparent px-3.5 py-2.5 text-sm leading-relaxed outline-none"
+            className="w-full resize-none bg-transparent px-3.5 py-2.5 text-sm leading-relaxed outline-none break-words [overflow-wrap:anywhere]"
           />
           <div className="flex items-center justify-end gap-1.5 px-3 pb-2.5">
             <button
@@ -259,10 +259,10 @@ export function UserBubble({
   return (
     <div className="group ml-auto flex w-full max-w-[80%] flex-col items-end gap-1.5">
       <SessionImageThumbs images={images} />
-      <div className="flex items-start justify-end gap-1.5">
+      <div className="flex max-w-full items-start justify-end gap-1.5">
         <div
           className={cn(
-            "flex items-center pt-1 text-muted-foreground opacity-0 transition-opacity group-hover:opacity-100 group-focus-within:opacity-100",
+            "flex shrink-0 items-center pt-1 text-muted-foreground opacity-0 transition-opacity group-hover:opacity-100 group-focus-within:opacity-100",
             copied && "opacity-100",
           )}
         >
@@ -299,13 +299,13 @@ export function UserBubble({
           </div>
         </div>
         {text ? (
-          <div className="rounded-2xl rounded-tr-xs border border-border/60 bg-secondary/80 px-3.5 py-2 text-sm leading-relaxed text-foreground shadow-2xs whitespace-pre-wrap select-text">
+          <div className="min-w-0 max-w-full rounded-2xl rounded-tr-xs border border-border/60 bg-secondary/80 px-3.5 py-2 text-sm leading-relaxed text-foreground shadow-2xs whitespace-pre-wrap break-words select-text [overflow-wrap:anywhere]">
             {text}
           </div>
         ) : null}
       </div>
       {boundary ? (
-        <div className="flex flex-wrap justify-end gap-1">
+        <div className="flex max-w-full flex-wrap justify-end gap-1">
           <button
             type="button"
             className="inline-flex cursor-pointer items-center gap-1 rounded-md px-1.5 py-0.5 text-meta text-muted-foreground hover:bg-muted hover:text-foreground disabled:cursor-not-allowed disabled:opacity-40"
@@ -441,7 +441,9 @@ export function UserBubble({
           </div>
         </div>
       ) : null}
-      {branchError ? <p className="text-meta text-destructive">{branchError}</p> : null}
+      {branchError ? (
+        <p className="max-w-full break-words text-meta text-destructive">{branchError}</p>
+      ) : null}
     </div>
   );
 }
