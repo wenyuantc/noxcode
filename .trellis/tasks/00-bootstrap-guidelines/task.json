@@ -12,7 +12,7 @@
   "assignee": "noxcode",
   "createdAt": "2026-09-30",
   "completedAt": null,
-  "branch": null,
+  "branch": "main",
   "base_branch": null,
   "worktree_path": null,
   "commit": null,

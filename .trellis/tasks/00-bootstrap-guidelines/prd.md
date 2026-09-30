@@ -21,8 +21,11 @@ the rest conversationally.
 
 ## Status (update the checkboxes as you complete each item)
 
-- [ ] Fill frontend guidelines
-- [ ] Add code examples
+- [x] Fill frontend guidelines
+- [x] Fill backend (Tauri/Rust `src-tauri/`) guidelines (scope added by developer, 2026-09-30)
+- [x] Add code examples
+
+Source decision (developer, 2026-09-30): extract from existing docs (AGENTS.md, docs/*.md, .prettierrc, eslint.config.js) first, then scan real code to fill gaps; every rule must cite real file paths.
 
 ---
 
@@ -39,6 +42,18 @@ the rest conversationally.
 | `.trellis/spec/frontend/state-management.md` | State library, patterns, what goes where |
 | `.trellis/spec/frontend/type-safety.md` | TypeScript conventions, type organization |
 | `.trellis/spec/frontend/quality-guidelines.md` | Linting, testing, accessibility |
+
+
+### Backend guidelines (added layer: `.trellis/spec/backend/`)
+
+| File | What to document |
+|------|------------------|
+| `.trellis/spec/backend/index.md` | Layer index + pre-dev checklist |
+| `.trellis/spec/backend/directory-structure.md` | Module layout under `src-tauri/src` |
+| `.trellis/spec/backend/command-guidelines.md` | Tauri IPC command conventions, frontend `backend.ts` contract |
+| `.trellis/spec/backend/database-guidelines.md` | SQLite access, migrations, contiguity test |
+| `.trellis/spec/backend/error-handling.md` | Error types, propagation to frontend |
+| `.trellis/spec/backend/quality-guidelines.md` | clippy, tests, process spawning, git runner, russh/ring constraints |
 
 
 ### Thinking guides (already populated)
