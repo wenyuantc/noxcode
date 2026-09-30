@@ -6,7 +6,7 @@ import eslintConfigPrettier from "eslint-config-prettier";
 
 export default tseslint.config(
   {
-    ignores: ["dist/**", "src-tauri/**", "node_modules/**", "scripts/**", "coverage/**"],
+    ignores: ["dist/**", "src-tauri/**", "node_modules/**", "scripts/**", "coverage/**",".opencode/**",".trellis/**"],
   },
   js.configs.recommended,
   ...tseslint.configs.recommended,
