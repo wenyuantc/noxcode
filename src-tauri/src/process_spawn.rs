@@ -7,6 +7,10 @@ use tokio::process::Command as TokioCommand;
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
 pub fn configure_std_command(command: &mut StdCommand) {
+    // Keep subprocess fixtures portable without changing the test process environment.
+    #[cfg(test)]
+    command.env("LC_ALL", "C");
+
     #[cfg(target_os = "windows")]
     {
         use std::os::windows::process::CommandExt;
@@ -20,15 +24,7 @@ pub fn configure_std_command(command: &mut StdCommand) {
 
 #[allow(dead_code)]
 pub fn configure_tokio_command(command: &mut TokioCommand) {
-    #[cfg(target_os = "windows")]
-    {
-        use std::os::windows::process::CommandExt;
-
-        command.as_std_mut().creation_flags(CREATE_NO_WINDOW);
-    }
-
-    #[cfg(not(target_os = "windows"))]
-    let _ = command;
+    configure_std_command(command.as_std_mut());
 }
 
 pub fn std_command(program: impl AsRef<OsStr>) -> StdCommand {
@@ -56,6 +52,43 @@ mod tests {
         configure_tokio_command(&mut tokio_cmd);
         let _ = std_command("echo");
         let _ = tokio_command("echo");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn std_test_command_has_portable_locale_and_preserves_stderr() {
+        let mut command = StdCommand::new("bash");
+        command.env("LC_ALL", "noxcode-invalid-locale");
+        configure_std_command(&mut command);
+        let output = command
+            .args([
+                "-c",
+                "printf '%s' \"$LC_ALL\"; printf '%s' 'stderr-marker' >&2",
+            ])
+            .output()
+            .expect("spawn bash");
+        assert!(output.status.success());
+        assert_eq!(output.stdout, b"C");
+        assert_eq!(output.stderr, b"stderr-marker");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn tokio_test_command_has_portable_locale_and_preserves_stderr() {
+        let mut command = TokioCommand::new("bash");
+        command.env("LC_ALL", "noxcode-invalid-locale");
+        configure_tokio_command(&mut command);
+        let output = command
+            .args([
+                "-c",
+                "printf '%s' \"$LC_ALL\"; printf '%s' 'stderr-marker' >&2",
+            ])
+            .output()
+            .await
+            .expect("spawn bash");
+        assert!(output.status.success());
+        assert_eq!(output.stdout, b"C");
+        assert_eq!(output.stderr, b"stderr-marker");
     }
 
     #[cfg(windows)]

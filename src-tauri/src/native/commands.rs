@@ -23,6 +23,7 @@ use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Manager, Runtime};
 
 use crate::native::plugins::{load_enabled_plugins, plugin_command_dirs, NativePlugin};
+use crate::process_spawn::tokio_command;
 
 pub const GLOBAL_COMMANDS_DIR_NAME: &str = "native-commands";
 pub const WORKSPACE_COMMAND_DIRS: &[&str] =
@@ -478,7 +479,7 @@ pub fn inline_bash_spans(body: &str) -> Vec<(usize, usize, String)> {
 }
 
 async fn run_inline_bash(command: &str, cwd: &Path) -> String {
-    let mut child = tokio::process::Command::new("bash");
+    let mut child = tokio_command("bash");
     child
         .arg("-lc")
         .arg(command)
