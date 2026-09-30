@@ -637,6 +637,9 @@ pub struct McpServerConfig {
     /// OAuth 2.1 授权码 + PKCE 配置；有则请求带 `Authorization: Bearer`。
     #[serde(default)]
     pub oauth: Option<McpOAuthConfig>,
+    /// 信任服务器自报的 `readOnlyHint`：开启后 build 模式对只读工具免确认。默认不信任。
+    #[serde(default)]
+    pub trust_tool_annotations: bool,
 }
 
 pub const MCP_TRANSPORT_STDIO: &str = "stdio";
@@ -893,6 +896,14 @@ pub struct NativeContextUsage {
     pub prompt_tokens: usize,
     #[serde(default)]
     pub cached_tokens: usize,
+    /// 压缩判断用的估算值（含工具定义）。
+    #[serde(default)]
+    pub estimated_tokens: usize,
+    /// `provider` 或 `estimate`；旧记录为空。
+    #[serde(default)]
+    pub estimate_source: String,
+    #[serde(default)]
+    pub output_reserve_tokens: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

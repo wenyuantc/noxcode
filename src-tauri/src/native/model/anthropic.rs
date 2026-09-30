@@ -154,14 +154,17 @@ pub fn anthropic_messages(messages: &[Message], model: &str) -> (String, Vec<Val
                 }
                 wire.push(json!({"role": "assistant", "content": content}));
             }
-            Role::Tool => wire.push(json!({
-                "role": "user",
-                "content": [{
+            Role::Tool => {
+                let mut block = json!({
                     "type": "tool_result",
                     "tool_use_id": message.tool_call_id,
                     "content": message.content,
-                }]
-            })),
+                });
+                if message.content.starts_with(super::types::TOOL_ERROR_PREFIX) {
+                    block["is_error"] = json!(true);
+                }
+                wire.push(json!({"role": "user", "content": [block]}));
+            }
         }
     }
     (system, wire)
@@ -559,6 +562,23 @@ mod tests {
         assert_eq!(wire[1]["content"][0]["type"], "tool_use");
         assert_eq!(wire[2]["content"][0]["type"], "tool_result");
         assert_eq!(wire[2]["content"][0]["tool_use_id"], "toolu_1");
+    }
+
+    #[test]
+    fn failed_tool_result_sets_is_error() {
+        let failed = Message::tool_result(
+            "toolu_1",
+            format!(
+                "{}文件不存在",
+                crate::native::model::types::TOOL_ERROR_PREFIX
+            ),
+        );
+        let (_, wire) = anthropic_messages(
+            &[failed, Message::tool_result("toolu_2", "ok")],
+            "claude-sonnet-4",
+        );
+        assert_eq!(wire[0]["content"][0]["is_error"], true);
+        assert!(wire[1]["content"][0].get("is_error").is_none());
     }
 
     #[test]

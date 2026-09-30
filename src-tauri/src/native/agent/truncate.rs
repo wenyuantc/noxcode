@@ -421,7 +421,7 @@ pub fn truncate_messages_tokens(
     // Context resets can leave the retained tail starting at a tool result,
     // even when no further clipping is needed. Sanitize unconditionally so a
     // request never carries an orphaned tool result/call after any trimming.
-    sanitize_tool_message_pairs(messages);
+    sanitize_committed_tool_pairs(messages);
     if total_message_tokens(messages) <= limit_tokens {
         return;
     }
@@ -461,7 +461,10 @@ pub fn truncate_messages_tokens(
             messages[index].content =
                 fit_text_tokens(&messages[index].content, target.saturating_sub(4));
             messages[index].reasoning_content.clear();
-            messages[index].tool_calls.clear();
+            // 已提交的调用结构不能改写；需要时由下面按整条删除。
+            if messages[index].history_id.is_empty() {
+                messages[index].tool_calls.clear();
+            }
             clear_images_with_notice(&mut messages[index]);
             changed |= message_tokens(&messages[index]) < before;
             if total_message_tokens(messages) <= limit_tokens {
@@ -517,7 +520,9 @@ pub fn truncate_messages_tokens(
             messages[index].content =
                 fit_text_tokens(&messages[index].content, target.saturating_sub(4));
             messages[index].reasoning_content.clear();
-            messages[index].tool_calls.clear();
+            if messages[index].history_id.is_empty() {
+                messages[index].tool_calls.clear();
+            }
             let skip_protected_images = protected == Some(index)
                 && messages[index].role == Role::User
                 && !messages[index].images.is_empty();
@@ -546,7 +551,7 @@ pub fn truncate_messages_tokens(
     // pair (or clear an assistant's calls while retaining its result). Such
     // orphaned messages are rejected by both Chat Completions and Responses,
     // so keep only complete pairs before the request is serialized.
-    sanitize_tool_message_pairs(messages);
+    sanitize_committed_tool_pairs(messages);
 }
 
 fn clear_images_with_notice(message: &mut Message) {
@@ -554,14 +559,38 @@ fn clear_images_with_notice(message: &mut Message) {
         return;
     }
     if !message.content.contains(IMAGE_REMOVED_NOTICE) {
+        // 带上附件引用，之后仍可按附件标识重新读取。
+        let notice = format!(
+            "{IMAGE_REMOVED_NOTICE}（{}）",
+            crate::native::media_plan::image_ref_summary(&message.images)
+        );
         if message.content.trim().is_empty() {
-            message.content = IMAGE_REMOVED_NOTICE.to_string();
+            message.content = notice;
         } else {
             message.content.push('\n');
-            message.content.push_str(IMAGE_REMOVED_NOTICE);
+            message.content.push_str(&notice);
         }
     }
     message.images.clear();
+}
+
+/// 与 [`sanitize_tool_message_pairs`] 相同，但已写入历史的 assistant 不能被删减调用：
+/// 只要它有调用缺少结果，就整条移出上下文（原文仍在历史里），其余结果随之清理。
+pub fn sanitize_committed_tool_pairs(messages: &mut Vec<Message>) {
+    let answered: HashSet<String> = messages
+        .iter()
+        .filter(|message| message.role == Role::Tool)
+        .map(|message| message.tool_call_id.clone())
+        .collect();
+    messages.retain(|message| {
+        message.role != Role::Assistant
+            || message.history_id.is_empty()
+            || message
+                .tool_calls
+                .iter()
+                .all(|call| answered.contains(&call.id))
+    });
+    sanitize_tool_message_pairs(messages);
 }
 
 /// Remove orphaned tool messages and assistant tool calls after history
@@ -816,6 +845,29 @@ mod tests {
             time_range: None,
         });
         assert!(message_tokens(&message) < 5_000);
+    }
+
+    #[test]
+    fn removed_image_notice_keeps_attachment_reference() {
+        let mut message = Message::assistant_text("旧回答");
+        message.images.push(NativeImage {
+            name: "page.png".to_string(),
+            mime_type: "image/png".to_string(),
+            data_base64: "A".repeat(400_000),
+            attachment_id: "att-42".to_string(),
+            page: Some(3),
+            time_range: None,
+        });
+        let mut messages = vec![Message::user("旧问题"), message, Message::user("新问题")];
+        truncate_messages_tokens(&mut messages, 200, 80);
+        let notice = messages
+            .iter()
+            .find(|message| message.content.contains(IMAGE_REMOVED_NOTICE))
+            .expect("notice");
+        assert!(notice.images.is_empty());
+        assert!(notice.content.contains("附件 att-42"));
+        assert!(notice.content.contains("第 3 页"));
+        assert!(!notice.content.contains("AAAA"));
     }
 
     #[test]

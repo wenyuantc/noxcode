@@ -403,6 +403,8 @@ pub fn parse_plugin_mcp_servers(value: &Value, plugin_name: &str) -> Vec<McpServ
             url,
             headers: env_pairs(entry.get("headers")),
             oauth,
+            // 插件带来的服务器不自动信任其只读声明。
+            trust_tool_annotations: false,
         });
     }
     out.sort_by(|left, right| left.name.cmp(&right.name));

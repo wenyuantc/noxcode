@@ -243,6 +243,7 @@ mod tests {
             max_turns: None,
             skills: Vec::new(),
             reasoning_effort: None,
+            memory: None,
         };
         let spec = parse_subagent_args_with(
             r#"{"prompt":"go","subagent_type":"代码审查"}"#,

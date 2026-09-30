@@ -230,6 +230,10 @@
   "contextCacheShort": "缓存 {{rate}}%",
   "contextCacheRate": "缓存率 {{rate}}%",
   "contextTotalUsage": "总用量 {{count}}",
+  "contextCompactEstimate": "压缩估算 {{count}}（{{source}}）",
+  "contextEstimateProvider": "服务端用量",
+  "contextEstimateLocal": "本地估算",
+  "contextOutputReserve": "输出预留 {{count}}",
   "contextCategoryMcp": "MCP 工具",
   "contextCategorySystemTools": "系统工具",
   "contextCategorySkills": "技能",
@@ -400,6 +404,10 @@
     "model": "模型摘要",
     "local": "本地摘要",
     "reset": "重置"
+  },
+  "compactOutcome": {
+    "no_gain": "收益不足",
+    "failed": "失败"
   },
   "forkNeedsSession": "/fork 需要先选中一个会话。",
   "branchForkAfter": "分叉并保留此消息",

@@ -75,6 +75,7 @@ pub fn default_mcp_servers() -> McpServersDocument {
             url: None,
             headers: Vec::new(),
             oauth: None,
+            trust_tool_annotations: false,
         }],
     }
 }
@@ -655,6 +656,7 @@ mod tests {
             url: None,
             headers: Vec::new(),
             oauth: None,
+            trust_tool_annotations: false,
         })
         .expect_err("empty name");
         assert!(err.contains("名称不能为空"));
@@ -675,6 +677,7 @@ mod tests {
             url: None,
             headers: Vec::new(),
             oauth: None,
+            trust_tool_annotations: false,
         })
         .expect("normalize");
         assert!(!ok.id.is_empty());
@@ -705,6 +708,7 @@ mod tests {
                     url: None,
                     headers: Vec::new(),
                     oauth: None,
+                    trust_tool_annotations: false,
                 },
                 McpServerConfig {
                     id: "b".to_string(),
@@ -720,6 +724,7 @@ mod tests {
                     url: None,
                     headers: Vec::new(),
                     oauth: None,
+                    trust_tool_annotations: false,
                 },
             ],
         };
@@ -739,6 +744,8 @@ mod tests {
         }"#;
         let legacy: McpServerConfig = serde_json::from_str(legacy).expect("legacy config");
         assert_eq!(legacy.scope, SCOPE_ALL);
+        // 旧配置没有该字段时不信任服务器的只读声明。
+        assert!(!legacy.trust_tool_annotations);
         assert!(legacy.workspace_ids.is_empty());
         assert!(server_matches_workspace(&legacy, None));
 

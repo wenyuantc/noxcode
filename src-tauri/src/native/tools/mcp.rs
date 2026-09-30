@@ -30,7 +30,7 @@ use crate::native::model::types::{NativeImage, ToolSpec};
 use crate::process_spawn::configure_tokio_command;
 
 use super::cancel::CancelFlag;
-use super::contract::ToolContract;
+use super::contract::{McpToolDeclaration, ToolContract};
 use super::dispatch::ToolOutput;
 
 const MCP_PROTOCOL_VERSION: &str = "2025-03-26";
@@ -68,6 +68,8 @@ struct McpLiveServer {
     id: String,
     name: String,
     is_playwright: bool,
+    /// 用户在设置里信任该服务器自报的只读声明。
+    trust_tool_annotations: bool,
     tools: Vec<McpListedTool>,
     resources: Vec<McpResource>,
     prompts: Vec<McpPrompt>,
@@ -86,6 +88,9 @@ struct McpListedTool {
     read_only_hint: bool,
     /// MCP `annotations.destructiveHint`，缺省按 true（规范默认值）。
     destructive_hint: bool,
+    /// 服务器是否给了 `annotations`。
+    annotated: bool,
+    output_schema: Option<Value>,
 }
 
 #[derive(Debug, Clone)]
@@ -466,10 +471,15 @@ impl McpSession {
         let mut contracts = Vec::new();
         for server in &self.servers {
             for tool in server.exposed_tools() {
-                contracts.push(ToolContract::for_mcp(
+                contracts.push(ToolContract::for_mcp_tool(
                     &mcp_tool_name(&server.id, &tool.name),
-                    tool.read_only_hint,
-                    tool.destructive_hint,
+                    &McpToolDeclaration {
+                        annotated: tool.annotated,
+                        read_only_hint: tool.read_only_hint,
+                        destructive_hint: tool.destructive_hint,
+                        output_schema: tool.output_schema.clone(),
+                        trusted: server.trust_tool_annotations,
+                    },
                 ));
             }
             if !server.resources.is_empty() {
@@ -1193,8 +1203,19 @@ fn parse_tool_output(response: &Value) -> Result<ToolOutput, String> {
             .to_string());
     }
     let result = response.get("result").unwrap_or(&Value::Null);
+    let structured = result
+        .get("structuredContent")
+        .filter(|value| !value.is_null())
+        .cloned();
     let Some(content) = result.get("content").and_then(Value::as_array) else {
-        return Ok(ToolOutput::text(result.to_string()));
+        let mut output = ToolOutput::text(
+            structured
+                .as_ref()
+                .map(Value::to_string)
+                .unwrap_or_else(|| result.to_string()),
+        );
+        output.structured = structured;
+        return Ok(output);
     };
     let mut parts = Vec::new();
     let mut images = Vec::new();
@@ -1244,7 +1265,13 @@ fn parse_tool_output(response: &Value) -> Result<ToolOutput, String> {
             None => parts.push("[MCP 未知内容已省略]".to_string()),
         }
     }
-    let text = parts.join("\n");
+    let mut text = parts.join("\n");
+    // 只给了结构化结果时，把它作为文本交给模型。
+    if text.is_empty() {
+        if let Some(value) = &structured {
+            text = value.to_string();
+        }
+    }
     if result.get("isError").and_then(Value::as_bool) == Some(true) {
         return Err(if text.is_empty() {
             "MCP 工具返回错误".to_string()
@@ -1256,6 +1283,7 @@ fn parse_tool_output(response: &Value) -> Result<ToolOutput, String> {
         text,
         images,
         ok: true,
+        structured,
     })
 }
 
@@ -1302,7 +1330,7 @@ fn parse_listed_tools(listed: &Value) -> Vec<McpListedTool> {
             if name.is_empty() {
                 return None;
             }
-            let annotations = item.get("annotations");
+            let annotations = item.get("annotations").filter(|value| value.is_object());
             let read_only_hint = annotations
                 .and_then(|value| value.get("readOnlyHint"))
                 .and_then(Value::as_bool)
@@ -1324,6 +1352,11 @@ fn parse_listed_tools(listed: &Value) -> Vec<McpListedTool> {
                     .unwrap_or_else(|| json!({"type": "object", "properties": {}})),
                 read_only_hint,
                 destructive_hint,
+                annotated: annotations.is_some(),
+                output_schema: item
+                    .get("outputSchema")
+                    .filter(|value| value.is_object())
+                    .cloned(),
             })
         })
         .collect()
@@ -1466,6 +1499,7 @@ fn blank_server(server: &McpServerConfig, transport: McpTransport) -> McpLiveSer
         id: server.id.clone(),
         name: server.name.clone(),
         is_playwright: is_playwright_server(server),
+        trust_tool_annotations: server.trust_tool_annotations,
         tools: Vec::new(),
         resources: Vec::new(),
         prompts: Vec::new(),
@@ -1971,6 +2005,7 @@ mod tests {
             url: None,
             headers: Vec::new(),
             oauth: None,
+            trust_tool_annotations: false,
         }
     }
 
@@ -2109,6 +2144,76 @@ mod tests {
         assert!(remote.contains("'--output-dir' \"$PLAYWRIGHT_OUTPUT_DIR\""));
     }
 
+    #[test]
+    fn listed_tools_distinguish_missing_annotations_and_keep_output_schema() {
+        let listed = json!({"result": {"tools": [
+            {"name": "plain", "inputSchema": {"type": "object"}},
+            {"name": "reader", "annotations": {"readOnlyHint": true},
+             "outputSchema": {"type": "object", "required": ["rows"]}},
+        ]}});
+        let tools = parse_listed_tools(&listed);
+        assert!(!tools[0].annotated);
+        assert!(tools[0].output_schema.is_none());
+        assert!(tools[1].annotated && tools[1].read_only_hint);
+        assert!(tools[1].output_schema.is_some());
+
+        let mut server = sample_server();
+        let transport = || McpTransport::Http {
+            client: reqwest::Client::new(),
+            url: "http://127.0.0.1:0".into(),
+            headers: vec![],
+            session_id: None,
+            bearer: None,
+            backlog: vec![],
+        };
+        let mut live = blank_server(&server, transport());
+        live.tools = tools.clone();
+        let session = McpSession {
+            servers: vec![live],
+            handlers: Arc::default(),
+        };
+        let reader = mcp_tool_name(&server.id, "reader");
+        let contract = session.contract_for(&reader).expect("contract");
+        assert!(!contract.read_only, "未信任的服务器不采用只读声明");
+        assert!(matches!(
+            contract.output,
+            crate::native::tools::contract::OutputContract::Json(_)
+        ));
+        let plain = session
+            .contract_for(&mcp_tool_name(&server.id, "plain"))
+            .expect("contract");
+        assert_eq!(
+            plain.source,
+            crate::native::tools::contract::ContractSource::McpUndeclared
+        );
+
+        server.trust_tool_annotations = true;
+        let mut trusted = blank_server(&server, transport());
+        trusted.tools = tools;
+        let session = McpSession {
+            servers: vec![trusted],
+            handlers: Arc::default(),
+        };
+        assert!(session.contract_for(&reader).expect("contract").read_only);
+    }
+
+    #[test]
+    fn structured_content_is_kept_for_output_contract_checks() {
+        let only_structured = parse_tool_output(&json!({"result": {
+            "structuredContent": {"rows": [1, 2]}
+        }}))
+        .expect("output");
+        assert_eq!(only_structured.structured, Some(json!({"rows": [1, 2]})));
+        assert_eq!(only_structured.text, r#"{"rows":[1,2]}"#);
+        let both = parse_tool_output(&json!({"result": {
+            "content": [{"type": "text", "text": "两行"}],
+            "structuredContent": {"rows": [1, 2]}
+        }}))
+        .expect("output");
+        assert_eq!(both.text, "两行");
+        assert!(both.structured.is_some());
+    }
+
     #[tokio::test]
     async fn cancelling_a_pending_mcp_call_closes_the_session() {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -2129,6 +2234,8 @@ mod tests {
             input_schema: json!({}),
             read_only_hint: true,
             destructive_hint: false,
+            annotated: true,
+            output_schema: None,
         });
         let mcp = SharedMcp::from_session(McpSession {
             servers: vec![live],

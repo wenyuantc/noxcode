@@ -42,20 +42,23 @@ use self::format::*;
 
 use super::background::BackgroundTaskRegistry;
 use super::compact::{
-    compact_local, compact_with_summary, compaction_prompt_with_instructions,
-    is_usable_compaction_summary, microcompact, reset_local, BudgetSnapshot, ChildQuota,
-    CompactBoundary, CompactTrigger, ContextWindow, RolloutBudget,
+    compact_local, compact_with_summary, compaction_gained, compaction_prompt_with_instructions,
+    dropped_messages, inject_preserved_context, is_usable_compaction_summary, microcompact,
+    output_reserve_for, preserved_context_block, reset_local, BudgetSnapshot, ChildQuota,
+    CompactBoundary, CompactOutcome, CompactTrigger, ContextWindow, PreservedState, RolloutBudget,
 };
 use super::subagent::{
     child_system_prompt, custom_child_system_prompt, format_subagent_log_tag,
     format_subagent_result, parse_subagent_args_with, truncate_report, SubagentKind, SubagentSpec,
 };
 use super::truncate::{
-    chars_to_tokens, context_usage_breakdown, message_tokens, total_message_tokens,
-    total_tool_tokens, truncate_messages_tokens, truncate_tool_result,
+    chars_to_tokens, context_usage_breakdown, message_tokens, sanitize_committed_tool_pairs,
+    total_message_tokens, total_tool_tokens, truncate_messages_tokens, truncate_tool_result,
     DEFAULT_TOOL_RESULT_TOKEN_LIMIT,
 };
 const DEFAULT_CONTEXT_CHARS: usize = 120_000;
+/// 自动压缩连续失败或无收益的上限，达到后暂停自动压缩和摘要模型调用。
+const MAX_COMPACT_FAILURES: u32 = 3;
 /// A finite default prevents a runaway rollout when older settings files do
 /// not have a budget field. `0` remains available for an explicit unlimited
 /// setting through [`RolloutBudget`].
@@ -87,6 +90,18 @@ struct ModelTurnCfg {
 
 struct ModelCallBudget {
     max_output_tokens: Option<u32>,
+}
+
+/// 最近一次主模型调用的服务端用量，以及当时请求的形状。
+/// 请求前缀、模型或压缩代数变化后就不再可信。
+#[derive(Debug, Clone)]
+struct UsageBaseline {
+    prompt_tokens: usize,
+    message_count: usize,
+    prefix_tokens: usize,
+    tool_tokens: usize,
+    generation: u32,
+    model: String,
 }
 
 type SubagentStub = Arc<dyn Fn(&SubagentSpec) -> String + Send + Sync>;
@@ -160,6 +175,8 @@ pub struct AgentRunner {
     pub workspace_context: String,
     pub project_agents: String,
     pub required_subagent_type: Option<String>,
+    /// 自定义子 Agent 持久记忆的根目录；会话层按工作区计算。
+    pub agent_memory_roots: Option<crate::native::subagents::AgentMemoryRoots>,
     extra_tools: Vec<ToolSpec>,
     /// MCP 等动态工具的契约；内置工具契约来自 catalog。
     extra_tool_contracts: Vec<ToolContract>,
@@ -171,6 +188,7 @@ pub struct AgentRunner {
     pub background: Arc<BackgroundTaskRegistry>,
     pub skills_prompt: String,
     last_usage: Option<Usage>,
+    usage_baseline: Option<UsageBaseline>,
     allowed_tools: Option<HashSet<String>>,
     disallowed_tools: Option<HashSet<String>>,
     turns: u32,
@@ -191,6 +209,8 @@ pub struct AgentRunner {
     microcompact_enabled: bool,
     /// 本回合内因供应商溢出而做的被动压缩次数（上限 2）。
     reactive_compactions: u32,
+    /// 非手动压缩连续失败 / 无收益的次数。
+    compact_failures: u32,
     depth: u8,
     event_prefix: String,
     subagent_seq: u32,
@@ -234,6 +254,11 @@ pub struct ContextUsageSnapshot {
     pub message_tokens: usize,
     pub prompt_tokens: usize,
     pub cached_tokens: usize,
+    /// 压缩判断使用的估算值（含工具定义）。
+    pub estimated_tokens: usize,
+    /// `provider`：以服务端用量为基线；`estimate`：纯本地保守估算。
+    pub estimate_source: &'static str,
+    pub output_reserve_tokens: usize,
 }
 
 #[derive(Debug)]

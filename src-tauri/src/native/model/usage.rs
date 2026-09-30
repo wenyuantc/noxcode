@@ -40,6 +40,16 @@ pub fn parse_usage(value: &Value) -> Usage {
             cached = first_u32(details, &["cached_tokens", "cachedTokens"]);
         }
     }
+    // Anthropic 的 `input_tokens` 不含缓存读写部分，窗口实际占用是三者之和。
+    let anthropic_cache = value.get("cache_read_input_tokens").is_some()
+        || value.get("cache_creation_input_tokens").is_some();
+    let prompt = if anthropic_cache && value.get("input_tokens").is_some() {
+        prompt
+            .saturating_add(first_u32(value, &["cache_read_input_tokens"]))
+            .saturating_add(first_u32(value, &["cache_creation_input_tokens"]))
+    } else {
+        prompt
+    };
     Usage {
         prompt_tokens: prompt,
         completion_tokens: completion,
@@ -104,9 +114,33 @@ mod tests {
             "output_tokens": 2,
             "cache_read_input_tokens": 1
         }));
-        assert_eq!(anthropic.prompt_tokens, 8);
+        assert_eq!(anthropic.prompt_tokens, 9);
         assert_eq!(anthropic.completion_tokens, 2);
         assert_eq!(anthropic.cached_tokens, 1);
+    }
+
+    #[test]
+    fn anthropic_prompt_includes_cache_read_and_creation() {
+        let usage = parse_usage(&json!({
+            "input_tokens": 12,
+            "cache_read_input_tokens": 90_000,
+            "cache_creation_input_tokens": 3_000,
+            "output_tokens": 5
+        }));
+        assert_eq!(usage.prompt_tokens, 93_012);
+        assert_eq!(usage.cached_tokens, 90_000);
+
+        // 只有输出的 message_delta 不应被当成新的输入量。
+        let delta = parse_usage(&json!({"output_tokens": 40}));
+        assert_eq!(delta.prompt_tokens, 0);
+
+        // OpenAI Responses 的 input_tokens 已含缓存，不能重复相加。
+        let responses = parse_usage(&json!({
+            "input_tokens": 100,
+            "input_tokens_details": {"cached_tokens": 60}
+        }));
+        assert_eq!(responses.prompt_tokens, 100);
+        assert_eq!(responses.cached_tokens, 60);
     }
 
     #[test]

@@ -46,6 +46,7 @@ fn readonly_custom_subagent() -> NativeSubagent {
         max_turns: None,
         skills: Vec::new(),
         reasoning_effort: None,
+        memory: None,
     }
 }
 
@@ -906,7 +907,13 @@ async fn read_only_emits_read_and_blocks_write() {
         runner
             .messages
             .iter()
-            .any(|message| message.content.contains("只读规划模式禁止调用工具 Write")),
+            // 白名单在执行时先拦下 Write；没有白名单时由只读预检拦截。
+            .any(
+                |message| message.content.contains("只读规划模式禁止调用工具 Write")
+                    || message
+                        .content
+                        .contains("工具 Write 不在当前 Agent 的可用工具中")
+            ),
         "expected write rejection in tool results: {:?}",
         runner
             .messages
@@ -3387,4 +3394,544 @@ async fn user_steer_does_not_abort_a_running_command() {
     assert!(!root.join("forbidden.txt").exists());
     assert!(!runner.ctx.cancel.is_cancelled());
     fs::remove_dir_all(root).unwrap();
+}
+
+fn usage_fixture(text: &str, prompt_tokens: u32) -> Value {
+    serde_json::json!({
+        "choices":[{"finish_reason":"stop","message":{"content":text}}],
+        "usage":{"prompt_tokens":prompt_tokens,"completion_tokens":5}
+    })
+}
+
+#[tokio::test]
+async fn provider_usage_baseline_triggers_compaction_before_local_estimate() {
+    let (mut runner, root) = temp_runner();
+    runner.context_window.set_token_limit(200_000);
+    let (client, server) = mock_child_model(
+        runner.background.clone(),
+        String::new(),
+        vec![(usage_fixture("done", 180_000), None)],
+    )
+    .await;
+    run_fixture_turn(&mut runner, &client, false)
+        .await
+        .expect("turn");
+    server.await.expect("server");
+    // 本地估算远低于触发线，但服务端报告的输入量已超过。
+    assert!(!runner.context_window.should_compact(&runner.messages));
+    let tool_tokens = total_tool_tokens(&runner.combined_tools());
+    let (estimated, from_provider) = runner.estimated_context_tokens(tool_tokens);
+    assert!(from_provider);
+    assert!(estimated >= 180_000, "{estimated}");
+    assert!(runner.should_compact_context());
+    let _ = fs::remove_dir_all(root);
+}
+
+#[tokio::test]
+async fn compaction_summary_usage_does_not_replace_baseline() {
+    let (mut runner, root) = temp_runner();
+    runner.context_window.set_token_limit(200_000);
+    let summary = "User goal\n完成两件事并保持上下文一致，这里写得足够长以通过摘要可用性检查。\n\
+                   Pending work\n继续后续步骤，确认结果。Completed work\n已完成第一件和第二件。";
+    let (client, server) = mock_child_model(
+        runner.background.clone(),
+        String::new(),
+        vec![
+            (usage_fixture("做完第一件", 1_000), None),
+            (usage_fixture("做完第二件", 150_000), None),
+            (usage_fixture(summary, 170_000), None),
+        ],
+    )
+    .await;
+    run_fixture_turn(&mut runner, &client, false)
+        .await
+        .expect("first");
+    run_fixture_turn(&mut runner, &client, false)
+        .await
+        .expect("second");
+    let boundary = runner
+        .compact_now(&client, None)
+        .await
+        .expect("compact")
+        .expect("boundary");
+    server.await.expect("server");
+    assert_eq!(boundary.source, "model");
+    // 摘要调用的用量不能成为主上下文基线，展示用量也保持主调用的值。
+    let baseline = runner.usage_baseline.as_ref().expect("baseline");
+    assert_eq!(baseline.prompt_tokens, 150_000);
+    assert_eq!(runner.last_usage.expect("usage").prompt_tokens, 150_000);
+    // 压缩后代数变化，旧基线失效，退回本地估算。
+    let (estimated, from_provider) = runner.estimated_context_tokens(0);
+    assert!(!from_provider);
+    assert!(estimated < 150_000, "{estimated}");
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn usage_baseline_invalidates_on_model_change_prefix_edit_and_missing_usage() {
+    let (mut runner, root) = temp_runner();
+    runner.model_turn = Some(ModelTurnCfg {
+        model: "model-a".into(),
+        effort: None,
+        max_output_tokens: None,
+        thinking_enabled: false,
+    });
+    runner.messages = vec![Message::user("问题"), Message::assistant_text("回答")];
+    let usage = Usage {
+        prompt_tokens: 50_000,
+        completion_tokens: 10,
+        cached_tokens: 0,
+    };
+    runner.record_usage_baseline(usage, 1, 0);
+    let (estimated, from_provider) = runner.estimated_context_tokens(0);
+    assert!(from_provider);
+    // 基线之后新增的回答按本地估算累加。
+    assert_eq!(
+        estimated,
+        50_000 + total_message_tokens(&runner.messages[1..])
+    );
+
+    // 切换模型：基线不再可信。
+    runner.model_turn.as_mut().unwrap().model = "model-b".into();
+    assert!(!runner.estimated_context_tokens(0).1);
+    runner.model_turn.as_mut().unwrap().model = "model-a".into();
+    assert!(runner.estimated_context_tokens(0).1);
+
+    // 请求前缀被改写（截断、回退等）：基线失效。
+    runner.messages[0].content = "被截断后的问题，长度已经变化".into();
+    assert!(!runner.estimated_context_tokens(0).1);
+
+    // 服务端没报输入量：清掉基线，使用本地估算上浮 10%。
+    runner.record_usage_baseline(Usage::default(), 2, 0);
+    assert!(runner.usage_baseline.is_none());
+    let local = total_message_tokens(&runner.messages);
+    assert_eq!(
+        runner.estimated_context_tokens(0),
+        (local + local / 10, false)
+    );
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn output_reserve_adapts_to_window_and_model() {
+    let (mut runner, root) = temp_runner();
+    runner.context_window.set_token_limit(8_192);
+    runner.sync_context_window();
+    // 小窗口：预留不超过窗口的 1/4，触发线随之下移。
+    assert_eq!(runner.context_window.output_reserve, 2_048);
+    assert_eq!(runner.context_window.trigger_tokens(), 6_144);
+
+    runner.context_window.set_token_limit(128_000);
+    runner.model_turn = Some(ModelTurnCfg {
+        model: "unknown-model".into(),
+        effort: None,
+        max_output_tokens: Some(8_192),
+        thinking_enabled: false,
+    });
+    runner.sync_context_window();
+    assert_eq!(runner.context_window.output_reserve, 8_192);
+    // 大窗口仍按用户阈值触发，不因预留提前。
+    assert_eq!(
+        runner.context_window.trigger_tokens(),
+        runner.context_window.threshold_tokens()
+    );
+    let _ = fs::remove_dir_all(root);
+}
+
+#[tokio::test]
+async fn repeated_compaction_failures_pause_auto_compaction_and_summary_model() {
+    let (mut runner, root) = temp_runner();
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    runner.on_event = Some(tx);
+    runner.context_window.set_token_limit(64);
+    // 只有一条用户消息：本地摘要和重置都无从下手，每次都是失败。
+    runner.messages = vec![Message::user("需要处理的长任务描述".repeat(20))];
+    for _ in 0..MAX_COMPACT_FAILURES {
+        let boundary = runner
+            .run_compaction(None, CompactTrigger::Auto, None)
+            .await
+            .expect("compact");
+        assert!(boundary.is_none());
+    }
+    assert_eq!(runner.compact_failures, MAX_COMPACT_FAILURES);
+    let lines = drain_events(&mut rx);
+    let pauses = lines
+        .iter()
+        .filter(|line| line.contains("已暂停自动压缩"))
+        .count();
+    assert_eq!(pauses, 1, "{lines:?}");
+
+    // 已达上限：超过触发线也不再自动压缩。
+    assert!(runner.should_compact_context());
+    runner.prepare_model_call(None).await.expect("prepare");
+    assert_eq!(runner.context_window.compactions, 0);
+    assert!(!drain_events(&mut rx)
+        .iter()
+        .any(|line| line.starts_with("[COMPACT_BOUNDARY]")));
+
+    // 被动压缩仍可本地降级，但不再请求摘要模型。
+    runner.messages = vec![
+        Message::user("第一件事"),
+        Message::assistant_text("第一件的很长回答".repeat(30)),
+        Message::user("第二件事"),
+        Message::assistant_text("第二件的回答"),
+    ];
+    let (client, server) = mock_child_model(runner.background.clone(), String::new(), vec![]).await;
+    let boundary = runner
+        .run_compaction(Some(&client), CompactTrigger::Reactive, None)
+        .await
+        .expect("reactive")
+        .expect("boundary");
+    assert_eq!(boundary.source, "local");
+    assert!(server.await.expect("server").is_empty());
+    assert!(!drain_events(&mut rx)
+        .iter()
+        .any(|line| line.contains("模型摘要失败")));
+
+    // 新用户回合恢复自动压缩（放大窗口，避免新回合立刻再次触发）。
+    runner.context_window.set_token_limit(200_000);
+    runner
+        .run_scripted("下一件事", vec![Message::assistant_text("好")])
+        .await
+        .expect("turn");
+    assert_eq!(runner.compact_failures, 0);
+    let _ = fs::remove_dir_all(root);
+}
+
+#[tokio::test]
+async fn compaction_without_real_reduction_is_classified_as_no_gain() {
+    let (mut runner, root) = temp_runner();
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    runner.on_event = Some(tx);
+    // 旧回合很短，本地摘要的固定标题反而更长：替换了消息但没有缩减。
+    runner.messages = vec![
+        Message::user("a"),
+        Message::assistant_text("b"),
+        Message::user("c"),
+        Message::assistant_text("d"),
+    ];
+    let boundary = runner
+        .run_compaction(None, CompactTrigger::Auto, None)
+        .await
+        .expect("compact")
+        .expect("boundary");
+    assert_eq!(boundary.outcome, CompactOutcome::NoGain);
+    assert_eq!(runner.compact_failures, 1);
+    let lines = drain_events(&mut rx);
+    assert!(
+        lines.iter().any(|line| line.contains("收益不足")),
+        "{lines:?}"
+    );
+    // 手动压缩不计入失败次数。
+    runner.compact_failures = 0;
+    runner.messages = vec![
+        Message::user("a"),
+        Message::assistant_text("b"),
+        Message::user("c"),
+        Message::assistant_text("d"),
+    ];
+    runner
+        .run_compaction(None, CompactTrigger::Manual, None)
+        .await
+        .expect("manual");
+    assert_eq!(runner.compact_failures, 0);
+    let _ = fs::remove_dir_all(root);
+}
+
+#[tokio::test]
+async fn compaction_summary_keeps_goal_permissions_todos_and_media_refs() {
+    let pool = crate::db::test_support::setup_migrated_pool().await;
+    sqlx::query("INSERT INTO workspaces (id, name, workspace_type) VALUES ('ws-1', 'ws', 'local')")
+        .execute(&pool)
+        .await
+        .expect("workspace");
+    sqlx::query(
+        "INSERT INTO agent_sessions (id, workspace_id, title, status) VALUES ('s-1', 'ws-1', 't', 'running')",
+    )
+    .execute(&pool)
+    .await
+    .expect("session");
+    crate::native::goals::apply_goal_action(
+        &pool,
+        "s-1",
+        Some("ws-1"),
+        "set",
+        Some("迁移支付模块"),
+        None,
+        None,
+        None,
+    )
+    .await
+    .expect("goal");
+    let (mut runner, root) = temp_runner();
+    runner.ctx.session_record_id = "s-1".to_string();
+    runner.ctx.session_scope = Some(crate::native::tools::dispatch::SessionScope {
+        pool,
+        workspace_id: Some("ws-1".into()),
+        channel_id: "c".into(),
+        model: "m".into(),
+        on_goal: None,
+    });
+    runner.ctx.plan_mode.store(true, Ordering::SeqCst);
+    *runner.ctx.todos.lock().unwrap() = vec![
+        crate::native::tools::dispatch::TodoItem {
+            id: "1".into(),
+            content: "写迁移脚本".into(),
+            status: "in_progress".into(),
+            priority: "high".into(),
+        },
+        crate::native::tools::dispatch::TodoItem {
+            id: "2".into(),
+            content: "已经做完的事".into(),
+            status: "completed".into(),
+            priority: "low".into(),
+        },
+    ];
+    let mut old = Message::user("看这张截图");
+    old.images.push(NativeImage {
+        name: "shot.png".into(),
+        mime_type: "image/png".into(),
+        data_base64: "QUJD".repeat(2_000),
+        attachment_id: "att-7".into(),
+        page: None,
+        time_range: None,
+    });
+    runner.messages = vec![
+        Message::system("sys"),
+        old,
+        Message::assistant_text("看到了"),
+        Message::user("继续迁移"),
+    ];
+    let boundary = runner
+        .run_compaction(None, CompactTrigger::Manual, None)
+        .await
+        .expect("compact")
+        .expect("boundary");
+    assert_eq!(boundary.source, "local");
+    let summary = runner
+        .messages
+        .iter()
+        .find(|message| message.content.contains("[压缩保留的状态]"))
+        .expect("summary");
+    for expected in ["迁移支付模块", "计划模式开", "写迁移脚本", "附件 att-7"] {
+        assert!(
+            summary.content.contains(expected),
+            "{expected}\n{}",
+            summary.content
+        );
+    }
+    assert!(!summary.content.contains("已经做完的事"));
+    assert!(runner
+        .messages
+        .iter()
+        .all(|message| !message.content.contains("QUJD") && message.images.is_empty()));
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn tool_projection_hides_unavailable_tools_and_media_modes() {
+    let (mut runner, root) = temp_runner();
+    let find =
+        |tools: &[ToolSpec], name: &str| tools.iter().find(|tool| tool.name == name).cloned();
+    let mut tools = tool_specs();
+    super::tools::project_tools(
+        &mut tools,
+        super::tools::ToolProjection {
+            ssh: true,
+            images: false,
+            video: false,
+        },
+        |name| name != "Glob",
+    );
+    for hidden in [
+        "Lsp",
+        "Monitor",
+        "ProcessList",
+        "ProcessOutput",
+        "ProcessStop",
+        "Glob",
+    ] {
+        assert!(find(&tools, hidden).is_none(), "{hidden}");
+    }
+    let bash = find(&tools, "Bash").expect("bash");
+    assert!(bash
+        .parameters
+        .pointer("/properties/run_in_background")
+        .is_none());
+    let read = find(&tools, "Read").expect("read");
+    assert_eq!(
+        read.parameters["properties"]["mode"]["enum"],
+        serde_json::json!(["text"])
+    );
+    assert!(read.description.contains("does not accept images"));
+
+    // 本地会话 + 仅文本模型：Lsp 仍可见，Read 去掉页面图模式。
+    runner.model_turn = Some(ModelTurnCfg {
+        model: "deepseek-chat".into(),
+        effort: None,
+        max_output_tokens: None,
+        thinking_enabled: false,
+    });
+    let local = runner.combined_tools();
+    assert!(find(&local, "Lsp").is_some());
+    let read = find(&local, "Read").expect("read");
+    assert_eq!(
+        read.parameters["properties"]["mode"]["enum"],
+        serde_json::json!(["text"])
+    );
+
+    // 能看图但不能收视频的模型：保留页面图，说明 MP4 不可用。
+    runner.model_turn.as_mut().unwrap().model = "gpt-4o".into();
+    let read = find(&runner.combined_tools(), "Read").expect("read");
+    assert!(read.parameters["properties"]["mode"]["enum"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!("pages")));
+    assert!(read.description.contains("does not accept video"));
+    let _ = fs::remove_dir_all(root);
+}
+
+#[tokio::test]
+async fn failed_tool_results_are_marked_for_the_model() {
+    let (mut runner, root) = temp_runner();
+    runner
+        .run_scripted(
+            "go",
+            vec![
+                assistant_tool_call("r1", "Read", r#"{"file_path":"missing.txt"}"#),
+                assistant_tool_call("r2", "Read", r#"{"file_path":"hello.txt"}"#),
+                Message::assistant_text("done"),
+            ],
+        )
+        .await
+        .expect("run");
+    let result = |id: &str| {
+        runner
+            .messages
+            .iter()
+            .find(|message| message.tool_call_id == id)
+            .expect("result")
+            .content
+            .clone()
+    };
+    assert!(result("r1").starts_with(crate::native::model::types::TOOL_ERROR_PREFIX));
+    assert!(!result("r2").starts_with(crate::native::model::types::TOOL_ERROR_PREFIX));
+    let _ = fs::remove_dir_all(root);
+}
+
+#[tokio::test]
+async fn tool_whitelist_and_blacklist_are_enforced_at_execution() {
+    let (mut runner, root) = temp_runner();
+    runner.set_allowed_tools(&["Read"]);
+    runner
+        .run_scripted(
+            "go",
+            vec![
+                assistant_tool_call("b1", "Bash", r#"{"command":"touch escaped.txt"}"#),
+                assistant_tool_call("w1", "Write", r#"{"file_path":"w.txt","content":"x"}"#),
+                Message::assistant_text("done"),
+            ],
+        )
+        .await
+        .expect("run");
+    assert!(!root.join("escaped.txt").exists());
+    assert!(!root.join("w.txt").exists());
+
+    let (mut runner, root_b) = temp_runner();
+    runner.set_disallowed_tools(&["Bash"]);
+    runner
+        .run_scripted(
+            "go",
+            vec![
+                assistant_tool_call("b2", "Bash", r#"{"command":"touch blocked.txt"}"#),
+                Message::assistant_text("done"),
+            ],
+        )
+        .await
+        .expect("run");
+    assert!(!root_b.join("blocked.txt").exists());
+    assert!(runner
+        .messages
+        .iter()
+        .any(|message| message.tool_call_id == "b2" && message.content.contains("不在当前 Agent")));
+    let _ = fs::remove_dir_all(root);
+    let _ = fs::remove_dir_all(root_b);
+}
+
+#[tokio::test]
+async fn read_only_custom_subagent_gets_only_its_own_memory() {
+    let (mut runner, root) = temp_runner();
+    let parent_memory = root.join("parent-memory");
+    fs::create_dir_all(&parent_memory).unwrap();
+    runner
+        .ctx
+        .workspace
+        .extra_write_roots
+        .push(parent_memory.clone());
+    let config = root.join("config");
+    runner.agent_memory_roots = Some(crate::native::subagents::agent_memory_roots(
+        &config,
+        Some(&root),
+        None,
+    ));
+    let mut reviewer = readonly_custom_subagent();
+    reviewer.memory = Some("local".to_string());
+    runner.custom_subagents = vec![reviewer];
+    let spec = parse_subagent_args_with(
+        r#"{"prompt":"go","subagent_type":"reviewer","description":"审"}"#,
+        &runner.custom_subagents,
+    )
+    .unwrap();
+    let mut child = runner.spawn_child_runner(&spec, 1);
+    // 开启记忆不改变只读，也不开放工作区写入工具。
+    assert!(child.ctx.is_read_only());
+    let names = child.tool_names();
+    assert!(names.iter().any(|name| name == "Memory"));
+    for blocked in ["Write", "Edit", "ApplyPatch", "Bash"] {
+        assert!(!names.iter().any(|name| name == blocked), "{blocked}");
+    }
+    // 父会话的记忆目录不再是子 Agent 的可写根。
+    assert!(child.ctx.workspace.extra_write_roots.is_empty());
+    let memory_dir = root.join(".noxcode/agent-memory-local/reviewer");
+    assert_eq!(child.ctx.memory.as_ref().unwrap().dir, memory_dir);
+    assert_eq!(
+        fs::read_to_string(root.join(".noxcode/agent-memory-local/.gitignore")).unwrap(),
+        "*\n"
+    );
+    let system = child.messages[0].content.clone();
+    assert!(system.contains("你的持久记忆（local）"));
+    child
+        .run_scripted(
+            "go",
+            vec![
+                assistant_tool_call(
+                    "m1",
+                    "Memory",
+                    r#"{"action":"write","name":"审查偏好","type":"feedback","body":"先看测试"}"#,
+                ),
+                assistant_tool_call("w1", "Write", r#"{"file_path":"x.txt","content":"x"}"#),
+                assistant_tool_call("b1", "Bash", r#"{"command":"touch y.txt"}"#),
+                Message::assistant_text("done"),
+            ],
+        )
+        .await
+        .expect("run");
+    assert_eq!(crate::native::memory::list_entries(&memory_dir).len(), 1);
+    assert!(!root.join("x.txt").exists());
+    assert!(!root.join("y.txt").exists());
+    assert!(fs::read_dir(&parent_memory).unwrap().next().is_none());
+
+    // general 子 Agent 仍继承父会话的记忆可写根，也没有 Memory 工具。
+    let general = parse_subagent_args(r#"{"prompt":"go","description":"g"}"#).unwrap();
+    let general_child = runner.spawn_child_runner(&general, 2);
+    assert_eq!(
+        general_child.ctx.workspace.extra_write_roots,
+        vec![parent_memory]
+    );
+    assert!(general_child.ctx.memory.is_none());
+    assert!(!general_child
+        .tool_names()
+        .iter()
+        .any(|name| name == "Memory"));
+    let _ = fs::remove_dir_all(root);
 }

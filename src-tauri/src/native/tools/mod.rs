@@ -3,6 +3,7 @@
 
 pub mod app_target;
 pub mod background_input;
+pub mod bash_policy;
 pub mod cancel;
 pub mod catalog;
 pub mod command_path;
@@ -17,12 +18,15 @@ pub mod hooks;
 pub mod local;
 pub mod lsp;
 pub mod mcp;
+pub mod memory_tool;
+pub mod output_check;
 pub mod patch;
 pub mod paths;
 pub mod permission;
 pub mod processes;
 pub mod question;
 pub mod sandbox;
+pub mod shell_parse;
 pub mod shell_snapshot;
 pub mod sqlite;
 pub mod ssh;

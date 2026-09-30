@@ -35,11 +35,23 @@ P4 把进程内编程 Agent 接到渠道 + 工作区外壳。数据流仍是 `Re
 
 「当前会话允许所有命令」使用独立 IPC 决策 `allow_session_commands`，仅为当前运行会话设置 Bash 免确认状态，立即执行当前命令并释放该会话已排队的 Bash 确认。后续本地或 SSH Bash 不再弹窗，包括高风险、写入及 ask 规则；显式 deny 仍直接拒绝。状态由当前会话及其工具上下文共享，不切换 yolo、不退出计划模式，不写权限文件或数据库，不影响其他会话及非 Bash 工具的审批；会话结束、重启或重新启动历史会话后失效。过期、取消或非 Bash 请求不能获取该授权。
 
-权限模式（`permission_mode`）四档，对齐 ZCode：`default` 变更前确认；`edit` 自动放行 `Overwrite`（删除 / 推送 / 强制 Git / 不透明命令 / MCP 仍弹确认）；`build` 再放行不透明 shell 与带 `readOnlyHint` 的 MCP；`yolo` 完全访问（`allow_all_high_risk=true`，不弹 MCP / 工作区钩子 / 命令 / ask 规则确认，deny 仍拒绝）。旧文件的 `confirm / auto_edit / full` 与 Claude Code 的 `acceptEdits / auto / bypassPermissions / dontAsk` 读入时映射到新名；`confirm_high_risk: false` 读成 `yolo`。`plan` 是会话态：既可由 Composer 选择在启动时进入，也可由模型调用 `EnterPlanMode` 进入；`ExitPlanMode` 提交计划触发 `native-plan-approval-request`，用户批准后恢复执行模式，退回则连同反馈交回模型继续修改。批准 IPC 可带 `ai_channel_id` / `model`：与当前 runtime 不同时先加载新 client 写入 live slot 并 `emit native-session`，再解除 `ExitPlanMode`；同一回合下一次 `chat()` 用实施模型。模型未变或退回则跳过加载。
+权限模式（`permission_mode`）四档，对齐 ZCode：`default` 变更前确认；`edit` 自动放行 `Overwrite`（删除 / 推送 / 强制 Git / 不透明命令 / MCP 仍弹确认）；`build` 再放行不透明 shell，以及用户标为「信任工具只读声明」的服务器上带 `readOnlyHint` 的 MCP 工具；`yolo` 完全访问（`allow_all_high_risk=true`，不弹 MCP / 工作区钩子 / 命令 / ask 规则确认，deny 仍拒绝）。旧文件的 `confirm / auto_edit / full` 与 Claude Code 的 `acceptEdits / auto / bypassPermissions / dontAsk` 读入时映射到新名；`confirm_high_risk: false` 读成 `yolo`。`plan` 是会话态：既可由 Composer 选择在启动时进入，也可由模型调用 `EnterPlanMode` 进入；`ExitPlanMode` 提交计划触发 `native-plan-approval-request`，用户批准后恢复执行模式，退回则连同反馈交回模型继续修改。批准 IPC 可带 `ai_channel_id` / `model`：与当前 runtime 不同时先加载新 client 写入 live slot 并 `emit native-session`，再解除 `ExitPlanMode`；同一回合下一次 `chat()` 用实施模型。模型未变或退回则跳过加载。
 
 待批准计划写入 `agent_sessions.pending_plan_json`（`{request_id, plan, created_at}`）；停止或退出后仍保留。live 与 detached 审批统一走 `resolve_native_plan_approval`：后端读取对应请求的正文并校验实施模型，先保存 `approved_plan_json` 授权快照，再将计划原子写入实际会话目录的 `.noxcode/plans/plan-<session>.md`（支持隔离 worktree 和 SSH），成功后才应用实施模型并解除只读。普通执行模式续聊不能跳过尚未解决的计划审批；停止后的批准由后端启动实施续聊，前端不再拼接批准提示词绕过保存。
 
 已批准快照包含正文、补充意见、工作目录、路径、哈希、保存状态及实施模型。保存失败保留审批和快照，卡片可「重试保存并实施」；正文、补充意见或模型选择变化后需要新的批准。写入使用同目录临时文件和原子替换；已有文件与上次成功保存的哈希不一致时报冲突，不覆盖用户改动。停止/新计划会先使旧的在途授权失效，解除只读与实施确认在同一授权锁下提交。成功记录在普通续聊中保留，工具结果、计划卡片和后续回合上下文提供计划路径。实现见 [`plans.rs`](../src-tauri/src/native/plans.rs)。
+
+## Bash 风险分类
+
+`tools/shell_parse.rs` 是手写的保守词法器：识别单双引号、反斜杠转义与续行、控制符、重定向（`>`、`>>`、`>|`、`&>`、`N>&M`、`<`、`<<<`）、环境变量前缀和未加引号的通配符。`$…`、反引号、`${…}`、子 shell、进程替换、花括号、heredoc、注释和未闭合的引号记为无法解析，不猜测其内容。`tools/bash_policy.rs` 是命令策略表：
+
+- 破坏性操作沿用原分类（删除、覆盖、推送、强制 Git、不透明），新增 `unlink`、`shred`、`ln`、`exec`；`gh` 的 create / merge / close / delete / edit / comment 等远端写操作和非 GET 的 `gh api` 归为推送。
+- 只读白名单按命令、子命令和选项判断：`tail -f`、`sort -o`、`uniq` 第二个参数、`tree -o`、`file -C`、`rg --pre`、`find -fprint` 等不算只读；`sed` 只接受 `-n` 加按行号打印的脚本。`git` 跳过 `-C`、`--git-dir` 等全局选项，全局 `-c` 或未知全局选项不算只读；`status / diff / log / show` 等只读子命令禁止 `--output`、`--ext-diff`、`--textconv`、`--no-index`，`branch / tag / config / remote / reflog / stash` 只接受列表或查询形式。`gh` 只放行 `pr / issue / run / repo / release` 的查看类子命令、`auth status` 和 GET 的 `gh api`，`--web` 不算只读。
+- 带路径的可执行文件（`/tmp/ls`、`./ls`）不在白名单内；`rg`、`find`、`sort`、`sed`、`git`、`gh` 的参数含未加引号的通配符时不算只读，避免文件名被展开成选项。
+- 所有段都只读、没有写文件的重定向（`/dev/null`、描述符复制和输入重定向除外）、也没有无法解析的结构时才是低风险；未知命令或选项按不透明处理。环境变量前缀一律按不透明处理。执行模式下 `nohup`、`timeout` 等包装可剥离后判断真实命令，计划模式和只读子 Agent 中包装仍需确认。
+- `Monitor` 与 `Bash` 使用同一分类器和同一套命令规则。本地与 SSH 共用 `enforce_permissions`，分类不依赖执行目标。
+
+分类器只决定是否需要确认，不是 OS 沙箱：本机 Bash 会通过 shell 快照导入用户的别名和函数，白名单里的 `ls`、`git` 实际执行的可能是它们；仓库配置（如 `core.fsmonitor`、textconv 驱动）也可能让只读 git 命令执行程序；SSH 执行不套沙箱。
 
 ## 权限规则
 
@@ -48,7 +60,8 @@ P4 把进程内编程 Agent 接到渠道 + 工作区外壳。数据流仍是 `Re
 - 文件访问弹窗提供「本次允许」「始终允许」「拒绝」，展示主机、操作和所有目标路径。「始终允许」默认保存当前文件，目录搜索保存搜索目录及子目录，也可改选文件所在目录；默认当前工作区，可显式选全局。保存失败保留请求，多目标规则原子保存后才执行。
 - 本地 / SSH 的 Read、Glob、Grep、Write、Edit、ApplyPatch 均支持工作区外授权。yolo 直接允许外部访问，其他模式遇到未授权路径先确认。补丁源、删除与移动目标统一检查，全部授权后才开始修改；单次授权不进入共享上下文。SSH Glob 使用指定搜索目录，显式指定目录时返回绝对路径。
 - `external_path = { target, scope: exact | subtree }` 使用真实绝对路径及路径组件匹配，能力为 `read` 或 `edit`，两者分开。`target` 为 `{ kind: local }` 或 `{ kind: ssh, config_id, host, port, username }`，防止授权跨连接混用。旧规则没有此字段时不自动扩展文件边界。
-- 普通工具的「始终允许」沿用 `suggested_rule`，Bash 使用命令前缀、其余工具使用工具名。设置页增删规则后同步运行中会话；文件授权仍保留只读模式、内容指纹、取消和路径验证。
+- Bash / Monitor 的命令规则按段匹配（`;`、`&&`、`||`、`|`、`&`、换行分段）：allow 规则要求每一段都匹配，且不能有写文件的重定向或无法解析的结构，`git status*` 不会放行 `git status; rm -rf x` 或 `git status > out.txt`；deny / ask 规则只要整条命令、任意一段或去掉包装后的任意一段匹配即生效。与模式完全相同的整条命令仍然命中。
+- 普通工具的「始终允许」沿用 `suggested_rule`：单段 Bash 使用前两个词做前缀，复合命令、带写文件重定向或无法解析的命令保存整条命令的精确规则；其余工具使用工具名。设置页增删规则后同步运行中会话；文件授权仍保留只读模式、内容指纹、取消和路径验证。
 - `ask` 规则命中时在非 `yolo` 模式弹确认（`kind = rule`）；`yolo` 跳过该确认。
 - 子 Agent 档案可带 `permission_mode`（不共享父会话的放行开关）与 `disallowed_tools`。
 - 命令：`get/update/add/delete_native_permission_rules`；设置页「权限规则」可增删规则。
@@ -94,6 +107,14 @@ P4 把进程内编程 Agent 接到渠道 + 工作区外壳。数据流仍是 `Re
 
 每个内置工具在 [`tools/catalog.rs`](../src-tauri/src/native/tools/catalog.rs) 声明一份 [`ToolContract`](../src-tauri/src/native/tools/contract.rs)：`read_only / destructive / concurrent_safe / side_effect_scope / risk_level / needs_approval / allowed_in_plan_mode / permission（能力）/ pattern_sources / result_budget / timeout`。MCP 工具按 `tools/list` 返回的 `annotations.readOnlyHint / destructiveHint` 动态生成契约，缺省视为需审批、串行。
 
+输出契约与按模型投影：
+
+- 契约新增 `output`（`Text` 或带 JSON Schema 子集的 `Json`）、`on_violation`（`Fail` / `Degrade`）和 `source`（`Builtin` / `McpDeclared` / `McpUndeclared`）。内置工具默认文本契约，`CronUpdate` 声明返回自动化对象的 JSON 结构，不符合时按工具失败返回。
+- `finalize_tool` 在钩子之前用 [`tools/output_check.rs`](../src-tauri/src/native/tools/output_check.rs) 校验：支持 `type`（含联合类型）、`required`、`properties`、`items`、`enum`，嵌套超过 32 层视为失败，错误带 `$.path`。MCP 工具声明了 `outputSchema` 时优先校验 `structuredContent`（只有结构化结果时把它作为文本交给模型），不符合按 `Degrade` 在结果前加「输出未通过契约校验，按不可信文本处理」。
+- MCP 服务器没有给 `annotations` 的工具记为 `McpUndeclared`、高风险。服务器自报的 `readOnlyHint` 只有在该服务器配置 `trust_tool_annotations: true`（设置页「信任工具只读声明」）时才让契约变为只读；默认不信任，旧配置读为 false。插件带来的服务器不自动信任；设置页添加固定版本的 Playwright 预设时默认勾选。
+- 失败的工具结果写入上下文时以 `[工具执行失败] ` 开头，Anthropic 请求据此给 `tool_result` 加 `is_error: true`，其他协议直接看到前缀。
+- `combined_tools` 最后按执行目标和模型能力投影：没有契约的工具不暴露；SSH 工作区隐藏 `Lsp`、`Monitor`、`ProcessList / ProcessOutput / ProcessStop`，`Bash` 去掉 `run_in_background` 并改写说明；模型不收图片时 `Read` 的 `mode` 只剩 `text` 并说明图片、MP4 不可查看，能收图片但不收视频时说明 MP4 不可用。模型能力与 M07 请求前的媒体预算使用同一来源（模型目录）。子 Agent 使用同一投影。
+
 - 计划模式与 explore 子 Agent 的常规只读白名单来自契约的 `allowed_in_plan_mode`，不再硬编码。`Agent` 保持 `allowed_in_plan_mode=false`：仅计划模式顶层 runner 在工具广告和预检中作显式特例，再由 `run_agent_batch` 按 `SubagentKind::Explore` 收紧；普通只读 runner、general、自定义 Agent 与嵌套委派不会因此放开。
 - 同一轮里连续的 `concurrent_safe && !destructive && !needs_approval` 调用（Read / Glob / Grep / Lsp / WebFetch / WebSearch / Skill / TodoRead）并行执行，上限 8，结果按模型给出的顺序回填；写工具与 Bash 串行；连续 `Agent` 调用仍成批并行。
 - 结果预算：输出超过 `result_budget.max_model_bytes` 且策略为 `Artifact` 时，完整内容写入 `$APPCONFIG/artifacts/<session>/<id>.txt` 并登记 `native_tool_artifacts`，模型只看到头（Glob / Grep / WebFetch / Agent / MCP）或尾（Bash）预览加 artifact 路径；`Read` 允许读取 artifact 目录。之后仍按 `max_tool_output_tokens` 截断兜底。
@@ -122,7 +143,14 @@ P4 把进程内编程 Agent 接到渠道 + 工作区外壳。数据流仍是 `Re
 
 ## 子 Agent 档案与后台任务
 
-- `.md` 档案：`<workspace>/.noxcode/agents/*.md`、`.claude/agents/*.md`、`$APPCONFIG/agents/*.md`。frontmatter：`name`（必填）、`description`、`tools`（逗号或数组；空 / `*` = 全部）、`disallowedTools`、`permissionMode`、`maxTurns`、`skills`（只对子 Agent 开放的技能名）、`injectAgentsMd`；正文即系统提示。与设置页 json 同名时 json 优先；档案 `source = file`，设置页只展示不可编辑。解析见 [`subagents.rs`](../src-tauri/src/native/subagents.rs) `parse_subagent_markdown`。设置页 json 子智能体指定渠道模型时可另选思考等级，未设置则用模型默认；`.md` 档案不支持。
+- `.md` 档案：`<workspace>/.noxcode/agents/*.md`、`.claude/agents/*.md`、`$APPCONFIG/agents/*.md`。frontmatter：`name`（必填）、`description`、`tools`（逗号或数组；空 / `*` = 全部）、`disallowedTools`、`permissionMode`、`maxTurns`、`skills`（只对子 Agent 开放的技能名）、`injectAgentsMd`、`memory`（`user` / `project` / `local`，其他值报错）；正文即系统提示。与设置页 json 同名时 json 优先；档案 `source = file`，设置页只展示不可编辑。解析见 [`subagents.rs`](../src-tauri/src/native/subagents.rs) `parse_subagent_markdown`。设置页 json 子智能体指定渠道模型时可另选思考等级，未设置则用模型默认；`.md` 档案不支持。
+- 子 Agent 持久记忆（档案 `memory` 字段，设置页「持久记忆」）：每个子 Agent 在作用域根目录下有自己的子目录（名称 slug），与表示适用工作区的 `scope` 无关。
+  - `user`：`$APPCONFIG/agent-memory/user/<agent>/`，跨项目共享。
+  - `project`：本地工作区为 `<仓库>/.noxcode/agent-memory/<agent>/`，可随仓库提交。
+  - `local`：本地工作区为 `<仓库>/.noxcode/agent-memory-local/<agent>/`，首次创建时在该目录写入内容为 `*` 的 `.gitignore`，不改仓库根目录的忽略规则。
+  - 本地路径用原仓库根目录，不用隔离 worktree 路径。SSH 工作区的 `project` / `local` 映射到本机 `$APPCONFIG/ssh-workspaces/<工作区 ID 十六进制>/agent-memory[-local]/<agent>/`，不写远端，也不会与本机同路径的仓库混用。
+  - 创建子 Agent 时绑定该目录（`ToolCtx.memory`），只能通过 `Memory` 工具读写；自定义工具白名单会自动加入 `Memory`，系统提示附上该目录的索引。只读子 Agent 仍保持只读，不会因此看到或执行 Write / Edit / ApplyPatch / Bash。
+  - explore 与自定义子 Agent 不再继承父会话的 `extra_write_roots`（父会话记忆目录）；只有 general 子 Agent 继承。`fork_for_child` 不传递记忆绑定。
 - 后台任务：`Agent(run_in_background=true)` 立即返回 `task_id`，子 Agent 在独立 tokio 任务里运行（自己的 CancelFlag，父取消会级联）。父 Agent 用 `TaskOutput(task_id, wait, timeout_ms)` 读取 / 等待、`TaskStop` 取消、`SendMessage` 追加指令（进子 Agent 的 steer 通道）；子 Agent 用 `RespondToCoordinator` 留言。完成与留言在父 Agent 下一次模型调用前以 `[后台任务提醒]` 注入。注册表见 [`agent/background.rs`](../src-tauri/src/native/agent/background.rs)；会话结束时停掉全部后台任务。
 - Agent 特殊调度与普通工具共用权限、只读检查及 Hook 前后置入口；前台和后台跨批共享同一并发许可。后台状态包含 queued / running / done / failed / stopped，消息在模型调用边界和最终返回前消费，队列满或任务已关闭立即报错。前端可查看任务、发送消息与停止任务，使用 `list_native_background_tasks`、`send_native_background_message`、`stop_native_background_task`。
 
@@ -139,13 +167,19 @@ P4 把进程内编程 Agent 接到渠道 + 工作区外壳。数据流仍是 `Re
 
 ## 记忆（MEMORY.md）
 
-本地工作区且 `memory_enabled` 时，每个工作区一个目录 `$APPCONFIG/memory/<project_key>/`（`project_key` = 目录名 + 8 位哈希）：`MEMORY.md` 是索引（每行 `- [名称](文件.md) — 描述 (type)`，≤ 200 行），事实文件带 frontmatter `name / description / type(user|feedback|project|reference) / created_at / updated_at`。实现见 [`memory.rs`](../src-tauri/src/native/memory.rs)。
+本地工作区且 `memory_enabled` 时，每个工作区一个目录 `$APPCONFIG/memory/<project_key>/`（`project_key` = 目录名 + 路径 SHA-256 前 16 位十六进制；旧版用 `DefaultHasher` 算出的目录在首次访问时改名迁移。隔离 worktree 会话按原仓库根目录归属）：`MEMORY.md` 是索引（每行 `- [名称](文件.md) — 描述 (type)`，≤ 200 行），事实文件带 frontmatter `name / description / type(user|feedback|project|reference) / created_at / updated_at`。实现见 [`memory.rs`](../src-tauri/src/native/memory.rs)。
 
 - 注入：系统提示的「# 记忆（MEMORY.md）」块（索引 + 维护约定），记忆目录加入 `extra_write_roots`，模型可直接 Read / Write / Edit 记忆文件。
 - recall：每个用户回合按关键词（ASCII 词 + CJK 双字，名称 ×3 / 描述 ×2 / 正文 ×1）取前 3 条，以「[记忆回忆]」附在用户消息末尾（不进事件流）。
-- extract：会话正常结束（非取消、至少一问一答）后用轻量模型抽取候选，去重后落盘，事件流写 `[记忆] 已保存 N 条记忆`。结束时抽取和 dream 合计最多等待 20 秒，不无限阻塞退出。
-- dream：每 `memory_dream_interval` 次抽取（默认 10，0 = 从不）或设置页「立即整理」时，把全部记忆交给模型合并 / 去重 / 重写。
-- 命令：`list_native_memories`、`save_native_memory`、`delete_native_memory`、`open_native_memory_dir`、`dream_native_memory`。
+- 存储：事实文件、索引和状态都用临时文件加 `persist` 原子写入；同一目录的写入在进程内互斥。不同名称 slug 相同时追加序号，不覆盖已有记忆；符号链接和带路径分隔符、`..` 的文件名不当作记忆。
+- extract：会话正常结束（非取消、至少一问一答）后用轻量模型抽取候选，去重后落盘，事件流写 `[记忆] 已保存 N 条记忆`。结束时抽取最多等待 20 秒；拼在用户消息末尾的「[记忆回忆]」块不再被当作新内容抽取。
+- dream：每 `memory_dream_interval` 次抽取（默认 10，0 = 从不）或设置页「立即整理」时，由 [`memory_organizer.rs`](../src-tauri/src/native/memory_organizer.rs) 的整理 Agent 处理。会话结束触发的整理放到后台任务，不占用 20 秒等待。
+  - 整理 Agent 只有 `Memory` 工具（list / search / read / write / delete），工作区根和记忆绑定都是记忆目录的同级暂存副本 `<key>.organize`，碰不到工作区。上限：12 次模型调用、6 万 token、120 秒，支持取消；提示要求合并重复、以较新较具体的一条纠正过期事实、删除一次性细节。
+  - 结束后校验副本（每个 `.md` 都能解析，原来有记忆时结果不能为空）并重建索引，然后在目录锁内比对原目录内容快照：整理期间原目录被改过就放弃结果；否则原目录改名为 `<key>.bak`（只保留最近一份），副本改名为正式目录。超时、取消、校验失败或交换失败都丢弃副本，原目录和索引不变。
+  - 模型拒绝工具调用等错误时回退到一次性 JSON 整理，同样先写副本再校验交换。
+  - 结果摘要包含整理前后条目数、模型调用次数和 token，设置页「立即整理」直接显示。
+- `Memory` 工具只在当前 Agent 绑定了记忆目录（`ToolCtx.memory`）时可见；主会话仍通过 `extra_write_roots` 用 Read / Write / Edit 维护记忆。`allowed_tools` / `disallowed_tools` 在执行时同样检查，模型点名列表外的工具会被拒绝，不只是不展示。
+- 命令：`list_native_memories`、`save_native_memory`、`delete_native_memory`、`open_native_memory_dir`、`dream_native_memory`。这些命令对 SSH 工作区返回「记忆只对本地工作区可用」，与会话侧一致。
 - `/init`：Composer 展开为「摸底仓库并生成 / 补充 AGENTS.md」的提示词，走普通 Agent 回合。
 
 ## 模型角色与调用日志
@@ -156,12 +190,30 @@ P4 把进程内编程 Agent 接到渠道 + 工作区外壳。数据流仍是 `Re
 
 统一入口 `AgentRunner::run_compaction(trigger, instructions)`，顺序：微压缩（把最近 6 条之外、超过 400 字的工具结果替换成一行占位，`microcompact_enabled` 控制）→ 模型摘要（`compaction_prompt_with_instructions`，可带 `/compact` 指令）→ 本地摘要 → 重置。触发方式：
 
-- `auto`：`total_tokens ≥ 窗口 × auto_compact_threshold_percent`（默认 85%，设置页可调 30–99）。
+- `auto`：估算输入量达到触发线。触发线取 `窗口 × auto_compact_threshold_percent`（默认 85%，设置页可调 30–99）与 `窗口 − 输出预留` 中较低者。
+  - 估算包含工具定义。最近一次主模型调用报告了输入量时，以它为基线加上之后新增消息的本地估算；否则用本地估算上浮 10%。两种都不低于纯本地估算。
+  - 基线只由主调用写入，压缩摘要等内部调用不写。模型、压缩代数或请求前缀（截断、回退）变化后基线失效；服务端没报输入量时清掉基线。
+  - Anthropic 的输入量按 `input_tokens + cache_read_input_tokens + cache_creation_input_tokens` 计算。
+  - 输出预留 `output_reserve_for`：约窗口 15%（至少 4K），不超过模型最大输出（渠道配置或模型目录）和窗口的 1/4。8K 窗口预留 2K，128K 窗口配 8K 最大输出时预留 8K。截断兜底同样扣除预留。
+  - `native-context-usage` 附带 `estimated_tokens`、`estimate_source`（`provider` / `estimate`）和 `output_reserve_tokens`，容量弹层显示；旧记录缺字段时不显示该行。
 - `manual`：`/compact [指令]`（Composer 拦截）→ `compact_native_session` 命令 → `NativeFollowup::Compact`。等待输入时立刻执行并写回 transcript；工作中则在下一次模型调用前执行。
 - `reactive`：模型返回上下文溢出类错误（`is_context_overflow_error`）时被动压缩后重试，一个回合最多 2 次。
 - `downshift`：会话恢复时历史已超过当前模型窗口阈值，首轮调用前压缩。
 
-每次压缩写一行 `[COMPACT_BOUNDARY] {trigger, source, pre_tokens, post_tokens, pre_messages, post_messages, instructions}` 到事件流，前端渲染为分隔线（`CompactBoundaryRow`），并刷新 `native-context-usage`。
+每次压缩写一行 `[COMPACT_BOUNDARY] {trigger, source, outcome, pre_tokens, post_tokens, pre_messages, post_messages, instructions}` 到事件流，前端渲染为分隔线（`CompactBoundaryRow`），并刷新 `native-context-usage`。
+
+压缩结果与失败预算：
+
+- `outcome`：`success`；`no_gain` 表示替换了消息，但压缩后仍保留 95% 以上 token，或（非手动）仍超触发线。旧记录没有该字段，按成功读取，分隔线只在非成功时加标注。
+- 各级都失败时不写分隔线。非手动触发的失败和无收益累计 `compact_failures`，成功清零。连续 3 次后本回合不再自动压缩，被动压缩也不再请求摘要模型、只做本地降级，并提示一次。新用户回合、`compact_now`（手动或切模型降窗口）和运行中切模型时清零。被动压缩每回合 2 次的上限不变。
+- `provider_error` 在错误码不能识别时按文案判断溢出，Anthropic 的 `prompt is too long`（`invalid_request_error`）也会触发被动压缩。
+
+信息保留：
+
+- 工具图片说明、`[Stop 钩子要求继续]`、`[后台任务提醒]`、轮次上限提醒这些由 Agent 插入的 user 消息按前缀识别（常量在 `compact.rs`，生成处直接引用），分组时不当作新的用户回合，本地摘要把它们归为观察。
+- 模型摘要、本地摘要和重置生成的摘要消息末尾追加 `[压缩保留的状态]` 块，由后端拼接：当前目标（`goals::current_goal().describe()`）、计划模式 / 只读 / 高风险放行状态、已批准计划文件路径、未完成的待办、被摘要掉的消息里被拒绝的操作（工具名、参数和拒绝原因），以及被摘要掉的媒体引用（附件标识、名称、页码、时间段，不带原始载荷）。再次压缩时继承上一轮的拒绝和媒体条目，去重后每类最多 20 条。微压缩不生成摘要消息，不追加。
+- 摘要替换后和截断时使用 `sanitize_committed_tool_pairs`：已写入历史的 assistant 只要有调用缺结果，就整条移出上下文，不删减它的调用（原文仍在历史里），避免下一次 checkpoint 报「不能改写已提交的工具调用」。截断缩短消息时也不再清空已提交消息的调用。
+- 截断移除图片时，占位文本带上附件引用。
 
 ## 模型层缓存与重试
 

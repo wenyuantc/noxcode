@@ -3,8 +3,9 @@ use serde_json::json;
 use crate::native::model::types::ToolSpec;
 
 use super::contract::{
-    builtin_contract, PatternSource, PermissionCapability, PreviewDirection, ResultBudget,
-    ResultStrategy, RiskLevel, SideEffectScope, ToolContract, ToolTimeout,
+    builtin_contract, ContractSource, OutputContract, PatternSource, PermissionCapability,
+    PreviewDirection, ResultBudget, ResultStrategy, RiskLevel, SideEffectScope, ToolContract,
+    ToolTimeout, ViolationPolicy,
 };
 
 /// 只读工具名（不含仅计划模式可见的 `AskQuestion`），供 explore 子 Agent 与
@@ -75,6 +76,9 @@ fn contract(
         pattern_sources: pattern_sources.to_vec(),
         result_budget,
         timeout,
+        output: OutputContract::Text,
+        on_violation: ViolationPolicy::Fail,
+        source: ContractSource::Builtin,
     }
 }
 
@@ -417,6 +421,21 @@ pub fn tool_contracts() -> Vec<ToolContract> {
             ToolTimeout::fixed(15_000),
         ),
     ];
+    contracts.push(contract(
+        "Memory",
+        "读写绑定给当前 Agent 的记忆目录，不能访问工作区",
+        false,
+        false,
+        false,
+        SideEffectScope::Session,
+        RiskLevel::Low,
+        false,
+        true,
+        PermissionCapability::Memory,
+        &[Input],
+        budget(40_000, ResultStrategy::Truncate, PreviewDirection::Head),
+        ToolTimeout::fixed(30_000),
+    ));
     if let Some(fetch) = contracts.iter_mut().find(|tool| tool.name == "WebFetch") {
         // WebFetch counts network IO itself; human trust prompts have no network deadline.
         fetch.requires_user_interaction = true;
@@ -589,6 +608,22 @@ pub fn tool_contracts() -> Vec<ToolContract> {
     );
     exit.requires_user_interaction = true;
     contracts.push(exit);
+    if let Some(update) = contracts.iter_mut().find(|tool| tool.name == "CronUpdate") {
+        update.output = OutputContract::Json(json!({
+            "type": "object",
+            "required": ["id", "name", "prompt", "cron", "enabled"],
+            "properties": {
+                "id": {"type": "string"},
+                "name": {"type": "string"},
+                "prompt": {"type": "string"},
+                "cron": {"type": "string"},
+                "enabled": {"type": "integer"},
+                "channel_id": {"type": ["string", "null"]},
+                "model": {"type": ["string", "null"]},
+                "next_run_at": {"type": ["string", "null"]}
+            }
+        }));
+    }
     contracts
 }
 
@@ -799,7 +834,29 @@ pub fn tool_specs() -> Vec<ToolSpec> {
     specs.push(send_message_spec());
     specs.push(respond_to_coordinator_spec());
     specs.extend(automation_specs());
+    specs.push(memory_spec());
     specs
+}
+
+/// 只在当前 Agent 绑定了记忆目录时可见（见 `combined_tools`）。
+fn memory_spec() -> ToolSpec {
+    spec(
+        "Memory",
+        "Read and maintain your persistent memory directory, which is separate from the workspace. Actions: list (all entries), search (query), read (file), write (name, type, description, body; pass file to update or rename an existing entry), delete (file). Keep only durable facts: user preferences, corrected approaches, project decisions and references. Update or delete stale entries instead of adding contradictory ones. Use this tool, not Write or Edit, for memory.",
+        json!({
+            "type": "object",
+            "properties": {
+                "action": {"type": "string", "enum": ["list", "search", "read", "write", "delete"]},
+                "query": {"type": "string"},
+                "file": {"type": "string", "description": "Entry file name such as build-commands.md"},
+                "name": {"type": "string"},
+                "type": {"type": "string", "enum": ["user", "feedback", "project", "reference"]},
+                "description": {"type": "string", "description": "One-line summary"},
+                "body": {"type": "string"}
+            },
+            "required": ["action"]
+        }),
+    )
 }
 
 fn core_tool_specs() -> Vec<ToolSpec> {
@@ -1184,7 +1241,9 @@ mod tests {
                 "CronList",
                 "Goal",
                 "GoalRead",
-                "ReadSessionContext"
+                "ReadSessionContext",
+                // 只写绑定给该 Agent 的记忆目录，不触及工作区。
+                "Memory"
             ]
         );
         assert!(is_read_only_native_tool("ExitPlanMode"));

@@ -55,6 +55,7 @@ pub enum PermissionCapability {
     Process,
     Worktree,
     Computer,
+    Memory,
 }
 
 impl PermissionCapability {
@@ -82,6 +83,7 @@ impl PermissionCapability {
             Self::Process => "process",
             Self::Worktree => "worktree",
             Self::Computer => "computer",
+            Self::Memory => "memory",
         }
     }
 }
@@ -153,6 +155,45 @@ impl ToolTimeout {
     }
 }
 
+/// 工具结果的形状。`Json` 附带 JSON Schema 子集，结果必须通过校验。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OutputContract {
+    Text,
+    Json(serde_json::Value),
+}
+
+/// 结果不符合输出契约时的处理。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ViolationPolicy {
+    /// 按工具失败返回。
+    Fail,
+    /// 保留结果，但标注为未通过校验的不可信文本。
+    Degrade,
+}
+
+/// 契约的来源。MCP 服务器没有声明 annotations 时不能当作低风险。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ContractSource {
+    Builtin,
+    /// 服务器声明了 annotations（或属于协议定义的只读操作）。
+    McpDeclared,
+    /// 服务器没有声明 annotations。
+    McpUndeclared,
+}
+
+/// MCP 服务器对单个工具的声明。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct McpToolDeclaration {
+    /// 是否给了 `annotations`。
+    pub annotated: bool,
+    pub read_only_hint: bool,
+    pub destructive_hint: bool,
+    /// `outputSchema`。
+    pub output_schema: Option<serde_json::Value>,
+    /// 用户是否信任该服务器自报的只读声明。
+    pub trusted: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ToolContract {
     pub name: String,
@@ -173,6 +214,9 @@ pub struct ToolContract {
     pub pattern_sources: Vec<PatternSource>,
     pub result_budget: ResultBudget,
     pub timeout: ToolTimeout,
+    pub output: OutputContract,
+    pub on_violation: ViolationPolicy,
+    pub source: ContractSource,
 }
 
 impl ToolContract {
@@ -215,7 +259,25 @@ impl ToolContract {
                 max_ms: 300_000,
                 allow_call_override: false,
             },
+            output: OutputContract::Text,
+            on_violation: ViolationPolicy::Degrade,
+            source: ContractSource::McpDeclared,
         }
+    }
+
+    /// 按服务器声明生成 MCP 工具契约。只读声明只有在用户信任该服务器时才生效；
+    /// 没有声明 annotations 的工具按最保守的方式处理。
+    pub fn for_mcp_tool(name: &str, declaration: &McpToolDeclaration) -> Self {
+        let read_only = declaration.trusted && declaration.annotated && declaration.read_only_hint;
+        let mut contract = Self::for_mcp(name, read_only, declaration.destructive_hint);
+        if !declaration.annotated {
+            contract.source = ContractSource::McpUndeclared;
+            contract.risk_level = RiskLevel::High;
+        }
+        if let Some(schema) = &declaration.output_schema {
+            contract.output = OutputContract::Json(schema.clone());
+        }
+        contract
     }
 
     /// 无契约的未知工具（例如动态注册但尚未声明）按最保守的方式处理。
@@ -298,6 +360,50 @@ mod tests {
         assert!(read_only.read_only);
         // 仍需审批，所以不能并行。
         assert!(!read_only.can_run_concurrently());
+    }
+
+    #[test]
+    fn mcp_read_only_hint_needs_explicit_trust_and_annotations() {
+        let undeclared = ToolContract::for_mcp_tool("mcp_a", &McpToolDeclaration::default());
+        assert_eq!(undeclared.source, ContractSource::McpUndeclared);
+        assert_eq!(undeclared.risk_level, RiskLevel::High);
+        assert!(!undeclared.read_only);
+        let declared = McpToolDeclaration {
+            annotated: true,
+            read_only_hint: true,
+            ..McpToolDeclaration::default()
+        };
+        let untrusted = ToolContract::for_mcp_tool("mcp_b", &declared);
+        assert_eq!(untrusted.source, ContractSource::McpDeclared);
+        assert!(!untrusted.read_only, "服务器自报的只读声明默认不可信");
+        let trusted = ToolContract::for_mcp_tool(
+            "mcp_c",
+            &McpToolDeclaration {
+                trusted: true,
+                ..declared.clone()
+            },
+        );
+        assert!(trusted.read_only);
+        assert!(trusted.needs_approval);
+        // 信任也不能让没有声明的工具变成只读。
+        let blank = ToolContract::for_mcp_tool(
+            "mcp_d",
+            &McpToolDeclaration {
+                trusted: true,
+                read_only_hint: true,
+                ..McpToolDeclaration::default()
+            },
+        );
+        assert!(!blank.read_only);
+        let with_schema = ToolContract::for_mcp_tool(
+            "mcp_e",
+            &McpToolDeclaration {
+                output_schema: Some(serde_json::json!({"type": "object"})),
+                ..declared
+            },
+        );
+        assert!(matches!(with_schema.output, OutputContract::Json(_)));
+        assert_eq!(with_schema.on_violation, ViolationPolicy::Degrade);
     }
 
     #[test]

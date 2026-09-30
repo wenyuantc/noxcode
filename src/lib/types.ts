@@ -1014,6 +1014,11 @@ export interface NativeContextUsage {
   message_tokens?: number;
   prompt_tokens?: number;
   cached_tokens?: number;
+  /** 压缩判断用的估算值（含工具定义）。 */
+  estimated_tokens?: number;
+  /** `provider`：以服务端用量为基线；`estimate`：本地估算。 */
+  estimate_source?: "provider" | "estimate" | "";
+  output_reserve_tokens?: number;
 }
 
 export type NativeTurnStateKind = "waiting_input" | "working";
@@ -1424,7 +1429,11 @@ export interface NativeSubagent {
   path?: string | null;
   max_turns?: number | null;
   skills?: string[];
+  /** 持久记忆作用域；缺省或 null 表示不启用。 */
+  memory?: NativeSubagentMemoryScope | null;
 }
+
+export type NativeSubagentMemoryScope = "user" | "project" | "local";
 
 export interface CreateNativeSubagentInput {
   name: string;
@@ -1441,6 +1450,7 @@ export interface CreateNativeSubagentInput {
   workspace_ids?: string[] | null;
   permission_mode?: string | null;
   disallowed_tools?: string[] | null;
+  memory?: NativeSubagentMemoryScope | null;
 }
 
 export interface UpdateNativeSubagentInput {
@@ -1458,6 +1468,8 @@ export interface UpdateNativeSubagentInput {
   workspace_ids?: string[];
   permission_mode?: string | null;
   disallowed_tools?: string[];
+  /** `null` 关闭记忆，省略则不改。 */
+  memory?: NativeSubagentMemoryScope | null;
 }
 
 export interface GenerateNativeSubagentInput {
@@ -1520,6 +1532,8 @@ export interface McpServerConfig {
   url: string | null;
   headers: McpEnvVar[];
   oauth: McpOAuthConfig | null;
+  /** 信任服务器自报的 readOnlyHint；旧配置缺省为 false。 */
+  trust_tool_annotations?: boolean;
 }
 
 export interface McpOAuthStart {

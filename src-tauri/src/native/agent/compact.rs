@@ -280,12 +280,30 @@ impl CompactTrigger {
     }
 }
 
+/// 一次压缩的结果：替换了消息但没有明显缩减时记为 `NoGain`。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CompactOutcome {
+    #[default]
+    Success,
+    NoGain,
+    Failed,
+}
+
+/// 压缩后仍保留超过 95% 的 token 视为无收益。
+pub fn compaction_gained(pre_tokens: usize, post_tokens: usize) -> bool {
+    post_tokens.saturating_mul(100) < pre_tokens.saturating_mul(95)
+}
+
 /// 一次压缩的结果记录（对齐 ZCode 的 compactBoundary）。
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct CompactBoundary {
     pub trigger: CompactTrigger,
     /// `microcompact` / `model` / `local` / `reset`。
     pub source: String,
+    /// 旧记录没有该字段，按成功读取。
+    #[serde(default)]
+    pub outcome: CompactOutcome,
     pub pre_tokens: usize,
     pub post_tokens: usize,
     pub pre_messages: usize,
@@ -313,28 +331,9 @@ impl CompactBoundary {
     }
 }
 
-/// 供应商上下文溢出错误的启发式识别（OpenAI / Anthropic / 兼容网关的常见文案）。
+/// 供应商上下文溢出错误的启发式识别；实现放在模型层供错误分类共用。
 pub fn is_context_overflow_error(error: &str) -> bool {
-    let lower = error.to_ascii_lowercase();
-    [
-        "context_length_exceeded",
-        "context length",
-        "maximum context",
-        "context window",
-        "prompt is too long",
-        "input is too long",
-        "too many tokens",
-        "tokens exceed",
-        "exceeds the model",
-        "request too large",
-        "reduce the length of the messages",
-        "max_tokens is too large",
-        "上下文长度",
-        "超出最大长度",
-    ]
-    .iter()
-    .any(|needle| lower.contains(needle))
-        && !lower.contains("rate limit")
+    crate::native::model::response::is_context_overflow_message(error)
 }
 
 /// State for a logical model context window. A new generation is used after
@@ -348,6 +347,8 @@ pub struct ContextWindow {
     pub resets: u32,
     /// 自动压缩阈值（占窗口的百分比）。
     pub threshold_percent: usize,
+    /// 为模型回答预留的 token，触发线不会高于 `token_limit - output_reserve`。
+    pub output_reserve: usize,
 }
 
 impl ContextWindow {
@@ -358,6 +359,7 @@ impl ContextWindow {
             compactions: 0,
             resets: 0,
             threshold_percent: COMPACT_THRESHOLD_PERCENT,
+            output_reserve: 0,
         }
     }
 
@@ -369,12 +371,28 @@ impl ContextWindow {
         self.threshold_percent = percent.clamp(30, 99);
     }
 
+    pub fn set_output_reserve(&mut self, tokens: usize) {
+        self.output_reserve = tokens;
+    }
+
+    /// 只用本地估算判断；运行中的 Agent 应使用带用量基线的估算。
     pub fn should_compact(&self, messages: &[Message]) -> bool {
-        should_compact_tokens_with(messages, self.token_limit, self.threshold_percent)
+        self.should_compact_used(total_message_tokens(messages))
+    }
+
+    pub fn should_compact_used(&self, used_tokens: usize) -> bool {
+        self.token_limit > 0 && used_tokens >= self.trigger_tokens()
     }
 
     pub fn threshold_tokens(&self) -> usize {
         self.token_limit.saturating_mul(self.threshold_percent) / 100
+    }
+
+    /// 实际触发线：阈值线与「窗口减输出预留」取较低者。
+    pub fn trigger_tokens(&self) -> usize {
+        self.threshold_tokens()
+            .min(self.token_limit.saturating_sub(self.output_reserve))
+            .max(1)
     }
 
     pub fn mark_compacted(&mut self) {
@@ -386,6 +404,18 @@ impl ContextWindow {
         self.generation = self.generation.saturating_add(1);
         self.resets = self.resets.saturating_add(1);
     }
+}
+
+const MIN_OUTPUT_RESERVE: usize = 4_096;
+
+/// 按窗口大小给回答预留空间：约 15%（至少 4K），不超过模型最大输出和窗口的 1/4。
+pub fn output_reserve_for(window: usize, max_output: Option<usize>) -> usize {
+    let proportional = (window.saturating_mul(15) / 100).max(MIN_OUTPUT_RESERVE);
+    let reserve = match max_output.filter(|tokens| *tokens > 0) {
+        Some(max_output) => max_output.min(proportional),
+        None => proportional,
+    };
+    reserve.min(window / 4)
 }
 
 pub fn total_chars(messages: &[Message]) -> usize {
@@ -496,10 +526,9 @@ pub fn reset_local(messages: &mut Vec<Message>) -> bool {
     let keep_from = rest.len().saturating_sub(RESET_KEEP_MESSAGES);
     let to_summarize = rest[..keep_from].to_vec();
     let mut preserved = rest[keep_from..].to_vec();
-    if let Some(last_user) = messages
-        .iter()
-        .rposition(|message| message.role == Role::User && !is_context_summary(message))
-    {
+    if let Some(last_user) = messages.iter().rposition(|message| {
+        message.role == Role::User && !is_context_summary(message) && !is_synthetic_user(message)
+    }) {
         if !preserved.iter().any(|message| {
             message.role == Role::User && message.content == messages[last_user].content
         }) {
@@ -634,7 +663,7 @@ fn group_user_turns(messages: &[Message]) -> Vec<Vec<Message>> {
     let mut groups = Vec::new();
     let mut current = Vec::new();
     for message in messages {
-        if message.role == Role::User && !current.is_empty() {
+        if message.role == Role::User && !is_synthetic_user(message) && !current.is_empty() {
             groups.push(std::mem::take(&mut current));
         }
         current.push(message.clone());
@@ -656,6 +685,7 @@ fn local_summary(messages: &[Message]) -> String {
             continue;
         }
         match message.role {
+            Role::User if is_synthetic_user(message) => observations.push(preview),
             Role::User => goals.push(preview),
             Role::Assistant => completed.push(preview),
             Role::Tool => observations.push(preview),
@@ -820,6 +850,200 @@ fn looks_like_error_observation(text: &str) -> bool {
     .any(|marker| lower.contains(marker))
 }
 
+/// 工具图片说明消息的固定片段：`（{工具} 工具返回的图片：{名称}）`。
+pub const TOOL_IMAGE_NOTE_MARKER: &str = " 工具返回的图片：";
+pub const STOP_HOOK_CONTINUE_PREFIX: &str = "[Stop 钩子要求继续]";
+pub const BACKGROUND_NOTICE_PREFIX: &str = "[后台任务提醒]";
+const LAST_TURN_NOTE_PREFIX: &str = "工具轮次已达上限";
+
+/// 由 Agent 自己插入的 user 消息（工具图片、钩子、提醒），不是新的用户回合。
+pub fn is_synthetic_user(message: &Message) -> bool {
+    if message.role != Role::User {
+        return false;
+    }
+    let content = message.content.as_str();
+    (content.starts_with('（') && content.contains(TOOL_IMAGE_NOTE_MARKER))
+        || content.starts_with(STOP_HOOK_CONTINUE_PREFIX)
+        || content.starts_with(BACKGROUND_NOTICE_PREFIX)
+        || content.starts_with(LAST_TURN_NOTE_PREFIX)
+}
+
+/// 压缩时由后端拼进摘要的运行状态，不依赖模型复述。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PreservedState {
+    pub goal: Option<String>,
+    pub permissions: String,
+    pub approved_plan: Option<String>,
+    pub open_todos: Vec<String>,
+}
+
+const PRESERVED_HEADER: &str = "[压缩保留的状态]";
+const PRESERVED_ITEM_CHARS: usize = 240;
+const DENIAL_MARKERS: [&str; 3] = ["用户不允许", "已按拒绝处理", "拒绝了该操作"];
+const DENIAL_HEADING: &str = "- 已被拒绝的操作（不要重复尝试同样的操作）：";
+const MEDIA_HEADING: &str = "- 已摘要的媒体（只保留引用，需要时重新读取）：";
+/// 每类保留条目的上限，防止多次压缩后越积越长。
+const PRESERVED_MAX_ITEMS: usize = 20;
+
+fn keep_recent(mut items: Vec<String>) -> Vec<String> {
+    let mut seen = std::collections::HashSet::new();
+    items.retain(|item| seen.insert(item.clone()));
+    let skip = items.len().saturating_sub(PRESERVED_MAX_ITEMS);
+    items.split_off(skip)
+}
+
+/// 从被再次压缩的旧摘要里取出上一轮保留块的条目。
+fn carried_items(dropped: &[Message], heading: &str) -> Vec<String> {
+    let mut items = Vec::new();
+    for message in dropped.iter().filter(|message| is_context_summary(message)) {
+        let Some(start) = message.content.rfind(PRESERVED_HEADER) else {
+            continue;
+        };
+        let mut inside = false;
+        for line in message.content[start..].lines() {
+            if line == heading {
+                inside = true;
+            } else if let Some(item) = line.strip_prefix("  - ").filter(|_| inside) {
+                items.push(item.to_string());
+            } else {
+                inside = false;
+            }
+        }
+    }
+    items
+}
+
+/// 生成摘要前缀：运行状态 + 被摘要掉的消息里的拒绝记录和媒体引用。
+pub fn preserved_context_block(state: &PreservedState, dropped: &[Message]) -> String {
+    let mut lines = vec![PRESERVED_HEADER.to_string()];
+    if let Some(goal) = state.goal.as_deref().filter(|goal| !goal.trim().is_empty()) {
+        lines.push(format!("- 当前目标：{}", goal.trim()));
+    }
+    if !state.permissions.is_empty() {
+        lines.push(format!("- 权限：{}", state.permissions));
+    }
+    if let Some(plan) = state.approved_plan.as_deref() {
+        lines.push(format!("- 已批准计划文件：{plan}"));
+    }
+    if !state.open_todos.is_empty() {
+        lines.push("- 未完成待办：".to_string());
+        lines.extend(state.open_todos.iter().map(|todo| format!("  - {todo}")));
+    }
+    let denials = keep_recent(
+        carried_items(dropped, DENIAL_HEADING)
+            .into_iter()
+            .chain(denied_operations(dropped))
+            .collect(),
+    );
+    if !denials.is_empty() {
+        lines.push(DENIAL_HEADING.to_string());
+        lines.extend(denials.iter().map(|item| format!("  - {item}")));
+    }
+    let media = keep_recent(
+        carried_items(dropped, MEDIA_HEADING)
+            .into_iter()
+            .chain(dropped_media_refs(dropped))
+            .collect(),
+    );
+    if !media.is_empty() {
+        lines.push(MEDIA_HEADING.to_string());
+        lines.extend(media.iter().map(|item| format!("  - {item}")));
+    }
+    if lines.len() == 1 {
+        return String::new();
+    }
+    lines.join("\n")
+}
+
+fn clip(text: &str, limit: usize) -> String {
+    let text = text.replace('\n', " ");
+    if text.chars().count() > limit {
+        format!("{}…", text.chars().take(limit).collect::<String>())
+    } else {
+        text
+    }
+}
+
+fn denied_operations(messages: &[Message]) -> Vec<String> {
+    messages
+        .iter()
+        .filter(|message| message.role == Role::Tool)
+        .filter(|message| {
+            DENIAL_MARKERS
+                .iter()
+                .any(|marker| message.content.contains(marker))
+        })
+        .map(|result| {
+            let call = messages
+                .iter()
+                .flat_map(|message| message.tool_calls.iter())
+                .find(|call| call.id == result.tool_call_id);
+            match call {
+                Some(call) => format!(
+                    "{} {}：{}",
+                    call.name,
+                    clip(&call.arguments, PRESERVED_ITEM_CHARS),
+                    clip(&result.content, PRESERVED_ITEM_CHARS)
+                ),
+                None => clip(&result.content, PRESERVED_ITEM_CHARS),
+            }
+        })
+        .collect()
+}
+
+fn dropped_media_refs(messages: &[Message]) -> Vec<String> {
+    let mut refs = Vec::new();
+    for message in messages {
+        if !message.images.is_empty() {
+            refs.push(crate::native::media_plan::image_ref_summary(
+                &message.images,
+            ));
+        } else {
+            refs.extend(
+                message
+                    .media
+                    .iter()
+                    .map(|item| format!("附件 {}", item.attachment_id())),
+            );
+        }
+    }
+    refs
+}
+
+/// 压缩前有、压缩后不再出现的消息（按历史身份，未入库的按角色 + 内容）。
+pub fn dropped_messages(before: &[Message], after: &[Message]) -> Vec<Message> {
+    before
+        .iter()
+        .filter(|old| {
+            !after.iter().any(|new| {
+                if !old.history_id.is_empty() {
+                    new.history_id == old.history_id
+                } else {
+                    new.role == old.role
+                        && new.tool_call_id == old.tool_call_id
+                        && new.content == old.content
+                }
+            })
+        })
+        .cloned()
+        .collect()
+}
+
+/// 把保留块追加到刚生成的压缩摘要消息；没有摘要消息（微压缩）时不改动。
+pub fn inject_preserved_context(messages: &mut [Message], block: &str) -> bool {
+    if block.is_empty() {
+        return false;
+    }
+    let Some(summary) = messages
+        .iter_mut()
+        .find(|message| is_context_summary(message))
+    else {
+        return false;
+    };
+    summary.content = format!("{}\n\n{block}", summary.content);
+    true
+}
+
 fn is_context_summary(message: &Message) -> bool {
     message.role == Role::User
         && message
@@ -870,6 +1094,7 @@ mod tests {
         let boundary = CompactBoundary {
             trigger: CompactTrigger::Reactive,
             source: "model".to_string(),
+            outcome: CompactOutcome::NoGain,
             pre_tokens: 120_000,
             post_tokens: 30_000,
             pre_messages: 80,
@@ -880,6 +1105,14 @@ mod tests {
         assert!(line.starts_with(COMPACT_BOUNDARY_PREFIX));
         let parsed = CompactBoundary::parse_line(&line).expect("parse");
         assert_eq!(parsed, boundary);
+        // 旧记录没有 outcome 字段，按成功读取。
+        let legacy = CompactBoundary::parse_line(
+            r#"[COMPACT_BOUNDARY] {"trigger":"auto","source":"local","pre_tokens":9,"post_tokens":3,"pre_messages":4,"post_messages":2}"#,
+        )
+        .expect("legacy");
+        assert_eq!(legacy.outcome, CompactOutcome::Success);
+        assert!(compaction_gained(100, 94));
+        assert!(!compaction_gained(100, 95));
         assert!(CompactBoundary::parse_line("[工具] nope").is_none());
         assert!(is_context_overflow_error(
             "模型请求失败（HTTP 400）: This model's maximum context length is 128000 tokens"
@@ -892,6 +1125,120 @@ mod tests {
             "rate limit exceeded, context window fine"
         ));
         assert!(!is_context_overflow_error("invalid api key"));
+    }
+
+    fn image(id: &str, page: Option<u32>) -> crate::native::model::types::NativeImage {
+        crate::native::model::types::NativeImage {
+            name: format!("{id}.png"),
+            mime_type: "image/png".to_string(),
+            data_base64: "QUJD".repeat(1_000),
+            attachment_id: id.to_string(),
+            page,
+            time_range: None,
+        }
+    }
+
+    #[test]
+    fn synthetic_user_notes_do_not_split_the_latest_turn() {
+        let mut call = Message::assistant_text("");
+        call.tool_calls = vec![crate::native::model::types::ToolCall {
+            id: "c1".to_string(),
+            name: "Read".to_string(),
+            arguments: "{}".to_string(),
+        }];
+        let mut note = Message::user(format!("（Read{TOOL_IMAGE_NOTE_MARKER}shot.png）"));
+        note.images.push(image("att-1", None));
+        let mut messages = vec![
+            Message::user("旧任务"),
+            Message::assistant_text("旧任务完成"),
+            Message::user("真正的新任务"),
+            call,
+            Message::tool_result("c1", "读取结果"),
+            note,
+            Message::assistant_text("看完图片"),
+            Message::user(format!("{STOP_HOOK_CONTINUE_PREFIX} 还有测试没跑")),
+        ];
+        assert!(is_synthetic_user(&messages[5]));
+        assert!(is_synthetic_user(&messages[7]));
+        assert!(!is_synthetic_user(&messages[2]));
+        assert!(compact_local(&mut messages));
+        // 真正的用户请求及其工具调用、结果、图片说明原样保留，没有被摘要掉。
+        assert!(messages
+            .iter()
+            .any(|message| message.role == Role::User && message.content == "真正的新任务"));
+        assert!(messages.iter().any(|message| message.tool_call_id == "c1"));
+        assert!(messages.iter().any(|message| !message.images.is_empty()));
+        assert!(!messages
+            .iter()
+            .any(|message| message.content == "旧任务完成"));
+    }
+
+    #[test]
+    fn preserved_block_keeps_state_denials_and_media_references() {
+        let mut denied_call = Message::assistant_text("");
+        denied_call.tool_calls = vec![crate::native::model::types::ToolCall {
+            id: "d1".to_string(),
+            name: "Bash".to_string(),
+            arguments: r#"{"command":"rm -rf build"}"#.to_string(),
+        }];
+        let mut with_image = Message::user("看这张图");
+        with_image.images.push(image("att-9", Some(2)));
+        let dropped = vec![
+            with_image,
+            denied_call,
+            Message::tool_result("d1", "工具执行失败：用户不允许该高风险操作"),
+        ];
+        let state = PreservedState {
+            goal: Some("目标：修复登录".to_string()),
+            permissions: "计划模式关；只读否；高风险操作需逐项确认".to_string(),
+            approved_plan: Some(".noxcode/plans/plan-s.md".to_string()),
+            open_todos: vec!["[pending] 补测试".to_string()],
+        };
+        let block = preserved_context_block(&state, &dropped);
+        for expected in [
+            "目标：修复登录",
+            "高风险操作需逐项确认",
+            ".noxcode/plans/plan-s.md",
+            "[pending] 补测试",
+            "rm -rf build",
+            "用户不允许",
+            "附件 att-9",
+            "第 2 页",
+        ] {
+            assert!(block.contains(expected), "{expected}\n{block}");
+        }
+        assert!(!block.contains("QUJD"), "不能带原始媒体载荷");
+
+        // 二次压缩：旧摘要里的拒绝和媒体条目继承下来，且不重复。
+        let mut messages = vec![
+            Message::user("旧任务"),
+            Message::assistant_text("旧回答"),
+            Message::user("新任务"),
+        ];
+        assert!(compact_local(&mut messages));
+        assert!(inject_preserved_context(&mut messages, &block));
+        let old_summary = messages[0].clone();
+        let next = preserved_context_block(
+            &PreservedState::default(),
+            &[old_summary.clone(), old_summary],
+        );
+        assert_eq!(next.matches("附件 att-9").count(), 1, "{next}");
+        assert!(next.contains("rm -rf build"));
+        assert!(preserved_context_block(&PreservedState::default(), &[]).is_empty());
+    }
+
+    #[test]
+    fn output_reserve_scales_with_window_instead_of_fixed_32k() {
+        assert_eq!(output_reserve_for(8_192, None), 2_048);
+        assert_eq!(output_reserve_for(128_000, None), 19_200);
+        assert_eq!(output_reserve_for(128_000, Some(8_192)), 8_192);
+        assert_eq!(output_reserve_for(1_000_000, Some(128_000)), 128_000);
+        assert_eq!(output_reserve_for(1_000_000, None), 150_000);
+        let mut window = ContextWindow::new(1_000_000);
+        window.set_output_reserve(output_reserve_for(1_000_000, Some(128_000)));
+        assert_eq!(window.trigger_tokens(), 850_000);
+        assert!(window.should_compact_used(850_000));
+        assert!(!window.should_compact_used(849_999));
     }
 
     #[test]

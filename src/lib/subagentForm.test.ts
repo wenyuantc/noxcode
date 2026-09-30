@@ -35,6 +35,7 @@ describe("formFromGeneratedSubagent", () => {
       injectAgentsMd: true,
       scope: "all",
       workspaceIds: [],
+      memory: "",
     });
   });
 
@@ -59,6 +60,7 @@ function state(overrides: Partial<SubagentFormState> = {}): SubagentFormState {
     injectAgentsMd: true,
     scope: "all",
     workspaceIds: [],
+    memory: "",
     ...overrides,
   };
 }
@@ -72,5 +74,12 @@ describe("subagentPayloadFrom", () => {
   it("submits null reasoning_effort when model mode is inherit", () => {
     const payload = subagentPayloadFrom(state({ modelMode: "inherit", reasoningEffort: "high" }));
     expect(payload.reasoning_effort).toBeNull();
+  });
+});
+
+describe("subagent memory scope", () => {
+  it("sends null when memory is off and the scope otherwise", () => {
+    expect(subagentPayloadFrom(state()).memory).toBeNull();
+    expect(subagentPayloadFrom(state({ memory: "local" })).memory).toBe("local");
   });
 });

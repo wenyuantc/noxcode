@@ -319,6 +319,13 @@ describe("sessionLines", () => {
     expect(parsed?.source).toBe("model");
     expect(parsed?.pre_tokens).toBe(120000);
     expect(parsed?.instructions).toBe("keep stacks");
+    // 旧记录没有 outcome，按成功处理。
+    expect(parsed?.outcome).toBe("success");
+    expect(
+      parseCompactBoundary(
+        '[COMPACT_BOUNDARY] {"trigger":"auto","source":"local","outcome":"no_gain","pre_tokens":9,"post_tokens":9,"pre_messages":4,"post_messages":3}',
+      )?.outcome,
+    ).toBe("no_gain");
     expect(parseCompactBoundary("[工具] 已压缩上下文")).toBeNull();
     expect(parseCompactBoundary("[COMPACT_BOUNDARY] not json")).toBeNull();
     expect(classifyLine(boundaryLine)).toBe("system");

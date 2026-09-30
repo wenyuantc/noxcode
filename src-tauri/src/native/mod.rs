@@ -23,6 +23,7 @@ pub(crate) mod media_error;
 pub(crate) mod media_limits;
 pub(crate) mod media_plan;
 pub(crate) mod memory;
+pub(crate) mod memory_organizer;
 pub(crate) mod model;
 pub(crate) mod model_catalog;
 pub(crate) mod office_text;

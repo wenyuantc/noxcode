@@ -84,6 +84,10 @@ pub struct NativeSubagent {
     /// `model_mode = channel` 时指定渠道模型的思考等级；`None` 走渠道模型默认。
     #[serde(default)]
     pub reasoning_effort: Option<String>,
+    /// 持久记忆作用域：`user` / `project` / `local`；`None` 不启用。
+    /// 与表示「适用工作区」的 `scope` 无关。
+    #[serde(default)]
+    pub memory: Option<String>,
 }
 
 pub const SUBAGENT_SOURCE_JSON: &str = "json";
@@ -184,6 +188,8 @@ pub fn parse_subagent_markdown(text: &str, path: &Path) -> Result<NativeSubagent
             )
         })
         .unwrap_or(true);
+    let memory = normalize_memory_scope(field("memory").as_deref())
+        .map_err(|error| format!("{}：{error}", path.display()))?;
     Ok(NativeSubagent {
         id: format!("md:{}", path.to_string_lossy()),
         name,
@@ -204,7 +210,101 @@ pub fn parse_subagent_markdown(text: &str, path: &Path) -> Result<NativeSubagent
         max_turns,
         skills,
         reasoning_effort: None,
+        memory,
     })
+}
+
+pub const MEMORY_SCOPE_USER: &str = "user";
+pub const MEMORY_SCOPE_PROJECT: &str = "project";
+pub const MEMORY_SCOPE_LOCAL: &str = "local";
+
+/// 记忆作用域：空或 `none` / `off` 表示不启用，其余只接受 user / project / local。
+pub fn normalize_memory_scope(value: Option<&str>) -> Result<Option<String>, String> {
+    let Some(value) = value.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Ok(None);
+    };
+    match value.to_ascii_lowercase().as_str() {
+        "none" | "off" | "false" => Ok(None),
+        scope @ (MEMORY_SCOPE_USER | MEMORY_SCOPE_PROJECT | MEMORY_SCOPE_LOCAL) => {
+            Ok(Some(scope.to_string()))
+        }
+        _ => Err(format!(
+            "记忆作用域只能是 user / project / local，收到 {value}"
+        )),
+    }
+}
+
+/// 子 Agent 持久记忆三种作用域的根目录。每个子 Agent 在根目录下有自己的子目录。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentMemoryRoots {
+    /// `$APPCONFIG/agent-memory/user`：跨项目。
+    pub user: PathBuf,
+    /// 本地：`<仓库>/.noxcode/agent-memory`（可随仓库提交）；
+    /// SSH：本机 `$APPCONFIG/ssh-workspaces/<工作区>/agent-memory`。
+    pub project: Option<PathBuf>,
+    /// 本地：`<仓库>/.noxcode/agent-memory-local`（自带 `.gitignore`）；
+    /// SSH：本机 `$APPCONFIG/ssh-workspaces/<工作区>/agent-memory-local`。
+    pub local: Option<PathBuf>,
+    /// `local` 是否在仓库内，需要写 `.gitignore`。
+    pub local_in_repo: bool,
+}
+
+/// 本地工作区用原仓库根目录（不用隔离 worktree 路径）；SSH 工作区映射到本机按工作区 ID
+/// 区分的目录，不写远端，也不会与本机同路径的仓库混用。没有工作区时只有 user 作用域。
+pub fn agent_memory_roots(
+    config_dir: &Path,
+    local_root: Option<&Path>,
+    ssh_workspace_id: Option<&str>,
+) -> AgentMemoryRoots {
+    let user = config_dir.join("agent-memory").join(MEMORY_SCOPE_USER);
+    match (local_root, ssh_workspace_id) {
+        (Some(root), _) => AgentMemoryRoots {
+            user,
+            project: Some(root.join(".noxcode").join("agent-memory")),
+            local: Some(root.join(".noxcode").join("agent-memory-local")),
+            local_in_repo: true,
+        },
+        (None, Some(workspace_id)) => {
+            let base = crate::native::permission_rules::ssh_rules_root(config_dir, workspace_id);
+            AgentMemoryRoots {
+                user,
+                project: Some(base.join("agent-memory")),
+                local: Some(base.join("agent-memory-local")),
+                local_in_repo: false,
+            }
+        }
+        (None, None) => AgentMemoryRoots {
+            user,
+            project: None,
+            local: None,
+            local_in_repo: false,
+        },
+    }
+}
+
+/// 某个子 Agent 在指定作用域下的记忆目录，并确保目录存在；local 作用域在仓库内时
+/// 先写好忽略全部内容的 `.gitignore`，不改动仓库根目录的忽略规则。
+pub fn prepare_agent_memory_dir(
+    roots: &AgentMemoryRoots,
+    scope: &str,
+    agent_name: &str,
+) -> Result<PathBuf, String> {
+    let root = match scope {
+        MEMORY_SCOPE_USER => Some(&roots.user),
+        MEMORY_SCOPE_PROJECT => roots.project.as_ref(),
+        MEMORY_SCOPE_LOCAL => roots.local.as_ref(),
+        _ => None,
+    }
+    .ok_or_else(|| format!("当前会话没有 {scope} 作用域的记忆目录"))?;
+    let dir = root.join(crate::native::memory::slugify(agent_name));
+    std::fs::create_dir_all(&dir).map_err(|error| format!("创建子 Agent 记忆目录失败: {error}"))?;
+    if scope == MEMORY_SCOPE_LOCAL && roots.local_in_repo {
+        let ignore = root.join(".gitignore");
+        if !ignore.exists() {
+            crate::native::memory::write_atomic(&ignore, "*\n")?;
+        }
+    }
+    Ok(dir)
 }
 
 fn cap_description(value: &str) -> String {
@@ -320,6 +420,8 @@ pub struct CreateNativeSubagent {
     pub disallowed_tools: Option<Vec<String>>,
     #[serde(default)]
     pub reasoning_effort: Option<String>,
+    #[serde(default)]
+    pub memory: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -343,6 +445,9 @@ pub struct UpdateNativeSubagent {
     /// `Some(Some(effort))` 设置，`Some(None)` 清空，`None` 不改。
     #[serde(default, deserialize_with = "deserialize_explicit_nullable")]
     pub reasoning_effort: Option<Option<String>>,
+    /// `Some(Some(scope))` 开启记忆，`Some(None)` 关闭，`None` 不改。
+    #[serde(default, deserialize_with = "deserialize_explicit_nullable")]
+    pub memory: Option<Option<String>>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -816,6 +921,7 @@ pub(crate) fn parse_generated_subagent(
 
 fn normalize_record(mut item: NativeSubagent) -> Result<NativeSubagent, String> {
     item.name = normalize_subagent_name(&item.name)?;
+    item.memory = normalize_memory_scope(item.memory.as_deref())?;
     item.description = normalize_description(&item.description)?;
     item.model_mode = normalize_model_mode(Some(&item.model_mode))?;
     item.tool_mode = normalize_tool_mode(Some(&item.tool_mode))?;
@@ -1132,6 +1238,7 @@ pub async fn create_native_subagent<R: Runtime>(
         permission_mode: payload.permission_mode,
         disallowed_tools: payload.disallowed_tools.unwrap_or_default(),
         reasoning_effort: payload.reasoning_effort,
+        memory: payload.memory,
         source: SUBAGENT_SOURCE_JSON.to_string(),
         path: None,
         max_turns: None,
@@ -1256,6 +1363,9 @@ pub async fn update_native_subagent<R: Runtime>(
     if let Some(reasoning_effort) = payload.reasoning_effort {
         next.reasoning_effort = reasoning_effort;
     }
+    if let Some(memory) = payload.memory {
+        next.memory = memory;
+    }
     let mut record = normalize_record(next)?;
     ensure_unique_name(&items, &record.name, Some(&id))?;
     if record.scope == SCOPE_WORKSPACES {
@@ -1377,6 +1487,7 @@ mod tests {
             max_turns: None,
             skills: Vec::new(),
             reasoning_effort: None,
+            memory: None,
         }
     }
 
@@ -1644,5 +1755,71 @@ mod tests {
         blank.reasoning_effort = Some("  ".to_string());
         let normalized_blank = normalize_record(blank).expect("valid");
         assert_eq!(normalized_blank.reasoning_effort, None);
+    }
+
+    #[test]
+    fn memory_scope_is_parsed_and_validated() {
+        assert_eq!(normalize_memory_scope(None).unwrap(), None);
+        assert_eq!(
+            normalize_memory_scope(Some(" Project "))
+                .unwrap()
+                .as_deref(),
+            Some("project")
+        );
+        assert_eq!(normalize_memory_scope(Some("none")).unwrap(), None);
+        assert!(normalize_memory_scope(Some("team")).is_err());
+        let path = Path::new("/repo/.noxcode/agents/reviewer.md");
+        let parsed =
+            parse_subagent_markdown("---\nname: reviewer\nmemory: user\n---\n审查", path).unwrap();
+        assert_eq!(parsed.memory.as_deref(), Some("user"));
+        assert!(parse_subagent_markdown("---\nname: r\nmemory: team\n---\nx", path).is_err());
+        let mut record = sample();
+        record.memory = Some("LOCAL".to_string());
+        assert_eq!(
+            normalize_record(record).unwrap().memory.as_deref(),
+            Some("local")
+        );
+    }
+
+    #[test]
+    fn memory_directories_are_stable_isolated_and_target_aware() {
+        let config = Path::new("/cfg");
+        let local = agent_memory_roots(config, Some(Path::new("/srv/app")), None);
+        let ssh = agent_memory_roots(config, None, Some("ws-remote"));
+        // 同样的输入得到同样的路径。
+        assert_eq!(
+            local,
+            agent_memory_roots(config, Some(Path::new("/srv/app")), None)
+        );
+        assert_eq!(
+            local.project.as_deref(),
+            Some(Path::new("/srv/app/.noxcode/agent-memory"))
+        );
+        // SSH 工作区即使远端也是 /srv/app，也映射到本机按工作区 ID 区分的目录。
+        let ssh_project = ssh.project.clone().unwrap();
+        assert!(ssh_project.starts_with("/cfg/ssh-workspaces"));
+        assert_ne!(Some(ssh_project), local.project);
+        assert!(!ssh.local_in_repo);
+        assert_eq!(local.user, ssh.user);
+        let none = agent_memory_roots(config, None, None);
+        assert!(none.project.is_none() && none.local.is_none());
+
+        let temp = std::env::temp_dir().join(format!(
+            "noxcode-agent-memory-{}",
+            crate::native::artifacts::unique_suffix()
+        ));
+        let roots = agent_memory_roots(&temp.join("cfg"), Some(&temp.join("repo")), None);
+        let a = prepare_agent_memory_dir(&roots, "project", "reviewer").unwrap();
+        let b = prepare_agent_memory_dir(&roots, "project", "writer").unwrap();
+        assert_ne!(a, b);
+        assert!(!temp.join("repo/.noxcode/agent-memory/.gitignore").exists());
+        prepare_agent_memory_dir(&roots, "local", "reviewer").unwrap();
+        assert!(temp
+            .join("repo/.noxcode/agent-memory-local/.gitignore")
+            .exists());
+        let user = prepare_agent_memory_dir(&roots, "user", "reviewer").unwrap();
+        assert!(user.starts_with(temp.join("cfg/agent-memory/user")));
+        assert!(prepare_agent_memory_dir(&none, "project", "reviewer").is_err());
+        let _ = std::fs::remove_dir_all(temp);
     }
 }

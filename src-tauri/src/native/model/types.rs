@@ -76,6 +76,9 @@ impl AttachmentUse {
     }
 }
 
+/// 失败的工具结果以此开头；Anthropic 请求据此设置 `is_error`，其他协议直接看到前缀。
+pub const TOOL_ERROR_PREFIX: &str = "[工具执行失败] ";
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Message {
     pub role: Role,

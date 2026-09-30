@@ -54,6 +54,10 @@ impl AgentRunner {
             }
             _ => None,
         };
+        // 父会话的记忆目录只留给 general 子 Agent；其余子 Agent 不能写它。
+        if !matches!(spec.kind, SubagentKind::General) {
+            child.ctx.workspace.extra_write_roots.clear();
+        }
         match &spec.kind {
             SubagentKind::Explore => {
                 child.ctx.set_read_only(true);
@@ -116,13 +120,51 @@ impl AgentRunner {
             .iter()
             .find(|message| message.role == Role::System)
             .map(|message| message.content.clone());
-        let system = if let Some(def) = custom_def.as_ref() {
+        let mut system = if let Some(def) = custom_def.as_ref() {
             custom_child_system_prompt(spec, def, &self.workspace_context, &self.project_agents)
         } else {
             child_system_prompt(parent_system.as_deref(), spec)
         };
+        if let Some(def) = custom_def.as_ref() {
+            if let Some(block) = self.bind_agent_memory(&mut child, def) {
+                system.push_str("\n\n");
+                system.push_str(&block);
+            }
+        }
         child.messages.push(Message::system(system));
         child
+    }
+
+    /// 档案开启持久记忆时，只通过 `Memory` 工具开放该子 Agent 自己的记忆目录。
+    /// 不改变只读状态，也不增加任何工作区写入能力。返回注入系统提示的记忆块。
+    fn bind_agent_memory(&self, child: &mut AgentRunner, def: &NativeSubagent) -> Option<String> {
+        let scope = def.memory.as_deref()?;
+        let roots = self.agent_memory_roots.as_ref()?;
+        let dir = match crate::native::subagents::prepare_agent_memory_dir(roots, scope, &def.name)
+        {
+            Ok(dir) => dir,
+            Err(error) => {
+                self.emit(format!("[子 Agent] {} 的记忆不可用：{error}", def.name));
+                return None;
+            }
+        };
+        if let Some(allowed) = child.allowed_tools.as_mut() {
+            allowed.insert("Memory".to_string());
+        }
+        let index = crate::native::memory::load_index(&dir);
+        child.ctx.memory = Some(crate::native::tools::memory_tool::MemoryBinding {
+            dir,
+            writable: true,
+        });
+        Some(format!(
+            "# 你的持久记忆（{scope}）\n这是只属于 {} 的记忆，跨会话保留。用 Memory 工具 list / search / read 查看；发现值得长期保留的信息（用户偏好、纠正过的做法、项目决策、参考资料）时用 Memory 工具 write，过时的条目要更新或删除。不要用 Write / Edit 修改记忆。\n\n{}",
+            def.name,
+            if index.trim().is_empty() {
+                "（当前还没有记忆条目）".to_string()
+            } else {
+                index.trim().to_string()
+            }
+        ))
     }
 
     pub(super) async fn run_agent_batch(
@@ -149,7 +191,7 @@ impl AgentRunner {
         }
         let mut jobs = Vec::new();
         for (pos, call) in calls.iter().enumerate() {
-            if let Some(rejection) = self.repeat_guard(call) {
+            if let Some(rejection) = self.call_guard(call) {
                 slot[pos] = Some((call.clone(), ToolOutput::error(rejection)));
                 continue;
             }

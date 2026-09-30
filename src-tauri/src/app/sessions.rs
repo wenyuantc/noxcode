@@ -847,6 +847,9 @@ mod tests {
                 message_tokens: 27850,
                 prompt_tokens: 27000,
                 cached_tokens: 22410,
+                estimated_tokens: 28100,
+                estimate_source: "provider".to_string(),
+                output_reserve_tokens: 75000,
             },
         )
         .await
@@ -864,6 +867,15 @@ mod tests {
         assert_eq!(stored.used_tokens, 28000);
         assert_eq!(stored.limit_tokens, 500000);
         assert_eq!(stored.cached_tokens, 22410);
+        assert_eq!(stored.estimate_source, "provider");
+        assert_eq!(stored.output_reserve_tokens, 75000);
+        // 旧记录没有这些字段时按默认值读取。
+        let legacy: NativeContextUsage = serde_json::from_str(
+            r#"{"session_record_id":"s","used_tokens":1,"limit_tokens":2,"generation":0,"compactions":0}"#,
+        )
+        .expect("legacy");
+        assert_eq!(legacy.estimate_source, "");
+        assert_eq!(legacy.output_reserve_tokens, 0);
     }
 
     #[tokio::test]

@@ -68,6 +68,8 @@ export function ContextCapacity({
     tokens: tokenOf(usage, category.key),
   })).filter((row) => row.tokens > 0);
   const percentBase = used > 0 ? used : rows.reduce((sum, row) => sum + row.tokens, 0);
+  const reserve = usage.output_reserve_tokens ?? 0;
+  const estimated = usage.estimated_tokens ?? 0;
 
   return (
     <div ref={rootRef} className="relative">
@@ -110,6 +112,23 @@ export function ContextCapacity({
           <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-muted">
             <div className="h-full rounded-full bg-sky-500" style={{ width: `${occupancy}%` }} />
           </div>
+          {reserve > 0 ? (
+            <div className="mt-2 flex items-center gap-2 text-muted-foreground">
+              <span className="min-w-0 flex-1 truncate">
+                {t("contextCompactEstimate", {
+                  count: formatCompactTokens(estimated, locale),
+                  source: t(
+                    usage.estimate_source === "provider"
+                      ? "contextEstimateProvider"
+                      : "contextEstimateLocal",
+                  ),
+                })}
+              </span>
+              <span className="shrink-0 tabular-nums">
+                {t("contextOutputReserve", { count: formatCompactTokens(reserve, locale) })}
+              </span>
+            </div>
+          ) : null}
           {rows.length > 0 ? (
             <ul className="mt-3 space-y-1.5">
               {rows.map((row) => {

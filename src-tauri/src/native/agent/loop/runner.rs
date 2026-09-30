@@ -37,12 +37,14 @@ impl AgentRunner {
             workspace_context: String::new(),
             project_agents: String::new(),
             required_subagent_type: None,
+            agent_memory_roots: None,
             extra_tools: Vec::new(),
             extra_tool_contracts: Vec::new(),
             artifacts: None,
             lite_model: None,
             skills_prompt: String::new(),
             last_usage: None,
+            usage_baseline: None,
             allowed_tools: None,
             disallowed_tools: None,
             turns: 0,
@@ -58,6 +60,7 @@ impl AgentRunner {
             pending_downshift_compact: false,
             microcompact_enabled: true,
             reactive_compactions: 0,
+            compact_failures: 0,
             depth: 0,
             event_prefix: String::new(),
             subagent_seq: 0,
@@ -105,6 +108,7 @@ impl AgentRunner {
             scope.channel_id = next.channel_id.clone();
             scope.model = next.model.clone();
         }
+        self.compact_failures = 0;
         if next.context_token_limit > 0
             && next.context_token_limit != self.context_window.token_limit
         {
@@ -237,6 +241,8 @@ impl AgentRunner {
                 };
             self.begin_model_call();
             let request_messages = self.model_request_messages();
+            let request_len = self.messages.len();
+            let request_tool_tokens = total_tool_tokens(tools_now);
             let result = client
                 .chat(ChatRequest {
                     messages: &request_messages,
@@ -266,6 +272,7 @@ impl AgentRunner {
             let requested_with_tools = !tools_now.is_empty();
             self.settle_model_usage(usage, Some(&assistant));
             self.emit_usage(usage);
+            self.record_usage_baseline(usage, request_len, request_tool_tokens);
             if matches!(
                 finish_reason,
                 FinishReason::OutputLimit | FinishReason::ContextLimit
@@ -410,6 +417,33 @@ impl AgentRunner {
         text
     }
 
+    /// 受限的独立执行：串行执行工具、不能委派子 Agent、不写会话检查点。
+    /// 供记忆整理等内部任务使用；调用方负责设置工具白名单、轮次和预算。
+    pub async fn run_restricted(
+        &mut self,
+        client: &ModelClient,
+        task: &str,
+        model: &str,
+        max_output_tokens: Option<u32>,
+    ) -> Result<String, String> {
+        self.run_child_with_client(
+            None,
+            client,
+            task,
+            model,
+            None,
+            max_output_tokens,
+            false,
+            None,
+        )
+        .await
+    }
+
+    /// 本回合已发起的模型调用次数。
+    pub fn turns_used(&self) -> u32 {
+        self.turns
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub(super) async fn run_child_with_client(
         &mut self,
@@ -457,6 +491,8 @@ impl AgentRunner {
                 };
             self.begin_model_call();
             let request_messages = self.model_request_messages();
+            let request_len = self.messages.len();
+            let request_tool_tokens = total_tool_tokens(tools_now);
             let result = client
                 .chat(ChatRequest {
                     messages: &request_messages,
@@ -485,6 +521,7 @@ impl AgentRunner {
             let requested_with_tools = !tools_now.is_empty();
             self.settle_model_usage(usage, Some(&assistant));
             self.emit_usage(usage);
+            self.record_usage_baseline(usage, request_len, request_tool_tokens);
             if matches!(
                 finish_reason,
                 FinishReason::OutputLimit | FinishReason::ContextLimit
@@ -594,6 +631,7 @@ impl AgentRunner {
         self.output_continuations = 0;
         self.clear_output_recovery();
         self.reactive_compactions = 0;
+        self.compact_failures = 0;
         self.drain_pending_recovery().await?;
         if let Some(recovery) = &self.recovery {
             if recovery.attempts_exhausted().await? {
@@ -639,8 +677,10 @@ impl AgentRunner {
             "[钩子] stop 钩子要求继续（{}/{}）：{reason}",
             self.stop_hook_continues, MAX_STOP_HOOK_CONTINUES
         ));
-        self.messages
-            .push(Message::user(format!("[Stop 钩子要求继续] {reason}")));
+        self.messages.push(Message::user(format!(
+            "{} {reason}",
+            super::super::compact::STOP_HOOK_CONTINUE_PREFIX
+        )));
         true
     }
 

@@ -108,6 +108,46 @@ export function SubagentFormFields({
           {t("settings:subagents.fields.scopeHint")}
         </p>
       </div>
+      <div>
+        <label className="text-xs font-medium text-muted-foreground">
+          {t("settings:subagents.fields.memory")}
+        </label>
+        <Select
+          value={form.memory || "off"}
+          disabled={busy}
+          onValueChange={(value) => {
+            if (value === "off") onPatch({ memory: "" });
+            if (value === "user" || value === "project" || value === "local") {
+              onPatch({ memory: value });
+            }
+          }}
+        >
+          <SelectTrigger className="mt-1 bg-background">
+            <SelectValue>
+              {(value) =>
+                t(
+                  value === "user"
+                    ? "settings:subagents.fields.memoryUser"
+                    : value === "project"
+                      ? "settings:subagents.fields.memoryProject"
+                      : value === "local"
+                        ? "settings:subagents.fields.memoryLocal"
+                        : "settings:subagents.fields.memoryOff",
+                )
+              }
+            </SelectValue>
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="off">{t("settings:subagents.fields.memoryOff")}</SelectItem>
+            <SelectItem value="user">{t("settings:subagents.fields.memoryUser")}</SelectItem>
+            <SelectItem value="project">{t("settings:subagents.fields.memoryProject")}</SelectItem>
+            <SelectItem value="local">{t("settings:subagents.fields.memoryLocal")}</SelectItem>
+          </SelectContent>
+        </Select>
+        <p className="mt-1 text-xs text-muted-foreground">
+          {t("settings:subagents.fields.memoryHint")}
+        </p>
+      </div>
       {form.scope === "workspaces" ? (
         <div>
           <label className="text-xs font-medium text-muted-foreground">

@@ -710,7 +710,7 @@ pub(super) async fn apply_session_configuration(
     apply_run_settings_to_runner(runner, &next);
     configure_runner_limits(app, runner, next.context_tokens);
     *transcript_model.lock().await = next.model.clone();
-    let compacted = if runner.context_window.should_compact(&runner.messages) {
+    let compacted = if runner.should_compact_context() {
         runner
             .compact_now_with(&next.client, CompactTrigger::Downshift, None)
             .await?

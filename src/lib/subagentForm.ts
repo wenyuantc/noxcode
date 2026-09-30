@@ -2,6 +2,7 @@ import type {
   CreateNativeSubagentInput,
   GeneratedNativeSubagent,
   NativeSubagent,
+  NativeSubagentMemoryScope,
   UpdateNativeSubagentInput,
   Workspace,
 } from "./types";
@@ -23,6 +24,8 @@ export interface SubagentFormState {
   injectAgentsMd: boolean;
   scope: NativeSubagentScope;
   workspaceIds: string[];
+  /** 空字符串表示不启用持久记忆。 */
+  memory: NativeSubagentMemoryScope | "";
 }
 
 export const EMPTY_SUBAGENT_FORM: SubagentFormState = {
@@ -38,6 +41,7 @@ export const EMPTY_SUBAGENT_FORM: SubagentFormState = {
   injectAgentsMd: true,
   scope: "all",
   workspaceIds: [],
+  memory: "",
 };
 
 export function formFromGeneratedSubagent(draft: GeneratedNativeSubagent): SubagentFormState {
@@ -54,6 +58,7 @@ export function formFromGeneratedSubagent(draft: GeneratedNativeSubagent): Subag
     injectAgentsMd: draft.inject_agents_md !== false,
     scope: "all",
     workspaceIds: [],
+    memory: "",
   };
 }
 
@@ -72,6 +77,7 @@ export function toSubagentForm(item: NativeSubagent, workspaces: Workspace[]): S
     injectAgentsMd: item.inject_agents_md !== false,
     scope: item.scope === "workspaces" ? "workspaces" : "all",
     workspaceIds: (item.workspace_ids ?? []).filter((id) => liveIds.has(id)),
+    memory: item.memory ?? "",
   };
 }
 
@@ -91,6 +97,7 @@ export function subagentPayloadFrom(
     inject_agents_md: state.injectAgentsMd,
     scope: state.scope,
     workspace_ids: state.scope === "workspaces" ? state.workspaceIds : [],
+    memory: state.memory || null,
   };
 }
 

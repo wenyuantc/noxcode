@@ -99,7 +99,8 @@ pub fn classify_native_tool_risk(
                 NativeToolRisk::Low
             }
         }
-        "Bash" => classify_bash(&arg_string(arguments, "command")),
+        // Monitor 在后台执行同样的 shell 命令，按 Bash 分类。
+        "Bash" | "Monitor" => classify_bash(&arg_string(arguments, "command")),
         "Computer" => NativeToolRisk::High {
             kind: NativeToolRiskKind::Computer,
             summary: super::desktop::risk_summary(arguments),
@@ -144,74 +145,93 @@ fn arg_string(arguments: &str, key: &str) -> String {
 
 pub fn classify_plan_bash_risk(arguments: &str) -> NativeToolRisk {
     let command = arg_string(arguments, "command");
-    let risk = classify_bash(&command);
-    if risk != NativeToolRisk::Low {
-        return risk;
+    let analysis = analyze_bash(&command);
+    if let Some((kind, summary)) = analysis.worst {
+        return NativeToolRisk::High { kind, summary };
     }
-    // Wrappers can write (nohup), change executable lookup (env), or invoke
-    // configured helpers (git). Keep them subject to explicit plan approval.
-    if !command.contains('#')
-        && split_shell_segments(&command).iter().all(|segment| {
-            let tokens = tokenize(segment);
-            is_known_read_command(&tokens)
-        })
-    {
-        NativeToolRisk::Low
-    } else {
+    // Wrappers can write (nohup), change executable lookup (env), or change the
+    // environment of the real command. Keep them subject to explicit plan approval.
+    if analysis.wrapped {
         NativeToolRisk::High {
             kind: NativeToolRiskKind::Opaque,
             summary: format!("计划模式下需确认的命令：{command}"),
         }
+    } else {
+        NativeToolRisk::Low
     }
 }
 
 fn classify_bash(command: &str) -> NativeToolRisk {
-    if is_opaque_shell(command) {
-        return NativeToolRisk::High {
-            kind: NativeToolRiskKind::Opaque,
-            summary: format!("不透明命令：{command}"),
-        };
-    }
-    let segments = split_shell_segments(command);
-    let mut worst = has_output_redirect(command).then(|| {
-        (
-            NativeToolRiskKind::Overwrite,
-            format!("Shell 输出重定向：{command}"),
-        )
-    });
-    let mut previous_first: Option<String> = None;
-    for segment in &segments {
-        if is_opaque_shell(segment) {
-            return NativeToolRisk::High {
-                kind: NativeToolRiskKind::Opaque,
-                summary: format!("不透明命令：{command}"),
-            };
-        }
-        let tokens = tokenize(segment);
-        if tokens.is_empty() {
-            continue;
-        }
-        let first = tokens[0].as_str();
-        if matches!(first, "sh" | "bash" | "zsh" | "dash" | "ksh")
-            && previous_first
-                .as_deref()
-                .is_some_and(|prev| matches!(prev, "curl" | "wget"))
-        {
-            worst = Some(pick_worse(
-                worst,
-                NativeToolRiskKind::Opaque,
-                format!("管道灌 shell：{command}"),
-            ));
-        }
-        if let Some((kind, summary)) = classify_tokens(&tokens, segment) {
-            worst = Some(pick_worse(worst, kind, summary));
-        }
-        previous_first = Some(first.to_string());
-    }
-    match worst {
+    match analyze_bash(command).worst {
         Some((kind, summary)) => NativeToolRisk::High { kind, summary },
         None => NativeToolRisk::Low,
     }
+}
+
+/// 一条 Bash 命令的分类结果：最严重的风险，以及是否经过了包装命令。
+struct BashAnalysis {
+    worst: Option<(NativeToolRiskKind, String)>,
+    wrapped: bool,
+}
+
+/// 按段分类。所有段都在只读白名单内、没有写文件的重定向、也没有无法解析的
+/// 结构时才没有风险；本地与 SSH 使用同一套判断。
+fn analyze_bash(command: &str) -> BashAnalysis {
+    let script = super::shell_parse::parse(command);
+    let mut worst: Option<(NativeToolRiskKind, String)> = None;
+    let mut raise = |kind: NativeToolRiskKind, summary: String| {
+        worst = Some(pick_worse(worst.take(), kind, summary));
+    };
+    if !script.opaque.is_empty() {
+        raise(
+            NativeToolRiskKind::Opaque,
+            format!("不透明命令（{}）：{command}", script.opaque.join("、")),
+        );
+    }
+    let mut wrapped = false;
+    let mut previous: Option<&str> = None;
+    for segment in &script.segments {
+        if !segment.assigns.is_empty() {
+            wrapped = true;
+            raise(
+                NativeToolRiskKind::Opaque,
+                format!("设置环境变量后执行：{command}"),
+            );
+        }
+        if segment.redirects.iter().any(|item| !item.is_harmless()) {
+            raise(
+                NativeToolRiskKind::Overwrite,
+                format!("Shell 输出重定向：{command}"),
+            );
+        }
+        let (start, via_wrapper) = super::bash_policy::unwrap_command(&segment.argv);
+        wrapped |= via_wrapper;
+        let argv = &segment.argv[start..];
+        let Some(first) = argv.first() else {
+            previous = None;
+            continue;
+        };
+        let name = super::bash_policy::command_name(first);
+        if segment.piped
+            && matches!(name, "sh" | "bash" | "zsh" | "dash" | "ksh")
+            && previous.is_some_and(|prev| matches!(prev, "curl" | "wget"))
+        {
+            raise(
+                NativeToolRiskKind::Opaque,
+                format!("管道灌 shell：{command}"),
+            );
+        }
+        if let Some((kind, label)) = super::bash_policy::dangerous(argv) {
+            raise(kind, format!("{label}：{command}"));
+        } else if let Err(reason) = super::bash_policy::read_only(argv, segment.globbed) {
+            raise(
+                NativeToolRiskKind::Opaque,
+                format!("未验证的命令（{reason}）：{command}"),
+            );
+        }
+        previous = Some(name);
+    }
+    BashAnalysis { worst, wrapped }
 }
 
 fn pick_worse(
@@ -245,371 +265,6 @@ fn risk_rank(kind: NativeToolRiskKind) -> u8 {
         NativeToolRiskKind::ForceGit => 6,
         NativeToolRiskKind::NetworkOrigin | NativeToolRiskKind::NetworkProxy => 5,
     }
-}
-
-fn is_opaque_shell(command: &str) -> bool {
-    command.contains('$')
-        || command.contains('`')
-        || command.contains('\\')
-        || command.contains("<<")
-        || command.contains(['(', ')', '{', '}'])
-        || tokenize(command)
-            .first()
-            .is_some_and(|token| token.starts_with('$'))
-}
-
-fn has_output_redirect(command: &str) -> bool {
-    let mut quote = None;
-    for ch in command.chars() {
-        match (quote, ch) {
-            (None, '\'' | '"') => quote = Some(ch),
-            (Some(current), value) if current == value => quote = None,
-            (None, '>') => return true,
-            _ => {}
-        }
-    }
-    false
-}
-
-fn classify_tokens(tokens: &[String], original: &str) -> Option<(NativeToolRiskKind, String)> {
-    let tokens = unwrap_tokens(tokens);
-    let first = command_basename(tokens.first()?);
-    if first.starts_with('$')
-        || matches!(first, "eval" | "alias" | "source" | "sudo" | "doas")
-        || first == "."
-    {
-        return Some((
-            NativeToolRiskKind::Opaque,
-            format!("不透明命令：{original}"),
-        ));
-    }
-    if is_interpreter(first) && has_inline_code_flag(&tokens) {
-        return Some((
-            NativeToolRiskKind::Opaque,
-            format!("解释器内联代码：{original}"),
-        ));
-    }
-    if matches!(first, "sh" | "bash" | "zsh" | "dash" | "ksh")
-        && tokens.iter().any(|token| token == "-c")
-    {
-        return Some((
-            NativeToolRiskKind::Opaque,
-            format!("嵌套 shell：{original}"),
-        ));
-    }
-    if first == "find"
-        && tokens
-            .iter()
-            .any(|token| matches!(token.as_str(), "-exec" | "-execdir" | "-delete"))
-    {
-        return Some((
-            NativeToolRiskKind::Opaque,
-            format!("find 执行动作：{original}"),
-        ));
-    }
-    if first == "xargs" {
-        return Some((
-            NativeToolRiskKind::Opaque,
-            format!("xargs 包装命令：{original}"),
-        ));
-    }
-    if first == "chmod" && tokens.iter().any(|token| token == "777" || token == "0777") {
-        return Some((NativeToolRiskKind::Opaque, format!("chmod 777：{original}")));
-    }
-    if matches!(
-        first,
-        "dd" | "mkfs" | "mkfs.ext4" | "mkfs.xfs" | "mkfs.vfat" | "mkfs.ntfs"
-    ) {
-        return Some((
-            NativeToolRiskKind::Opaque,
-            format!("磁盘危险操作：{original}"),
-        ));
-    }
-    if matches!(first, "rm" | "rmdir") {
-        return Some((NativeToolRiskKind::Delete, format!("删除：{original}")));
-    }
-    if matches!(first, "cp" | "mv" | "install" | "tee" | "truncate") {
-        return Some((
-            NativeToolRiskKind::Overwrite,
-            format!("可能覆盖文件：{original}"),
-        ));
-    }
-    if first == "git" {
-        let sub = git_subcommand(&tokens);
-        if sub == "rm" {
-            return Some((NativeToolRiskKind::Delete, format!("git rm：{original}")));
-        }
-        if sub == "push" {
-            if tokens
-                .iter()
-                .any(|token| token == "--force" || token == "-f" || token == "--force-with-lease")
-            {
-                return Some((
-                    NativeToolRiskKind::ForceGit,
-                    format!("强制推送：{original}"),
-                ));
-            }
-            return Some((NativeToolRiskKind::Push, format!("推送：{original}")));
-        }
-        if sub == "reset" && tokens.iter().any(|token| token == "--hard") {
-            return Some((
-                NativeToolRiskKind::ForceGit,
-                format!("git reset --hard：{original}"),
-            ));
-        }
-        if sub == "clean"
-            && tokens
-                .iter()
-                .any(|token| token == "-f" || token == "-fd" || token == "-df" || token == "-ffd")
-        {
-            return Some((
-                NativeToolRiskKind::ForceGit,
-                format!("git clean：{original}"),
-            ));
-        }
-        if sub == "branch" && tokens.iter().any(|token| token == "-D") {
-            return Some((
-                NativeToolRiskKind::ForceGit,
-                format!("git branch -D：{original}"),
-            ));
-        }
-        if sub == "checkout" && tokens.iter().any(|token| token == "--") && tokens.len() > 3 {
-            return Some((
-                NativeToolRiskKind::ForceGit,
-                format!("丢弃改动：{original}"),
-            ));
-        }
-        if sub == "restore" {
-            return Some((
-                NativeToolRiskKind::ForceGit,
-                format!("git restore：{original}"),
-            ));
-        }
-    }
-    if is_known_read_command(&tokens) {
-        None
-    } else {
-        Some((
-            NativeToolRiskKind::Opaque,
-            format!("未验证的命令：{original}"),
-        ))
-    }
-}
-
-fn is_known_read_command(tokens: &[String]) -> bool {
-    let Some(first) = tokens.first().map(String::as_str) else {
-        return false;
-    };
-    // 只给可审计的命令子集默认放行，脚本、构建工具和任意可执行文件需显式授权。
-    match first {
-        "echo" | "printf" | "pwd" | "ls" | "cat" | "head" | "tail" | "wc" | "whoami" | "id"
-        | "uname" | "true" | "false" | "cd" | "basename" | "dirname" | "readlink" => true,
-        "git" => {
-            matches!(
-                tokens.get(1).map(String::as_str),
-                Some("status" | "diff" | "log" | "show" | "ls-files" | "rev-parse")
-            ) && !tokens.iter().skip(2).any(|token| {
-                token == "-c"
-                    || token.starts_with("--output")
-                    || token.starts_with("--ext-diff")
-                    || token.starts_with("--textconv")
-                    || token.starts_with("--exec-path")
-            })
-        }
-        _ => false,
-    }
-}
-
-fn unwrap_tokens(tokens: &[String]) -> Vec<String> {
-    let mut index = 0usize;
-    while index < tokens.len() {
-        let token = tokens[index].as_str();
-        if is_env_assignment(token) {
-            index += 1;
-            continue;
-        }
-        let name = command_basename(token);
-        match name {
-            "env" => {
-                index += 1;
-                while index < tokens.len()
-                    && (is_env_assignment(&tokens[index]) || tokens[index].starts_with('-'))
-                {
-                    index += 1;
-                }
-            }
-            "nohup" | "time" | "chronic" => index += 1,
-            "command" => {
-                index += 1;
-                while index < tokens.len() && tokens[index].starts_with('-') {
-                    index += 1;
-                }
-            }
-            "nice" => {
-                index += 1;
-                if index < tokens.len() {
-                    if tokens[index] == "-n" {
-                        index = index.saturating_add(2);
-                    } else if tokens[index].starts_with("-n") || tokens[index].starts_with('-') {
-                        index += 1;
-                    }
-                }
-            }
-            "timeout" => {
-                index += 1;
-                while index < tokens.len() {
-                    let current = tokens[index].as_str();
-                    if matches!(
-                        current,
-                        "-k" | "-s" | "--signal" | "--kill-after" | "--foreground"
-                    ) {
-                        if current == "--foreground" {
-                            index += 1;
-                        } else {
-                            index = index.saturating_add(2);
-                        }
-                        continue;
-                    }
-                    if current.starts_with('-') || looks_like_duration(current) {
-                        index += 1;
-                        continue;
-                    }
-                    break;
-                }
-            }
-            "stdbuf" => {
-                index += 1;
-                while index < tokens.len() && tokens[index].starts_with('-') {
-                    index += 1;
-                }
-            }
-            _ => break,
-        }
-    }
-    tokens[index..].to_vec()
-}
-
-fn command_basename(token: &str) -> &str {
-    let stripped = token.trim_start_matches('\\');
-    stripped
-        .rsplit(['/', '\\'])
-        .next()
-        .filter(|item| !item.is_empty())
-        .unwrap_or(stripped)
-}
-
-fn is_env_assignment(token: &str) -> bool {
-    let Some((key, _)) = token.split_once('=') else {
-        return false;
-    };
-    !key.is_empty()
-        && key
-            .chars()
-            .all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
-}
-
-fn looks_like_duration(token: &str) -> bool {
-    token.chars().next().is_some_and(|ch| ch.is_ascii_digit())
-}
-
-fn is_interpreter(name: &str) -> bool {
-    matches!(
-        name,
-        "python"
-            | "python2"
-            | "python3"
-            | "perl"
-            | "ruby"
-            | "node"
-            | "nodejs"
-            | "php"
-            | "lua"
-            | "osascript"
-    )
-}
-
-fn has_inline_code_flag(tokens: &[String]) -> bool {
-    tokens.iter().any(|token| {
-        matches!(
-            token.as_str(),
-            "-c" | "-e" | "-r" | "--eval" | "-command" | "-Command"
-        )
-    })
-}
-
-fn git_subcommand(tokens: &[String]) -> &str {
-    let mut index = 1usize;
-    while index < tokens.len() {
-        let token = tokens[index].as_str();
-        if token == "-c" || token == "-C" {
-            index = index.saturating_add(2);
-            continue;
-        }
-        if token.starts_with("--git-dir") || token.starts_with("--work-tree") {
-            if token.contains('=') {
-                index += 1;
-            } else {
-                index = index.saturating_add(2);
-            }
-            continue;
-        }
-        if token.starts_with('-') {
-            index += 1;
-            continue;
-        }
-        return token;
-    }
-    ""
-}
-
-fn split_shell_segments(command: &str) -> Vec<String> {
-    let mut parts = Vec::new();
-    let mut current = String::new();
-    let mut quote: Option<char> = None;
-    let mut chars = command.chars().peekable();
-    while let Some(ch) = chars.next() {
-        if quote.is_none() && matches!(ch, '|' | ';' | '&' | '\n') {
-            if ch == '&' && chars.peek() == Some(&'&') {
-                chars.next();
-            }
-            if ch == '|' && chars.peek() == Some(&'|') {
-                chars.next();
-            }
-            if !current.trim().is_empty() {
-                parts.push(current.trim().to_string());
-            }
-            current.clear();
-            continue;
-        }
-        if let Some(q) = quote {
-            current.push(ch);
-            if ch == q {
-                quote = None;
-            }
-            continue;
-        }
-        if ch == '\'' || ch == '"' {
-            quote = Some(ch);
-        }
-        current.push(ch);
-    }
-    if !current.trim().is_empty() {
-        parts.push(current.trim().to_string());
-    }
-    if parts.is_empty() {
-        vec![command.trim().to_string()]
-    } else {
-        parts
-    }
-}
-
-fn tokenize(segment: &str) -> Vec<String> {
-    segment
-        .split_whitespace()
-        .map(|item| item.trim_matches(|ch| ch == '\'' || ch == '"'))
-        .filter(|item| !item.is_empty())
-        .map(ToOwned::to_owned)
-        .collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -751,21 +406,21 @@ impl PermissionRules {
         if let Some(rule) = self
             .deny
             .iter()
-            .find(|rule| rule_matches(rule, contract, &candidates))
+            .find(|rule| rule_matches(rule, contract, &candidates, MatchMode::Restrict))
         {
             return RuleDecision::Deny(rule.clone());
         }
         if let Some(rule) = self
             .allow
             .iter()
-            .find(|rule| rule_matches(rule, contract, &candidates))
+            .find(|rule| rule_matches(rule, contract, &candidates, MatchMode::Allow))
         {
             return RuleDecision::Allow(rule.clone());
         }
         if let Some(rule) = self
             .ask
             .iter()
-            .find(|rule| rule_matches(rule, contract, &candidates))
+            .find(|rule| rule_matches(rule, contract, &candidates, MatchMode::Restrict))
         {
             return RuleDecision::Ask(rule.clone());
         }
@@ -787,8 +442,9 @@ impl PermissionRules {
                 && rule.plan_bash.as_ref() == Some(context)
                 && candidates.command.as_deref() == Some(rule.pattern.as_str())
         };
-        let restriction_matches =
-            |rule: &&PermissionRule| exact_match(rule) || rule_matches(rule, contract, &candidates);
+        let restriction_matches = |rule: &&PermissionRule| {
+            exact_match(rule) || rule_matches(rule, contract, &candidates, MatchMode::Restrict)
+        };
         if let Some(rule) = self.deny.iter().find(restriction_matches) {
             RuleDecision::Deny(rule.clone())
         } else if let Some(rule) = self.ask.iter().find(restriction_matches) {
@@ -824,18 +480,21 @@ impl PermissionRules {
                     relative_display_path(&path.path, Some(&physical_root)),
                     path.path.clone(),
                 ];
-                let matches = |rule: &&PermissionRule| {
-                    if rule.external_path.is_some() {
-                        external_rule_matches(rule, &access.target, path)
-                    } else {
-                        rule_matches(rule, contract, &candidates)
+                let matches = |mode: MatchMode| {
+                    let candidates = &candidates;
+                    move |rule: &&PermissionRule| {
+                        if rule.external_path.is_some() {
+                            external_rule_matches(rule, &access.target, path)
+                        } else {
+                            rule_matches(rule, contract, candidates, mode)
+                        }
                     }
                 };
-                if let Some(rule) = self.deny.iter().find(matches) {
+                if let Some(rule) = self.deny.iter().find(matches(MatchMode::Restrict)) {
                     RuleDecision::Deny(rule.clone())
-                } else if let Some(rule) = self.allow.iter().find(matches) {
+                } else if let Some(rule) = self.allow.iter().find(matches(MatchMode::Allow)) {
                     RuleDecision::Allow(rule.clone())
-                } else if let Some(rule) = self.ask.iter().find(matches) {
+                } else if let Some(rule) = self.ask.iter().find(matches(MatchMode::Restrict)) {
                     RuleDecision::Ask(rule.clone())
                 } else {
                     RuleDecision::NoMatch
@@ -845,11 +504,49 @@ impl PermissionRules {
     }
 }
 
+/// 命令中的一段。`text` 含环境变量前缀和包装命令，`core` 去掉了它们。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CommandSegment {
+    pub text: String,
+    pub core: String,
+    /// 有写文件的重定向。
+    pub writes: bool,
+}
+
+impl CommandSegment {
+    fn from_segment(segment: &super::shell_parse::Segment) -> Self {
+        let (start, _) = super::bash_policy::unwrap_command(&segment.argv);
+        let text = segment
+            .assigns
+            .iter()
+            .chain(segment.argv.iter())
+            .map(String::as_str)
+            .collect::<Vec<_>>()
+            .join(" ");
+        Self {
+            text,
+            core: segment.argv[start..].join(" "),
+            writes: segment.redirects.iter().any(|item| !item.is_harmless()),
+        }
+    }
+}
+
+/// allow 规则要求命令的每一段都匹配；deny / ask 规则任意一段匹配即生效。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MatchMode {
+    Allow,
+    Restrict,
+}
+
 /// 从一次调用里抽出的可匹配字段。
 #[derive(Debug, Clone, Default)]
 pub struct RuleCandidates {
     pub tool_name: String,
     pub command: Option<String>,
+    /// 命令按段拆开后的形式，供命令规则逐段匹配。
+    pub command_segments: Vec<CommandSegment>,
+    /// 命令含无法解析的结构（展开、替换、子 shell 等）。
+    pub command_opaque: bool,
     pub paths: Vec<String>,
     pub input: String,
     pub apps: Vec<String>,
@@ -905,9 +602,24 @@ impl RuleCandidates {
             .and_then(Value::as_str)
             .map(|item| item.trim().to_string())
             .filter(|item| !item.is_empty());
+        let script = command.as_deref().map(super::shell_parse::parse);
+        let command_opaque = script
+            .as_ref()
+            .is_some_and(|script| !script.opaque.is_empty());
+        let command_segments = script
+            .map(|script| {
+                script
+                    .segments
+                    .iter()
+                    .map(CommandSegment::from_segment)
+                    .collect()
+            })
+            .unwrap_or_default();
         Self {
             tool_name: tool_name.to_string(),
             command,
+            command_segments,
+            command_opaque,
             paths,
             input: arguments.to_string(),
             apps,
@@ -940,6 +652,7 @@ fn rule_matches(
     rule: &PermissionRule,
     contract: &ToolContract,
     candidates: &RuleCandidates,
+    mode: MatchMode,
 ) -> bool {
     if rule.external_path.is_some()
         || rule.plan_bash.is_some()
@@ -956,7 +669,7 @@ fn rule_matches(
         PatternSource::Command => candidates
             .command
             .as_deref()
-            .is_some_and(|command| command_pattern_matches(pattern, command)),
+            .is_some_and(|command| command_rule_matches(pattern, command, candidates, mode)),
         PatternSource::Path => candidates
             .paths
             .iter()
@@ -984,7 +697,39 @@ fn glob_or_exact(pattern: &str, candidate: &str) -> bool {
     candidate == pattern || glob_match(pattern, candidate)
 }
 
-/// 命令模式：`git push*` 前缀匹配（按空白切词后逐词比较），否则精确匹配。
+/// 命令规则与整条命令的匹配。整条命令与模式完全相同时总是命中。
+/// allow：每一段都要匹配，且不能有写文件的重定向或无法解析的结构，
+/// 避免 `git status*` 放行 `git status; rm -rf x`。
+/// deny / ask：整条命令或任意一段（含去掉包装后的形式）匹配即命中。
+fn command_rule_matches(
+    pattern: &str,
+    command: &str,
+    candidates: &RuleCandidates,
+    mode: MatchMode,
+) -> bool {
+    if pattern == "*" || pattern == command.trim() {
+        return true;
+    }
+    let segments = &candidates.command_segments;
+    match mode {
+        MatchMode::Allow => {
+            !candidates.command_opaque
+                && !segments.is_empty()
+                && segments.iter().all(|segment| {
+                    !segment.writes && command_pattern_matches(pattern, &segment.text)
+                })
+        }
+        MatchMode::Restrict => {
+            command_pattern_matches(pattern, command)
+                || segments.iter().any(|segment| {
+                    command_pattern_matches(pattern, &segment.text)
+                        || command_pattern_matches(pattern, &segment.core)
+                })
+        }
+    }
+}
+
+/// 单段命令模式：`git push*` 前缀匹配（按空白切词后逐词比较），否则精确匹配。
 pub fn command_pattern_matches(pattern: &str, command: &str) -> bool {
     let command = command.trim();
     if pattern == command || pattern == "*" {
@@ -1008,7 +753,8 @@ pub fn command_pattern_matches(pattern: &str, command: &str) -> bool {
     glob_match(pattern, command)
 }
 
-/// 根据一次待确认的调用推导「总是允许」规则：Bash 用前两个词做前缀，
+/// 根据一次待确认的调用推导「总是允许」规则：单段 Bash 用前两个词做前缀
+/// （复合命令用整条命令精确匹配），
 /// 文件工具用相对路径，其余用工具名。
 pub fn suggest_rule(
     contract: &ToolContract,
@@ -1019,14 +765,22 @@ pub fn suggest_rule(
     let candidates = RuleCandidates::from_call(tool_name, arguments, workspace_root);
     match contract.permission {
         PermissionCapability::Bash => {
-            let command = candidates.command?;
-            let tokens: Vec<&str> = command.split_whitespace().collect();
-            let first = *tokens.first()?;
-            let pattern = match tokens.get(1) {
-                Some(second) if !second.starts_with('-') && tokens.len() > 1 => {
-                    format!("{first} {second}*")
+            let command = candidates.command.clone()?;
+            // 复合命令、无法解析或带写文件重定向的命令只给精确规则，不生成通配。
+            let single = match candidates.command_segments.as_slice() {
+                [segment] if !candidates.command_opaque && !segment.writes => Some(segment),
+                _ => None,
+            };
+            let pattern = match single {
+                Some(segment) => {
+                    let tokens: Vec<&str> = segment.text.split_whitespace().collect();
+                    let first = *tokens.first()?;
+                    match tokens.get(1) {
+                        Some(second) if !second.starts_with('-') => format!("{first} {second}*"),
+                        _ => format!("{first}*"),
+                    }
                 }
-                _ => format!("{first}*"),
+                None => command,
             };
             Some(PermissionRuleSuggestion {
                 capability: PermissionCapability::Bash,
@@ -1668,5 +1422,228 @@ mod tests {
         assert_eq!(suggestion.pattern, "com.apple.Safari");
         assert_eq!(suggestion.source, PatternSource::Input);
         assert_eq!(suggestion.capability, PermissionCapability::Computer);
+    }
+
+    fn plan_risk(command: &str) -> NativeToolRisk {
+        classify_plan_bash_risk(&serde_json::json!({ "command": command }).to_string())
+    }
+
+    fn risk_kind(command: &str) -> Option<NativeToolRiskKind> {
+        match classify_bash(command) {
+            NativeToolRisk::Low => None,
+            NativeToolRisk::High { kind, .. } => Some(kind),
+        }
+    }
+
+    #[test]
+    fn git_and_gh_read_only_rules_follow_subcommands_and_options() {
+        for command in [
+            "git -C sub status",
+            "git --no-pager log --oneline -n 5",
+            "git show HEAD:src/main.rs",
+            "git branch",
+            "git branch -a -v",
+            "git tag -l",
+            "git config --get user.name",
+            "git remote -v",
+            "git stash list",
+            "git grep -n TODO",
+            "git blame src/lib.rs",
+            "gh pr view 12",
+            "gh pr list --json title",
+            "gh issue list",
+            "gh api repos/o/r/pulls",
+            "gh api -X GET repos/o/r",
+            "gh auth status",
+        ] {
+            assert_eq!(plan_risk(command), NativeToolRisk::Low, "{command}");
+        }
+        for (command, kind) in [
+            ("git branch new-feature", NativeToolRiskKind::Opaque),
+            ("git tag v1", NativeToolRiskKind::Opaque),
+            ("git config user.name x", NativeToolRiskKind::Opaque),
+            ("git remote add origin url", NativeToolRiskKind::Opaque),
+            ("git stash", NativeToolRiskKind::Opaque),
+            ("git grep -O vim TODO", NativeToolRiskKind::Opaque),
+            ("git -c core.pager=./x log", NativeToolRiskKind::Opaque),
+            ("git log --output=out.txt", NativeToolRiskKind::Opaque),
+            ("git diff --no-index a b", NativeToolRiskKind::Opaque),
+            ("git commit -m msg", NativeToolRiskKind::Opaque),
+            ("git push -f", NativeToolRiskKind::ForceGit),
+            ("git -c a=b push --force", NativeToolRiskKind::ForceGit),
+            ("git checkout -f main", NativeToolRiskKind::ForceGit),
+            ("gh pr create --fill", NativeToolRiskKind::Push),
+            ("gh pr merge 1", NativeToolRiskKind::Push),
+            ("gh api -X POST repos/o/r/issues", NativeToolRiskKind::Push),
+            (
+                "gh api repos/o/r/issues -f title=x",
+                NativeToolRiskKind::Push,
+            ),
+            ("gh pr view 1 --web", NativeToolRiskKind::Opaque),
+            ("gh auth token", NativeToolRiskKind::Opaque),
+        ] {
+            assert_eq!(risk_kind(command), Some(kind), "{command}");
+            assert!(
+                matches!(plan_risk(command), NativeToolRisk::High { .. }),
+                "{command}"
+            );
+        }
+    }
+
+    #[test]
+    fn shell_syntax_is_parsed_instead_of_guessed() {
+        for command in [
+            "echo '(x)' '{y}'",
+            "grep \"a b\" src/main.rs",
+            "ls 2>/dev/null",
+            "cat a.txt 2>&1 | head -n 5",
+            "cat a | grep x | wc -l",
+            "ls *.rs",
+            "find . -name '*.rs'",
+            "sed -n 1,20p file.txt",
+            "sed -n '$p' file.txt",
+            "rg -n TODO src",
+            "sort -n data.txt",
+            "tail -n 50 app.log",
+            "cd src && ls; pwd",
+        ] {
+            assert_eq!(risk_kind(command), None, "{command}");
+            assert_eq!(plan_risk(command), NativeToolRisk::Low, "{command}");
+        }
+        for (command, kind) in [
+            ("ls > out.txt", NativeToolRiskKind::Overwrite),
+            ("echo x >> notes.md", NativeToolRiskKind::Overwrite),
+            ("cat a &> all.log", NativeToolRiskKind::Overwrite),
+            ("echo $(touch f)", NativeToolRiskKind::Opaque),
+            ("echo `touch f`", NativeToolRiskKind::Opaque),
+            ("(cd src && rm -rf build)", NativeToolRiskKind::Delete),
+            ("ls; rm -rf x", NativeToolRiskKind::Delete),
+            ("ls && git push", NativeToolRiskKind::Push),
+            // heredoc 无法静态确定，按现有排序不透明高于覆盖。
+            ("cat <<EOF > f\nx\nEOF", NativeToolRiskKind::Opaque),
+            ("tail -f app.log", NativeToolRiskKind::Opaque),
+            ("sort -o out.txt data.txt", NativeToolRiskKind::Opaque),
+            ("sort -no out.txt data.txt", NativeToolRiskKind::Opaque),
+            ("sed -i s/a/b/ file", NativeToolRiskKind::Opaque),
+            ("sed -n /x/w\\ out file", NativeToolRiskKind::Opaque),
+            ("rg --pre=./x TODO", NativeToolRiskKind::Opaque),
+            ("rg TODO *", NativeToolRiskKind::Opaque),
+            ("find . -fprint out", NativeToolRiskKind::Opaque),
+            ("uniq in.txt out.txt", NativeToolRiskKind::Opaque),
+            ("LD_PRELOAD=x.so cat file", NativeToolRiskKind::Opaque),
+            ("ls --unknown-thing | ./run.sh", NativeToolRiskKind::Opaque),
+            ("ln -sf a b", NativeToolRiskKind::Overwrite),
+        ] {
+            assert_eq!(risk_kind(command), Some(kind), "{command}");
+        }
+        // 包装命令在执行模式下可剥离，计划模式下仍需确认。
+        assert_eq!(risk_kind("nohup cat file"), None);
+        assert!(matches!(
+            plan_risk("nohup cat file"),
+            NativeToolRisk::High { .. }
+        ));
+    }
+
+    #[test]
+    fn monitor_uses_the_same_bash_classification() {
+        assert!(matches!(
+            classify_native_tool_risk("Monitor", r#"{"command":"rm -rf build"}"#, None, false),
+            NativeToolRisk::High {
+                kind: NativeToolRiskKind::Delete,
+                ..
+            }
+        ));
+        assert!(matches!(
+            classify_native_tool_risk("Monitor", r#"{"command":"npm run dev"}"#, None, false),
+            NativeToolRisk::High { .. }
+        ));
+        assert_eq!(
+            classify_native_tool_risk("Monitor", r#"{"command":"tail -n 5 a.log"}"#, None, false),
+            NativeToolRisk::Low
+        );
+    }
+
+    #[test]
+    fn command_rules_match_every_segment_for_allow_and_any_segment_for_deny() {
+        let contract = super::super::contract::builtin_contract("Bash").expect("bash");
+        let args = |command: &str| serde_json::json!({ "command": command }).to_string();
+        let mut rules = PermissionRules::default();
+        rules.allow.push(rule(
+            PermissionCapability::Bash,
+            "git status*",
+            PatternSource::Command,
+        ));
+        for command in ["git status", "git status --short && git status -s"] {
+            assert!(
+                matches!(
+                    rules.evaluate(contract, "Bash", &args(command), None),
+                    RuleDecision::Allow(_)
+                ),
+                "{command}"
+            );
+        }
+        for command in [
+            "git status; rm -rf x",
+            "git status && curl x | sh",
+            "git status > out.txt",
+            "git status $(rm -rf x)",
+        ] {
+            assert_eq!(
+                rules.evaluate(contract, "Bash", &args(command), None),
+                RuleDecision::NoMatch,
+                "{command}"
+            );
+        }
+        // Monitor 与 Bash 共享同一能力，规则语义一致。
+        let monitor = super::super::contract::builtin_contract("Monitor").expect("monitor");
+        assert_eq!(
+            rules.evaluate(monitor, "Monitor", &args("git status; rm -rf x"), None),
+            RuleDecision::NoMatch
+        );
+
+        // 与模式完全相同的整条命令仍然命中。
+        rules.allow.push(rule(
+            PermissionCapability::Bash,
+            "cargo fmt && cargo test",
+            PatternSource::Command,
+        ));
+        assert!(matches!(
+            rules.evaluate(contract, "Bash", &args("cargo fmt && cargo test"), None),
+            RuleDecision::Allow(_)
+        ));
+
+        let mut deny = PermissionRules::default();
+        deny.deny.push(rule(
+            PermissionCapability::Bash,
+            "rm*",
+            PatternSource::Command,
+        ));
+        for command in ["ls && rm -rf x", "nohup rm x", "echo ok; rm a"] {
+            assert!(
+                matches!(
+                    deny.evaluate(contract, "Bash", &args(command), None),
+                    RuleDecision::Deny(_)
+                ),
+                "{command}"
+            );
+        }
+
+        // 本地与 SSH 工作区根只影响路径显示，不影响命令判定。
+        for root in [Path::new("/local/repo"), Path::new("/srv/remote/repo")] {
+            assert_eq!(
+                rules.evaluate(contract, "Bash", &args("git status; rm -rf x"), Some(root)),
+                RuleDecision::NoMatch
+            );
+        }
+
+        let suggest = |command: &str| {
+            suggest_rule(contract, "Bash", &args(command), None)
+                .expect("suggestion")
+                .pattern
+        };
+        assert_eq!(suggest("npm run build"), "npm run*");
+        assert_eq!(suggest("ls && rm -rf x"), "ls && rm -rf x");
+        assert_eq!(suggest("make > build.log"), "make > build.log");
+        assert_eq!(suggest("echo $(id)"), "echo $(id)");
     }
 }

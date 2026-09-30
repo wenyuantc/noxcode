@@ -72,6 +72,7 @@ function createEmptyServer(): McpServerConfig {
     url: null,
     headers: [],
     oauth: null,
+    trust_tool_annotations: false,
   };
 }
 
@@ -124,6 +125,7 @@ interface McpFormState {
   workspace_ids: string[];
   notes: string;
   enabled: boolean;
+  trustToolAnnotations: boolean;
 }
 
 const EMPTY_FORM: McpFormState = {
@@ -139,6 +141,7 @@ const EMPTY_FORM: McpFormState = {
   workspace_ids: [],
   notes: "",
   enabled: true,
+  trustToolAnnotations: false,
 };
 
 function serverToForm(server: McpServerConfig): McpFormState {
@@ -155,6 +158,7 @@ function serverToForm(server: McpServerConfig): McpFormState {
     workspace_ids: server.workspace_ids ?? [],
     notes: server.notes ?? "",
     enabled: server.enabled ?? true,
+    trustToolAnnotations: server.trust_tool_annotations ?? false,
   };
 }
 
@@ -547,6 +551,7 @@ export function McpSettingsTab() {
       workspace_ids: form.scope === "workspaces" ? form.workspace_ids : [],
       notes: form.notes.trim() || null,
       enabled: form.enabled,
+      trust_tool_annotations: form.trustToolAnnotations,
     };
 
     const nextServers = isCreate
@@ -747,6 +752,8 @@ export function McpSettingsTab() {
       args: ["--offline", "--no-install", PLAYWRIGHT_MCP_PACKAGE, "--isolated", "--no-webmcp"],
       notes: t("mcp.playwright.notes"),
       enabled: false,
+      // 固定版本的官方 Playwright 预设，只读快照类工具可按声明免确认。
+      trust_tool_annotations: true,
     });
   };
 
@@ -1255,6 +1262,24 @@ export function McpSettingsTab() {
                   </div>
                 </div>
               ) : null}
+
+              <label className="flex cursor-pointer items-start gap-2 rounded-xl border border-border/70 bg-muted/20 p-3">
+                <input
+                  type="checkbox"
+                  className="mt-0.5 size-3.5 rounded border-input text-primary focus:ring-1"
+                  checked={form.trustToolAnnotations}
+                  disabled={formLocked}
+                  onChange={(event) => patchForm({ trustToolAnnotations: event.target.checked })}
+                />
+                <span className="min-w-0">
+                  <span className="block text-xs font-medium text-foreground">
+                    {t("mcp.fields.trustAnnotations")}
+                  </span>
+                  <span className="mt-0.5 block text-[11px] leading-relaxed text-muted-foreground">
+                    {t("mcp.fields.trustAnnotationsHint")}
+                  </span>
+                </span>
+              </label>
 
               <div>
                 <label className="text-xs font-medium text-muted-foreground">

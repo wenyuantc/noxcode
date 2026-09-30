@@ -36,11 +36,13 @@ impl AgentRunner {
         instructions: Option<String>,
     ) -> Result<Option<CompactBoundary>, String> {
         let client = self.observe_client(client);
+        self.reset_compaction_failures();
         self.run_compaction(Some(&client), trigger, instructions)
             .await
     }
 
     /// 统一的压缩入口：微压缩 → 模型摘要 → 本地摘要 → 重置。返回边界记录（已写入事件流）。
+    /// 非手动触发的失败和无收益计入连续失败次数，达到上限后暂停自动压缩。
     pub(super) async fn run_compaction(
         &mut self,
         client: Option<&ModelClient>,
@@ -49,11 +51,16 @@ impl AgentRunner {
     ) -> Result<Option<CompactBoundary>, String> {
         let pre_tokens = total_message_tokens(&self.messages);
         let pre_messages = self.messages.len();
+        let before = self.messages.clone();
+        // 连续失败已达上限时不再请求摘要模型，只用本地降级。
+        let client = client.filter(|_| {
+            trigger == CompactTrigger::Manual || self.compact_failures < MAX_COMPACT_FAILURES
+        });
         let mut source: Option<&str> = None;
         // 自动 / 降级 / 被动触发时，先试便宜的微压缩；用户明确 /compact 时直接做摘要。
         if trigger != CompactTrigger::Manual && self.microcompact_enabled {
             let replaced = microcompact(&mut self.messages);
-            if replaced > 0 && !self.context_window.should_compact(&self.messages) {
+            if replaced > 0 && !self.should_compact_context() {
                 source = Some("microcompact");
             }
         }
@@ -76,20 +83,33 @@ impl AgentRunner {
                 compacted = true;
             }
             if !compacted {
+                self.note_compaction_outcome(trigger, CompactOutcome::Failed);
                 return Ok(None);
             }
         }
         let source = source.unwrap_or("local");
+        if source != "microcompact" {
+            self.preserve_compaction_state(&before).await;
+        }
         if source == "reset" {
             self.context_window.mark_reset();
         } else {
             self.context_window.mark_compacted();
         }
+        let post_tokens = total_message_tokens(&self.messages);
+        let outcome = if compaction_gained(pre_tokens, post_tokens)
+            && (trigger == CompactTrigger::Manual || !self.should_compact_context())
+        {
+            CompactOutcome::Success
+        } else {
+            CompactOutcome::NoGain
+        };
         let boundary = CompactBoundary {
             trigger,
             source: source.to_string(),
+            outcome,
             pre_tokens,
-            post_tokens: total_message_tokens(&self.messages),
+            post_tokens,
             pre_messages,
             post_messages: self.messages.len(),
             instructions: instructions.filter(|item| !item.trim().is_empty()),
@@ -100,16 +120,100 @@ impl AgentRunner {
             "local" => "已压缩上下文（本地摘要）",
             _ => "已重置上下文窗口（保留当前任务）",
         };
+        let suffix = if outcome == CompactOutcome::NoGain {
+            "，收益不足"
+        } else {
+            ""
+        };
         self.emit(format!(
-            "[工具] {label}：{} → {} token（{}）",
+            "[工具] {label}：{} → {} token（{}{suffix}）",
             boundary.pre_tokens,
             boundary.post_tokens,
             boundary.trigger.as_str()
         ));
         self.emit(boundary.line());
+        self.note_compaction_outcome(trigger, outcome);
         self.emit_context_usage();
         self.checkpoint_transcript().await?;
         Ok(Some(boundary))
+    }
+
+    /// 摘要替换后：拼入目标、权限、计划、待办、拒绝记录和媒体引用，再清理孤立的工具结果。
+    async fn preserve_compaction_state(&mut self, before: &[Message]) {
+        let dropped = dropped_messages(before, &self.messages);
+        let state = self.preserved_state().await;
+        let block = preserved_context_block(&state, &dropped);
+        inject_preserved_context(&mut self.messages, &block);
+        sanitize_committed_tool_pairs(&mut self.messages);
+    }
+
+    async fn preserved_state(&self) -> PreservedState {
+        let mut state = PreservedState {
+            permissions: format!(
+                "计划模式{}；只读{}；高风险操作{}",
+                if self.ctx.plan_mode.load(Ordering::SeqCst) {
+                    "开"
+                } else {
+                    "关"
+                },
+                if self.ctx.read_only.load(Ordering::SeqCst) {
+                    "是"
+                } else {
+                    "否"
+                },
+                if self.ctx.allow_all_high_risk.load(Ordering::SeqCst) {
+                    "已全部放行"
+                } else {
+                    "需逐项确认"
+                }
+            ),
+            open_todos: self
+                .ctx
+                .todos_snapshot()
+                .into_iter()
+                .filter(|todo| !matches!(todo.status.as_str(), "completed" | "done" | "cancelled"))
+                .map(|todo| format!("[{}] {}", todo.status, todo.content))
+                .collect(),
+            ..PreservedState::default()
+        };
+        if let Some(scope) = &self.ctx.session_scope {
+            let session = self.ctx.session_record_id.as_str();
+            state.goal = crate::native::goals::current_goal(&scope.pool, session)
+                .await
+                .ok()
+                .flatten()
+                .map(|goal| goal.describe());
+            state.approved_plan = crate::native::plans::load_approved(&scope.pool, session)
+                .await
+                .ok()
+                .flatten()
+                .filter(|plan| plan.status != crate::native::plans::PlanSaveStatus::Cancelled)
+                .and_then(|plan| plan.last_saved_path().map(ToOwned::to_owned));
+        }
+        state
+    }
+
+    /// 记录压缩结果：成功清零；非手动的失败 / 无收益累加，到上限时提示一次。
+    fn note_compaction_outcome(&mut self, trigger: CompactTrigger, outcome: CompactOutcome) {
+        if outcome == CompactOutcome::Success {
+            self.compact_failures = 0;
+            return;
+        }
+        if trigger == CompactTrigger::Manual {
+            return;
+        }
+        self.compact_failures = self.compact_failures.saturating_add(1);
+        if self.compact_failures == MAX_COMPACT_FAILURES {
+            self.emit(format!(
+                "[上下文] 自动压缩连续 {MAX_COMPACT_FAILURES} 次失败或收益不足，已暂停自动压缩和摘要模型调用；\
+                 发送新消息、手动 /compact 或切换模型后恢复"
+            ));
+        }
+    }
+
+    /// 新用户回合、手动压缩或切换模型后重新允许自动压缩。
+    pub fn reset_compaction_failures(&mut self) {
+        self.compact_failures = 0;
     }
 
     pub(super) async fn checkpoint_transcript(&mut self) -> Result<(), String> {
@@ -154,8 +258,89 @@ impl AgentRunner {
         if let Some(tx) = &self.on_usage {
             let _ = tx.send(delta);
         }
+    }
+
+    /// 主模型调用返回后记录用量基线；摘要等内部调用不走这里。
+    pub(super) fn record_usage_baseline(
+        &mut self,
+        usage: Usage,
+        message_count: usize,
+        tool_tokens: usize,
+    ) {
+        if usage.prompt_tokens == 0 {
+            // 服务端没报输入量：旧基线已不对应当前请求，退回本地估算。
+            self.usage_baseline = None;
+            return;
+        }
+        let count = message_count.min(self.messages.len());
+        self.usage_baseline = Some(UsageBaseline {
+            prompt_tokens: usage.prompt_tokens as usize,
+            message_count: count,
+            prefix_tokens: total_message_tokens(&self.messages[..count]),
+            tool_tokens,
+            generation: self.context_window.generation,
+            model: self.current_model_name().to_string(),
+        });
         self.last_usage = Some(usage);
         self.emit_context_usage();
+    }
+
+    pub(super) fn current_model_name(&self) -> &str {
+        self.model_turn
+            .as_ref()
+            .map(|cfg| cfg.model.as_str())
+            .unwrap_or("")
+    }
+
+    /// 仍与当前消息前缀、模型和压缩代数一致的基线。
+    fn valid_usage_baseline(&self) -> Option<&UsageBaseline> {
+        let baseline = self.usage_baseline.as_ref()?;
+        let valid = baseline.generation == self.context_window.generation
+            && baseline.model == self.current_model_name()
+            && baseline.message_count <= self.messages.len()
+            && total_message_tokens(&self.messages[..baseline.message_count])
+                == baseline.prefix_tokens;
+        valid.then_some(baseline)
+    }
+
+    /// 下一次请求的输入估算（含工具定义）。有可信基线时用「服务端用量 + 新增内容」，
+    /// 否则用本地估算上浮 10%；两种情况都不低于本地估算。
+    pub(super) fn estimated_context_tokens(&self, tool_tokens: usize) -> (usize, bool) {
+        let local = total_message_tokens(&self.messages).saturating_add(tool_tokens);
+        match self.valid_usage_baseline() {
+            Some(baseline) => {
+                let added = total_message_tokens(&self.messages[baseline.message_count..]);
+                let provider = baseline
+                    .prompt_tokens
+                    .saturating_add(added)
+                    .saturating_add(tool_tokens)
+                    .saturating_sub(baseline.tool_tokens);
+                (provider.max(local), true)
+            }
+            None => (local.saturating_add(local / 10), false),
+        }
+    }
+
+    /// 当前上下文是否已到压缩触发线（含工具定义与输出预留）。
+    pub fn should_compact_context(&mut self) -> bool {
+        self.refresh_output_reserve();
+        let tool_tokens = total_tool_tokens(&self.combined_tools());
+        let (estimated, _) = self.estimated_context_tokens(tool_tokens);
+        self.context_window.should_compact_used(estimated)
+    }
+
+    fn refresh_output_reserve(&mut self) {
+        let max_output = self
+            .model_turn
+            .as_ref()
+            .and_then(|cfg| cfg.max_output_tokens)
+            .map(|tokens| tokens as usize)
+            .or_else(|| {
+                crate::native::model_catalog::lookup_catalog(self.current_model_name())
+                    .map(|entry| entry.max_output_tokens as usize)
+            });
+        let reserve = output_reserve_for(self.context_window.token_limit, max_output);
+        self.context_window.set_output_reserve(reserve);
     }
 
     pub(super) fn settle_model_usage(&mut self, usage: Usage, assistant: Option<&Message>) {
@@ -271,7 +456,7 @@ impl AgentRunner {
             {
                 self.emit("[工具] 当前上下文太短，无需压缩");
             }
-        } else if self.context_window.should_compact(&self.messages) {
+        } else if self.compact_failures < MAX_COMPACT_FAILURES && self.should_compact_context() {
             let trigger = if std::mem::take(&mut self.pending_downshift_compact) {
                 CompactTrigger::Downshift
             } else {
@@ -291,6 +476,7 @@ impl AgentRunner {
             self.context_window
                 .token_limit
                 .saturating_sub(tool_context_tokens)
+                .saturating_sub(self.context_window.output_reserve)
                 .max(1)
         } else {
             self.context_window.token_limit.max(1)
@@ -302,9 +488,11 @@ impl AgentRunner {
         );
         // A provider may return a very large assistant message after local
         // compaction. Try a second reset before sending an oversized request.
+        let before_reset = self.messages.clone();
         if total_message_tokens(&self.messages) > message_context_limit
             && reset_local(&mut self.messages)
         {
+            self.preserve_compaction_state(&before_reset).await;
             self.context_window.mark_reset();
             truncate_messages_tokens(
                 &mut self.messages,
@@ -439,7 +627,7 @@ impl AgentRunner {
         }
     }
 
-    fn sync_context_window(&mut self) {
+    pub(super) fn sync_context_window(&mut self) {
         let configured = chars_to_tokens(self.context_char_limit).max(1);
         // Older callers only set `context_char_limit`; newer session wiring
         // sets the token field explicitly. Do not overwrite an explicit token
@@ -450,6 +638,7 @@ impl AgentRunner {
         {
             self.context_window.set_token_limit(configured);
         }
+        self.refresh_output_reserve();
     }
 
     pub(super) fn reserve_model_call(

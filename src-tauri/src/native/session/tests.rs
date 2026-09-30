@@ -638,6 +638,7 @@ fn native_diagnostics_describe_budget_and_context_window() {
         compactions: 1,
         resets: 1,
         threshold_percent: 85,
+        output_reserve: 0,
     };
     let details =
         format_native_diagnostics(&budget, &context, &AgentDiagnosticsSnapshot::default());

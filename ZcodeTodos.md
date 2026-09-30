@@ -194,31 +194,39 @@ P0 全量检查：Rust **935 通过、3 项既有真实服务测试忽略**；Vi
 
 主要入口：`src-tauri/src/native/agent/compact.rs`、`agent/truncate.rs`、`memory.rs`、`subagents.rs`、`agent/subagent.rs`、`tools/contract.rs`、`tools/catalog.rs`、`tools/permission.rs`。
 
-- [ ] **C01：以 provider usage 校准上下文预算。** 结合最近一次有效用量与新增内容估算触发压缩，并预留输出空间。
+- [x] **C01：以 provider usage 校准上下文预算。** 结合最近一次有效用量与新增内容估算触发压缩，并预留输出空间。
   - 依赖：无；媒体预算在 M07 后接入。
   - 验收：用量缺失时有保守估算；切模型、压缩后不会沿用失效基线；输出预留适配窗口大小，不机械固定为 32K。
+  - 自动化证据（2026-09-29）：服务端报 180K 输入、本地估算低于触发线时，带基线的判断触发压缩。压缩摘要调用报 170K，不替换主调用的 150K 基线和展示用量；压缩后代数变化，退回本地估算。切模型、改写请求前缀后基线失效，服务端没报输入量时清掉基线并按本地估算上浮 10%。Anthropic 输入量计入缓存读写，OpenAI Responses 已含缓存的输入量不重复相加。输出预留 8K 窗口为 2K（触发线降到 6144），128K 窗口配 8K 最大输出为 8K，1M 窗口配 128K 为 128K 且触发线仍是 85%。旧的上下文用量记录缺新字段时按默认值读取，容量弹层不显示预留行。Rust `--lib` 1020 通过、3 项既有真实服务测试忽略；`ContextCapacity`、`contextUsage` 9 项通过；Clippy `--all-targets -D warnings`、`npm run format:check`、lint、build 通过。未连真实渠道，也未在桌面窗口查看容量弹层。
 
-- [ ] **C02：压缩失败预算与信息保留。** 记录连续失败，区分失败、无收益和成功，完善现有摘要/本地降级链路。
+- [x] **C02：压缩失败预算与信息保留。** 记录连续失败，区分失败、无收益和成功，完善现有摘要/本地降级链路。
   - 依赖：C01；附件引用依赖 M02。
   - 验收：连续失败不会无限重试；目标、权限约束、未完成工作及工具调用配对保留；媒体采用引用，不重复引入原始载荷。
+  - 自动化证据（2026-09-29）：只有一条用户消息时自动压缩连续失败 3 次，暂停提示只出现一次；之后超过触发线也不再自动压缩，被动压缩不向摘要模型发请求、改走本地摘要；新用户回合清零。旧回合太短、本地摘要反而更长时记为 `no_gain` 并计数，手动压缩不计数。Anthropic `prompt is too long` 归为上下文上限。数据库里设置的目标、计划模式、进行中的待办（已完成的不带）和被摘要掉的截图附件标识出现在摘要里，上下文中不再有 base64。拒绝记录包含命令和原因，二次压缩后媒体条目不重复。工具图片说明和 Stop 钩子消息不再切开最新回合，真正的用户请求及其调用、结果、图片原样保留。已提交的带工具调用 assistant 在 600 token 窗口截断后仍能提交历史（修复前报「不能改写已提交的工具调用」）。截断移除图片的占位文本带附件标识和页码。前端旧分隔线记录按成功解析。Rust `--lib` 1028 通过、3 项既有真实服务测试忽略；`sessionLines` 70 项通过；Clippy `--all-targets -D warnings`、`npm run format:check`、lint、build 通过。未连真实渠道，未在桌面窗口查看分隔线。
 
-- [ ] **C03：工具驱动的记忆整理 Agent。** 在现有抽取和 dream 基础上增加可检索、可多轮整理的受限执行流程。
+- [x] **C03：工具驱动的记忆整理 Agent。** 在现有抽取和 dream 基础上增加可检索、可多轮整理的受限执行流程。
   - 依赖：无。
   - 验收：读写限制在授权范围；有调用、时间及 token 预算；能合并重复和纠正过期事实；失败不会损坏已有索引，不阻塞会话无限等待。
+  - 自动化证据（2026-09-29）：本地模拟模型驱动整理 Agent 三轮调用 `Memory`：两条构建记忆合并为一条（保留 npm install 与 make build），删除重复项，把默认分支从 master 改为 main，3 → 2 条，索引同步，旧内容在 `.bak`，副本已清理。模型不响应时 300 毫秒超时中止，原目录内容快照不变。模型写 `../escape.md`、点名 `Write` 和 `Bash` 时都被拒绝，目录外没有新文件（这条测试暴露了既有缺陷：`allowed_tools` 只影响展示、不拦执行，已改为执行前检查，自定义子 Agent 的 `tools` / `disallowedTools` 同样受益）。整理期间原目录新增一条记忆时放弃交换，新记忆保留、未应用的删除不生效。模型拒绝工具时回退一次性整理并成功写回；回退结果为空时放弃，原目录不变。存储层：同名更新、slug 冲突追加序号、原子写入不留临时文件、符号链接不读、旧键目录迁移、回忆后缀不再被抽取。Rust `--lib` 1059 通过、3 项既有真实服务测试忽略；Clippy `--all-targets -D warnings`、`npm run format:check` 通过。未连真实模型渠道，未在桌面窗口点「立即整理」。跨进程文件锁未做：只考虑单个应用进程。
 
-- [ ] **C04：子 Agent 独立持久记忆。** 增加 user/project/local 作用域及档案配置。
+- [x] **C04：子 Agent 独立持久记忆。** 增加 user/project/local 作用域及档案配置。
   - 依赖：无；可复用 C03 的整理器，但不强制依赖。
   - 验收：作用域路径稳定且隔离；读取和写入权限明确；只读子 Agent 不因开启记忆而自动获得工作区写权限；本地与 SSH 项目的归属不混淆。
+  - 自动化证据（2026-09-29）：档案 `memory` 字段支持 frontmatter 和设置页，大小写规范化，未知值报错。同样输入得到同样路径，不同子 Agent 目录不同；本地 `project` 在仓库 `.noxcode/agent-memory` 下，`local` 首次创建时写入 `.gitignore`；远端同为 `/srv/app` 的 SSH 工作区映射到本机按工作区 ID 区分的目录，与本地仓库不混用；没有工作区时只有 user 作用域。只读 reviewer 开启 local 记忆后仍为只读，工具列表有 Memory、没有 Write / Edit / ApplyPatch / Bash；它用 Memory 写入一条记忆成功，同一轮点名的 Write 和 Bash 被拒绝，工作区没有新文件。自定义子 Agent 不再继承父会话的记忆可写根（修复前可以直接写父会话的记忆目录），general 子 Agent 保持继承且没有 Memory 工具。前端表单与载荷映射测试通过。Rust `--lib` 1062 通过、3 项既有真实服务测试忽略；Vitest 93 个文件 771 项通过；Clippy `--all-targets -D warnings`、`npm run format:check`、lint、build 通过。未在桌面窗口编辑子 Agent，未连真实 SSH 主机。
 
-- [ ] **C05：工具输出 schema 与模型能力适配。** 在已有 ToolContract 上增加结构化输出、校验和按模型投影的描述/schema。
+- [x] **C05：工具输出 schema 与模型能力适配。** 在已有 ToolContract 上增加结构化输出、校验和按模型投影的描述/schema。
   - 依赖：无；媒体工具契约在 M03 后对接。
   - 验收：输出不符合契约时明确失败或受控降级；模型只看到当前可用能力；MCP 工具的契约缺失不能被误认为可信或低风险。
+  - 自动化证据（2026-09-29）：契约增加输出契约、违约策略和来源，校验器是不引入依赖的 JSON Schema 子集，失败时带出 `$.id`、`$.items[1]` 这类路径，超深嵌套拒绝。`CronUpdate` 缺字段的结果按失败返回；MCP 非 JSON 结果加不可信标注后保留，只有 `structuredContent` 时转为文本并通过校验。没有 annotations 的 MCP 工具为 `McpUndeclared`、高风险；自报只读的工具在未信任服务器上仍需确认（修复前 build 模式直接免确认），用户信任后才为只读，旧配置缺字段读为不信任。失败的 Read 结果以 `[工具执行失败]` 开头，Anthropic 请求带 `is_error: true`，成功结果不带。SSH 投影隐藏 Lsp、Monitor 和进程工具并去掉后台参数；`deepseek-chat` 的 Read 只剩文本模式，`gpt-4o` 保留页面图并说明不能读 MP4；本地会话仍保留 Lsp。设置页可切换信任开关，添加 Playwright 预设时默认开启。Rust `--lib` 1048 通过、3 项既有真实服务测试忽略；设置页 Vitest 44 项通过；Clippy `--all-targets -D warnings`、`npm run format:check`、lint、build 通过。未连真实 MCP 服务器和真实渠道，SSH 投影用纯函数验证（单元测试无法构造 SSH 运行时），未在桌面窗口操作设置页。没有做 OpenAI 专用的 schema 清理：现有 schema 未发现不兼容关键字。
 
-- [ ] **C06：精细化 Bash 只读判断。** 用明确的命令、子命令、选项及 shell 语法策略替换不足的启发式判断。
+- [x] **C06：精细化 Bash 只读判断。** 用明确的命令、子命令、选项及 shell 语法策略替换不足的启发式判断。
   - 依赖：无。
   - 验收：覆盖 git/gh、重定向、管道、命令替换、复合命令和未知参数；不确定命令保守处理；本地和 SSH 适用同一权限语义，不把分类器当作完整 OS 沙箱。
+  - 自动化证据（2026-09-29）：新增 `shell_parse.rs` 手写词法器（无新依赖）和 `bash_policy.rs` 策略表。`git -C sub status`、`git branch -a -v`、`git config --get`、`gh pr view`、GET 的 `gh api` 在计划模式直接放行；`git branch new-feature`、`git -c core.pager=./x log`、`git log --output=…`、`gh pr view --web` 需确认，`gh pr create / merge`、POST 或带 `-f` 的 `gh api` 归为推送，`git -c a=b push --force` 仍是强制 Git。引号里的括号、`"a b"` 分词、`2>/dev/null`、`2>&1 |`、多级管道判为只读；`> out.txt`、`>>`、`&>` 为覆盖，`$()`、反引号、heredoc 为不透明，子 shell 里的 `rm` 为删除，`ls; rm -rf x` 为删除。`tail -f`、`sort -o` / `-no`、`sed -i`、带 `w` 的 sed 脚本、`rg --pre`、`rg TODO *`、`uniq in out`、`LD_PRELOAD=` 前缀都需确认。Monitor 执行 `rm -rf build` 分类为删除（修复前为低风险直接执行）。allow `git status*` 不再放行 `git status; rm -rf x`、`git status > out.txt` 和 `git status $(…)`，deny `rm*` 能拦住 `ls && rm -rf x` 和 `nohup rm x`，本地与远端工作区根判定一致；复合命令的「始终允许」建议保存整条命令。原有 18 项权限测试与计划模式 Bash 分发测试全部保持通过。Rust `--lib` 1039 通过、3 项既有真实服务测试忽略；Clippy `--all-targets -D warnings` 通过。未在真实 SSH 主机和桌面窗口手工验证确认弹窗。
 
 阶段验收：长会话压缩、模型窗口下调、记忆冲突、只读子 Agent 和含副作用的复杂 Shell 输入均有针对性回归验证。
+
+2026-09-29 已勾选 C01–C06。本阶段针对性回归：长会话压缩（服务端用量触发、连续失败暂停、无收益分类、摘要保留目标/权限/待办/媒体引用）、模型窗口下调（切模型后基线失效，8K 窗口预留 2K）、记忆冲突（整理期间原目录被改时放弃交换）、只读子 Agent（开启记忆后仍不能写工作区）、含副作用的复杂 Shell 输入（复合命令、重定向、命令替换、按段匹配的 allow 规则）。实施中发现并修复的既有问题：Monitor 绕过 Bash 风险分类、allow 规则前缀匹配可放行复合命令、build 模式信任 MCP 自报只读声明、`allowed_tools` / `disallowed_tools` 只影响展示不拦执行、自定义子 Agent 可写父会话记忆目录、已提交的工具调用在截断后导致 checkpoint 失败、Anthropic `prompt is too long` 不触发被动压缩。本阶段未新增数据库迁移和依赖，迁移仍连续至 19，`aws-lc-rs` 无匹配。全量检查：Rust `--lib` 1062 通过、3 项既有真实服务测试忽略；Vitest 93 个文件 771 项；Clippy、Rustfmt、lint、生产构建和格式检查通过。未做真实 Tauri 桌面、真实模型渠道、真实 MCP 服务器和真实 SSH 主机的手工验收。另注意：`model::client::tests::cancel_during_backoff_does_not_send_another_attempt` 单独运行时在改动前后都会因 400 毫秒计时断言失败，全量运行时通过，属既有的计时不稳定。
 
 ## P2：扩展分发与 MCP 授权
 

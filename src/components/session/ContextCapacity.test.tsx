@@ -50,4 +50,46 @@ describe("ContextCapacity", () => {
     expect(html).toContain("总用量 66.77K");
     expect(html).not.toContain("总用量 39.00K");
   });
+
+  it("shows compaction estimate source and output reserve", () => {
+    const html = renderToStaticMarkup(
+      <I18nextProvider i18n={i18n}>
+        <ContextCapacity
+          open
+          usage={{
+            session_record_id: "s1",
+            used_tokens: 39_000,
+            limit_tokens: 128_000,
+            generation: 0,
+            compactions: 0,
+            estimated_tokens: 52_000,
+            estimate_source: "provider",
+            output_reserve_tokens: 8_192,
+          }}
+        />
+      </I18nextProvider>,
+    );
+
+    expect(html).toContain("服务端用量");
+    expect(html).toContain("输出预留");
+  });
+
+  it("hides the reserve row for legacy usage records", () => {
+    const html = renderToStaticMarkup(
+      <I18nextProvider i18n={i18n}>
+        <ContextCapacity
+          open
+          usage={{
+            session_record_id: "s1",
+            used_tokens: 39_000,
+            limit_tokens: 128_000,
+            generation: 0,
+            compactions: 0,
+          }}
+        />
+      </I18nextProvider>,
+    );
+
+    expect(html).not.toContain("输出预留");
+  });
 });

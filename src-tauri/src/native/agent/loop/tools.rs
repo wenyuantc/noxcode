@@ -6,6 +6,9 @@ impl AgentRunner {
         if self.ctx.ssh.is_some() {
             tools.retain(|tool| tool.name != "SQLiteQuery");
         }
+        if self.ctx.memory.is_none() {
+            tools.retain(|tool| tool.name != "Memory");
+        }
         let advertise_computer = self.ctx.computer_control_enabled
             && self.ctx.ssh.is_none()
             && !self.ctx.is_read_only()
@@ -82,7 +85,28 @@ impl AgentRunner {
                     || (plan_mode && tool.name == "Agent")
             });
         }
+        self.project_for_target_and_model(&mut tools);
         tools
+    }
+
+    /// 只给模型看当前执行目标和模型能力下真正可用的工具与参数。
+    fn project_for_target_and_model(&self, tools: &mut Vec<ToolSpec>) {
+        let model = self.current_model_name();
+        project_tools(
+            tools,
+            ToolProjection {
+                ssh: self.ctx.ssh.is_some(),
+                images: crate::native::media_plan::budget_for_model(model).max_image_blocks > 0,
+                video: crate::native::media_plan::model_allows_video(model),
+            },
+            |name| {
+                crate::native::tools::contract::builtin_contract(name).is_some()
+                    || self
+                        .extra_tool_contracts
+                        .iter()
+                        .any(|contract| contract.name == name)
+            },
+        );
     }
 
     pub fn tool_names(&self) -> Vec<String> {
@@ -90,6 +114,27 @@ impl AgentRunner {
             .into_iter()
             .map(|tool| tool.name)
             .collect()
+    }
+
+    /// 执行前的统一检查：`allowed_tools` / `disallowed_tools` 在执行时同样生效，
+    /// 模型点名列表外的工具不能绕过；随后是重复调用检查。只读、计划模式等其余
+    /// 限制仍由 `preflight_tool` 负责。
+    pub(super) fn call_guard(&mut self, call: &ToolCall) -> Option<String> {
+        let outside_allowed = self
+            .allowed_tools
+            .as_ref()
+            .is_some_and(|allowed| !allowed.contains(&call.name));
+        let disallowed = self
+            .disallowed_tools
+            .as_ref()
+            .is_some_and(|disallowed| disallowed.contains(&call.name));
+        if outside_allowed || disallowed {
+            return Some(format!(
+                "工具 {} 不在当前 Agent 的可用工具中，请只使用提供的工具",
+                call.name
+            ));
+        }
+        self.repeat_guard(call)
     }
 
     /// 连续相同参数的调用计数；达到上限时返回拒绝文案。
@@ -153,7 +198,7 @@ impl AgentRunner {
     }
 
     pub(super) async fn execute_logged_tool(&mut self, call: &ToolCall) -> ToolOutput {
-        if let Some(rejection) = self.repeat_guard(call) {
+        if let Some(rejection) = self.call_guard(call) {
             return ToolOutput::error(rejection);
         }
         match execute_tool_call(&self.ctx, call).await {
@@ -163,7 +208,7 @@ impl AgentRunner {
     }
 
     pub(super) async fn reject_nested_agent(&mut self, call: &ToolCall) -> ToolOutput {
-        if let Some(rejection) = self.repeat_guard(call) {
+        if let Some(rejection) = self.call_guard(call) {
             return ToolOutput::error(rejection);
         }
         match preflight_tool(&self.ctx, call).await {
@@ -248,7 +293,7 @@ impl AgentRunner {
         let mut join_set = JoinSet::new();
         for (pos, call) in calls.iter().enumerate() {
             self.emit_tool_start(call).await?;
-            if let Some(rejection) = self.repeat_guard(call) {
+            if let Some(rejection) = self.call_guard(call) {
                 let output = ToolOutput::error(rejection);
                 self.ledger_result(call, &output).await?;
                 slot[pos] = Some(output);
@@ -339,7 +384,15 @@ impl AgentRunner {
                 .tool_results_truncated
                 .fetch_add(1, Ordering::AcqRel);
         }
-        let mut message = Message::tool_result(&call.id, bounded);
+        let content = if output.ok {
+            bounded
+        } else {
+            format!(
+                "{}{bounded}",
+                crate::native::model::types::TOOL_ERROR_PREFIX
+            )
+        };
+        let mut message = Message::tool_result(&call.id, content);
         message.name = call.name.clone();
         self.messages.push(message);
         if !output.images.is_empty() {
@@ -349,9 +402,75 @@ impl AgentRunner {
                 .map(|image| image.name.as_str())
                 .collect();
             self.messages.push(Message::user_with_images(
-                format!("（{} 工具返回的图片：{}）", call.name, names.join("、")),
+                format!(
+                    "（{}{}{}）",
+                    call.name,
+                    super::super::compact::TOOL_IMAGE_NOTE_MARKER,
+                    names.join("、")
+                ),
                 output.images,
             ));
         }
+    }
+}
+
+/// 执行目标与模型能力。
+#[derive(Debug, Clone, Copy)]
+pub(super) struct ToolProjection {
+    pub ssh: bool,
+    pub images: bool,
+    pub video: bool,
+}
+
+pub(super) fn project_tools(
+    tools: &mut Vec<ToolSpec>,
+    projection: ToolProjection,
+    has_contract: impl Fn(&str) -> bool,
+) {
+    // 没有契约的工具无法判断权限与副作用，不暴露。
+    tools.retain(|tool| has_contract(&tool.name));
+    if projection.ssh {
+        // SSH 工作区不支持 LSP 和后台 Bash，调用只会报错。
+        tools.retain(|tool| {
+            !matches!(
+                tool.name.as_str(),
+                "Lsp" | "Monitor" | "ProcessList" | "ProcessOutput" | "ProcessStop"
+            )
+        });
+    }
+    for tool in tools.iter_mut() {
+        match tool.name.as_str() {
+            "Bash" if projection.ssh => project_ssh_bash(tool),
+            "Read" => project_read(tool, projection.images, projection.video),
+            _ => {}
+        }
+    }
+}
+
+fn project_ssh_bash(tool: &mut ToolSpec) {
+    tool.description = "Run a shell command in the SSH workspace. Prefer Read/Glob/Grep for file inspection. Background processes are not available in SSH workspaces.".to_string();
+    if let Some(properties) = tool
+        .parameters
+        .get_mut("properties")
+        .and_then(Value::as_object_mut)
+    {
+        properties.remove("run_in_background");
+    }
+}
+
+/// 按模型可接收的媒体改写 Read：不收图片时去掉页面图模式，不收视频时说明 MP4 不可用。
+fn project_read(tool: &mut ToolSpec, images: bool, video: bool) {
+    if !images {
+        tool.description = "Read a text file or the text layer of a PDF from the workspace or an allowed read root, including enabled skill directories in local sessions. The current model does not accept images or video, so image and MP4 files cannot be viewed and PDF page images are unavailable; PDFs without a text layer fail instead of pretending the document was read. Use absolute paths for external roots. For SQLite database contents use SQLiteQuery, not Read. Prefer this over cat in Bash.".to_string();
+        if let Some(mode) = tool.parameters.pointer_mut("/properties/mode") {
+            *mode = serde_json::json!({
+                "type": "string",
+                "enum": ["text"],
+                "description": "text extracts the text layer."
+            });
+        }
+    } else if !video {
+        tool.description
+            .push_str(" The current model does not accept video, so MP4 files cannot be viewed.");
     }
 }

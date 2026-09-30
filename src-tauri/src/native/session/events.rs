@@ -329,10 +329,9 @@ pub(super) fn attach_memory(
         return None;
     }
     let config_dir = app.path().app_config_dir().ok()?;
-    let dir = crate::native::memory::memory_dir(
-        &config_dir,
-        &runner.ctx.workspace.root.to_string_lossy(),
-    );
+    // 隔离 worktree 会话也按原仓库根目录归属，与设置页看到的是同一目录。
+    let dir =
+        crate::native::memory::memory_dir(&config_dir, &runner.ctx.original_root.to_string_lossy());
     if let Err(error) = std::fs::create_dir_all(&dir) {
         eprintln!("[native] 创建记忆目录失败: {error}");
         return None;
@@ -407,22 +406,34 @@ pub(super) async fn finish_memory(
         .map(|item| item.memory_dream_interval.max(0) as u32)
         .unwrap_or(0);
     if crate::native::memory::dream_due(dir, interval) {
-        match crate::native::memory::dream(&run.client, &run.model, run.lite_model.as_deref(), dir)
-            .await
-        {
-            Ok(summary) => {
-                emit_native_line(
-                    app,
-                    session_record_id,
-                    profile_id,
-                    Some(workspace_id),
-                    kind,
-                    format!("[记忆] {summary}"),
-                )
-                .await;
-            }
-            Err(error) => eprintln!("[native] 记忆整理失败: {error}"),
-        }
+        // 整理是多轮 Agent，放到后台，不占用会话收尾的等待时间；自带轮次、token 与超时上限。
+        let app = app.clone();
+        let client = run.client.clone();
+        let model = run.model.clone();
+        let lite_model = run.lite_model.clone();
+        let dir = dir.to_path_buf();
+        let session_record_id = session_record_id.to_string();
+        let profile_id = profile_id.to_string();
+        let workspace_id = workspace_id.to_string();
+        let kind = kind.to_string();
+        tokio::spawn(async move {
+            let line =
+                match crate::native::memory::dream(&client, &model, lite_model.as_deref(), &dir)
+                    .await
+                {
+                    Ok(summary) => format!("[记忆] {summary}"),
+                    Err(error) => format!("[记忆] 整理未完成：{error}"),
+                };
+            emit_native_line(
+                &app,
+                &session_record_id,
+                &profile_id,
+                Some(&workspace_id),
+                &kind,
+                line,
+            )
+            .await;
+        });
     }
 }
 
@@ -558,6 +569,23 @@ pub(super) fn attach_subagent_runtime(
 ) {
     runner.workspace_context = crate::native::prompt::workspace_context_block(parts);
     runner.project_agents = parts.project_agents.clone();
+    if let Ok(config_dir) = app.path().app_config_dir() {
+        let local_root = runner
+            .ctx
+            .ssh
+            .is_none()
+            .then(|| runner.ctx.original_root.clone());
+        let ssh_workspace = if runner.ctx.ssh.is_some() {
+            workspace_id
+        } else {
+            None
+        };
+        runner.agent_memory_roots = Some(crate::native::subagents::agent_memory_roots(
+            &config_dir,
+            local_root.as_deref(),
+            ssh_workspace,
+        ));
+    }
     // 本地工作区还会读取 .noxcode/agents、.claude/agents 与全局 agents 目录下的 .md 档案。
     let workspace_root = runner
         .ctx
@@ -853,6 +881,9 @@ pub(super) async fn forward_native_events(
                             message_tokens: snapshot.message_tokens,
                             prompt_tokens: snapshot.prompt_tokens,
                             cached_tokens: snapshot.cached_tokens,
+                            estimated_tokens: snapshot.estimated_tokens,
+                            estimate_source: snapshot.estimate_source.to_string(),
+                            output_reserve_tokens: snapshot.output_reserve_tokens,
                         };
                         let _ = app.emit("native-context-usage", usage.clone());
                         if let Ok(pool) = sqlite_pool(&app).await {

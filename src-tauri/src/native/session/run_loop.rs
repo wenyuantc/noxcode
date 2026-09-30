@@ -662,7 +662,7 @@ pub(super) async fn run_native_loop(
                     }
                     runner.messages.extend(history);
                     // 恢复到更小窗口的模型（或历史本就很长）时，第一次调用前按 downshift 压缩。
-                    if runner.context_window.should_compact(&runner.messages) {
+                    if runner.should_compact_context() {
                         runner.request_downshift_compaction();
                     }
                 }

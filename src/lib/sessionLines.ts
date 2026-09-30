@@ -27,6 +27,8 @@ export type CompactTrigger = "auto" | "manual" | "reactive" | "downshift";
 export interface CompactBoundary {
   trigger: CompactTrigger | string;
   source: "microcompact" | "model" | "local" | "reset" | string;
+  /** 旧记录没有该字段，按成功处理。 */
+  outcome: "success" | "no_gain" | "failed" | string;
   pre_tokens: number;
   post_tokens: number;
   pre_messages: number;
@@ -49,6 +51,7 @@ export function parseCompactBoundary(text: string): CompactBoundary | null {
     return {
       trigger: typeof record.trigger === "string" ? record.trigger : "auto",
       source: typeof record.source === "string" ? record.source : "local",
+      outcome: typeof record.outcome === "string" ? record.outcome : "success",
       pre_tokens: num("pre_tokens"),
       post_tokens: num("post_tokens"),
       pre_messages: num("pre_messages"),

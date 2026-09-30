@@ -95,25 +95,51 @@ impl From<ModelError> for String {
     }
 }
 
+/// 供应商上下文溢出错误的启发式识别（OpenAI / Anthropic / 兼容网关的常见文案）。
+pub fn is_context_overflow_message(error: &str) -> bool {
+    let lower = error.to_ascii_lowercase();
+    [
+        "context_length_exceeded",
+        "context length",
+        "maximum context",
+        "context window",
+        "prompt is too long",
+        "input is too long",
+        "too many tokens",
+        "tokens exceed",
+        "exceeds the model",
+        "request too large",
+        "reduce the length of the messages",
+        "max_tokens is too large",
+        "上下文长度",
+        "超出最大长度",
+    ]
+    .iter()
+    .any(|needle| lower.contains(needle))
+        && !lower.contains("rate limit")
+}
+
 pub fn provider_error(value: &serde_json::Value) -> Option<ModelError> {
     let error = value.get("error").filter(|error| !error.is_null())?;
     let code = error
         .get("code")
         .and_then(serde_json::Value::as_str)
         .or_else(|| error.get("type").and_then(serde_json::Value::as_str));
-    let kind = if FinishReason::from_raw(code) == FinishReason::ContextLimit {
+    let message = error
+        .get("message")
+        .and_then(serde_json::Value::as_str)
+        .map(ToOwned::to_owned)
+        .unwrap_or_else(|| error.to_string());
+    // Anthropic 等只在文案里说明溢出（如 `prompt is too long`），错误码是通用的
+    // `invalid_request_error`，同样归为上下文上限以触发被动压缩。
+    let kind = if FinishReason::from_raw(code) == FinishReason::ContextLimit
+        || is_context_overflow_message(&message)
+    {
         ModelErrorKind::ContextLimit
     } else {
         ModelErrorKind::Provider
     };
-    Some(ModelError::new(
-        kind,
-        error
-            .get("message")
-            .and_then(serde_json::Value::as_str)
-            .map(ToOwned::to_owned)
-            .unwrap_or_else(|| error.to_string()),
-    ))
+    Some(ModelError::new(kind, message))
 }
 
 #[derive(Debug, Clone)]
@@ -225,6 +251,24 @@ impl ModelResponse {
 mod tests {
     use super::*;
     use crate::native::model::types::ToolCall;
+
+    #[test]
+    fn anthropic_prompt_too_long_is_classified_as_context_limit() {
+        let error = provider_error(&serde_json::json!({
+            "type": "error",
+            "error": {
+                "type": "invalid_request_error",
+                "message": "prompt is too long: 210000 tokens > 200000 maximum"
+            }
+        }))
+        .expect("error");
+        assert_eq!(error.kind, ModelErrorKind::ContextLimit);
+        let other = provider_error(&serde_json::json!({
+            "error": {"type": "invalid_request_error", "message": "invalid api key"}
+        }))
+        .expect("error");
+        assert_eq!(other.kind, ModelErrorKind::Provider);
+    }
 
     fn response(reason: FinishReason, calls: Vec<ToolCall>) -> ModelResponse {
         let mut message = Message::assistant_text("visible partial answer");

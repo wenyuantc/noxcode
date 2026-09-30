@@ -8,17 +8,20 @@
 //! 关键词命中前几条注入用户消息）、`dream`（周期性让模型合并 / 去重 / 重写索引）。
 
 use std::collections::hash_map::DefaultHasher;
+use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
+use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, LazyLock, Mutex};
+
+use sha2::{Digest, Sha256};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tauri::{AppHandle, Manager, Runtime};
 
 use crate::app::shared::now_sqlite;
-use crate::native::model::call_log::{
-    MODEL_ROLE_LITE, MODEL_ROLE_MAIN, OPERATION_MEMORY_DREAM, OPERATION_MEMORY_EXTRACT,
-};
+use crate::native::model::call_log::{MODEL_ROLE_LITE, MODEL_ROLE_MAIN, OPERATION_MEMORY_EXTRACT};
 use crate::native::model::client::ChatRequest;
 use crate::native::model::types::{Message, Role};
 use crate::native::model::ModelClient;
@@ -31,8 +34,8 @@ const MEMORY_BODY_MAX_CHARS: usize = 6_000;
 const MEMORY_STATE_FILE: &str = ".state.json";
 const EXTRACT_TRANSCRIPT_CHARS: usize = 24_000;
 const EXTRACT_MAX_ENTRIES: usize = 8;
-const DREAM_MAX_ENTRIES: usize = 60;
 pub const MEMORY_TYPES: &[&str] = &["user", "feedback", "project", "reference"];
+const RECALL_PREFIX: &str = "[记忆回忆]";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct MemoryEntry {
@@ -75,17 +78,35 @@ pub struct NativeMemoryView {
     pub dreams: u32,
 }
 
-/// 工作区目录 → 稳定的项目键：最后一段路径名 + 8 位哈希。
+/// 工作区目录 → 稳定的项目键：最后一段路径名 + SHA-256 前 16 位十六进制。
 pub fn project_key(workspace_root: &str) -> String {
     let normalized = workspace_root.trim().trim_end_matches(['/', '\\']);
+    let digest = Sha256::digest(normalized.as_bytes());
+    let hash: String = digest[..8]
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    format!("{}-{hash}", key_slug(normalized))
+}
+
+/// 旧版本用 `DefaultHasher`（算法不保证跨 Rust 版本稳定）算出的键，仅用于迁移。
+fn legacy_project_key(workspace_root: &str) -> String {
+    let normalized = workspace_root.trim().trim_end_matches(['/', '\\']);
+    let mut hasher = DefaultHasher::new();
+    normalized.hash(&mut hasher);
+    format!(
+        "{}-{:08x}",
+        key_slug(normalized),
+        hasher.finish() & 0xffff_ffff
+    )
+}
+
+fn key_slug(normalized: &str) -> String {
     let leaf = normalized
         .rsplit(['/', '\\'])
         .next()
         .filter(|item| !item.is_empty())
         .unwrap_or("workspace");
-    let mut hasher = DefaultHasher::new();
-    normalized.hash(&mut hasher);
-    let hash = hasher.finish();
     let slug: String = leaf
         .chars()
         .map(|ch| {
@@ -100,17 +121,53 @@ pub fn project_key(workspace_root: &str) -> String {
         .chars()
         .take(40)
         .collect();
-    format!(
-        "{}-{:08x}",
-        if slug.is_empty() { "workspace" } else { &slug },
-        hash & 0xffff_ffff
-    )
+    if slug.is_empty() {
+        "workspace".to_string()
+    } else {
+        slug
+    }
 }
 
+/// 工作区的记忆目录。旧键目录存在而新键目录不存在时先迁移过去。
 pub fn memory_dir(app_config_dir: &Path, workspace_root: &str) -> PathBuf {
-    app_config_dir
-        .join(MEMORY_DIR_NAME)
-        .join(project_key(workspace_root))
+    let base = app_config_dir.join(MEMORY_DIR_NAME);
+    let dir = base.join(project_key(workspace_root));
+    let legacy = base.join(legacy_project_key(workspace_root));
+    if !dir.exists() && legacy.is_dir() {
+        if let Err(error) = std::fs::rename(&legacy, &dir) {
+            eprintln!("[native] 迁移旧记忆目录失败: {error}");
+            return legacy;
+        }
+    }
+    dir
+}
+
+/// 同一记忆目录的写入互斥（进程内）。整理 Agent 只在替换目录时短暂持有。
+pub fn dir_lock(dir: &Path) -> Arc<Mutex<()>> {
+    static LOCKS: LazyLock<Mutex<HashMap<PathBuf, Arc<Mutex<()>>>>> =
+        LazyLock::new(|| Mutex::new(HashMap::new()));
+    LOCKS
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .entry(dir.to_path_buf())
+        .or_default()
+        .clone()
+}
+
+/// 写临时文件、刷盘后原子替换，中途失败不会留下半截文件。
+pub fn write_atomic(path: &Path, content: &str) -> Result<(), String> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| format!("无效的记忆路径: {}", path.display()))?;
+    std::fs::create_dir_all(parent).map_err(|error| format!("创建记忆目录失败: {error}"))?;
+    let mut file = tempfile::NamedTempFile::new_in(parent)
+        .map_err(|error| format!("创建临时记忆文件失败: {error}"))?;
+    file.write_all(content.as_bytes())
+        .and_then(|_| file.as_file().sync_all())
+        .map_err(|error| format!("写入记忆文件失败: {error}"))?;
+    file.persist(path)
+        .map_err(|error| format!("保存记忆文件失败: {}", error.error))?;
+    Ok(())
 }
 
 pub fn normalize_kind(kind: &str) -> &'static str {
@@ -188,11 +245,29 @@ fn render_entry(entry: &MemoryEntry) -> String {
     )
 }
 
+/// 记忆目录里的事实文件名：不含路径分隔符和 `..`，不以 `.` 开头，不是索引。
+pub fn is_entry_file_name(file_name: &str) -> bool {
+    file_name.ends_with(".md")
+        && file_name != MEMORY_INDEX_FILE
+        && !file_name.starts_with('.')
+        && !file_name.contains(['/', '\\'])
+        && !file_name.contains("..")
+}
+
 pub fn read_entry(dir: &Path, file_name: &str) -> Option<MemoryEntry> {
-    if !file_name.ends_with(".md") || file_name == MEMORY_INDEX_FILE || file_name.contains('/') {
+    if !is_entry_file_name(file_name) {
         return None;
     }
-    let text = std::fs::read_to_string(dir.join(file_name)).ok()?;
+    let path = dir.join(file_name);
+    // 符号链接可能指向目录外的文件，不当作记忆读取。
+    if std::fs::symlink_metadata(&path)
+        .ok()?
+        .file_type()
+        .is_symlink()
+    {
+        return None;
+    }
+    let text = std::fs::read_to_string(path).ok()?;
     let (fields, body) = parse_frontmatter(&text);
     let field = |key: &str| {
         fields
@@ -258,9 +333,7 @@ pub fn rebuild_index(dir: &Path) -> Result<String, String> {
         ));
     }
     let text = format!("{}\n", lines.join("\n"));
-    std::fs::create_dir_all(dir).map_err(|error| format!("创建记忆目录失败: {error}"))?;
-    std::fs::write(dir.join(MEMORY_INDEX_FILE), &text)
-        .map_err(|error| format!("写入 MEMORY.md 失败: {error}"))?;
+    write_atomic(&dir.join(MEMORY_INDEX_FILE), &text)?;
     Ok(text)
 }
 
@@ -281,12 +354,30 @@ pub fn save_entry(
     description: &str,
     body: &str,
 ) -> Result<MemoryEntry, String> {
+    save_entry_in(dir, None, name, kind, description, body)
+}
+
+/// 同 [`save_entry`]；给出 `file` 时原地更新该文件（可改名），否则按名称定位。
+pub fn save_entry_in(
+    dir: &Path,
+    file: Option<&str>,
+    name: &str,
+    kind: &str,
+    description: &str,
+    body: &str,
+) -> Result<MemoryEntry, String> {
     let name = name.trim();
     if name.is_empty() {
         return Err("记忆名称不能为空".to_string());
     }
+    let lock = dir_lock(dir);
+    let _guard = lock.lock().unwrap_or_else(|error| error.into_inner());
     std::fs::create_dir_all(dir).map_err(|error| format!("创建记忆目录失败: {error}"))?;
-    let file_name = format!("{}.md", slugify(name));
+    let file_name = match file {
+        Some(file) if is_entry_file_name(file) => file.to_string(),
+        Some(file) => return Err(format!("无效的记忆文件名：{file}")),
+        None => entry_file_for(dir, name),
+    };
     let now = now_sqlite();
     let existing = read_entry(dir, &file_name);
     let entry = MemoryEntry {
@@ -302,13 +393,30 @@ pub fn save_entry(
         updated_at: now,
         body: cap_chars(body.trim(), MEMORY_BODY_MAX_CHARS),
     };
-    std::fs::write(dir.join(&file_name), render_entry(&entry))
-        .map_err(|error| format!("写入记忆文件失败: {error}"))?;
+    write_atomic(&dir.join(&file_name), &render_entry(&entry))?;
     rebuild_index(dir)?;
     Ok(entry)
 }
 
+/// 同名记忆沿用原文件；不同名称的 slug 撞车时追加序号，不覆盖别的记忆。
+fn entry_file_for(dir: &Path, name: &str) -> String {
+    let same_name = |entry: &MemoryEntry| entry.name.trim().eq_ignore_ascii_case(name.trim());
+    if let Some(entry) = list_entries(dir).into_iter().find(same_name) {
+        return entry.file_name;
+    }
+    let slug = slugify(name);
+    let mut candidate = format!("{slug}.md");
+    let mut index = 2;
+    while dir.join(&candidate).exists() {
+        candidate = format!("{slug}-{index}.md");
+        index += 1;
+    }
+    candidate
+}
+
 pub fn delete_entry(dir: &Path, file_name: &str) -> Result<bool, String> {
+    let lock = dir_lock(dir);
+    let _guard = lock.lock().unwrap_or_else(|error| error.into_inner());
     if read_entry(dir, file_name).is_none() {
         return Ok(false);
     }
@@ -326,8 +434,9 @@ fn load_state(dir: &Path) -> MemoryState {
 
 fn save_state(dir: &Path, state: &MemoryState) {
     if let Ok(json) = serde_json::to_string_pretty(state) {
-        let _ = std::fs::create_dir_all(dir);
-        let _ = std::fs::write(dir.join(MEMORY_STATE_FILE), json);
+        if let Err(error) = write_atomic(&dir.join(MEMORY_STATE_FILE), &json) {
+            eprintln!("[native] 保存记忆状态失败: {error}");
+        }
     }
 }
 
@@ -407,7 +516,7 @@ pub fn format_recall_block(dir: &Path, hits: &[MemoryHit]) -> String {
         return String::new();
     }
     let mut lines = vec![format!(
-        "[记忆回忆] 与本次输入相关的已保存记忆（目录 {}），需要细节时用 Read 打开：",
+        "{RECALL_PREFIX} 与本次输入相关的已保存记忆（目录 {}），需要细节时用 Read 打开：",
         dir.display()
     )];
     for hit in hits {
@@ -457,8 +566,13 @@ fn transcript_digest(messages: &[Message]) -> String {
             Role::Assistant => "助手",
             _ => continue,
         };
-        let text = message.content.trim();
-        if text.is_empty() || text.starts_with("[记忆回忆]") {
+        // 回忆块拼在用户消息末尾，不能再当作新内容喂给抽取。
+        let text = message
+            .content
+            .split_once(RECALL_PREFIX)
+            .map_or(message.content.as_str(), |(before, _)| before)
+            .trim();
+        if text.is_empty() {
             continue;
         }
         parts.push(format!("{label}：{}", cap_chars(text, 1_500)));
@@ -479,7 +593,7 @@ fn transcript_digest(messages: &[Message]) -> String {
     format!("…{tail}")
 }
 
-fn parse_entries_json(text: &str) -> Vec<(String, String, String, String)> {
+pub(crate) fn parse_entries_json(text: &str) -> Vec<(String, String, String, String)> {
     let trimmed = text.trim();
     let candidate = if let (Some(start), Some(end)) = (trimmed.find('['), trimmed.rfind(']')) {
         &trimmed[start..=end]
@@ -512,7 +626,7 @@ fn parse_entries_json(text: &str) -> Vec<(String, String, String, String)> {
         .collect()
 }
 
-fn lite_client(client: &ModelClient, operation: &str, role: &str) -> ModelClient {
+pub(crate) fn lite_client(client: &ModelClient, operation: &str, role: &str) -> ModelClient {
     match client.call_log_context() {
         Some(context) => client.clone().with_call_log_context(
             context
@@ -524,7 +638,10 @@ fn lite_client(client: &ModelClient, operation: &str, role: &str) -> ModelClient
     }
 }
 
-fn pick_model<'a>(main_model: &'a str, lite_model: Option<&'a str>) -> (&'a str, &'static str) {
+pub(crate) fn pick_model<'a>(
+    main_model: &'a str,
+    lite_model: Option<&'a str>,
+) -> (&'a str, &'static str) {
     match lite_model.map(str::trim).filter(|item| !item.is_empty()) {
         Some(lite) => (lite, MODEL_ROLE_LITE),
         None => (main_model, MODEL_ROLE_MAIN),
@@ -575,7 +692,7 @@ pub async fn extract_memories(
         .into_iter()
         .take(EXTRACT_MAX_ENTRIES)
     {
-        let file_name = format!("{}.md", slugify(&name));
+        let file_name = entry_file_for(dir, &name);
         let unchanged =
             read_entry(dir, &file_name).is_some_and(|item| item.body.trim() == body.trim());
         if unchanged {
@@ -591,6 +708,14 @@ pub async fn extract_memories(
     Ok(saved)
 }
 
+/// 整理成功后记一次 dream：读原目录的状态，写进即将替换它的副本。
+pub(crate) fn record_dream(dir: &Path, staging: &Path) {
+    let mut state = load_state(dir);
+    state.dreams = state.dreams.saturating_add(1);
+    state.last_dreamed_at = Some(now_sqlite());
+    save_state(staging, &state);
+}
+
 /// 是否到了该做 dream 的时候：每 `interval` 次抽取一次；`0` 表示从不。
 pub fn dream_due(dir: &Path, interval: u32) -> bool {
     if interval == 0 {
@@ -602,71 +727,23 @@ pub fn dream_due(dir: &Path, interval: u32) -> bool {
         && !list_entries(dir).is_empty()
 }
 
-/// dream：把全部记忆交给模型合并、去重、丢弃过时项，然后按结果重写目录。
+/// dream：交给工具驱动的整理 Agent，失败时原目录保持不变。
 pub async fn dream(
     client: &ModelClient,
     main_model: &str,
     lite_model: Option<&str>,
     dir: &Path,
 ) -> Result<String, String> {
-    let entries = list_entries(dir);
-    if entries.is_empty() {
-        return Ok("没有记忆可整理".to_string());
-    }
-    let (model, role) = pick_model(main_model, lite_model);
-    let dump: Vec<String> = entries
-        .iter()
-        .map(|entry| {
-            format!(
-                "### {} [{}]\n描述：{}\n{}",
-                entry.name,
-                entry.kind,
-                entry.description,
-                cap_chars(&entry.body, 1_200)
-            )
-        })
-        .collect();
-    let prompt = vec![
-        Message::system(
-            "你整理编程助手的长期记忆：合并重复项、删除互相矛盾里过时的一方、去掉一次性细节、让描述更精确。保持四类 type 不变。只输出 JSON 数组 [{\"name\",\"type\",\"description\",\"body\"}]，条目数不超过 60；输出即为整理后的全部记忆，未包含的条目会被删除。",
-        ),
-        Message::user(format!("当前记忆：\n\n{}", dump.join("\n\n"))),
-    ];
-    let message = lite_client(client, OPERATION_MEMORY_DREAM, role)
-        .chat(ChatRequest {
-            messages: &prompt,
-            tools: &[],
-            model,
-            effort: None,
-            max_output_tokens: Some(8_192),
-            thinking_enabled: false,
-        })
-        .await?
-        .complete_message()?;
-    let parsed = parse_entries_json(&message.content);
-    if parsed.is_empty() {
-        return Err("模型没有返回可用的整理结果，记忆保持不变".to_string());
-    }
-    let keep: Vec<String> = parsed
-        .iter()
-        .take(DREAM_MAX_ENTRIES)
-        .map(|(name, _, _, _)| format!("{}.md", slugify(name)))
-        .collect();
-    let before = entries.len();
-    for entry in &entries {
-        if !keep.contains(&entry.file_name) {
-            let _ = std::fs::remove_file(dir.join(&entry.file_name));
-        }
-    }
-    for (name, kind, description, body) in parsed.into_iter().take(DREAM_MAX_ENTRIES) {
-        save_entry(dir, &name, &kind, &description, &body)?;
-    }
-    rebuild_index(dir)?;
-    let mut state = load_state(dir);
-    state.dreams = state.dreams.saturating_add(1);
-    state.last_dreamed_at = Some(now_sqlite());
-    save_state(dir, &state);
-    Ok(format!("记忆整理完成：{before} → {} 条", keep.len()))
+    crate::native::memory_organizer::organize(
+        client,
+        main_model,
+        lite_model,
+        dir,
+        &crate::native::tools::cancel::CancelFlag::new(),
+        crate::native::memory_organizer::OrganizeLimits::default(),
+    )
+    .await
+    .map(|report| report.summary())
 }
 
 pub fn memory_view(dir: &Path) -> NativeMemoryView {
@@ -692,6 +769,10 @@ async fn resolve_memory_dir<R: Runtime>(
     let context =
         crate::engine::context::resolve_workspace_execution_context_with_pool(&pool, workspace_id)
             .await?;
+    // 会话侧 SSH 工作区不启用记忆；这里同样拒绝，避免远端路径与本机同名目录混用。
+    if context.execution_target != crate::app::shared::EXECUTION_TARGET_LOCAL {
+        return Err("记忆只对本地工作区可用".to_string());
+    }
     let root = context
         .working_dir
         .ok_or_else(|| "工作区缺少目录".to_string())?;
@@ -851,5 +932,87 @@ mod tests {
         assert!(!dream_due(&dir, 3));
         assert!(!dream_due(&dir, 0));
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn project_key_is_stable_and_legacy_directory_is_migrated() {
+        // 固定输入的固定输出：不依赖 DefaultHasher 的实现。
+        assert_eq!(project_key("/repo/My App/"), project_key("/repo/My App"));
+        assert!(project_key("/repo/My App").starts_with("my-app-"));
+        assert_eq!(project_key("/repo/a").len(), "a-".len() + 16);
+        let config = temp_dir();
+        let legacy = config
+            .join(MEMORY_DIR_NAME)
+            .join(legacy_project_key("/repo/a"));
+        std::fs::create_dir_all(&legacy).unwrap();
+        std::fs::write(legacy.join("x.md"), "---\nname: x\n---\nbody\n").unwrap();
+        let dir = memory_dir(&config, "/repo/a");
+        assert_eq!(
+            dir.file_name().unwrap().to_string_lossy(),
+            project_key("/repo/a")
+        );
+        assert!(dir.join("x.md").exists());
+        assert!(!legacy.exists());
+        let _ = std::fs::remove_dir_all(config);
+    }
+
+    #[test]
+    fn same_name_updates_and_slug_collisions_do_not_overwrite() {
+        let dir = temp_dir();
+        let first = save_entry(&dir, "A B", "project", "d", "one").unwrap();
+        let other = save_entry(&dir, "a-b", "project", "d", "two").unwrap();
+        assert_eq!(first.file_name, "a-b.md");
+        assert_eq!(other.file_name, "a-b-2.md");
+        let updated = save_entry(&dir, "a b", "project", "d", "three").unwrap();
+        assert_eq!(updated.file_name, "a-b.md");
+        assert_eq!(read_entry(&dir, "a-b.md").unwrap().body, "three");
+        assert_eq!(read_entry(&dir, "a-b-2.md").unwrap().body, "two");
+        // 原子写入不留下临时文件。
+        let stray = std::fs::read_dir(&dir)
+            .unwrap()
+            .flatten()
+            .map(|item| item.file_name().to_string_lossy().into_owned())
+            .filter(|name| !name.ends_with(".md") && name != MEMORY_STATE_FILE)
+            .collect::<Vec<_>>();
+        assert!(stray.is_empty(), "{stray:?}");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn entry_names_and_symlinks_stay_inside_the_directory() {
+        let dir = temp_dir();
+        for bad in [
+            "../x.md",
+            "a/b.md",
+            "a\\b.md",
+            ".state.md",
+            "MEMORY.md",
+            "x.txt",
+            "..md",
+        ] {
+            assert!(!is_entry_file_name(bad), "{bad}");
+        }
+        #[cfg(unix)]
+        {
+            let outside = temp_dir().join("secret.md");
+            std::fs::write(&outside, "---\nname: secret\n---\nleak\n").unwrap();
+            std::os::unix::fs::symlink(&outside, dir.join("link.md")).unwrap();
+            assert!(read_entry(&dir, "link.md").is_none());
+            assert!(list_entries(&dir).is_empty());
+        }
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn transcript_digest_drops_appended_recall_blocks() {
+        let messages = vec![
+            Message::user(
+                "修一下登录\n\n[记忆回忆] 与本次输入相关的已保存记忆：\n- 旧记忆 — 不应被再次抽取",
+            ),
+            Message::assistant_text("好的"),
+        ];
+        let digest = transcript_digest(&messages);
+        assert!(digest.contains("修一下登录"));
+        assert!(!digest.contains("旧记忆"));
     }
 }

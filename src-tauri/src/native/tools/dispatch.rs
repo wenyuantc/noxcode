@@ -196,6 +196,8 @@ pub struct ToolCtx {
     )>,
     /// 数据库作用域（自动化 / 目标 / ReadSessionContext）；测试与子 Agent 可为空。
     pub session_scope: Option<SessionScope>,
+    /// 当前 Agent 可用 `Memory` 工具访问的记忆目录。
+    pub memory: Option<super::memory_tool::MemoryBinding>,
     pub lsp: Option<std::sync::Arc<super::lsp::LspHub>>,
     pub processes: Option<std::sync::Arc<super::processes::ProcessRegistry>>,
     pub git_target: Option<crate::git::GitTarget>,
@@ -286,6 +288,7 @@ impl ToolCtx {
             background: None,
             coordinator: None,
             session_scope: None,
+            memory: None,
             lsp: None,
             processes: None,
             git_target: None,
@@ -507,6 +510,8 @@ impl ToolCtx {
         child.coordinator = None;
         child.computer_control_enabled = false;
         child.computer_app_state = std::sync::Arc::new(std::sync::Mutex::new(None));
+        // 子 Agent 的记忆目录由其档案单独绑定，不继承父 Agent 的。
+        child.memory = None;
         child
     }
 
@@ -528,6 +533,8 @@ pub struct ToolOutput {
     pub text: String,
     pub images: Vec<NativeImage>,
     pub ok: bool,
+    /// MCP `structuredContent` 等结构化结果，供输出契约校验。
+    pub structured: Option<Value>,
 }
 
 impl Default for ToolOutput {
@@ -542,6 +549,7 @@ impl ToolOutput {
             text: text.into(),
             images: Vec::new(),
             ok: true,
+            structured: None,
         }
     }
 
@@ -550,6 +558,7 @@ impl ToolOutput {
             text: text.into(),
             images: Vec::new(),
             ok: false,
+            structured: None,
         }
     }
 }
@@ -781,6 +790,8 @@ pub(crate) async fn finalize_tool(
 ) -> Result<ToolOutput, String> {
     let name = prepared.name.as_str();
     let arguments = prepared.arguments.as_str();
+    let result =
+        result.and_then(|output| super::output_check::check_output(&prepared.contract, output));
     match result {
         Ok(mut output) => {
             if matches!(name, "Write" | "Edit" | "ApplyPatch") {
@@ -906,6 +917,7 @@ async fn dispatch(ctx: &ToolCtx, name: &str, arguments: &str) -> Result<ToolOutp
             .map(ToolOutput::text),
         "ExitWorktree" => call_exit_worktree(ctx).await.map(ToolOutput::text),
         "Computer" => super::desktop::execute(ctx, arguments).await,
+        "Memory" => super::memory_tool::call(ctx, arguments).map(ToolOutput::text),
         other if ctx.mcp.has_tool(other).await => ctx.mcp.call(other, arguments, &ctx.cancel).await,
         other => Err(format!("unknown tool: {other}")),
     }
@@ -2016,6 +2028,7 @@ async fn call_read(ctx: &ToolCtx, arguments: &str) -> Result<ToolOutput, String>
                 text: format!("PDF 页面图：{summary}"),
                 images: crate::native::pdf_doc::native_images_for_pages(rendered),
                 ok: true,
+                structured: None,
             });
         }
         let report = crate::native::pdf_doc::read_pdf_text(&bytes, pages.as_deref())
@@ -2060,6 +2073,7 @@ async fn call_read(ctx: &ToolCtx, arguments: &str) -> Result<ToolOutput, String>
                 time_range: crate::native::media_plan::mp4_time_range(&bytes),
             }],
             ok: true,
+            structured: None,
         });
     }
     if let Some(ssh) = ctx.ssh_for_exec() {
@@ -2088,6 +2102,7 @@ async fn call_read(ctx: &ToolCtx, arguments: &str) -> Result<ToolOutput, String>
             text,
             images: vec![image],
             ok: true,
+            structured: None,
         });
     }
     let output = workspace.read_file(&path, offset, limit)?;

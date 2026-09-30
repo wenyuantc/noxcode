@@ -380,7 +380,7 @@ fn image_needs_shrink(bytes: &[u8], limits: &BudgetLimits) -> bool {
         || u64::from(width) * u64::from(height) > limits.max_decode_pixels
 }
 
-fn image_ref_summary(images: &[crate::native::model::types::NativeImage]) -> String {
+pub(crate) fn image_ref_summary(images: &[crate::native::model::types::NativeImage]) -> String {
     images
         .iter()
         .map(|image| {

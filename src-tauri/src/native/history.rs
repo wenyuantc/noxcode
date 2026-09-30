@@ -1785,6 +1785,34 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn token_truncation_keeps_committed_tool_calls_committable() {
+        let pool = setup_migrated_pool().await;
+        let mut call = assistant_call("call_a");
+        call.content = "先读取文件再回答。".repeat(200);
+        let mut messages = vec![
+            Message::user("turn one"),
+            call,
+            Message::tool_result("call_a", "结果".repeat(400)),
+            Message::user("turn two"),
+        ];
+        commit_model_context(&pool, write("sess", &mut messages, Some(0), None, &[]))
+            .await
+            .unwrap();
+        // 窗口很小：截断会缩短已提交的 assistant，但不能改写它的工具调用。
+        crate::native::agent::truncate::truncate_messages_tokens(&mut messages, 600, 4_096);
+        for message in &messages {
+            if message.role == crate::native::model::types::Role::Assistant
+                && !message.history_id.is_empty()
+            {
+                assert!(message.tool_calls.len() == 1 || message.content.is_empty());
+            }
+        }
+        commit_model_context(&pool, write("sess", &mut messages, Some(1), None, &[]))
+            .await
+            .expect("截断后的上下文仍可提交");
+    }
+
+    #[tokio::test]
     async fn restart_keeps_identity_after_compaction() {
         let pool = setup_migrated_pool().await;
         let mut messages = vec![

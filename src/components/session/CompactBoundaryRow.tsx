@@ -30,6 +30,11 @@ export function CompactBoundaryRow({ item }: { item: GroupedSessionItem }) {
           {formatTokens(boundary.pre_tokens)} → {formatTokens(boundary.post_tokens)}
           {percent > 0 ? ` (-${percent}%)` : ""}
         </span>
+        {boundary.outcome !== "success" ? (
+          <span className="text-amber-600 dark:text-amber-400">
+            · {t(`compactOutcome.${boundary.outcome}`, { defaultValue: boundary.outcome })}
+          </span>
+        ) : null}
         {boundary.instructions ? (
           <span className="max-w-64 truncate" title={boundary.instructions}>
             · {boundary.instructions}

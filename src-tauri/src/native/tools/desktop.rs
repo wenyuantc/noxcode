@@ -509,6 +509,7 @@ fn state_output(args: &ComputerArgs, state: &ComputerAppState) -> ToolOutput {
             .map(|image| vec![image.image.clone()])
             .unwrap_or_default(),
         ok: true,
+        structured: None,
     }
 }
 

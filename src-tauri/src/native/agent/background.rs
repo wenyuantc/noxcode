@@ -363,7 +363,11 @@ impl BackgroundTaskRegistry {
         if lines.is_empty() {
             None
         } else {
-            Some(format!("[后台任务提醒]\n{}", lines.join("\n")))
+            Some(format!(
+                "{}\n{}",
+                super::compact::BACKGROUND_NOTICE_PREFIX,
+                lines.join("\n")
+            ))
         }
     }
 

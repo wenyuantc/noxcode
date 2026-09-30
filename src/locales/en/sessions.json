@@ -230,6 +230,10 @@
   "contextCacheShort": "cache {{rate}}%",
   "contextCacheRate": "Cache rate {{rate}}%",
   "contextTotalUsage": "Total usage {{count}}",
+  "contextCompactEstimate": "Compaction estimate {{count}} ({{source}})",
+  "contextEstimateProvider": "provider usage",
+  "contextEstimateLocal": "local estimate",
+  "contextOutputReserve": "Output reserve {{count}}",
   "contextCategoryMcp": "MCP tools",
   "contextCategorySystemTools": "System tools",
   "contextCategorySkills": "Skills",
@@ -400,6 +404,10 @@
     "model": "model summary",
     "local": "local summary",
     "reset": "reset"
+  },
+  "compactOutcome": {
+    "no_gain": "little gain",
+    "failed": "failed"
   },
   "forkNeedsSession": "/fork needs a selected session.",
   "branchForkAfter": "Fork, keeping this message",

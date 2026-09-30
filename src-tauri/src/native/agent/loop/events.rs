@@ -312,11 +312,10 @@ impl AgentRunner {
             return;
         }
         if let Some(tx) = &self.on_event {
-            let breakdown = context_usage_breakdown(
-                &self.messages,
-                &self.combined_tools(),
-                &self.skills_prompt,
-            );
+            let tools = self.combined_tools();
+            let breakdown = context_usage_breakdown(&self.messages, &tools, &self.skills_prompt);
+            let (estimated_tokens, from_provider) =
+                self.estimated_context_tokens(total_tool_tokens(&tools));
             let (prompt_tokens, cached_tokens) = self
                 .last_usage
                 .map(|usage| (usage.prompt_tokens as usize, usage.cached_tokens as usize))
@@ -334,6 +333,13 @@ impl AgentRunner {
                 message_tokens: breakdown.message_tokens,
                 prompt_tokens,
                 cached_tokens,
+                estimated_tokens,
+                estimate_source: if from_provider {
+                    "provider"
+                } else {
+                    "estimate"
+                },
+                output_reserve_tokens: self.context_window.output_reserve,
             }));
         }
     }
